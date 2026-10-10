@@ -1209,6 +1209,10 @@ struct site_record {
     const active_outing_state *active_external_outing() const;
 };
 
+// A crossing is historical evidence for this exact operation/owner epoch.
+// Its clock may precede current progress, but never belong to another owner.
+bool crossing_receipt_has_current_owner( const active_outing_state &outing );
+
 struct world_state {
     struct crossing_receipt_identity {
         std::string site_id;
@@ -2173,9 +2177,12 @@ local_handoff_commit_result commit_local_pair_dematerialization( site_record &si
 bool begin_abstract_pair_homeward_resume( site_record &site,
         const simulation_advance_cursor &expected_cursor, int current_minutes,
         const std::vector<local_abstract_resume_progress_read> &member_reads );
+// Validate the complete next snapshot before invoking the preflighted native
+// motor. Its callback must commit all surviving actors without refusal.
 bool record_local_pair_abstract_resume_progress( site_record &site,
         const simulation_advance_cursor &expected_cursor, int current_minutes,
-        const std::vector<local_abstract_resume_progress_read> &member_reads );
+        const std::vector<local_abstract_resume_progress_read> &member_reads,
+        const std::function<void()> &commit_members = {} );
 bool record_structural_member_physical_return( site_record &site,
         const simulation_advance_cursor &expected_cursor, character_id member_id,
         const tripoint_abs_omt &returned_omt, int current_minutes );

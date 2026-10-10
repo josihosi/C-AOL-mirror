@@ -26,6 +26,7 @@
 #include "character_martial_arts.h"
 #include "creature.h"
 #include "creature_tracker.h"
+#include "current_map.h"
 #include "cursesdef.h"
 #include "damage.h"
 #include "debug.h"
@@ -136,6 +137,7 @@ static const itype_id itype_molotov( "molotov" );
 
 static const json_character_flag json_flag_CANNOT_MOVE( "CANNOT_MOVE" );
 static const json_character_flag json_flag_CANNOT_ATTACK( "CANNOT_ATTACK" );
+static const json_character_flag json_flag_FREEZE_EFFECTS( "FREEZE_EFFECTS" );
 static const json_character_flag json_flag_READ_IN_DARKNESS( "READ_IN_DARKNESS" );
 static const json_character_flag json_flag_SAPIOVORE( "SAPIOVORE" );
 
@@ -1559,11 +1561,19 @@ void npc::on_move( const tripoint_abs_ms &old_pos )
 
 void npc::travel_overmap( const tripoint_abs_omt &pos )
 {
+    const int max_coord = coords::map_squares_per( coords::omt ) - 1;
+    const point_rel_ms offset( rng( 0, max_coord ), rng( 0, max_coord ) );
+    travel_overmap( project_to<coords::ms>( pos ) + offset );
+}
+
+void npc::travel_overmap( const tripoint_abs_ms &position )
+{
+    const tripoint_abs_omt pos = project_to<coords::omt>( position );
     const point_abs_om pos_om_old = project_to<coords::om>( pos_abs_omt().xy() );
     const bool completes_assigned_route = is_travelling() && pos == goal &&
                                          pos != pos_abs_omt() && !omt_path.empty() && omt_path.front() == goal &&
                                          omt_path.back() == pos;
-    spawn_at_omt( pos );
+    spawn_at_precise( position );
     const point_abs_om pos_om_new = project_to<coords::om>( pos_abs_omt().xy() );
     if( pos_abs_omt() == goal ) {
         if( completes_assigned_route && live_bandit_scout_watch_order_pending( *this ) ) {
@@ -4746,6 +4756,25 @@ void npc::add_new_mission( class mission *miss )
 
 void npc::on_unload()
 {
+    // Active effects have already run each turn. Finish only the throttled body
+    // interval so a later native catch-up cannot replay those active turns.
+    if( !is_dead() && last_updated < calendar::turn ) {
+        const auto finish_body_interval = [&]() {
+            update_body( last_updated, calendar::turn );
+            last_updated = calendar::turn;
+            check_dead_state( &get_map() );
+        };
+        if( get_map().inbounds( pos_abs() ) ) {
+            finish_body_interval();
+        } else {
+            // Map shifts can precede unloading the old active NPC list.
+            tinymap body_map;
+            body_map.load( pos_abs_omt(), false );
+            swap_map current( *body_map.cast_to_map() );
+            finish_body_interval();
+            body_map.save();
+        }
+    }
 }
 
 void npc::update_bodytemp_and_wetness()
@@ -4767,12 +4796,21 @@ void npc::npc_update_body()
     }
 }
 
-void npc::on_load( map *here )
+time_duration npc::catch_up_body()
 {
+    if( last_updated >= calendar::turn ) {
+        return 0_turns;
+    }
     const auto advance_effects = [&]( const time_duration & elapsed_dur ) {
         for( auto &elem : *effects ) {
             for( auto &_effect_it : elem.second ) {
                 effect &e = _effect_it.second;
+                // Bulk aging must obey the same permanence/freeze contract as
+                // Creature::process_effects. The final native turns own removal.
+                if( e.is_permanent() || ( has_flag( json_flag_FREEZE_EFFECTS ) &&
+                                         !e.has_flag( json_flag_FREEZE_EFFECTS ) ) ) {
+                    continue;
+                }
                 const time_duration &time_left = e.get_duration();
                 if( time_left > 1_turns ) {
                     if( time_left < elapsed_dur ) {
@@ -4796,21 +4834,20 @@ void npc::on_load( map *here )
     // Cap at some reasonable number, say 2 days
     const time_duration dt = std::min( calendar::turn - last_updated, 2_days );
     // TODO: Sleeping, healing etc.
-    last_updated = calendar::turn;
     time_point cur = calendar::turn - dt;
     add_msg_debug( debugmode::DF_NPC, "on_load() by %s, %d turns", get_name(), to_turns<int>( dt ) );
     // First update with 30 minute granularity, then 5 minutes, then turns
-    for( ; cur < calendar::turn - 30_minutes; cur += 30_minutes + 1_turns ) {
+    for( ; !is_dead() && cur < calendar::turn - 30_minutes; cur += 30_minutes + 1_turns ) {
         update_body( cur, cur + 30_minutes );
         advance_effects( 30_minutes );
         advance_focus( 30 );
     }
-    for( ; cur < calendar::turn - 5_minutes; cur += 5_minutes + 1_turns ) {
+    for( ; !is_dead() && cur < calendar::turn - 5_minutes; cur += 5_minutes + 1_turns ) {
         update_body( cur, cur + 5_minutes );
         advance_effects( 5_minutes );
         advance_focus( 5 );
     }
-    for( ; cur < calendar::turn; cur += 1_turns ) {
+    for( ; !is_dead() && cur < calendar::turn; cur += 1_turns ) {
         update_body( cur, cur + 1_turns );
         process_effects();
         if( ( cur - calendar::turn_zero ) % 1_minutes == 0_turns ) {
@@ -4818,8 +4855,25 @@ void npc::on_load( map *here )
         }
     }
 
+    // Stamp completion after catch-up. Stamping first makes update_body skip
+    // and rewind the first interval, so repeated loads replay needs and injury.
+    last_updated = calendar::turn;
+    check_dead_state( &get_map() );
+    // The loaded move owner releases this temporary attitude when its native
+    // effect expires. Off-bubble bodies need the same expiry consequence.
+    if( !is_dead() && attitude == NPCATT_FLEE_TEMP &&
+        !has_effect( effect_npc_flee_player ) ) {
+        set_attitude( NPCATT_NULL );
+    }
+    return dt;
+}
+
+void npc::on_load( map *here )
+{
+    const time_duration dt = catch_up_body();
+
     // Reconcile body temperature and wetness with current weather.
-    // The catch-up loops above ran update_body() but not update_bodytemp();
+    // The shared catch-up ran update_body() but not update_bodytemp();
     // one recompute at current conditions is enough since temp converges fast.
     update_bodytemp_and_wetness();
 

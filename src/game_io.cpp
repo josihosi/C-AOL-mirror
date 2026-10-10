@@ -107,6 +107,64 @@ static const dimension_id dimension_world_default( "default" );
 namespace
 {
 
+// Validate the actual save owners, not a lease inferred from the world state.
+// Abstract resumes carry exact physical exit snapshots; local movement carries
+// current identity/epoch/cursor leases on every copy instead.
+bool crossing_actor_copies_match( const bandit_live_world::site_record &site )
+{
+    const auto *outing = site.active_external_outing();
+    if( outing == nullptr || !bandit_live_world::current_external_simulation_cursor( site ) ||
+        !bandit_live_world::crossing_receipt_has_current_owner( *outing ) ) {
+        return false;
+    }
+    for( const character_id id : outing->member_ids ) {
+        if( outing->member_is_resolved( id ) ) {
+            continue;
+        }
+        const auto actor = overmap_buffer.find_npc( id );
+        const auto persistent = overmap_buffer.get_overmap_npcs();
+        if( std::count_if( persistent.begin(), persistent.end(), [id]( const auto &copy ) {
+            return copy && copy->getID() == id;
+        } ) != 1 ) {
+            return false;
+        }
+        if( !actor || actor->is_dead() ||
+            bandit_live_world::active_operation_duty_site_for(
+                overmap_buffer.global_state.bandit_live_world, id ) != &site ) {
+            return false;
+        }
+        for( const npc *copy : bandit_live_world_projection_lease_copies( *actor ) ) {
+            const auto &lease = copy->get_bandit_live_world_projection_lease();
+            if( copy->getID() != id || copy->is_dead() || copy->pos_abs() != actor->pos_abs() ||
+                copy->hp_percentage() != actor->hp_percentage() ) {
+                return false;
+            }
+            if( outing->owner == bandit_live_world::simulation_owner::local ) {
+                if( !lease.present || lease.site_id != site.site_id ||
+                    lease.activity_id != outing->activity_id || lease.owner != "local" ||
+                    lease.generation != outing->generation || lease.handoff_epoch != outing->handoff_epoch ||
+                    lease.last_advanced_minutes != outing->last_advanced_minutes ) {
+                    return false;
+                }
+            } else if( lease.present ) {
+                return false;
+            }
+        }
+        if( outing->owner == bandit_live_world::simulation_owner::abstract &&
+            outing->local_handoff.is_abstract_resume() ) {
+            const auto &members = outing->local_handoff.members;
+            const auto snapshot = std::find_if( members.begin(), members.end(),
+            [id]( const auto &member ) { return member.npc_id == id; } );
+            if( snapshot == members.end() || snapshot->dead ||
+                snapshot->exit_position != actor->pos_abs() ||
+                snapshot->hp_percent != actor->hp_percentage() ) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bandit_live_world::local_projection_reconciliation_result
 reconcile_loaded_bandit_live_world_projections()
 {
@@ -174,7 +232,7 @@ reconcile_loaded_bandit_live_world_projections()
     }
     std::vector<character_id> retired_old_leases;
     std::vector<character_id> refreshed_local_leases;
-    const auto result = bandit_live_world::reconcile_loaded_local_projections(
+    auto result = bandit_live_world::reconcile_loaded_local_projections(
                             overmap_buffer.global_state.bandit_live_world, claims,
                             &retired_old_leases, &refreshed_local_leases );
     // Output IDs belong only to fully validated, committed operations, even
@@ -202,10 +260,44 @@ reconcile_loaded_bandit_live_world_projections()
                 *member, bandit_live_world_projection_lease() );
         }
     }
+    for( auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        auto *outing = site.active_external_outing();
+        if( outing == nullptr || !outing->crossing.persistence_acknowledged ||
+            outing->owner != bandit_live_world::simulation_owner::abstract ||
+            !outing->local_handoff.is_abstract_resume() ) {
+            continue;
+        }
+        // Resolve the persisted containing overmap even when it is beyond the
+        // new reality bubble. This loads the NPC's existing save, not a body.
+        for( const auto &member : outing->local_handoff.members ) {
+            if( !member.dead ) {
+                overmap_buffer.get( project_to<coords::om>( member.exit_position.xy() ) );
+            }
+        }
+        if( !crossing_actor_copies_match( site ) ) {
+            outing->local_projection_reconciliation_rejected = true;
+            result = bandit_live_world::local_projection_reconciliation_result::rejected;
+        }
+    }
     return result;
 }
 
 } // namespace
+
+void game::validate_bandit_crossing_save() const
+{
+    for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        const auto *outing = site.active_external_outing();
+        const bool persists_current_abstract_snapshot = outing != nullptr &&
+                outing->crossing.persistence_acknowledged &&
+                outing->owner == bandit_live_world::simulation_owner::abstract &&
+                outing->local_handoff.is_abstract_resume();
+        if( outing != nullptr && ( outing->crossing.pending() || persists_current_abstract_snapshot ) &&
+            !crossing_actor_copies_match( site ) ) {
+            throw std::runtime_error( "crossing save has incompatible actor or operation copies" );
+        }
+    }
+}
 
 static const mod_id MOD_INFORMATION_dda( "dda" );
 
@@ -950,6 +1042,16 @@ bool game::save()
         }
         save_continuity::require_ordinary_save( PATH_INFO::world_base_save_path().get_unrelative_path() );
         save_continuity::begin_write( PATH_INFO::world_base_save_path().get_unrelative_path() );
+        validate_bandit_crossing_save();
+        const auto acknowledged_crossings =
+            overmap_buffer.global_state.bandit_live_world.acknowledge_persisted_crossings();
+        bool complete_published = false;
+        on_out_of_scope restore_unpublished_acknowledgments( [&]() {
+            if( !complete_published ) {
+                overmap_buffer.global_state.bandit_live_world.rollback_persisted_crossings(
+                    acknowledged_crossings );
+            }
+        } );
         if( !save_player_data() ) {
             last_save_result_ = "failed_player_data";
             return false;
@@ -1007,20 +1109,11 @@ bool game::save()
                 fout.imbue( std::locale::classic() );
                 fout << total_time_played.count();
             } );
-        const std::vector<bandit_live_world::world_state::crossing_receipt_identity>
-            acknowledged_crossings =
-                overmap_buffer.global_state.bandit_live_world.acknowledge_persisted_crossings();
-        if( !acknowledged_crossings.empty() && !save_maps() ) {
-            overmap_buffer.global_state.bandit_live_world.rollback_persisted_crossings(
-                    acknowledged_crossings );
-            last_save_result_ = "failed_crossing_acknowledgement";
-            return false;
-        }
-        // Protect only a genuinely complete connected generation, after the
-        // second map write has acknowledged crossings. Protection failure is
-        // still save failure; the prior complete generation remains independent.
+        // Global state and NPCs were written with the same acknowledgment.
+        // Existing complete-generation publication is their single commit point.
         save_continuity::publish_complete( PATH_INFO::world_base_save_path().get_unrelative_path(),
                                           to_turns<int>( calendar::turn - calendar::turn_zero ), u.get_save_id() );
+        complete_published = true;
         // The certification digest must describe the completed ordinary
         // save, including any persisted crossing acknowledgement above.
         bandit_live_world_probe::record_certification_save_receipt(

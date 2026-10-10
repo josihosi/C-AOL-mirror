@@ -1629,6 +1629,9 @@ class npc : public Character
          * Do not use when placing an NPC in mapgen.
          */
         void travel_overmap( const tripoint_abs_omt &pos );
+        // Deterministic square for a preflighted paired abstract move. Uses the
+        // same native arrival and overmap-container transfer as ordinary travel.
+        void travel_overmap( const tripoint_abs_ms &position );
         npc_attitude get_attitude() const override;
         void set_attitude( npc_attitude new_attitude );
         void set_mission( npc_mission new_mission );
@@ -1930,6 +1933,11 @@ class npc : public Character
          * Retroactively update npc.
          */
         void on_load( map *here );
+        /** Native elapsed body/effect catch-up in the actor's current map.
+         * Does not admit a loaded actor, assign moves or change its orders.
+         * Consumes last_updated exactly once, with the ordinary load bounds.
+         */
+        time_duration catch_up_body();
         /**
          * Update body, but throttled.
          */

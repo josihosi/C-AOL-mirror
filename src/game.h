@@ -972,6 +972,7 @@ class game
         bool save_factions_missions_npcs();
         bool save_external_options_record();
         bool save_dimension_data();
+        void validate_bandit_crossing_save() const;
         bool load_dimension_data();
         void reset_npc_dispositions();
         void serialize_dimension_data( std::ostream &fout );

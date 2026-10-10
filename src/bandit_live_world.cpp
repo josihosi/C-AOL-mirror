@@ -3079,11 +3079,11 @@ bool local_handoff_snapshot_matches_outing(
     // in different squares of the same OMT while the overmap return owns them.
     const bool abstract_homeward_pair = outing.owner == simulation_owner::abstract &&
                                         snapshot.is_abstract_resume() && physical_homeward_cursor &&
-                                        !snapshot.cohesion_assembled &&
-                                        !snapshot.cohesion_abort_return &&
-                                        outing.actor_departure_observed &&
-                                        outing.actor_route_waypoint >
-                                        structural_outing_destination_waypoint( outing );
+                                        ( snapshot.cohesion_abort_return ||
+                                          ( !snapshot.cohesion_assembled &&
+                                            outing.actor_departure_observed &&
+                                            outing.actor_route_waypoint >
+                                            structural_outing_destination_waypoint( outing ) ) );
     if( ( outing.owner == simulation_owner::local && !snapshot.is_active() ) ||
         snapshot.activity_id != outing.activity_id ||
         snapshot.activity_generation != outing.generation ||
@@ -3221,7 +3221,7 @@ bool local_handoff_snapshot_matches_outing(
                        member.staging_position ) != staging_positions.end() ||
             ( !member.dead && member.staging_position == member.entry_position &&
               !assembled_physical_homeward_pair && !abstract_homeward_pair ) ||
-            ( abstract_homeward_pair && !member.dead &&
+            ( abstract_homeward_pair && !snapshot.cohesion_abort_return && !member.dead &&
               ( project_to<coords::omt>( member.entry_position ) != snapshot.route_position ||
                 project_to<coords::omt>( member.staging_position ) != snapshot.route_position ) ) ||
             ( !member.dead && !physical_return_is_recorded &&
@@ -5090,7 +5090,7 @@ local_handoff_commit_result commit_local_pair_dematerialization( site_record &si
     }
     if( next.casualty_ids.size() == next.member_ids.size() ) {
         next.phase = scout_phase::lost;
-        next.local_handoff.phase = scout_phase::lost;
+        next.local_handoff.clear();
     }
     advance_camp_supply( candidate, plan.resume_snapshot.committed_minutes );
     if( !simulation_owner_state_is_consistent( next ) || !candidate.roster().valid ) {
@@ -5234,6 +5234,7 @@ bool begin_abstract_pair_homeward_resume( site_record &site,
             rl_dist( read->current_position, staging_position ) );
     }
     next.handoff_epoch = resume.handoff_epoch;
+    next.crossing.clear();
     next.last_advanced_minutes = current_minutes;
     next.local_handoff = std::move( resume );
     if( !simulation_owner_state_is_consistent( next ) || !candidate.roster().valid ) {
@@ -5247,7 +5248,9 @@ bool begin_abstract_pair_homeward_resume( site_record &site,
     return true;
 }
 
-bool record_local_pair_abstract_resume_progress( site_record &site,
+namespace
+{
+std::optional<site_record> local_pair_abstract_resume_progress_candidate( const site_record &site,
         const simulation_advance_cursor &expected_cursor, const int current_minutes,
         const std::vector<local_abstract_resume_progress_read> &member_reads )
 {
@@ -5257,10 +5260,10 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
         !simulation_cursor_matches( outing, expected_cursor ) ||
         !scout_phase_requires_homeward_only( outing.phase ) ||
         !outing.local_handoff.is_abstract_resume() ||
-        outing.local_handoff.cohesion_abort_return ||
         outing.member_ids.size() != 2 || outing.local_handoff.members.size() != 2 ||
-        member_reads.size() != 2 || current_minutes < outing.last_advanced_minutes ) {
-        return false;
+        member_reads.size() != 2 || current_minutes < outing.last_advanced_minutes ||
+        current_minutes <= outing.local_handoff.committed_minutes ) {
+        return std::nullopt;
     }
 
     std::vector<const local_abstract_resume_progress_read *> reads;
@@ -5283,7 +5286,7 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
                 member == nullptr || member->state != member_state::dead ||
                 std::find( outing.casualty_ids.begin(), outing.casualty_ids.end(), member_id ) ==
                 outing.casualty_ids.end() ) {
-                return false;
+                return std::nullopt;
             }
             continue;
         }
@@ -5297,18 +5300,18 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
         [read]( const local_abstract_resume_progress_read * existing ) {
             return existing->current_position == read->current_position;
         } ) != reads.end() ) {
-            return false;
+            return std::nullopt;
         }
         const tripoint_abs_omt member_omt = project_to<coords::omt>( read->current_position );
         if( !progressed_omt ) {
             progressed_omt = member_omt;
         } else if( *progressed_omt != member_omt ) {
-            return false;
+            return std::nullopt;
         }
         reads.push_back( &*read );
     }
     if( !progressed_omt || *progressed_omt == outing.local_handoff.route_position ) {
-        return false;
+        return std::nullopt;
     }
 
     site_record candidate = site;
@@ -5334,7 +5337,7 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
             return candidate_read->npc_id != snapshot.npc_id;
         } );
         if( read == reads.end() || ( partner == reads.end() && reads.size() != 1 ) ) {
-            return false;
+            return std::nullopt;
         }
         snapshot.prior_position = snapshot.exit_position;
         snapshot.entry_position = ( *read )->current_position;
@@ -5353,9 +5356,28 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
         next.last_progress_minutes = std::max( next.last_progress_minutes, current_minutes );
     }
     if( !simulation_owner_state_is_consistent( next ) || !candidate.roster().valid ) {
+        return std::nullopt;
+    }
+    return candidate;
+}
+} // namespace
+
+bool record_local_pair_abstract_resume_progress( site_record &site,
+        const simulation_advance_cursor &expected_cursor, const int current_minutes,
+        const std::vector<local_abstract_resume_progress_read> &member_reads,
+        const std::function<void()> &commit_members )
+{
+    auto candidate = local_pair_abstract_resume_progress_candidate( site, expected_cursor,
+                     current_minutes, member_reads );
+    if( !candidate ) {
         return false;
     }
-    site = std::move( candidate );
+    // The motor preflights every actor/container and supplies a deterministic,
+    // non-refusing commit. No actor moves until the complete owner candidate is valid.
+    if( commit_members ) {
+        commit_members();
+    }
+    site = std::move( *candidate );
     record_live_transition( site, &site.active_outing, "local_pair_abstract_resume_progress", "committed",
                             "abstract", "abstract",
                             "paired physical resume advanced its persisted homeward cursor",
@@ -6224,9 +6246,11 @@ bool reconcile_local_pair_casualties( site_record &site,
 {
     const active_outing_state &outing = site.active_outing;
     if( !outing.is_active() || outing.kind != outing_kind::structural_sortie ||
-        outing.schema_version < 7 || outing.owner != simulation_owner::local ||
+        outing.schema_version < 7 ||
+        !( ( outing.owner == simulation_owner::local && outing.local_handoff.is_active() ) ||
+           ( outing.owner == simulation_owner::abstract && outing.local_handoff.is_abstract_resume() ) ) ||
         !simulation_cursor_matches( outing, expected_cursor ) ||
-        !outing.local_handoff.is_active() || reads.empty() || current_minutes < 0 ||
+        reads.empty() || current_minutes < 0 ||
         current_minutes < outing.last_advanced_minutes ) {
         return false;
     }
@@ -6311,6 +6335,12 @@ bool reconcile_local_pair_casualties( site_record &site,
     if( next.casualty_ids.size() == next.member_ids.size() ) {
         next.phase = scout_phase::lost;
         next.local_handoff.phase = scout_phase::lost;
+        if( next.owner == simulation_owner::abstract ) {
+            // As for record_matching_external_outing_casualty, an abstract
+            // terminal party no longer owns a resumable physical route. The
+            // actual corpses, resolved IDs and roster retain casualty custody.
+            next.local_handoff = local_handoff_snapshot();
+        }
     }
     advance_camp_supply( candidate, current_minutes );
     if( !simulation_owner_state_is_consistent( next ) || !candidate.roster().valid ) {
@@ -12000,12 +12030,25 @@ void world_state::clear()
     hostile_target_opportunities.clear();
 }
 
+bool crossing_receipt_has_current_owner( const active_outing_state &outing )
+{
+    const auto &crossing = outing.crossing;
+    return crossing.outcome == "committed" && !crossing.run_id.empty() && !crossing.activity_id.empty() &&
+           crossing.activity_id == outing.activity_id && crossing.generation == outing.generation &&
+           crossing.handoff_epoch == outing.handoff_epoch && crossing.actor_ids == outing.member_ids &&
+           crossing.prior_owner != crossing.next_owner && crossing.next_owner == outing.owner &&
+           crossing.cursor_minutes >= 0 && crossing.cursor_minutes <= outing.last_advanced_minutes &&
+           crossing.cursor_waypoint >= 0 &&
+           crossing.cursor_waypoint < static_cast<int>( outing.shared_route.size() );
+}
+
 std::vector<world_state::crossing_receipt_identity> world_state::acknowledge_persisted_crossings()
 {
     std::vector<crossing_receipt_identity> acknowledged;
     for( site_record &site : sites ) {
         active_outing_state *outing = site.active_external_outing();
-        if( outing != nullptr && outing->crossing.pending() ) {
+        if( outing != nullptr && outing->crossing.pending() &&
+            crossing_receipt_has_current_owner( *outing ) ) {
             outing->crossing.persistence_acknowledged = true;
             acknowledged.push_back( { site.site_id, outing->crossing.run_id,
                                       outing->crossing.activity_id,
@@ -12040,18 +12083,10 @@ void world_state::rollback_persisted_crossings(
                    token.prior_owner == current.prior_owner && token.next_owner == current.next_owner;
         } );
         if( exact_match ) {
-            // Persistence failure invalidates the whole crossing, not only its
-            // acknowledgement bit.  Restore the source owner and epoch so a
-            // later attempt can build a fresh candidate and receipt.
-            if( outing->handoff_epoch == current.handoff_epoch &&
-                outing->handoff_epoch > 0 ) {
-                outing->owner = current.prior_owner;
-                outing->handoff_epoch--;
-                if( current.prior_owner == simulation_owner::abstract ) {
-                    outing->local_handoff.clear();
-                }
-            }
-            outing->crossing.clear();
+            // The physical crossing already happened. Failed publication only
+            // withdraws its durability claim; reverting the owner here would
+            // disagree with the NPC copies and permit a second executor.
+            outing->crossing.persistence_acknowledged = false;
         }
     }
 }
