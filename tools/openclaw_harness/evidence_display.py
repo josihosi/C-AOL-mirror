@@ -24,22 +24,27 @@ def encoded(value):
 
 
 def retain(value, directory=STORE):
-    raw = encoded(value)
-    digest = hashlib.sha256(raw).hexdigest()
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / (digest + ".json.gz")
-    if not path.exists() and not (directory / (digest + ".json")).exists():
-        fd, temporary = tempfile.mkstemp(dir=directory, prefix=".writing-")
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(gzip.compress(raw, compresslevel=6, mtime=0))
-                stream.flush()
-                os.fsync(stream.fileno())
+    digest, size = hashlib.sha256(), 0
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".writing-")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            with gzip.GzipFile(filename="", fileobj=stream, mode="wb", compresslevel=6, mtime=0) as compressed:
+                for chunk in json_chunks(value):
+                    raw = chunk.encode("utf-8")
+                    digest.update(raw)
+                    size += len(raw)
+                    compressed.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        identity = digest.hexdigest()
+        path = directory / (identity + ".json.gz")
+        if not path.exists() and not (directory / (identity + ".json")).exists():
             os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-    return {"sha256": digest, "json_bytes": len(raw)}
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return {"sha256": identity, "json_bytes": size}
 
 
 def recover(digest, directory=STORE):
@@ -55,32 +60,56 @@ def recover(digest, directory=STORE):
 
 def bounded(value, budget=DEFAULT_BYTES, directory=STORE):
     """Preserve structure where it fits; every omission is an exact value handle."""
+    # Measure each original subtree once. Projection only changes byte counts;
+    # it never re-encodes a large candidate to discover its shrinking deficit.
+    sizes = {}
+
+    def size(item):
+        identity = id(item)
+        if identity not in sizes:
+            if isinstance(item, dict):
+                sizes[identity] = (2 + max(0, len(item) - 1) +
+                                   sum(len(encoded(key)) + 1 + size(child)
+                                       for key, child in item.items()))
+            elif isinstance(item, (list, tuple)):
+                sizes[identity] = 2 + max(0, len(item) - 1) + sum(size(child) for child in item)
+            else:
+                sizes[identity] = sum(len(chunk.encode("utf-8")) for chunk in json_chunks(item))
+        return sizes[identity]
+
     # Small machine replies already fit. They need no permanent display artifact.
-    if len(encoded(value)) + 1 <= budget:
+    if size(value) + 1 <= budget:
         return value
     original = retain(value, directory)
 
     def project(item, allowance, path=()):
-        raw = encoded(item)
-        if len(raw) <= allowance:
+        item_size = size(item)
+        if item_size <= allowance:
             return item
         # Every omitted piece points into the one retained response. Do not
         # save the same large history again under each nested field's hash.
-        ref = {"omitted": True, "json_bytes": len(raw),
+        ref = {"omitted": True, "json_bytes": item_size,
                "evidence": {**original, "path": list(path)}}
         if isinstance(item, (dict, list)) and item:
+            if 150 * len(item) > allowance:
+                return ref
             pairs = list(item.items()) if isinstance(item, dict) else list(enumerate(item))
             empty = {k: None for k, _ in pairs} if isinstance(item, dict) else [None] * len(item)
             if len(encoded(empty)) + 150 * len(pairs) > allowance:
                 return ref
             candidate = dict(item) if isinstance(item, dict) else list(item)
-            sizes = {k: len(encoded(v)) for k, v in pairs}
-            while len(encoded(candidate)) > allowance and sizes:
-                key = max(sizes, key=sizes.get)
-                size = sizes.pop(key)
-                deficit = len(encoded(candidate)) - allowance
-                candidate[key] = project(candidate[key], max(150, size - deficit - 16), (*path, key))
-            if len(encoded(candidate)) <= allowance:
+            candidate_size = item_size
+            for key, child in sorted(pairs, key=lambda pair: size(pair[1]), reverse=True):
+                if candidate_size <= allowance:
+                    break
+                child_size = size(child)
+                projected = project(child, max(150, child_size - (candidate_size - allowance) - 16),
+                                    (*path, key))
+                candidate[key] = projected
+                # A projection is itself bounded by its allowance (or a small
+                # exact-value reference); only this new small value is encoded.
+                candidate_size += len(encoded(projected)) - child_size
+            if candidate_size <= allowance:
                 return candidate
         return ref
 

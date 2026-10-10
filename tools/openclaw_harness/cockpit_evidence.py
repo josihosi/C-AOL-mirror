@@ -290,7 +290,7 @@ compare_observations = compare_selected
 def describe(value: Any, path: str) -> dict[str, Any]:
     if isinstance(value, ArchiveSequence):
         return {"omitted": True, "selector": path, "type": "list",
-                "count": len(value), "json_bytes": value.json_bytes}
+                "count": len(value), "json_bytes": (value.verified_reference or {}).get("json_bytes")}
     decoded = decode(value)
     result = {"omitted": True, "selector": path, "type": type(decoded).__name__,
               "json_bytes": len(json.dumps(value, ensure_ascii=False).encode())}

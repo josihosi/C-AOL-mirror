@@ -41,7 +41,8 @@ def _persistent_result_cache(value: Any) -> Any:
     reference rather than materializing its history into play-client.json.
     """
     if isinstance(value, ArchiveSequence):
-        return {"schema": "caol-archive-sequence-ref-v1", **value.reference()}
+        return {"schema": "caol-archive-sequence-ref-v1",
+                **(value.verified_reference or value.reference())}
     if isinstance(value, dict):
         return {key: _persistent_result_cache(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -504,7 +505,7 @@ class PlayerClient:
 
         assessment: dict[str, Any] | None = None
         while True:
-            result = Bridge.response_status(self.session, request_id)
+            result = Bridge.response_status(self.session, request_id, summary=False)
             assessment = _merge_turn_assessments(assessment, turn_assessment())
             if result.get("ok") or result.get("error") != "response_not_available_or_stale":
                 break
@@ -546,6 +547,8 @@ class PlayerClient:
         if not full.get("ok"):
             return full
         response = full["response"]
+        if response.get("ok") is not True:
+            result["startup_diagnostics"] = Bridge.startup_diagnostics(self.session)
         receipt_generation = result["receipt"].get("session_generation", 0)
         try:
             current_status = json.loads((self.session / "status.json").read_text(encoding="utf-8"))
@@ -1462,7 +1465,22 @@ def main(argv=None):
             with (args.session / "playtest.txt").open("a", encoding="utf-8") as transcript:
                 transcript.write("> play " + shlex.join(entered) + "\n" + text + "\n\n")
     else:
-        emit(result)
+        try:
+            emit(result)
+        except (OSError, ValueError) as error:
+            # Collection commits before presentation. A failed stdout/store
+            # write must never suggest resubmitting the native action.
+            committed = (not client.state.get("pending") and
+                         bool(client.state.get("last_request_id")) and
+                         client.state.get("last_request_id") == result.get("request_id"))
+            sys.stderr.write(json.dumps({
+                "ok": False, "error": "presentation_failed", "detail": str(error),
+                "collection_committed": committed,
+                "request_id": result.get("request_id"),
+                "session": str(args.session),
+                "next": "play collect retrieves the retained result; do not repeat the native action",
+            }, ensure_ascii=False) + "\n")
+            return 1
     return 0 if result.get("ok") else 1
 
 

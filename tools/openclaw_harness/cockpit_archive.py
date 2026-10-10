@@ -266,6 +266,7 @@ class Archive:
 class ArchiveSequence(Sequence):
     def __init__(self, archive, stream, count=None):
         self.archive, self.stream, self.count = archive, stream, count
+        self.verified_reference = None
 
     def __len__(self):
         if self.count is not None:
@@ -585,6 +586,10 @@ def resolve_wire(response, *, directory, binding_id, exported_path=None):
             sequence = ArchiveSequence(archive, reference["stream"], count=reference["count"])
             if sequence.reference() != reference:
                 raise ValueError("archive_reference_digest_mismatch")
+            # This readonly, fixed-count response was just authenticated. Carry
+            # its metadata to presentation/state writing within this recovery;
+            # every subsequent public recovery still validates its own source.
+            sequence.verified_reference = dict(reference)
             parent = result
             for part in item["path"][:-1]:
                 parent = parent[part]
