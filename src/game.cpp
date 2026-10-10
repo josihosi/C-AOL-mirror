@@ -3433,10 +3433,39 @@ void game::disp_NPCs()
     ctxt.register_action( "CONFIRM" );
     ctxt.register_action( "QUIT" );
     ctxt.register_action( "HELP_KEYBINDINGS" );
+
+    std::optional<semantic_surface_manager_session> semantic_session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    std::string semantic_action;
+    std::optional<semantic_surface_scope> semantic_scope;
+    if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
+        semantic_scope.emplace( *manager, "npc_viewer", _( "NPC viewer" ),
+        std::map<std::string, std::string>{ { "native_owner", "DISP_NPCS" } },
+        std::vector<semantic_action_descriptor>{
+            { "npc_viewer.close", "", _( "Close NPC viewer" ), true }
+        }, [&semantic_action]( const semantic_action_request &request ) {
+            if( request.action_id != "npc_viewer.close" || request.stable_id.has_value() ) {
+                return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+            }
+            semantic_action = "QUIT";
+            return semantic_action_dispatch_result{ true, "", "", false, false };
+        } );
+    }
+
     bool stop = false;
     while( !stop ) {
         ui_manager::redraw();
-        const std::string action = ctxt.handle_input();
+        if( semantic_scope ) {
+            semantic_scope->consume_request();
+        }
+        std::string action = semantic_action.empty() ? ctxt.handle_input() : "";
+        // A close may arrive while native input is blocked. Keep its intent
+        // and callback alive across redraws, then apply the native action once.
+        if( !semantic_action.empty() ) {
+            action = std::exchange( semantic_action, std::string() );
+        }
         if( action == "CONFIRM" || action == "QUIT" ) {
             stop = true;
         }

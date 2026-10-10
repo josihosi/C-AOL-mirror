@@ -1231,4 +1231,276 @@ TEST_CASE( "inventory contents selection settles at its real parent and leaves c
     }
 }
 
+TEST_CASE( "public debug check closes its NPC viewer and recreates World authority",
+           "[semantic_surface][npc_viewer_close_067]" )
+{
+    const std::string mode = GENERATE( "semantic", "keyboard" );
+    CAPTURE( mode );
+    const std::string run = "npc-viewer-" + mode;
+    const auto transport = std::filesystem::temp_directory_path() /
+                           ( run + std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+    std::ofstream( transport, std::ios::binary ).close();
+    scoped_environment run_env( "OPENCLAW_HARNESS_RUN_ID", run );
+    scoped_environment bound_env( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run );
+    scoped_environment transport_env( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", transport.string() );
+    on_out_of_scope remove_transport( [&] { std::filesystem::remove( transport ); } );
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    REQUIRE( manager.stack().empty() );
+    const std::string old_locale = std::setlocale( LC_CTYPE, nullptr );
+    REQUIRE( std::setlocale( LC_CTYPE, "en_US.UTF-8" ) != nullptr );
+    on_out_of_scope restore_locale( [&] { std::setlocale( LC_CTYPE, old_locale.c_str() ); } );
+#if defined(_WIN32)
+    const UINT old_codepage = GetConsoleOutputCP();
+    REQUIRE( SetConsoleOutputCP( CP_UTF8 ) );
+    on_out_of_scope restore_codepage( [&] { SetConsoleOutputCP( old_codepage ); } );
+
+#endif
+    if( ImGui::GetCurrentContext() == nullptr ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = true;
+    const int previous_timeout = inp_mngr.get_timeout();
+    inp_mngr.set_timeout( 125 );
+    on_out_of_scope cleanup( [&] {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        manager.set_transport_observer( {} );
+        inp_mngr.set_timeout( previous_timeout );
+        catacurses::endwin();
+    } );
+    clear_avatar();
+    clear_map();
+    // Install the ordinary game mode through the same native save/load route
+    // used by the existing public-turn renderer controls.
+    REQUIRE( world_generator->active_world );
+    const std::string world_name = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world_name ) );
+    clear_avatar();
+    clear_map();
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    restore_on_out_of_scope<time_point> restore_turn( calendar::turn );
+    g->uquit = QUIT_NO;
+    test_mode = false;
+    // The ordinary running game has painted its main UI before input. Keep
+    // that native renderer owner alive when entering debug's ImGui menus.
+    const auto main_ui = g->create_or_get_main_ui_adaptor();
+    ui_manager::redraw();
+    semantic_surface_manager outer( "unrelated-outer" );
+    semantic_surface_manager_session outer_session( outer );
+    std::vector<semantic_action_receipt> receipts;
+    std::vector<semantic_surface_descriptor> worlds;
+    std::optional<semantic_action_request> close_request;
+    semantic_surface_descriptor viewer;
+    int popups = 0;
+    int menus = 0;
+    int viewer_publications = 0;
+    int close_consumptions = 0;
+    int successor_consumptions = 0;
+    bool duplicate_checked = false;
+    std::thread sender;
+    on_out_of_scope join_sender( [&] { if( sender.joinable() ) { sender.join(); } } );
+    const auto append = [&]( const semantic_action_request &request ) {
+        std::ofstream file( transport, std::ios::binary | std::ios::app );
+        JsonOut json( file );
+        json.start_object();
+        json.member( "run_id", request.run_id );
+        json.member( "surface_id", request.surface_id );
+        json.member( "frame_id", request.frame_id );
+        json.member( "request_id", request.request_id );
+        json.member( "action_id", request.action_id );
+        if( request.stable_id ) { json.member( "stable_id", *request.stable_id ); }
+        json.end_object();
+        file << '\n';
+    };
+    const auto native_quit = [] {
+        const auto &keys = inp_mngr.get_input_for_action( "QUIT", "DISP_NPCS" );
+        const auto key = std::find_if( keys.begin(), keys.end(), []( const input_event &event ) {
+            return event.type == input_event_t::keyboard_char && event.sequence.size() == 1 &&
+                   event.get_first_input() >= 0 && event.get_first_input() < 128;
+        } );
+        REQUIRE( key != keys.end() );
+        REQUIRE( ::ungetch( key->get_first_input() ) != -1 );
+    };
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+        if( receipt.request_id == "viewer-close" && receipt.accepted && !duplicate_checked ) {
+            duplicate_checked = true;
+            CHECK_FALSE( manager.submit_request( *close_request ) );
+        }
+    } );
+    manager.set_transport_observer( [&]( const semantic_request_transport_event &event ) {
+        if( event.event == "request_consumed" && event.request_id == "viewer-close" ) {
+            ++close_consumptions;
+            CHECK( inp_mngr.get_timeout() == 125 );
+        }
+        if( event.event == "request_consumed" && event.request_id == "fresh-world-pause" ) {
+            ++successor_consumptions;
+        }
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+        if( descriptor.kind == "world" ) {
+            worlds.push_back( descriptor );
+            if( worlds.size() == 1 ) {
+                append( { run, descriptor.surface_id, descriptor.frame_id, "debug-check",
+                          "world.debug_menu", std::nullopt, {} } );
+            } else {
+                if( close_request ) {
+                    auto stale = *close_request; stale.request_id = "viewer-after-return";
+                    REQUIRE( manager.submit_request( stale ) );
+                    CHECK_FALSE( manager.consume_top_request() );
+                }
+                append( { run, descriptor.surface_id, descriptor.frame_id, "fresh-world-pause",
+                          "world.pause", std::nullopt, {} } );
+            }
+        } else if( descriptor.kind == "menu" ) {
+            const std::string target = descriptor.payload.at( "text" ) == "Debug Functions" ?
+                                       "Info…" : "Check game state";
+            const auto action = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
+            [&]( const semantic_action_descriptor &candidate ) {
+                return candidate.id == "menu.choose" && candidate.label == target;
+            } );
+            REQUIRE( action != descriptor.valid_actions.end() );
+            append( { run, descriptor.surface_id, descriptor.frame_id, "debug-menu-" + std::to_string( ++menus ),
+                      action->id, action->stable_id, {} } );
+        } else if( descriptor.kind == "prompt" ) {
+            REQUIRE( std::any_of( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
+            []( const semantic_action_descriptor &action ) { return action.id == "prompt.cancel"; } ) );
+            CHECK( descriptor.payload.at( "title" ) == "POPUP_WAIT" );
+            append( { run, descriptor.surface_id, descriptor.frame_id, "debug-popup-" + std::to_string( ++popups ),
+                      "prompt.cancel", std::nullopt, {} } );
+        } else if( descriptor.kind == "unsupported" && descriptor.payload.at( "owner" ) == "DISP_NPCS" ) {
+            // Bounded unchanged-source countercontrol only. A keyboard escape
+            // keeps the failed automated case recoverable; it is never a pass.
+            CHECK( descriptor.kind == "npc_viewer" );
+            native_quit();
+        } else if( descriptor.kind == "npc_viewer" ) {
+            ++viewer_publications;
+            viewer = descriptor;
+            REQUIRE( descriptor.valid_actions.size() == 1 );
+            CHECK( descriptor.valid_actions.front().id == "npc_viewer.close" );
+            CHECK( descriptor.payload.at( "native_owner" ) == "DISP_NPCS" );
+            CHECK( popups == 2 );
+            CHECK( worlds.size() == 1 );
+            ui_manager::redraw();
+            input_context poll( "DISP_NPCS" ); poll.register_action( "QUIT" );
+            CHECK( poll.handle_input( 1 ) == "TIMEOUT" );
+            REQUIRE( manager.top() );
+            CHECK( manager.top()->surface_id == descriptor.surface_id );
+            CHECK( manager.top()->frame_id == descriptor.frame_id );
+            if( mode == "keyboard" ) {
+                native_quit();
+            } else {
+                close_request = semantic_action_request{ run, descriptor.surface_id, descriptor.frame_id,
+                                  "viewer-close", "npc_viewer.close", std::nullopt, {} };
+                for( int i = 0; i < 5; ++i ) {
+                    auto bad = *close_request; bad.request_id = "viewer-bad-" + std::to_string( i );
+                    if( i == 0 ) { bad.run_id = "wrong-run"; }
+                    if( i == 1 ) { bad.frame_id = "stale-frame"; }
+                    if( i == 2 ) { bad.surface_id = "foreign-owner"; }
+                    if( i == 3 ) { bad.action_id = "world.move.north"; }
+                    if( i == 4 ) { bad.stable_id = "not-a-target"; }
+                    REQUIRE( manager.submit_request( bad ) );
+                    CHECK_FALSE( manager.consume_top_request() );
+                    CHECK( manager.top()->surface_id == viewer.surface_id );
+                }
+                sender = std::thread( [&, request = *close_request] {
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+                    append( request );
+                } );
+            }
+        }
+    } );
+    get_avatar().set_moves( 100 );
+    CHECK_FALSE( g->do_turn() );
+    if( sender.joinable() ) { sender.join(); }
+    CHECK( popups == 2 );
+    CHECK( menus == 2 );
+    CHECK( viewer_publications == 1 );
+    CHECK( close_consumptions == ( mode == "semantic" ? 1 : 0 ) );
+    CHECK( duplicate_checked == ( mode == "semantic" ) );
+    CHECK( manager.stack().empty() );
+    CHECK( active_semantic_surface_manager() == &outer );
+    // The debug check costs no turn: the same public do_turn continues into
+    // a fresh World input, whose ordinary pause completes that turn.
+    REQUIRE( worlds.size() == 2 );
+    CHECK( worlds.back().surface_id != worlds.front().surface_id );
+    CHECK( worlds.back().frame_id != worlds.front().frame_id );
+    CHECK( successor_consumptions == 1 );
+    CHECK( manager.stack().empty() );
+    CHECK_FALSE( manager.has_pending_request() );
+    if( close_request ) {
+        CHECK( std::count_if( receipts.begin(), receipts.end(), []( const semantic_action_receipt &r ) {
+            return r.request_id == "viewer-after-return" && !r.accepted && r.rejection_reason == "wrong_surface";
+        } ) == 1 );
+        for( int i = 0; i < 5; ++i ) {
+            CHECK( std::any_of( receipts.begin(), receipts.end(), [&]( const semantic_action_receipt &r ) {
+                return r.request_id == "viewer-bad-" + std::to_string( i ) && !r.accepted;
+            } ) );
+        }
+    }
+}
+
+
+TEST_CASE( "NPC viewer direct entry retains native off mode and bound session lifetime",
+           "[semantic_surface][npc_viewer_direct_067]" )
+{
+    const bool bound = GENERATE( false, true );
+    CAPTURE( bound );
+    scoped_environment run_env( "OPENCLAW_HARNESS_RUN_ID", bound ? "npc-viewer-direct" : "" );
+    scoped_environment bound_env( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", bound ? "npc-viewer-direct" : "" );
+    scoped_environment transport_env( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", "" );
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    REQUIRE( active_semantic_surface_manager() == nullptr );
+    REQUIRE( manager.stack().empty() );
+    if( ImGui::GetCurrentContext() == nullptr ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    const int previous_timeout = inp_mngr.get_timeout();
+    inp_mngr.set_timeout( 1 );
+    on_out_of_scope cleanup( [&] {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        inp_mngr.set_timeout( previous_timeout );
+        catacurses::endwin();
+    } );
+    int publications = 0;
+    int accepted = 0;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+        ++publications;
+        CHECK( bound );
+        CHECK( active_semantic_surface_manager() == &manager );
+        REQUIRE( descriptor.kind == "npc_viewer" );
+        REQUIRE( manager.submit_request( { "npc-viewer-direct", descriptor.surface_id, descriptor.frame_id,
+                                           "direct-close", "npc_viewer.close", std::nullopt, {} } ) );
+    } );
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        CHECK( receipt.accepted );
+        ++accepted;
+    } );
+    if( !bound ) {
+        const auto &keys = inp_mngr.get_input_for_action( "QUIT", "DISP_NPCS" );
+        const auto key = std::find_if( keys.begin(), keys.end(), []( const input_event &event ) {
+            return event.type == input_event_t::keyboard_char && event.sequence.size() == 1 &&
+                   event.get_first_input() >= 0 && event.get_first_input() < 128;
+        } );
+        REQUIRE( key != keys.end() );
+        REQUIRE( ::ungetch( key->get_first_input() ) != -1 );
+    }
+    g->disp_NPCs();
+    CHECK( publications == ( bound ? 1 : 0 ) );
+    CHECK( accepted == ( bound ? 1 : 0 ) );
+    CHECK( active_semantic_surface_manager() == nullptr );
+    CHECK( manager.stack().empty() );
+    CHECK_FALSE( manager.has_pending_request() );
+}
+
+
 #endif
