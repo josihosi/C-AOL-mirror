@@ -56,6 +56,7 @@ class R014StepEvidenceTest( unittest.TestCase ):
                 ))
 
     def test_menu_handoff_publishes_live_descriptor_then_rechecks_world( self ) -> None:
+        from cockpit_witness_test import CHARTER
         run_id = "run-a"
         menu_owner = {
             "status": "required_state_present",
@@ -123,7 +124,7 @@ class R014StepEvidenceTest( unittest.TestCase ):
                                       return_value=world_metadata) as strict_bootstrap, \
                     mock.patch.object(startup_harness, "open_cockpit_game_service",
                                       return_value=service), \
-                    mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=None), \
+                    mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=CHARTER), \
                     mock.patch.object(startup_harness.time, "sleep"), \
                     mock.patch.object(startup_harness, "serve_cockpit_live",
                                       side_effect=finish_live_session):
@@ -131,6 +132,8 @@ class R014StepEvidenceTest( unittest.TestCase ):
                     12345, run_dir, steps, profile="profile-a", world="Test00",
                     grants_gameplay_proof=True,
                 )
+                descriptor = json.loads(
+                    (run_dir / "select_saved_character.cockpit_live_session.json").read_text())
 
         descriptor_lines = [line for line in output.getvalue().splitlines()
                             if "cockpit_live_session" in line]
@@ -143,6 +146,13 @@ class R014StepEvidenceTest( unittest.TestCase ):
         self.assertEqual(reports[0]["metadata"]["frame_state"], "world")
         self.assertEqual(reports[1]["kind"], "wait")
         self.assertTrue(reports[2]["metadata"]["gameplay_credit"])
+        self.assertEqual(descriptor["witness"]["action"], "run.finish")
+        self.assertEqual(descriptor["witness"]["outcome"], CHARTER["claim"])
+        self.assertNotIn("charter", descriptor["witness"])
+        self.assertIn("optional", descriptor["witness"]["instruction"])
+        self.assertNotIn("sequence", descriptor["witness"])
+        self.assertIn("one operation", descriptor["termination"])
+        self.assertNotIn("run.witness then", descriptor["termination"])
 
     def test_menu_handoff_without_world_keeps_zero_credit_and_stops( self ) -> None:
         run_id = "run-a"

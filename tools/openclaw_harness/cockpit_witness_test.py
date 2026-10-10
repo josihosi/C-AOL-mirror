@@ -98,24 +98,101 @@ class CockpitWitnessTest(unittest.TestCase):
         self.assertEqual(detail["witness_validation"]["status"], "mechanically_valid")
         self.assertEqual(detail["evidence_journal"]["identity"]["binding_id"], "binding-a")
 
-    def test_finish_cannot_skip_or_rewrite_the_sealed_witness(self) -> None:
+    def test_ordinary_result_skips_whole_journal_and_keeps_optional_review_separate(self):
+        from unittest.mock import patch
         service = self.service()
         observed = service.call({"action": "game.observe"})["result"]
         service.run_channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
-        missing = service.call({
-            "action": "run.finish", "observation_id": observed["observation_id"],
-            "stop_reason": "claim_settled", "unused_authority": "none",
-        })
-        self.assertEqual(missing["error"], "witness_journal_must_be_sealed_before_finish")
-        service.call({
-            "action": "run.witness", "observation_id": observed["observation_id"],
-            "stop_reason": "claim_settled", "unused_authority": "none",
-        })
-        rewritten = service.call({
-            "action": "run.finish", "observation_id": observed["observation_id"],
-            "stop_reason": "different", "unused_authority": "none", "witness": {},
-        })
+        with patch("cockpit.build_evidence_journal", side_effect=AssertionError("ordinary closeout reconstructed history")):
+            result = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+                "stop_reason": "positive combat", "unused_authority": "released", "outcome": {
+                    "summary": "The selected gameplay outcome succeeded.", "verdict": "positive",
+                    "unknowns": ["Individual secondary participation was not observed"],
+                    "citations": [{"observation_id": observed["observation_id"],
+                                   "select": ["game_minutes", "avatar.name"]}]}})
+        self.assertTrue(result["ok"], result)
+        detail = result["result"]["stop_detail"]
+        report = detail["gameplay_outcome"]
+        self.assertEqual(report["verdict"], "positive")
+        self.assertEqual(report["citations"][0]["values"], {"game_minutes": 100, "avatar.name": "A"})
+        self.assertEqual(len(report["unknowns"]), 1)
+        self.assertFalse(report["proof_promotion_authority"])
+        self.assertNotIn("target_receipt", detail)
+        self.assertNotIn("evidence_journal", detail)
+        self.assertEqual(service.run_channel.status()["final"]["stop_detail"]["gameplay_outcome"], report)
+
+        service = self.service()
+        observed = service.call({"action": "game.observe"})["result"]
+        service.run_channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
+        service.call({"action": "run.witness", "observation_id": observed["observation_id"],
+                      "stop_reason": "claim_settled", "unused_authority": "none"})
+        rewritten = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+            "stop_reason": "different", "unused_authority": "none", "witness": {}})
         self.assertEqual(rewritten["error"], "finish_does_not_match_sealed_witness_terminal")
+
+    def test_raw_finish_cannot_promote_a_caller_supplied_proof_reason(self):
+        from unittest.mock import patch
+        service = self.service()
+        observed = service.call({"action": "game.observe"})["result"]
+        service.run_channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
+        request = {"action": "run.finish", "observation_id": observed["observation_id"],
+                   "stop_reason": "target_predicate_proved", "unused_authority": "released"}
+        with patch("cockpit.build_evidence_journal", side_effect=AssertionError("unrequested whole journal")):
+            refused = service.call(request)
+            self.assertFalse(refused["ok"], refused)
+            self.assertEqual(refused["error"], "target_predicate_proved_requires_validated_witness")
+            self.assertEqual(service.run_channel.status()["state"], "active")
+            reported = service.call({**request, "outcome": {
+                "summary": "The selected gameplay outcome succeeded.", "verdict": "positive",
+                "citations": [{"observation_id": observed["observation_id"], "select": ["game_minutes"]}]}})
+        self.assertTrue(reported["ok"], reported)
+        self.assertEqual(reported["result"]["stop_reason"], "outcome_reported")
+        detail = reported["result"]["stop_detail"]
+        self.assertEqual(detail["requested_stop_reason"], "target_predicate_proved")
+        self.assertFalse(detail["gameplay_outcome"]["proof_promotion_authority"])
+        self.assertNotIn("target_receipt", detail)
+
+    def test_reserved_proof_reason_requires_a_proved_validated_witness(self):
+        for verdict in ("proved", "contradicted", "inconclusive"):
+            with self.subTest(verdict=verdict):
+                service = self.service()
+                observed = service.call({"action": "game.observe"})["result"]
+                service.run_channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
+                result = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+                    "stop_reason": "target_predicate_proved", "unused_authority": "none", "witness": {
+                        "verdict": verdict,
+                        "smallest_supported_claim": "The bound run was observed at minute 100.",
+                        "causal_account": "The native observation supplies the minute.",
+                        "citations": [{"citation_id": "J0002", "meaning": "bound native minute",
+                                       "checks": {"value.game_minutes": 100}}],
+                        "recommended_disposition": "accept" if verdict == "proved" else "continue",
+                        "evidence_ceiling": "focused"}})
+                if verdict == "proved":
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(result["result"]["stop_reason"], "target_predicate_proved")
+                    receipt = result["result"]["stop_detail"]["target_receipt"]
+                    self.assertEqual(receipt["run_id"], "run-a")
+                    self.assertEqual(receipt["binding_id"], "binding-a")
+                    self.assertEqual(receipt["observation_id"], observed["observation_id"])
+                else:
+                    self.assertFalse(result["ok"], result)
+                    self.assertEqual(result["error"], "target_predicate_proved_requires_validated_witness")
+                    finished = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+                        "stop_reason": "reported_result", "unused_authority": "none"})
+                    self.assertTrue(finished["ok"], finished)
+                    self.assertNotIn("target_receipt", finished["result"]["stop_detail"])
+
+    def test_outcome_citations_reject_foreign_missing_or_changed_claim_fields(self):
+        for citation in ({"observation_id": "other-run:frame", "select": ["game_minutes"]},
+                         {"observation_id": "run-a:1", "select": ["fabricated_damage"]}):
+            service = self.service()
+            observed = service.call({"action": "game.observe"})["result"]
+            service.run_channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
+            result = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+                "stop_reason": "report", "unused_authority": "released", "outcome": {
+                    "summary": "Player conclusion", "verdict": "positive", "citations": [citation]}})
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(service.run_channel.status()["state"], "active")
 
     def test_finish_accepts_documented_witness_statement_alias(self) -> None:
         service = self.service()

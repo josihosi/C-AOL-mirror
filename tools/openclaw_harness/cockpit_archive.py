@@ -203,18 +203,48 @@ class Archive:
                 value = copied
             return {"s": [value.stream, len(value)]}
         if isinstance(value, Mapping):
-            return {"m": {key: self.pack(item) for key, item in value.items()}}
+            return {"m": {key: self._pack_payload(key, item) for key, item in value.items()}}
         if isinstance(value, (list, tuple)):
             return {"l": [self.pack(item) for item in value]}
         if isinstance(value, set):
             return {"t": [self.pack(item) for item in sorted(value)]}
         return value
 
+    def _pack_payload(self, key, value):
+        packed = self.pack(value)
+        # Native catalogues and facts are repeated in the authority object,
+        # transcript and optional journal. Store their exact snapshot once in
+        # the existing archive, not once per enclosing record. Decoding still
+        # produces independent ordinary containers; these are storage references,
+        # never live action authority or a mutable cache.
+        if key not in {"facts", "actions", "valid_actions", "advertised_action_details",
+                       "production_channel_observation", "observation"} or \
+                not isinstance(value, (Mapping, list, tuple)):
+            return packed
+        raw = json.dumps(packed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        encoded = raw.encode("utf-8")
+        if len(encoded) < 4096:
+            return packed
+        identity = hashlib.sha256(encoded).hexdigest()
+        self.connection.execute(
+            "INSERT OR IGNORE INTO objects(namespace,id,value) VALUES ('payloads',?,?)",
+            (identity, raw),
+        )
+        return {"v": identity}
+
     def unpack(self, value):
         if not isinstance(value, dict):
             return value
         if set(value) == {"s"}:
             return ArchiveSequence(self, value["s"][0], count=value["s"][1])
+        if set(value) == {"v"}:
+            identity = value["v"]
+            row = self.connection.execute(
+                "SELECT value FROM objects WHERE namespace='payloads' AND id=?", (identity,),
+            ).fetchone()
+            if row is None or hashlib.sha256(row[0].encode("utf-8")).hexdigest() != identity:
+                raise ValueError("archive_payload_digest_mismatch")
+            return self.unpack(json.loads(row[0]))
         if set(value) == {"m"}:
             return {key: self.unpack(item) for key, item in value["m"].items()}
         if set(value) == {"l"}:
@@ -353,6 +383,10 @@ class ArchiveSequence(Sequence):
             if sequence != count or not isinstance(expected, str) or \
                     hashlib.sha256(raw.encode("utf-8")).hexdigest() != expected:
                 return False
+            if '"v":' in raw:
+                # Legacy sidecars may gain newly deduplicated rows. Validate
+                # their referenced snapshots too before trusting the sidecar.
+                self.archive.decode(raw)
             count += 1
         return count == len(self)
 
@@ -388,6 +422,8 @@ class ArchiveSequence(Sequence):
         raw_sha256 = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         key = value.get("citation_id") if isinstance(value, Mapping) else None
         kind = value.get("kind") if isinstance(value, Mapping) else None
+        if key is None and kind == "observation" and isinstance(value.get("value"), Mapping):
+            key = value["value"].get("observation_id")
         sequence = len(self)
         # Older archives retain their existing optional serialization caches.
         # New archives write the record only to SQLite.
@@ -411,8 +447,11 @@ class ArchiveSequence(Sequence):
         self._rebuild_sidecars()
 
     def lookup(self, key):
+        # A native frame may be republished before consumption. Resolve its
+        # latest retained publication; journal citation IDs remain unique.
         row = self.archive.connection.execute(
-            "SELECT value FROM records WHERE stream=? AND entry_key=? AND seq<?", (self.stream, key, len(self))).fetchone()
+            "SELECT value FROM records WHERE stream=? AND entry_key=? AND seq<? ORDER BY seq DESC LIMIT 1",
+            (self.stream, key, len(self))).fetchone()
         return self.archive.decode(row[0]) if row else None
 
     def reference(self):

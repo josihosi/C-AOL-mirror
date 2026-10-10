@@ -77,6 +77,160 @@ class ArchiveTest(unittest.TestCase):
         write_json_stream(path, sequence)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), legacy)
 
+    def test_ordinary_finish_cites_consumed_facts_without_restoring_authority(self):
+        for archived in (False, True):
+            with self.subTest(archived=archived):
+                current = {"event": "surface_descriptor", "schema_version": 1,
+                           "run_id": "run-a", "frame_id": "frame:prior", "surface_id": "inventory:prior",
+                           "kind": "inventory", "breadcrumbs": ["Inventory"],
+                           "payload": {"title": "Before native redraw"},
+                           "valid_actions": [{"id": "inventory.toggle", "stable_id": "item:1",
+                                              "label": "Select physical item", "enabled": True}]}
+                dispatched = []
+
+                def dispatch(issuing, action_id, stable_id):
+                    dispatched.append((action_id, stable_id))
+                    current.update(frame_id="frame:current", surface_id="inventory:current",
+                                   payload={"title": "Current native fact"})
+                    return {"native_receipt": {
+                        "run_id": "run-a", "requested_run_id": "run-a", "accepted": True,
+                        "requested_frame_id": issuing["frame_id"], "consuming_frame_id": issuing["frame_id"],
+                        "requested_surface_id": issuing["surface_id"], "consuming_surface_id": issuing["surface_id"],
+                        "action_id": action_id, "stable_id": stable_id}, "next_frame": dict(current)}
+
+                channel = CockpitRunChannel(lambda: current, dispatch,
+                    archive=self.archive if archived else None, binding_id="binding-a")
+                service = CockpitService(run_channel=channel)
+                service.call({"action": "game.observe"})
+                current["payload"] = {"title": "Prior native fact"}
+                prior = service.call({"action": "game.observe"})["result"]
+                action = {"action": "game.act", "observation_id": prior["observation_id"],
+                          "action_id": "inventory.toggle", "stable_id": "item:1"}
+                accepted = service.call(action)
+                self.assertTrue(accepted["ok"], accepted)
+                self.assertEqual(service.call(action)["error"], "duplicate_submission")
+                if archived:
+                    self.assertNotIn("public_state", channel._observations[prior["observation_id"]])
+                channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
+                terminal = service.call({"action": "game.observe"})["result"]
+                finish = {"action": "run.finish", "observation_id": terminal["observation_id"],
+                          "stop_reason": "reported", "unused_authority": "released"}
+                self.assertFalse(channel._observations[terminal["observation_id"]]["used"])
+                channel._read_binding_id = lambda: "foreign-binding"
+                self.assertEqual(service.call(finish)["error"], "native_exit_required_before_reporting")
+                channel._read_binding_id = lambda: "binding-a"
+                for source_id, field in (("other-run:prior", "surface.facts.title"),
+                                         ("frame:missing", "surface.facts.title"),
+                                         (prior["observation_id"], "fabricated_fact")):
+                    refused = service.call({**finish, "outcome": {
+                        "summary": "Player report", "verdict": "positive",
+                        "citations": [{"observation_id": source_id, "select": [field]}]}})
+                    self.assertFalse(refused["ok"], refused)
+                    self.assertEqual(channel.status()["state"], "active")
+                    self.assertFalse(channel._observations[terminal["observation_id"]]["used"], refused)
+                stale_terminal = service.call({**finish, "observation_id": prior["observation_id"]})
+                self.assertEqual(stale_terminal["error"], "unknown_or_stale_observation")
+                retrieve = channel._outcome_citation_state
+
+                def indexed_citation(source_id):
+                    with patch.object(ArchiveSequence, "__iter__", side_effect=AssertionError("citation history scan")):
+                        return retrieve(source_id)
+
+                with patch("cockpit.build_evidence_journal", side_effect=AssertionError("unrequested journal")), \
+                     patch.object(channel, "_outcome_citation_state", side_effect=indexed_citation):
+                    finished = service.call({**finish, "outcome": {
+                        "summary": "Selected item once", "verdict": "positive",
+                        "citations": [{"observation_id": prior["observation_id"],
+                                       "select": ["surface.facts.title"]}]}})
+                self.assertTrue(finished["ok"], finished)
+                report = finished["result"]["stop_detail"]["gameplay_outcome"]
+                self.assertEqual(report["citations"][0]["values"],
+                                 {"surface.facts.title": "Prior native fact"})
+                self.assertEqual(report["citations"][0]["binding_id"], "binding-a")
+                self.assertFalse(report["proof_promotion_authority"])
+                self.assertNotIn("target_receipt", finished["result"]["stop_detail"])
+                self.assertEqual(dispatched, [("inventory.toggle", "item:1")])
+
+    def test_native_catalogue_snapshots_are_stored_once_and_keep_current_authority(self):
+        actions = [{"id": "inventory.toggle", "stable_id": f"item:{i}",
+                    "label": "same label", "enabled": True} for i in range(300)]
+        facts = {"title": "Inventory", "contents": "native facts " * 1000}
+        current = {"event": "surface_descriptor", "schema_version": 1,
+                   "run_id": "run-a", "frame_id": "frame:0", "surface_id": "inventory:0",
+                   "kind": "inventory", "breadcrumbs": ["Inventory"],
+                   "payload": facts, "valid_actions": actions}
+        dispatched = []
+
+        def dispatch(issuing, action_id, stable_id):
+            dispatched.append((action_id, stable_id))
+            old = dict(issuing)
+            current.update(frame_id="frame:selected", surface_id="inventory:selected")
+            return {"native_receipt": {
+                "run_id": "run-a", "requested_run_id": "run-a", "accepted": True,
+                "requested_frame_id": old["frame_id"], "consuming_frame_id": old["frame_id"],
+                "requested_surface_id": old["surface_id"], "consuming_surface_id": old["surface_id"],
+                "action_id": action_id, "stable_id": stable_id}, "next_frame": dict(current)}
+
+        channel = CockpitRunChannel(lambda: current, dispatch, archive=self.archive,
+                                    binding_id="binding-a")
+        service = CockpitService(run_channel=channel)
+        originals = []
+        for i in range(6):
+            current.update(frame_id=f"frame:{i}", surface_id=f"inventory:{i}")
+            result = service.call({"action": "game.observe"})["result"]
+            originals.append(json.loads("".join(json_chunks(result))))
+        identity = {"scenario_id": "scenario-a", "source_identity": "source-a",
+                    "executable_identity": "exe-a", "run_id": "run-a", "binding_id": "binding-a"}
+        journal_args = dict(charter=CHARTER, identity=identity,
+                            terminal={"run_id": "run-a", "stop_reason": "selected detail"},
+                            evidence_ceiling="focused")
+        legacy_journal = build_evidence_journal(
+            **journal_args, transcript=list(channel._transcript))
+        journal = build_evidence_journal(**journal_args, transcript=channel._transcript)
+        self.assertEqual(json.loads("".join(json_chunks(journal))), legacy_journal)
+        # Repeated labels retain all distinct physical identities, not just the
+        # preview. The current native receipt consumes one exact item once.
+        chosen = {"action": "game.act", "observation_id": result["observation_id"],
+                  "action_id": "inventory.toggle", "stable_id": "item:299"}
+        accepted = service.call(chosen)
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertFalse(service.call(chosen)["ok"])
+        self.assertEqual(dispatched, [("inventory.toggle", "item:299")])
+        payloads = self.archive.connection.execute(
+            "SELECT count(*),sum(length(value)) FROM objects WHERE namespace='payloads'").fetchone()
+        record_bytes = self.archive.connection.execute(
+            "SELECT sum(length(value)) FROM records").fetchone()[0]
+        logical_bytes = sum(len(json.dumps(item)) for item in originals)
+        self.assertLess(record_bytes + (payloads[1] or 0), logical_bytes // 2)
+        # Two shared native payloads and the action's distinct successor
+        # observation. The latter references those same facts and catalogue.
+        self.assertEqual(payloads[0], 3)
+        for i, original in enumerate(originals):
+            self.assertEqual(channel._transcript[i]["value"], original)
+        # A live mutation cannot change any historical snapshot, and a native
+        # disabled action in a new publication cannot inherit old authority.
+        current["payload"]["title"] = "Changed"
+        current["valid_actions"][299]["enabled"] = False
+        current.update(frame_id="frame:changed", surface_id="inventory:changed")
+        changed = service.call({"action": "game.observe"})["result"]
+        denied = service.call({**chosen, "observation_id": changed["observation_id"]})
+        self.assertFalse(denied["ok"])
+        self.assertEqual(dispatched, [("inventory.toggle", "item:299")])
+        self.assertEqual(channel._transcript[0]["value"], originals[0])
+        self.assertEqual(journal["entries"][1]["value"]["value"]["surface"]["facts"]["title"],
+                         "Inventory")
+        wire = self.archive.wire({"entries": channel._transcript})
+        recovered = resolve_wire(wire, directory=self.directory, binding_id="binding-a")
+        self.addCleanup(recovered["entries"].archive.close)
+        recovered["entries"][0]["value"]["surface"]["facts"]["title"] = "caller mutation"
+        self.assertEqual(recovered["entries"][0]["value"], originals[0])
+        with self.archive.connection:
+            self.archive.connection.execute(
+                "UPDATE objects SET value='{}' WHERE namespace='payloads' AND id="
+                "(SELECT id FROM objects WHERE namespace='payloads' LIMIT 1)")
+        with self.assertRaisesRegex(ValueError, "payload_digest_mismatch"):
+            resolve_wire(wire, directory=self.directory, binding_id="binding-a")
+
     def test_old_authority_flags_and_payloads_are_exact_without_hot_history(self):
         records = ArchiveMap(self.archive, "observations")
         for index in range(50):

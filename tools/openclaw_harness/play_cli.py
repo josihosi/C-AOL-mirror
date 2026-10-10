@@ -438,6 +438,8 @@ class PlayerClient:
                 complete = state == "safe_to_cleanup"
                 return {"ok": not failed, "state": "finished" if complete else "cleanup_failed" if failed else "finishing",
                         "bridge_state": state, "cleanup": cleanup,
+                        **({"gameplay_outcome": self.state["gameplay_outcome"]}
+                           if self.state.get("gameplay_outcome") else {}),
                         "cleanup_pending": not complete and not failed,
                         "bridge_cleanup": status.get("cleanup"), "terminalization": terminal,
                         "reason": status.get("reason", status.get("error")),
@@ -624,6 +626,9 @@ class PlayerClient:
                               and terminal.get("state") == "finished")
         if terminal_request and confirmed_terminal:
             self.state["finished"] = True
+            reported = terminal.get("stop_detail", {}).get("gameplay_outcome")
+            if isinstance(reported, dict):
+                self.state["gameplay_outcome"] = reported
             self.state["finished_generation"] = result["receipt"].get("session_generation", 0)
             self.state.pop("observation_id", None)
         try:
@@ -653,31 +658,19 @@ class PlayerClient:
         self.state.pop("pending", None)
         self.save()
         output = {**result, "ok": response.get("ok") is True,
+                  **({"gameplay_outcome": self.state["gameplay_outcome"]}
+                     if self.state.get("gameplay_outcome") else {}),
                   "world_controls_unchanged": world_controls_unchanged,
                   "world_observation": world_observation,
                   "turn_assessment": assessment,
                   "state": "collected" if response.get("ok") else "rejected", "request_id": request_id,
                   "next": "collect" if self.state.get("finished") else
-                          ("finish --witness FILE" if self.state.get("process_exited") else
+                          ("finish --outcome TEXT --verdict positive|negative|inconclusive" if self.state.get("process_exited") else
                            "status; preserve the sealed journal and live game; native exit is unverified") if self.state.get("sealed_terminal") else
-                          "journal --reason REASON" if self.state.get("process_exited") else
+                          "finish --outcome TEXT --verdict positive|negative|inconclusive" if self.state.get("process_exited") else
                           "act, look, inspect, evidence, messages, or status" if self.state.get("observation_id") else "look"}
         if self.state.get("process_exited") and not self.state.get("finished"):
             output["state"] = "process_exited"
-        if self.state.get("sealed_terminal") and not self.state.get("finished"):
-            output["witness_fields"] = {
-                "citation_paths": "Checks are relative to entry.value, not the whole response. Observation checks start value.surface.facts. Inspect the actual journal entry first; do not guess paths.",
-                "value_types": "Copy exact JSON values from the journal: false differs from the string \"false\", and 0 differs from \"0\". Do not coerce native string facts.",
-                "verdict": "proved | contradicted | inconclusive",
-                "smallest_supported_claim": "Your conclusion limited to cited facts",
-                "causal_account": "Why the observed facts support that conclusion",
-                "citations": [{"citation_id": "J... from journal entries", "meaning": "What this establishes",
-                               "checks": {"value.surface.facts.FIELD": "Exact observed value; nested JSON paths supported"}}],
-                "recommended_disposition": "accept | continue | repair | change-strategy",
-                "contradictions": "List every supplied contradiction with its citation_id and meaning",
-                "remaining_unknowns": "Optional list of unresolved questions",
-                "evidence_ceiling": "Optional: omit this field to use the sealed journal's evidence_ceiling. If supplied, copy that exact value; this is not a prose explanation.",
-            }
         if terminal_request and confirmed_terminal:
             output.update(state="finishing", cleanup_pending=True,
                           note="Finish accepted; collect reports scenario cleanup. Native save/exit evidence remains separate.")
@@ -1033,29 +1026,24 @@ class PlayerClient:
         return self.submit({"action": "run.witness", "observation_id": self.frame(terminal=self.state.get("process_exited", False)),
                             "stop_reason": reason, "unused_authority": unused}, wait_seconds)
 
-    def finish(self, witness: dict[str, Any], wait_seconds: float):
+    def finish(self, witness: dict[str, Any] | None, wait_seconds: float, *,
+               outcome: dict[str, Any] | None = None):
         refusal = self._reporting_exit_refusal()
         if refusal is not None:
             return refusal
-        if isinstance(witness, dict):
-            statements = [claim.get("statement") for claim in witness.get("claims", [])
-                          if isinstance(claim, dict)] if witness.get("schema") == \
-                "caol-playtest-witness-bundle-v1" else [witness]
-            for statement in statements if isinstance(statements, list) else []:
-                for citation in statement.get("citations", []) if isinstance(statement, dict) else []:
-                    checks = citation.get("checks", {}) if isinstance(citation, dict) else {}
-                    for path, value in checks.items() if isinstance(checks, dict) else []:
-                        if path.endswith(".last_save_checkpoint") and not isinstance(value, str):
-                            return {"ok": False, "error": "witness_checkpoint_requires_string",
-                                    "path": path, "supplied_type": type(value).__name__,
-                                    "expected_shape": {"type": "string", "example":
-                                        json.dumps({"confirmed_turn": 5248280}, separators=(",", ":"))},
-                                    "next": "Copy the exact STRING from the cited journal row; no request submitted."}
-        terminal = self.state.get("sealed_terminal")
-        if not terminal:
-            return {"ok": False, "error": "journal_required_before_finish",
-                    "next": "journal --reason REASON; inspect result.evidence_journal.entries --limit 10"}
-        return self.submit({"action": "run.finish", **terminal, "witness": witness}, wait_seconds)
+        terminal = self.state.get("sealed_terminal") or {
+            "observation_id": self.state.get("terminal_observation_id"),
+            "stop_reason": "outcome_reported" if outcome is not None else "witness_reported",
+            "unused_authority": "released",
+        }
+        if not terminal.get("observation_id"):
+            return {"ok": False, "error": "terminal_observation_required", "next": "look"}
+        request = {"action": "run.finish", **terminal}
+        if witness is not None:
+            request["witness"] = witness
+        if outcome is not None:
+            request["outcome"] = outcome
+        return self.submit(request, wait_seconds)
 
     def messages(self, offset: int | None, limit: int, contains: str | None):
         from cockpit_evidence import select
@@ -1295,8 +1283,14 @@ def main(argv=None):
     journal = commands.add_parser("journal", help="Terminal seal after native exit; live evidence uses inspect/evidence/messages/status")
     journal.add_argument("--reason", required=True)
     journal.add_argument("--unused-authority", default="released")
-    finish = commands.add_parser("finish", help="Submit your witness against the sealed journal")
-    finish.add_argument("--witness", type=Path, required=True)
+    finish = commands.add_parser("finish", help="Report the gameplay result after native exit; cleanup is separate")
+    report = finish.add_mutually_exclusive_group(required=True)
+    report.add_argument("--outcome", help="Concise supported gameplay conclusion; no journal ceremony required")
+    report.add_argument("--witness", type=Path, help="Optional detailed witness review; selected paths generate typed values")
+    finish.add_argument("--verdict", choices=("positive", "negative", "inconclusive"), default="inconclusive")
+    finish.add_argument("--unknown", action="append", default=[], help="Unresolved secondary observation")
+    finish.add_argument("--cite", action="append", default=[], help="Existing native observation ID to cite")
+    finish.add_argument("--select", action="append", default=[], help="Selected native fields; their exact values are derived")
     # argparse accepts global options before a subcommand only.  Keep the
     # same destination and default when a caller places this display choice
     # after any subcommand; absent subparser options must not reset a true
@@ -1405,7 +1399,11 @@ def main(argv=None):
                 elif args.command == "journal":
                     result = client.journal(args.reason, args.unused_authority, args.wait_seconds)
                 else:
-                    result = client.finish(json.loads(args.witness.read_text()), args.wait_seconds)
+                    outcome = ({"summary": args.outcome, "verdict": args.verdict, "unknowns": args.unknown,
+                                "citations": [{"observation_id": identity, "select": args.select}
+                                              for identity in args.cite]} if args.outcome is not None else None)
+                    result = client.finish(json.loads(args.witness.read_text()) if args.witness else None,
+                                           args.wait_seconds, outcome=outcome)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"ok": False, "error": str(error)}
     if args.command == "look" and "client" in locals() and isinstance(result.get("status"), dict):

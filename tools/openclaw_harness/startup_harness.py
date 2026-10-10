@@ -6586,6 +6586,10 @@ def compact_cockpit_live_evidence(
         pass
     channel_observation = read_r008_indoor_channel_observation(
         Path( run_dir ), run_id=run_id,
+        # Normal decisions retain validation, counts and exact source path.
+        # Detailed channel rows remain in the original native stream and the
+        # explicit subsystem reader, not copied into every observation.
+        include_records=False,
         source_sha256=str(runtime_binding.get("runtime_source_sha256", "")),
         executable_sha256=str(runtime_binding.get("executable_sha256", "")),
         # The native child writes its bridge identity in a live cockpit.  The
@@ -33745,18 +33749,14 @@ def execute_probe_steps(
                                *( ["run.witness"] if witness_charter is not None else [] ),
                                "run.finish"],
                 **({"witness": {
-                    "action": "WITNESS / FINISH",
-                    "charter": witness_charter,
-                    "sequence": "observe, choose, act, repair or rerun when needed, run.witness, run.finish",
-                    "instruction": "Report the smallest supported conclusion for each affected claim. A single statement remains valid; use a caol-playtest-witness-bundle-v1 when one run has independent claim outcomes or a routed defect. Preserve inconvenient evidence without discarding unaffected observations, and stop requesting proof once the charter is honestly settled.",
+                    "action": "run.finish",
+                    "outcome": str(witness_charter.get("claim", "")),
+                    "instruction": "Report the supported gameplay result with run.finish outcome; select native observations for automatic typed citations when useful. Keep unknown secondary observations and cleanup separate. Detailed run.witness review is optional; exact evidence remains retrievable.",
                 }} if witness_charter is not None else {}),
                 "bound_bases": sorted(["game_mechanic", "scheduler_boundary", "path_progress",
                                        "measured_rate"]),
-                "termination": (
-                    "run.witness then run.finish to conclude the evidence, or run.quit to end without a claim. "
-                    if witness_charter is not None else
-                    "run.finish or run.quit explicitly ends the session. "
-                ) + (
+                "termination": "After native exit, run.finish reports the supported outcome in one operation; "
+                    "run.quit ends without an outcome. " + (
                     "Action failures, binding drift, missing receipts, no progress, and client disconnects "
                     "stop only the current operation and leave the game running."
                 ),

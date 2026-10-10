@@ -278,7 +278,7 @@ class RegistryQueryOutputTest(unittest.TestCase):
         self.assertEqual(result["export"], result["artifact"])
         self.assertIn("evaluation", json.loads(Path(result["export"]["path"]).read_text())["result"])
 
-    def test_selected_live_route_supplies_charter_and_absent_session_path(self):
+    def test_selected_live_route_keeps_optional_charter_and_absent_session_path(self):
         declaration = self.scenarios / "live.json"
         declaration.write_text(json.dumps({"steps": [{"kind": "cockpit_live_session"}]}))
         ranked_declaration = self.scenarios / "ranked.json"
@@ -301,7 +301,12 @@ class RegistryQueryOutputTest(unittest.TestCase):
         self.assertEqual(args.witness_charter, str(charter.resolve()))
         self.assertFalse(Path(args.session_dir).exists())
         missing = cli._query_launch_action(result, argparse.Namespace(witness_charter=None), self.registry)
-        self.assertEqual(missing["kind"], "provide_witness_charter")
+        self.assertEqual(missing["kind"], "launch_selected_scenario")
+        ordinary = cli.build_parser().parse_args(missing["command"]["argv"][2:])
+        self.assertEqual(ordinary.command, "registry-detached-launch")
+        self.assertEqual(ordinary.selection_token, "issued-token")
+        self.assertFalse(ordinary.witness_charter)
+        self.assertFalse(Path(ordinary.session_dir).exists())
 
 
 if __name__ == "__main__":

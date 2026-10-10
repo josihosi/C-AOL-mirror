@@ -37,13 +37,14 @@ from scenario_registry_store import (
 from playtest_witness import (
     WitnessError,
     build_evidence_journal,
+    citation_value,
     normalize_witness_charter,
     validate_witness_bundle,
     validate_witness_statement,
 )
 
 _FORBIDDEN = {"token", "tokens", "token_id", "query_sha256", "offset", "offsets", "candidate_offsets", "pid", "pids", "ocr", "logs", "raw_logs", "physical_key", "physical_keys", "source_path", "draft_path", "manual", "full_manual", "executable", "executables", "executable_path", "manifest_sha256", "hash", "hashes", "sha256", "path", "paths", "key", "subprocess"}
-_ALLOWED = {"action", "frontier", "capability", "scenario", "requirements", "preferences", "id", "name", "detail", "declaration", "world", "required_typeid", "candidate_offsets", "player_save", "handle", "observation_id", "action_id", "stable_id", "parameters", "recovery", "run_id", "scenario_id", "selection_id", "binding_id", "blocked_intent", "missing_kind", "evidence", "reusable_outcome", "affected_scenarios", "expected_signal", "bound", "stop_reason", "unused_authority", "wait", "keep_watch", "raw_wait", "move_relative", "raw_move_relative", "guarded_move_relative", "player_fire_setup", "r019_acceptance_matrix", "witness", "witness_statement", "target_delta_game_minutes", "abort"}
+_ALLOWED = {"action", "frontier", "capability", "scenario", "requirements", "preferences", "id", "name", "detail", "declaration", "world", "required_typeid", "candidate_offsets", "player_save", "handle", "observation_id", "action_id", "stable_id", "parameters", "recovery", "run_id", "scenario_id", "selection_id", "binding_id", "blocked_intent", "missing_kind", "evidence", "reusable_outcome", "affected_scenarios", "expected_signal", "bound", "stop_reason", "unused_authority", "wait", "keep_watch", "raw_wait", "move_relative", "raw_move_relative", "guarded_move_relative", "player_fire_setup", "r019_acceptance_matrix", "witness", "witness_statement", "outcome", "target_delta_game_minutes", "abort"}
 
 _DANGER_HANDLING_MODES = {
     "stop_on_interruption",
@@ -994,7 +995,7 @@ class CockpitRunChannel:
             "compact_log": {"persistence": "not_established_by_process_exit",
                             "evidence_refs": [process["evidence_ref"]] if process.get("evidence_ref") else [],
                             "contradictory_evidence": []},
-            "next_calls": ["run.witness", "run.finish"],
+            "next_calls": ["run.finish"],
             "note": "The bound game process ended. Its cached native frame is no longer actionable. Exit alone establishes neither saving nor gameplay success.",
         }
         if isinstance(self._observations, ArchiveMap):
@@ -3809,10 +3810,32 @@ class CockpitRunChannel:
             },
         }
 
+    def _outcome_citation_state(self, observation_id: str) -> Optional[Mapping[str, Any]]:
+        """Read retained facts without reviving a consumed input grant."""
+        record = self._observations.get(observation_id)
+        if not isinstance(record, Mapping) or record.get("run_id") != self._run_id:
+            return None
+        if self.archive is not None:
+            if self.archive.run_id != self._run_id or self.archive.binding_id != self._binding_id:
+                return None
+            entry = self._transcript.lookup(observation_id)
+        else:
+            entry = next((entry for entry in reversed(self._transcript)
+                          if entry.get("kind") == "observation" and
+                          entry.get("value", {}).get("observation_id") == observation_id), None)
+        if not isinstance(entry, Mapping) or entry.get("kind") != "observation":
+            return None
+        state = entry.get("value")
+        if not isinstance(state, Mapping) or state.get("observation_id") != observation_id or \
+                state.get("run_id") != self._run_id:
+            return None
+        return state
+
     def finish(
         self, *, observation_id: str, stop_reason: str, unused_authority: str,
         r019_acceptance_matrix: Optional[Mapping[str, Any]] = None,
         witness: Optional[Mapping[str, Any]] = None,
+        outcome: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         refusal = self._reporting_exit_refusal()
         if refusal is not None:
@@ -3830,8 +3853,43 @@ class CockpitRunChannel:
             return self._fail_operation("binding_drift", {"unused_authority": "revoked"})
         if r019_acceptance_matrix is not None and not isinstance(r019_acceptance_matrix, Mapping):
             return {"ok": False, "error": "r019_acceptance_matrix must be an object"}
+        reported_outcome = None
+        if outcome is not None:
+            if not isinstance(outcome, Mapping) or not isinstance(outcome.get("summary"), str) or \
+                    not outcome["summary"].strip() or outcome.get("verdict") not in {"positive", "negative", "inconclusive"}:
+                return {"ok": False, "error": "outcome_requires_summary_and_verdict"}
+            unknowns = outcome.get("unknowns", [])
+            citations = outcome.get("citations", [])
+            if not isinstance(unknowns, list) or any(not isinstance(value, str) for value in unknowns) or \
+                    not isinstance(citations, list):
+                return {"ok": False, "error": "outcome_unknowns_and_citations_must_be_lists"}
+            resolved = []
+            for citation in citations:
+                if not isinstance(citation, Mapping):
+                    return {"ok": False, "error": "outcome_citation_must_be_an_object"}
+                source_id = str(citation.get("observation_id", ""))
+                source = self._outcome_citation_state(source_id)
+                fields = citation.get("select", [])
+                if source is None:
+                    return {"ok": False, "error": "outcome_citation_observation_unavailable", "observation_id": source_id}
+                if not isinstance(fields, list) or any(not isinstance(field, str) or not field for field in fields):
+                    return {"ok": False, "error": "outcome_citation_select_requires_paths"}
+                try:
+                    values = {field: citation_value(source, field) for field in fields}
+                except WitnessError as error:
+                    return {"ok": False, "error": str(error)}
+                resolved.append({"observation_id": source_id, "run_id": self._run_id,
+                                 "binding_id": self._binding_id, "values": values})
+            reported_outcome = {"summary": outcome["summary"].strip(), "verdict": outcome["verdict"],
+                                "unknowns": list(unknowns), "citations": resolved,
+                                "attribution": "player_report", "proof_promotion_authority": False}
         witness_validation: Optional[Dict[str, Any]] = None
-        if self._witness_charter is not None:
+        if witness is not None:
+            if self._sealed_journal is None and self._state == "active":
+                sealed = self.seal_witness_journal(observation_id=observation_id,
+                    stop_reason=reason, unused_authority=disposition)
+                if not sealed.get("ok"):
+                    return sealed
             if self._sealed_journal is None or self._state != "witnessing":
                 return {"ok": False, "error": "witness_journal_must_be_sealed_before_finish"}
             if not isinstance(witness, Mapping):
@@ -3855,6 +3913,12 @@ class CockpitRunChannel:
                     )
             except WitnessError as exc:
                 return {"ok": False, "error": str(exc)}
+        witness_promoted_target = (
+            isinstance(witness_validation, Mapping) and
+            witness_validation.get("witness", {}).get("verdict") == "proved"
+        )
+        if reason == "target_predicate_proved" and reported_outcome is None and not witness_promoted_target:
+            return {"ok": False, "error": "target_predicate_proved_requires_validated_witness"}
         r019_receipt: Optional[Dict[str, Any]] = None
         if isinstance(r019_acceptance_matrix, Mapping):
             r019_receipt = self._r019_receipt(
@@ -3911,22 +3975,14 @@ class CockpitRunChannel:
             self._continuation = None
         if diagnostic_terminal is not None:
             self._continuation = None
-        # Witness sealing is the authoritative terminal decision for a
-        # claimed live step.  Workers may supply a human-readable stop reason
-        # (the sealed witness preserves it), but the durable cockpit protocol
-        # needs one canonical reason so the target receipt is machine-bound.
-        # Only a mechanically validated proved witness can promote it; failed
-        # or inconclusive witnesses retain their original terminal reason.
-        canonical_reason = reason
-        witness_promoted_target = (
-            isinstance( witness_validation, Mapping ) and
-            witness_validation.get( "witness", {} ).get( "verdict" ) == "proved"
-            if isinstance( witness_validation, Mapping ) else False
-        )
+        # A reported gameplay result is independent of formal proof.  Only a
+        # validated proved witness can authorize the reserved reason/receipt;
+        # a caller-supplied reason is never proof authority.
+        canonical_reason = "outcome_reported" if reported_outcome is not None else reason
         if witness_promoted_target:
             canonical_reason = "target_predicate_proved"
         target_receipt: Dict[str, Any] = {}
-        if canonical_reason == "target_predicate_proved":
+        if witness_promoted_target:
             target_receipt = {
                 "schema": "caol-cockpit-target-receipt-v1",
                 "run_id": self._run_id,
@@ -3940,6 +3996,7 @@ class CockpitRunChannel:
         return {"ok": True, "result": self._stop(canonical_reason, {
             "observation_id": str(observation_id),
             "unused_authority": disposition,
+            **({"gameplay_outcome": reported_outcome} if reported_outcome is not None else {}),
             **({"requested_stop_reason": reason} if canonical_reason != reason else {}),
             **({"target_receipt": target_receipt} if target_receipt else {}),
             **({"r019_hostile_stop_receipt": {
@@ -4235,12 +4292,15 @@ class CockpitService:
                 return {"ok": False, "error": "finish_accepts_one_witness_payload"}
             if witness is None:
                 witness = witness_statement
+            if witness is not None and not isinstance(witness, Mapping):
+                return {"ok": False, "error": "witness_statement_must_be_an_object"}
             return self.run_channel.finish(
                 observation_id=str(request.get("observation_id", "")),
                 stop_reason=str(request.get("stop_reason", "")),
                 unused_authority=str(request.get("unused_authority", "")),
                 r019_acceptance_matrix=request.get("r019_acceptance_matrix"),
                 witness=witness if isinstance(witness, Mapping) else None,
+                outcome=request.get("outcome"),
             )
         try:
             # Finish the SQLite transaction before closing, including early returns.

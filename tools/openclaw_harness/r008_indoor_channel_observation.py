@@ -34,13 +34,14 @@ def _contract_scenario(run_dir: Path) -> str:
 
 
 def _records(path: Path) -> Iterable[Mapping[str, Any]]:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            yield {"_invalid": True}
-            continue
-        yield value if isinstance(value, Mapping) else {"_invalid": True}
+    with path.open(encoding="utf-8") as source:
+        for line in source:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                yield {"_invalid": True}
+                continue
+            yield value if isinstance(value, Mapping) else {"_invalid": True}
 
 
 def read_r008_indoor_channel_observation(
@@ -52,6 +53,7 @@ def read_r008_indoor_channel_observation(
     scenario_id: str = "",
     binding_id: str = "",
     observed_game_minutes: Optional[int] = None,
+    include_records: bool = True,
 ) -> Dict[str, Any]:
     """Read and validate the run-owned production channel stream.
 
@@ -87,6 +89,8 @@ def read_r008_indoor_channel_observation(
         }
 
     records = []
+    record_count = 0
+    channels = set()
     expected_sequence = 1
     scan_minutes = None
     for row in _records(path):
@@ -149,11 +153,15 @@ def read_r008_indoor_channel_observation(
             issues.append("unknown_channel")
         if not isinstance(row.get("observed"), bool):
             issues.append("invalid_observed_flag")
-        records.append(dict(row))
+        record_count += 1
+        if row.get("channel") in R008_CHANNELS:
+            channels.add(str(row["channel"]))
+        if include_records:
+            records.append(dict(row))
 
     if observed_game_minutes is not None and scan_minutes is not None and scan_minutes > observed_game_minutes:
         issues.append("future_scan")
-    channels = sorted({str(row.get("channel")) for row in records if row.get("channel") in R008_CHANNELS})
+    channels = sorted(channels)
     missing_channels = sorted(set(R008_CHANNELS) - set(channels))
     if missing_channels:
         issues.append("missing_channels:" + ",".join(missing_channels))
@@ -167,7 +175,8 @@ def read_r008_indoor_channel_observation(
         "channels": channels,
         "missing_channels": missing_channels,
         "issues": unique_issues,
-        "record_count": len(records),
+        "record_count": record_count,
+        "records_included": include_records,
         "latest_game_minutes": scan_minutes,
     }
 

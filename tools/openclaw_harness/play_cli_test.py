@@ -65,9 +65,9 @@ class PlayerCliTest(unittest.TestCase):
         from gameplay_display import plain_player_output
         text = plain_player_output({"ok": True, "request_id": "journal-request", "result": {
             "evidence_journal": {"entries": [{"value": "history" * 10000}]}}})
-        for required in ("1 entries", "--request-id journal-request", "verdict", "smallest_supported_claim",
-                         "causal_account", "citation_id", "checks", "recommended_disposition", "contradictions"):
+        for required in ("1 entries", "--request-id journal-request", "--outcome TEXT", "--verdict", "--witness FILE"):
             self.assertIn(required, text)
+        self.assertNotIn("Copy exact values", text)
         self.assertNotIn("history", text)
 
     def test_filtered_journal_commands_keep_source_index_and_filter(self):
@@ -710,7 +710,7 @@ class PlayerCliTest(unittest.TestCase):
             "observation_id": "run-a:process-exit:123", "surface": {
                 "kind": "process_exited", "facts": {"exit_code": 1}, "actions": []}}}})
         result = self.cli("collect", ok=False)
-        self.assertEqual(result["next"], "journal --reason REASON")
+        self.assertEqual(result["next"], "finish --outcome TEXT --verdict positive|negative|inconclusive")
         self.assertEqual(self.cli("call", "--request", str(path), ok=False)["error"], "game_process_exited")
         self.cli("journal", "--reason", "process exited during wait")
         self.assertEqual(len(self.requests()), 2)
@@ -785,11 +785,10 @@ class PlayerCliTest(unittest.TestCase):
         self.cli("act", "world.wait")
         self.assertEqual(len(self.requests()), len(requests) + 1)
 
-    def test_journal_finish_preserves_sealed_terminal_and_requires_witness(self):
+    def test_optional_journal_preserves_sealed_terminal_for_detailed_review(self):
         self.observe(exited=True)
         witness_path = self.session / "witness.json"
         witness_path.write_text(json.dumps({"verdict": "inconclusive"}))
-        self.cli("finish", "--witness", str(witness_path), ok=False)
         pending = self.cli("journal", "--reason", "missing gameplay outcome")
         self.reply(pending["request_id"], {"ok": True, "result": {"evidence_journal": {"entries": []}}})
         self.cli("collect")
@@ -843,6 +842,43 @@ class PlayerCliTest(unittest.TestCase):
         reference = cached["response"]["result"]["action_observation_sequence"]
         self.assertEqual(reference["schema"], "caol-archive-sequence-ref-v1")
         self.assertEqual(reference["count"], 1)
+
+    def test_public_one_step_outcome_uses_actual_service_and_separates_cleanup(self):
+        from cockpit import CockpitRunChannel, CockpitService
+        from cockpit_witness_test import frame, CHARTER
+        alive = True
+        channel = CockpitRunChannel(frame, binding_id="bound-a", witness_charter=CHARTER,
+            witness_identity={"scenario_id": "scenario-a", "source_identity": "source-a", "executable_identity": "exe-a"},
+            read_process_state=lambda: {"run_id": "run-a", "pid": 123, "alive": alive})
+        service = CockpitService(run_channel=channel)
+        prior = service.call({"action": "game.observe"})["result"]
+        alive = False
+        pending = self.cli("look")
+        self.reply(pending["request_id"], service.call({"action": "game.observe"}))
+        self.cli("collect")
+        finish = self.cli("finish", "--outcome", "Fight achieved the selected gameplay result",
+                          "--verdict", "positive", "--unknown", "Per-bandit participation unobserved",
+                          "--cite", prior["observation_id"], "--select", "game_minutes")
+        request = next(record["request"] for record in self.requests()
+                       if record["request_id"] == finish["request_id"])
+        self.assertNotIn("witness", request)
+        self.reply(finish["request_id"], service.call(request))
+        collected = self.cli("collect")
+        self.assertEqual(collected["state"], "finishing")
+        self.assertEqual(collected["gameplay_outcome"]["verdict"], "positive")
+        self.assertEqual(collected["gameplay_outcome"]["citations"][0]["values"], {"game_minutes": 100})
+        self.assertEqual(len(self.requests()), 2)  # No seal, reconstruct, replay or native action.
+        for state, ok in (("terminalization_failed", False), ("safe_to_cleanup", True)):
+            self.write("status.json", {"binding_id": "bound-a", "state": state,
+                                       "cleanup": {"status": "accepted" if ok else "failed"}})
+            result = self.cli("collect", ok=ok)
+            self.assertEqual(result["gameplay_outcome"]["verdict"], "positive")
+            self.assertEqual(result["gameplay_outcome"]["unknowns"], ["Per-bandit participation unobserved"])
+            process = subprocess.run([sys.executable, str(CLI), "--session", str(self.session), "collect"],
+                                     capture_output=True, text=True)
+            self.assertIn("Gameplay positive: Fight achieved", process.stdout)
+            self.assertIn("Unknown: Per-bandit", process.stdout)
+        self.assertEqual(len(self.requests()), 2)
 
     def test_corrupt_or_wrong_binding_response_remains_pending(self):
         pending = self.cli("look")
@@ -1345,7 +1381,7 @@ class PlayerCliTest(unittest.TestCase):
                    "surface": {"kind": "process_exited", "facts": {"exit_code": 0}, "actions": []}}})
         result = self.cli("collect")
         self.assertEqual(result["state"], "process_exited")
-        self.assertEqual(result["next"], "journal --reason REASON")
+        self.assertEqual(result["next"], "finish --outcome TEXT --verdict positive|negative|inconclusive")
         self.cli("act", "world.move.north", ok=False)
         self.assertEqual(len(self.requests()), 1)
         self.cli("journal", "--reason", "process exited")
