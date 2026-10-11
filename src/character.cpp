@@ -4602,6 +4602,11 @@ int Character::get_shout_volume() const
 
 int Character::shout( std::string msg, bool order )
 {
+    return shout( std::move( msg ), order, nullptr );
+}
+
+int Character::shout( std::string msg, bool order, const sounds::robbery_demand *demand )
+{
     int base = 10;
     std::string shout;
 
@@ -4658,9 +4663,13 @@ int Character::shout( std::string msg, bool order )
         add_msg_if_player( m_warning, _( "The sound of your voice is significantly muffled!" ) );
     }
 
-    sounds::sound( pos_bub(), noise, order ? sounds::sound_t::order : sounds::sound_t::alert, msg,
-                   false,
-                   "shout", shout );
+    if( demand != nullptr ) {
+        sounds::sound( pos_bub(), noise, order ? sounds::sound_t::order : sounds::sound_t::alert,
+                       msg, *demand, "shout", shout );
+    } else {
+        sounds::sound( pos_bub(), noise, order ? sounds::sound_t::order : sounds::sound_t::alert, msg,
+                       false, "shout", shout );
+    }
     return std::max( 0, noise );
 }
 
@@ -5413,6 +5422,11 @@ void Character::fall_asleep()
 
 void Character::fall_asleep( const time_duration &duration )
 {
+    // add_effect merges a live episode without replacing its start time.
+    // Keep its origin on refresh; a genuinely new ordinary episode clears it.
+    if( !is_involuntarily_asleep() ) {
+        remove_value( "involuntary_sleep_start_turn" );
+    }
     if( activity ) {
         if( activity.id() == ACT_TRY_SLEEP ) {
             activity.set_to_null();
@@ -5423,6 +5437,28 @@ void Character::fall_asleep( const time_duration &duration )
     add_effect( effect_sleep, duration );
     raid_decision_trace::record_sleep_edge( *this, "fall_asleep", "fall_asleep" );
     get_event_bus().send<event_type::character_falls_asleep>( getID(), to_seconds<int>( duration ) );
+}
+
+void Character::fall_asleep_involuntarily()
+{
+    fall_asleep();
+    set_value( "involuntary_sleep_start_turn",
+               to_turn<int>( get_effect( effect_sleep ).get_start_time() ) );
+}
+
+void Character::fall_asleep_involuntarily( const time_duration &duration )
+{
+    fall_asleep( duration );
+    set_value( "involuntary_sleep_start_turn",
+               to_turn<int>( get_effect( effect_sleep ).get_start_time() ) );
+}
+
+bool Character::is_involuntarily_asleep() const
+{
+    const auto &origin = get_value( "involuntary_sleep_start_turn" );
+    return origin.is_dbl() && has_effect( effect_sleep ) &&
+           get_effect_dur( effect_sleep ) > 0_turns &&
+           origin.dbl() == to_turn<int>( get_effect( effect_sleep ).get_start_time() );
 }
 
 std::map<bodypart_id, int> Character::bonus_item_warmth() const
@@ -6766,7 +6802,7 @@ void Character::process_one_effect( effect &it, bool is_new )
         if( ( is_new || it.activated( calendar::turn, "SLEEP", val, reduced, mod ) ) &&
             !has_effect( effect_sleep ) ) {
             add_msg_if_player( _( "You pass out!" ) );
-            fall_asleep( time_duration::from_turns( val ) );
+            fall_asleep_involuntarily( time_duration::from_turns( val ) );
         }
     }
 

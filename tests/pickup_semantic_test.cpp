@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <iostream>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,6 +13,9 @@
 #include "calendar.h"
 #include "cached_options.h"
 #include "cata_scope_helpers.h"
+#include "cursesdef.h"
+#include "popup.h"
+#include "imgui/imgui.h"
 #include "sdl_renderer_recovery.h"
 #include "cata_catch.h"
 #include "game.h"
@@ -448,4 +452,138 @@ TEST_CASE( "pickup native partial quantities preserve current frames and physica
     CHECK( ( charges ? you.charges_of( type ) : you.amount_of( type ) ) == ( commit ? 3 : 0 ) );
 }
 
+#endif
+
+TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner across a rejected transport wake",
+           "[semantic_surface][pickup][pickup_popup_owner_067]" )
+{
+    clear_avatar();
+    clear_map();
+    avatar &you = get_avatar();
+    map &here = get_map();
+    const auto position = you.pos_bub();
+    item &placed = here.add_item_or_charges( position, item( itype_id( "2x4" ) ) );
+    const auto uid = placed.uid().get_value();
+    const auto turn = calendar::turn;
+    const auto moves = you.get_moves();
+    const auto path = std::filesystem::temp_directory_path() /
+                      ( "pickup-popup-owner-" + std::to_string(
+                            std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+    const char *old_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous = old_path ? std::optional<std::string>( old_path ) :
+            std::nullopt;
+    on_out_of_scope cleanup( [&]() {
+        if( previous ) { setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 ); }
+        else { unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" ); }
+        std::filesystem::remove( path );
+    } );
+    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
+#if defined(TILES)
+    software_render_fixture renderer;
+    REQUIRE( renderer.available() );
+    renderer_recovery_test_support::setup_software_ui();
+#else
+    if( ImGui::GetCurrentContext() == nullptr ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_renderer( [&]() { catacurses::endwin(); } );
+#endif
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    REQUIRE( you.wear_item( item( itype_id( "debug_backpack" ) ), false ) );
+    semantic_surface_manager manager( "pickup-popup-owner" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    bool cancel_queued = false;
+    int inventory_publications = 0;
+    int popup_publications = 0;
+    bool accepted_ack = false;
+    bool rejected_wake = false;
+    std::optional<semantic_surface_descriptor> popup_descriptor;
+    std::vector<semantic_action_receipt> receipts;
+    const auto submit_cancel = [&]() {
+        if( cancel_queued ) { return; }
+        cancel_queued = true;
+        REQUIRE( manager.top() );
+        const auto current = *manager.top();
+        REQUIRE( current.kind == "inventory" );
+        REQUIRE( manager.submit_request( { manager.run_id(), current.surface_id, current.frame_id,
+                                           "close-pickup", "inventory.cancel", std::nullopt, {} } ) );
+    };
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+        std::cout << "R067_POPUP_RECEIPT request=" << receipt.request_id << " accepted=" << receipt.accepted
+                  << " consumed=" << receipt.consuming_surface_id << "/" << receipt.consuming_frame_id
+                  << " reason=" << receipt.rejection_reason << std::endl;
+        if( receipt.request_id == "inert-wake" ) {
+            CHECK_FALSE( receipt.accepted );
+            CHECK( receipt.rejection_reason == "wrong_run" );
+            rejected_wake = true;
+            REQUIRE( popup_descriptor );
+            REQUIRE( manager.submit_request( { manager.run_id(), popup_descriptor->surface_id,
+                                               popup_descriptor->frame_id, "ack", "prompt.acknowledge", std::nullopt, {} } ) );
+        } else if( receipt.request_id == "ack" ) {
+            accepted_ack = receipt.accepted;
+            // Bound the old failing path: the real popup has unwound without
+            // consuming its acknowledgement. Close only the current parent.
+            if( !receipt.accepted ) { submit_cancel(); }
+        }
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+        std::cout << "R067_POPUP_PUBLICATION kind=" << descriptor.kind << " surface=" << descriptor.surface_id
+                  << " frame=" << descriptor.frame_id << std::endl;
+        if( descriptor.kind == "inventory" ) {
+            ++inventory_publications;
+            if( inventory_publications == 1 ) {
+                REQUIRE( manager.submit_request( { manager.run_id(), descriptor.surface_id,
+                                                   descriptor.frame_id, "empty-select", "inventory.select", std::to_string( uid ), {} } ) );
+            } else { submit_cancel(); }
+        } else if( descriptor.kind == "prompt" ) {
+            ++popup_publications;
+            popup_descriptor = descriptor;
+            REQUIRE( descriptor.payload.at( "title" ) == "POPUP_WAIT" );
+            // The actual input backend reads this original-shaped wrong-run
+            // record while the any-key prompt owns input, returning a semantic
+            // wake rather than a physical key. The receipt queues the real ack.
+            std::ofstream stream( path );
+            stream << "{\"run_id\":\"wrong-run\",\"request_id\":\"inert-wake\"}\n";
+        }
+    } );
+    const drop_locations selected = game_menus::inv::pickup( { position } );
+    CHECK( selected.empty() );
+    CHECK( rejected_wake );
+    CHECK( accepted_ack );
+    CHECK( popup_publications == 1 );
+    CHECK( inventory_publications == 2 );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto &receipt ) {
+        return receipt.request_id == "ack" && receipt.accepted;
+    } ) == 1 );
+    CHECK( here.i_at( position ).only_item().uid().get_value() == uid );
+    CHECK( calendar::turn == turn );
+    CHECK( you.get_moves() == moves );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->surface_id == world.surface_id() );
+}
+
+#if !defined(TILES)
+extern "C" int ungetch( int );
+TEST_CASE( "unbound any-key popup still accepts ordinary native keyboard input",
+           "[semantic_surface][pickup_popup_owner_067]" )
+{
+    REQUIRE( active_semantic_surface_manager() == nullptr );
+    if( ImGui::GetCurrentContext() == nullptr ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_renderer( [&]() { catacurses::endwin(); } );
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    REQUIRE( ungetch( 'x' ) != -1 );
+    const auto result = query_popup().allow_anykey( true ).message( "%s", "Native acknowledgement" ).query();
+    CHECK_FALSE( result.wait_input );
+    CHECK( result.evt.type == input_event_t::keyboard_char );
+    CHECK( result.evt.get_first_input() == 'x' );
+    CHECK( active_semantic_surface_manager() == nullptr );
+}
 #endif

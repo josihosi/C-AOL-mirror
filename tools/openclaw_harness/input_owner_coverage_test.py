@@ -20,6 +20,11 @@ DIRECT_INPUT = re.compile( r"(?:\.|->)\s*(?:handle_input|get_input_event)\s*\(" 
 # cannot stand in for the owning loop's actual semantic boundary.
 SUPPORTED = {
     "src/game.cpp",
+    # Global distraction configuration retains native settings/keyboard input;
+    # its focused semantic owner advertises only ordinary QUIT.
+    "src/distraction_manager.cpp",
+    # Scores has one focused ordinary QUIT owner; death epilogues remain separate.
+    "src/scores_ui.cpp",
     "src/inventory_ui.cpp",
     # MESSAGE_LOG has a focused scope with navigation, filtering and close
     # actions.  Its filter field is owned by the existing string_prompt child.
@@ -45,7 +50,7 @@ HARD_STOP = {
     "src/advanced_inv.cpp", "src/armor_layers.cpp", "src/auto_note.cpp",
     "src/auto_pickup.cpp", "src/bionics_ui.cpp", "src/bodygraph.cpp", "src/character_health.cpp",
     "src/color.cpp", "src/computer_session.cpp", "src/construction.cpp", "src/crafting_gui.cpp",
-    "src/debug_console.cpp", "src/diary_ui.cpp", "src/distraction_manager.cpp",
+    "src/debug_console.cpp",
     "src/do_turn.cpp", "src/end_screen.cpp", "src/faction_camp.cpp",
     "src/faction_ui.cpp", "src/game_inventory.cpp", "src/help.cpp", "src/iexamine.cpp",
     "src/imgui_demo.cpp", "src/input_popup.cpp", "src/iuse.cpp", "src/iuse_software_kitten.cpp",
@@ -53,15 +58,29 @@ HARD_STOP = {
     "src/iuse_software_snake.cpp", "src/iuse_software_sokoban.cpp", "src/main_menu.cpp",
     "src/martialarts.cpp", "src/medical_ui.cpp", "src/mission_companion.cpp",
     "src/mission_ui.cpp", "src/morale.cpp", "src/mutation_ui.cpp", "src/newcharacter.cpp",
-    "src/npctalk_rules.cpp", "src/options.cpp", "src/output.cpp",
+    "src/npctalk_rules.cpp", "src/options.cpp",
     "src/panels.cpp", "src/player_display.cpp", "src/proficiency_ui.cpp",
-    "src/recipe_dictionary.cpp", "src/safemode_ui.cpp", "src/scores_ui.cpp",
+    "src/recipe_dictionary.cpp", "src/safemode_ui.cpp",
     "src/smart_controller_ui.cpp", "src/string_editor_window.cpp", "src/study_zone_ui.cpp", "src/surroundings_menu.cpp",
     "src/ui_extended_description.cpp", "src/ui_iteminfo.cpp", "src/ui_manager.h", "src/veh_interact.cpp",
     "src/veh_shape.cpp", "src/worldfactory.cpp", "src/zone_manager_ui.cpp",
 }
 
 MIXED_OWNER_SITES = {
+    # Only Diary's view loop advertises native QUIT. Page editing retains its
+    # existing child/string editor boundary and ordinary keyboard behavior.
+    "src/diary_ui.cpp": {
+        "scope": '"diary"',
+        "direct_input": 'action = semantic_action.empty() ? ctxt.handle_input() : "";',
+        "reject_guard": "if( semantic_scope )",
+    },
+    # Only the epilogue/shared scrollable-text loop is adapted.  Other output
+    # loops retain input_context's actionless boundary; no whole-file credit.
+    "src/output.cpp": {
+        "scope": '"scrollable_text"',
+        "direct_input": 'action = semantic_action.empty() ? ctxt.handle_input() : "";',
+        "reject_guard": "if( semantic_scope )",
+    },
     "src/action.cpp": {
         "scope": '"direction"',
         "direct_input": "action = ctxt.handle_input();",

@@ -788,6 +788,9 @@ static std::string openclaw_harness_keep_watch_safety( const std::string &run_id
 }
 
 std::string openclaw_harness_visible_local_facts( const map &here,
+        const tripoint_bub_ms &avatar_pos, int radius, bool include_unknown, bool include_identity );
+
+std::string openclaw_harness_visible_local_facts( const map &here,
         const tripoint_bub_ms &avatar_pos, int radius, bool include_unknown, bool include_identity )
 {
     const visibility_variables &cache = here.get_visibility_variables_cache();
@@ -5671,6 +5674,7 @@ bool game::handle_action()
     std::optional<semantic_surface_manager_session> semantic_session;
     std::optional<semantic_surface_scope> world_semantic_scope;
     bool semantic_action_consumed = false;
+    bool semantic_death_camera_close = false;
     std::optional<character_id> semantic_npc_inspection_actor;
     npc_ptr semantic_camp_npc_inspection_actor;
     // A Base Missions selector owns a blocking native modal.  Keep only an
@@ -5700,6 +5704,13 @@ bool game::handle_action()
         player_character.start_destination_activity();
         return false;
     } else if( uistate.open_menu ) {
+        // Activity callbacks reopen a native modal before the ordinary World
+        // input branch. Give that modal the bound session when no caller owns
+        // one; an enclosing native session retains its existing authority.
+        if( active_semantic_surface_manager() == nullptr &&
+            !openclaw_harness_bound_semantic_run_id().empty() ) {
+            semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+        }
         // make a copy so that uistate.open_menu can be assigned a new function
         // during the execution of the copied old function
         std::optional<std::function<void()>> open_menu_tmp = std::nullopt;
@@ -5713,9 +5724,20 @@ bool game::handle_action()
             semantic_surface_manager &semantic_manager = openclaw_harness_semantic_surface_manager();
             semantic_session.emplace( semantic_manager );
             if( uquit == QUIT_WATCH && player_character.is_dead_state() ) {
-                world_semantic_scope.emplace( semantic_manager, "unsupported", "Death camera",
+                world_semantic_scope.emplace( semantic_manager, "death_camera", "Death camera",
                                               std::map<std::string, std::string>{
-                    { "stop_reason", "death camera lacks semantic bindings" }
+                    { "native_owner", "DEFAULTMODE" },
+                    { "actual_death", "true" }
+                }, std::vector<semantic_action_descriptor>{
+                    { "death_camera.close", "", _( "Accept your fate" ), true }
+                }, [ &semantic_death_camera_close, &semantic_manager ](
+                const semantic_action_request &request ) {
+                    if( request.action_id != "death_camera.close" ) {
+                        return semantic_action_dispatch_result{ false, "no_native_binding", "" };
+                    }
+                    semantic_death_camera_close = true;
+                    semantic_manager.withhold_parent_authority_until_recreated( request.surface_id );
+                    return semantic_action_dispatch_result{ true, "", "" };
                 } );
             } else {
                 input_context world_context = get_default_mode_input_context();
@@ -5944,6 +5966,13 @@ bool game::handle_action()
         if( !semantic_action_consumed ) {
             ctxt = get_player_input( action );
         }
+    }
+
+    // A blocked input wake returns its own action string. Apply the selected
+    // close afterward so both early and late semantic requests reach the
+    // ordinary QUIT_WATCH -> QUIT_DIED branch below exactly once.
+    if( semantic_death_camera_close ) {
+        action = "QUIT";
     }
 
     // Requests may be consumed either before get_player_input or by its

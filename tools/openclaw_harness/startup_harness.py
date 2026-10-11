@@ -102,6 +102,7 @@ from semantic_state import (
     latest_semantic_game_minutes,
     latest_semantic_step_frame,
     read_semantic_step_trace,
+    semantic_catalog_io_path,
 )
 from r009_technical_witness import (
     complete_child_resource_interval,
@@ -149,7 +150,13 @@ BENIGN_DEBUG_LOG_PREFIX_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+CANONICAL_KEYBINDINGS_PATH = (
+    "tools/openclaw_harness/fixtures/profiles/live-debug/"
+    "mcwilliams_live_debug_2026-04-07/config/keybindings.json"
+)
+
 RUNTIME_RELEVANT_PATHS: Tuple[str, ...] = (
+    CANONICAL_KEYBINDINGS_PATH,
     "src",
     "data",
     "lang",
@@ -170,8 +177,11 @@ RUNTIME_RELEVANT_PATHS: Tuple[str, ...] = (
     "tools/openclaw_harness/semantic_state.py",
     "tools/openclaw_harness/cockpit.py",
     "tools/openclaw_harness/cockpit_file_bridge.py",
+    "tools/openclaw_harness/cockpit_memory_profile.py",
     "tools/openclaw_harness/curses_terminal_transport.py",
     "tools/openclaw_harness/writable_run_owner.py",
+    "tools/openclaw_harness/windows_native_process.py",
+    "tools/openclaw_harness/windows_curses_terminal_transport.py",
     "tools/openclaw_harness/certification_process_lease.py",
     "tools/openclaw_harness/cockpit_evidence.py",
     "tools/openclaw_harness/harness_log_window.py",
@@ -1873,6 +1883,14 @@ def product_build_receipt_archive_path(
     archive_identity = str(archive_identity).strip().lower()
     if not executable_sha256 or not product_source_sha256:
         raise ValueError("immutable receipt requires executable and source digests")
+    if os.name == "nt":
+        # Three full digests exceed MAX_PATH in an ordinary owned Windows
+        # workspace. The receipt digest already addresses all serialized
+        # executable/source/build fields; keep that full identity once.
+        identity = archive_identity or hashlib.sha256(
+            (executable_sha256 + "\0" + product_source_sha256).encode("ascii")
+        ).hexdigest()
+        return legacy.with_name(f"{legacy.stem}-{identity}.json")
     suffix = f"-{archive_identity}" if archive_identity else ""
     return legacy.with_name(
         f"{legacy.stem}-{executable_sha256}-{product_source_sha256}{suffix}.json"
@@ -1922,11 +1940,11 @@ def _current_product_build_receipt(
 def validate_selected_product_build(
     executable: Path, selected_product_build: Any,
 ) -> Tuple[Dict[str, Any], str]:
-    """Validate one scenario-declared immutable product publication.
+    """Validate one run-selected immutable product publication.
 
     The selected source identity is independent of today's mutable product
-    worktree.  Authority comes from the scenario bytes, which bind the receipt
-    path and digest; the receipt then binds the exact executable path, binary,
+    worktree. The resolved run selection binds the receipt path and digest;
+    the receipt binds the exact executable path, binary,
     product source digest, and compiled Git head.
     """
     if not isinstance(selected_product_build, Mapping):
@@ -1951,15 +1969,9 @@ def validate_selected_product_build(
     raw_receipt_path = str(selected_product_build.get("receipt_path", "")).strip()
     if not raw_receipt_path:
         return {}, "selected immutable product build receipt path is missing"
-    receipt_relative = Path(raw_receipt_path)
-    if receipt_relative.is_absolute() or ".." in receipt_relative.parts:
-        return {}, "selected immutable product build receipt path must stay within the workspace"
-    root = repo_root().resolve()
-    receipt_path = (root / receipt_relative).resolve()
-    try:
-        receipt_path.relative_to(root)
-    except ValueError:
-        return {}, "selected immutable product build receipt path escaped the workspace"
+    # The explicit run selection may reference a product in another owned build
+    # root. Its receipt and executable bytes remain hash-bound, not scenario-bound.
+    receipt_path = (repo_root() / raw_receipt_path).resolve()
 
     actual_receipt_sha256, receipt_error = sha256_file(receipt_path)
     if receipt_error:
@@ -5037,6 +5049,33 @@ def read_latest_activity_query_trace(
     return latest
 
 
+def latest_semantic_source_descriptor(path: Path) -> Optional[Mapping[str, Any]]:
+    """Inspect a sampled suffix, including its complete first physical record."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            start = max(0, size - SEMANTIC_STEP_MAX_BYTES * 16)
+            # The current descriptor itself can exceed the suffix window.
+            # Align backwards to its record boundary rather than discard it.
+            while start:
+                previous = max(0, start - 64 * 1024)
+                stream.seek(previous)
+                prefix = stream.read(start - previous)
+                newline = prefix.rfind(b"\n")
+                if newline >= 0:
+                    start = previous + newline + 1
+                    break
+                start = previous
+            stream.seek(start)
+            latest = None
+            for event, _, _ in iter_complete_semantic_trace_records(stream, size):
+                if event.get("event") == "surface_descriptor":
+                    latest = event
+            return latest
+    except OSError:
+        return None
+
+
 def semantic_step_source_trace(profile: str, run_dir: Optional[Path] = None) -> Path:
     if run_dir is not None:
         native_trace = Path(run_dir) / "semantic.native.events.jsonl"
@@ -5056,14 +5095,36 @@ def semantic_step_source_trace(profile: str, run_dir: Optional[Path] = None) -> 
             # This file grows by one native frame per dispatch.  Reading it
             # wholesale just to establish that it is the run-owned semantic
             # stream made a one-minute (60-action) wait allocate the whole
-            # accumulated action history once per action.  The writer emits
-            # its semantic marker at the beginning of the stream, so probe
-            # only its fixed header.  A nonsemantic or incomplete file still
-            # falls back to the profile debug log as before.
+            # accumulated action history once per action.  Probe bounded
+            # header and suffix windows instead.  A nonsemantic file still
+            # falls back to the profile debug log as before; the event reader
+            # separately rejects incomplete or invalid semantic records.
             try:
                 with native_trace.open("rb") as stream:
                     native_prefix = stream.read(64 * 1024)
-                if SEMANTIC_STEP_PREFIX.encode( "utf-8" ) in native_prefix:
+                    # Actor traces share this run-owned file and can precede
+                    # its first semantic record.  Inspect the bounded current
+                    # suffix too; a header-only probe otherwise substitutes
+                    # debug.log for a complete current input owner.
+                    size = native_trace.stat().st_size
+                    has_records = SEMANTIC_STEP_PREFIX.encode("utf-8") in native_prefix
+                    if not has_records:
+                        stream.seek(max(0, size - 64 * 1024))
+                        has_records = SEMANTIC_STEP_PREFIX.encode("utf-8") in stream.read(64 * 1024)
+                    if not has_records:
+                        # An oversized first descriptor after actor output can
+                        # place its marker outside both probe windows. Scan the
+                        # sampled bytes in fixed chunks, not a whole-file read.
+                        stream.seek(0)
+                        has_records = semantic_trace_has_records(stream, size)
+                if has_records:
+                    # This run-owned stream is the input/receipt authority.
+                    # A later-sampled debug mirror can appear newer during
+                    # publication, but its shared logger is not a transaction
+                    # source: switching also resets byte cursors and can read
+                    # malformed historical diagnostics after input was taken.
+                    # Keep canonical parsing strict in the record reader and
+                    # leave the mirror available for independent diagnosis.
                     return native_trace
             except OSError:
                 pass
@@ -5132,6 +5193,72 @@ def iter_bounded_semantic_trace_lines(
                 if not oversized:
                     yield bytes(line)
                 break
+
+
+def semantic_trace_has_records(handle: Any, size: int) -> bool:
+    """Find a semantic marker in sampled bytes with a fixed-size buffer."""
+    marker = SEMANTIC_STEP_PREFIX.encode("utf-8")
+    remaining = max(0, int(size) - int(handle.tell()))
+    overlap = b""
+    while remaining:
+        chunk = handle.read(min(remaining, 64 * 1024))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        if marker in overlap + chunk:
+            return True
+        overlap = chunk[-(len(marker) - 1):]
+    return False
+
+
+def iter_complete_semantic_trace_records(
+    handle: Any, size: int, *, require_complete: bool = True,
+) -> Iterable[tuple[Mapping[str, Any], int, int]]:
+    """Decode complete sampled records before lossless catalog compaction.
+
+    The wire channel stays bounded; a native descriptor's action set does not.
+    Spool one physical record in bounded chunks, never the growing source log.
+    Parsing starts only after its terminator is present in the sampled range.
+    Malformed or incomplete semantic records cannot restore an older owner.
+    """
+    marker = SEMANTIC_STEP_PREFIX.encode("utf-8")
+    remaining = max(0, int(size) - int(handle.tell()))
+    while remaining:
+        start = handle.tell()
+        first = handle.readline(min(remaining, 64 * 1024))
+        if not first:
+            return
+        remaining -= len(first)
+        marker_offset = first.find(marker)
+        with tempfile.SpooledTemporaryFile(max_size=SEMANTIC_STEP_MAX_BYTES) as record:
+            if marker_offset >= 0:
+                record.write(first[marker_offset + len(marker):])
+            complete = first.endswith(b"\n")
+            while not complete and remaining:
+                chunk = handle.readline(min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                if marker_offset >= 0:
+                    record.write(chunk)
+                complete = chunk.endswith(b"\n")
+            end = handle.tell()
+            if marker_offset < 0:
+                continue
+            if not complete:
+                if require_complete:
+                    raise ValueError("incomplete_native_semantic_record")
+                # Receipt collection may keep complete facts while a successor
+                # is being appended. Never yield that partial input owner.
+                return
+            record.seek(0)
+            try:
+                event = json.load(record)
+            except (ValueError, UnicodeError) as error:
+                raise ValueError("malformed_native_semantic_record") from error
+            if not isinstance(event, Mapping):
+                raise ValueError("malformed_native_semantic_record")
+        yield event, start + marker_offset, end
 
 
 def compact_semantic_step_channel_event(event: Mapping[str, Any]) -> Dict[str, Any]:
@@ -5226,11 +5353,13 @@ def compact_current_surface_descriptor_payload(event: Mapping[str, Any]) -> Dict
 
 def refresh_semantic_step_trace(
     *, profile: str, run_dir: Path, run_id: str, start_offset: int,
-    event_filter: Optional[Set[str]] = None,
+    event_filter: Optional[Set[str]] = None, source_trace: Optional[Path] = None,
+    require_complete: bool = True,
 ) -> tuple[Path, Path]:
     """Copy only the current run's bounded native trace into its owned artifact."""
     run_dir = Path(run_dir).resolve()
-    source = semantic_step_source_trace(profile, run_dir).resolve()
+    source = (source_trace if source_trace is not None else
+              semantic_step_source_trace(profile, run_dir)).resolve()
     size = source.stat().st_size
     if start_offset < 0 or start_offset > size:
         # The game can truncate debug.log after the startup readiness sample,
@@ -5238,12 +5367,12 @@ def refresh_semantic_step_trace(
         # is bound by run_id when the copied trace is read below, so restart
         # only when this new log generation actually contains semantic data.
         with source.open("rb") as handle:
-            if SEMANTIC_STEP_PREFIX.encode("utf-8") not in handle.read():
+            if not semantic_trace_has_records(handle, size):
                 raise ValueError("semantic trace start offset is stale")
         start_offset = 0
-    marker = SEMANTIC_STEP_PREFIX.encode("utf-8")
     selected_events = deque(maxlen=SEMANTIC_STEP_MAX_EVENTS)
     latest_duration_receipt: Optional[Dict[str, Any]] = None
+    latest_movement_receipt: Optional[Dict[str, Any]] = None
     latest_surface_receipt: Optional[Dict[str, Any]] = None
     latest_surface_successor: Optional[Dict[str, Any]] = None
     with source.open("rb") as handle:
@@ -5252,16 +5381,9 @@ def refresh_semantic_step_trace(
         # only the byte range sampled above so appended lines cannot extend
         # this refresh, while keeping one line at a time in memory instead of
         # materializing the complete history and its split-line list.
-        for raw_line in iter_bounded_semantic_trace_lines(
-                handle, size, SEMANTIC_STEP_MAX_BYTES * 16):
-            marker_offset = raw_line.find(marker)
-            if marker_offset < 0:
-                continue
-            payload = raw_line[marker_offset + len(marker):].strip()
-            try:
-                event = dict(decode_semantic_step_event(payload))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
+        for decoded, source_offset, source_end in iter_complete_semantic_trace_records(
+                handle, size, require_complete=require_complete):
+            event = dict(decoded)
             if not isinstance(event, Mapping) or str(event.get("run_id", "")) != str(run_id):
                 continue
             # ``semantic.native.log`` is a filtered projection, so its local
@@ -5269,8 +5391,9 @@ def refresh_semantic_step_trace(
             # the original marker position with each retained event.  The
             # registry child can then advance its cursor without re-reading
             # and splitting the complete source log to rediscover one frame.
-            event["_source_offset"] = handle.tell() - len(raw_line) + marker_offset
-            event["_source_end"] = handle.tell()
+            event["_source_offset"] = source_offset
+            event["_source_end"] = source_end
+            event["_source_path"] = str(source)
             # Legacy duration selections publish a semantic ``receipt`` and
             # then an actionless wait_activity frame.  The bounded suffix can
             # otherwise evict that only correlation record before the adapter
@@ -5279,6 +5402,10 @@ def refresh_semantic_step_trace(
             if event.get("event") == "receipt" and event.get("accepted") is True and \
                     str(event.get("action_id", "")).startswith("wait."):
                 latest_duration_receipt = dict(event)
+            if event.get("event") == "receipt" and \
+                    str(event.get("action_id", "")).startswith("world.move.") and \
+                    event.get("coordinate_space") == "absolute_ms":
+                latest_movement_receipt = dict(event)
             if event.get("event") == "surface_receipt":
                 latest_surface_receipt = dict(event)
                 resulting_frame_id = str(event.get("resulting_frame_id", ""))
@@ -5288,6 +5415,9 @@ def refresh_semantic_step_trace(
                         if candidate.get("event") == "surface_descriptor" and
                         str(candidate.get("frame_id", "")) == resulting_frame_id
                     ), None)
+            elif event.get("event") == "surface_descriptor" and latest_surface_receipt is not None and \
+                    event.get("frame_id") == latest_surface_receipt.get("resulting_frame_id"):
+                latest_surface_successor = dict(event)
             # Turn boundaries remain in the exact run-owned producer journal
             # for ProcessPerformance.  They are observational and can occur
             # many times during one pending wait, so do not let them evict the
@@ -5322,14 +5452,23 @@ def refresh_semantic_step_trace(
     # semantic request receipt and its named successor together; otherwise
     # the input was accepted but the bridge incorrectly reports a receipt
     # timeout solely because the short correlation cluster fell off the tail.
-    for event in (latest_surface_successor, latest_surface_receipt):
+    # Movement completion is a separate native fact from surface acceptance.
+    # Keep only the coordinate receipt for the latest surface action, alongside
+    # its named successor.  A later redraw remains the active authority.
+    if latest_surface_receipt is not None and latest_movement_receipt is not None and \
+            latest_movement_receipt.get("action_id") != latest_surface_receipt.get("action_id"):
+        latest_movement_receipt = None
+    correlation_events = [event for event in (
+        latest_duration_receipt, latest_movement_receipt,
+        latest_surface_successor, latest_surface_receipt,
+    ) if event is not None]
+    correlation_offsets = {event["_source_offset"] for event in correlation_events}
+    for event in (latest_movement_receipt, latest_surface_successor, latest_surface_receipt):
         if event is None:
             continue
         if not any(
                 candidate.get("event") == event.get("event") and
-                (candidate.get("request_id") == event.get("request_id")
-                 if event.get("event") == "surface_receipt" else
-                 candidate.get("frame_id") == event.get("frame_id"))
+                candidate.get("_source_offset") == event.get("_source_offset")
                 for candidate in [*preserved_events, *selected_events]):
             preserved_events.append(compact_semantic_step_channel_event(event))
     if preserved_events:
@@ -5404,8 +5543,9 @@ def refresh_semantic_step_trace(
         ]
         selected = encode(selected_events)
     if len(selected) > SEMANTIC_STEP_MAX_BYTES:
-        # Keep the exact full trace above while reducing only the executable
-        # channel to its latest owner descriptor and receipt.
+        # Reduce render history, keeping the action correlation cluster as
+        # well as the newest owner.  Dropping the coordinate receipt or named
+        # successor here would turn an accepted move into a false timeout.
         latest_descriptor_index = max(
             (index for index, event in enumerate(selected_events)
              if event.get("event") == "surface_descriptor"),
@@ -5413,6 +5553,8 @@ def refresh_semantic_step_trace(
         )
         tail_start = max(0, len(selected_events) - 8)
         keep_indexes = set(range(tail_start, len(selected_events)))
+        keep_indexes.update(index for index, event in enumerate(selected_events)
+                            if event.get("_source_offset") in correlation_offsets)
         if latest_descriptor_index >= 0:
             keep_indexes.add(latest_descriptor_index)
         selected_events = [event for index, event in enumerate(selected_events) if index in keep_indexes]
@@ -5422,14 +5564,18 @@ def refresh_semantic_step_trace(
                            if event.get("event") == "surface_descriptor"), None)
         receipt = next((event for event in reversed(selected_events)
                         if event.get("event") in {"receipt", "surface_receipt"}), None)
-        selected = encode([event for event in (receipt, descriptor) if event is not None])
+        selected_events = ([receipt] if receipt is not None else []) + [
+            event for event in selected_events if event is not receipt and
+            (event.get("_source_offset") in correlation_offsets or event is descriptor)
+        ]
+        selected = encode(selected_events)
     if len(selected) > SEMANTIC_STEP_MAX_BYTES:
         # A large native inventory can legitimately advertise thousands of
         # item actions.  Keep every action in a content-addressed run artifact;
         # the channel reader restores it before validating or exposing controls.
         # This bounds the transport, not the set of usable native actions.
         compact_events = []
-        for event in (receipt, descriptor):
+        for event in selected_events:
             if event is None:
                 continue
             event = dict(event)
@@ -5441,8 +5587,9 @@ def refresh_semantic_step_trace(
                 body = json.dumps(catalog, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
                 digest = hashlib.sha256(body).hexdigest()
                 catalog_path = run_dir / ("semantic.actions." + digest + ".json")
-                if not catalog_path.exists():
-                    catalog_path.write_bytes(body)
+                catalog_io_path = semantic_catalog_io_path(catalog_path)
+                if not catalog_io_path.exists():
+                    catalog_io_path.write_bytes(body)
                 event["valid_actions"] = []
                 event["valid_actions_ref"] = {
                     "path": catalog_path.name, "sha256": digest, "bytes": len(body),
@@ -5452,8 +5599,9 @@ def refresh_semantic_step_trace(
                 body = json.dumps(catalog, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
                 digest = hashlib.sha256(body).hexdigest()
                 catalog_path = run_dir / ("semantic.payload." + digest + ".json")
-                if not catalog_path.exists():
-                    catalog_path.write_bytes(body)
+                catalog_io_path = semantic_catalog_io_path(catalog_path)
+                if not catalog_io_path.exists():
+                    catalog_io_path.write_bytes(body)
                 event["payload"] = {}
                 event["payload_ref"] = {
                     "path": catalog_path.name, "sha256": digest, "bytes": len(body),
@@ -5514,22 +5662,12 @@ def semantic_step_frame_source_offset(
         return -1
     if start_offset > size:
         start_offset = 0
-    marker = SEMANTIC_STEP_PREFIX.encode("utf-8")
     try:
         with source.open("rb") as handle:
             handle.seek(start_offset)
-            cursor = start_offset
-            for raw_line in handle.read(size - start_offset).splitlines(keepends=True):
-                marker_offset = raw_line.find(marker)
-                if marker_offset >= 0:
-                    payload = raw_line[marker_offset + len(marker):].strip()
-                    try:
-                        event = decode_semantic_step_event(payload)
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        event = None
-                    if isinstance(event, Mapping) and event.get("frame_id") == frame_id:
-                        return cursor + marker_offset
-                cursor += len(raw_line)
+            for event, offset, _end in iter_complete_semantic_trace_records(handle, size):
+                if event.get("frame_id") == frame_id:
+                    return offset
     except OSError:
         return -1
     return -1
@@ -5538,10 +5676,12 @@ def semantic_step_frame_source_offset(
 def current_semantic_step_frame(
     *, profile: str, run_dir: Path, run_id: str, start_offset: int,
     history: Optional[MutableMapping[str, Any]] = None,
+    source_trace: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Return the newest native wait or activity-query frame for adaptive play."""
     source, owned = refresh_semantic_step_trace(
         profile=profile, run_dir=run_dir, run_id=run_id, start_offset=start_offset,
+        source_trace=source_trace,
     )
     effective_source_offset = semantic_step_effective_source_offset(source, start_offset)
     events, status = read_semantic_step_trace(owned, Path(run_dir), run_id)
@@ -5661,7 +5801,7 @@ def current_semantic_step_frame(
             complete_events, complete_status = context_events, "ok"
         else:
             _, complete_owned = refresh_semantic_step_trace(
-                profile=profile, run_dir=run_dir, run_id=run_id, start_offset=0,
+                profile=profile, run_dir=run_dir, run_id=run_id, start_offset=0, source_trace=source,
             )
             complete_events, complete_status = read_semantic_step_trace(
                 complete_owned, Path(run_dir), run_id)
@@ -5727,7 +5867,7 @@ def current_semantic_step_frame(
             complete_events, complete_status = context_events, "ok"
         else:
             _, complete_owned = refresh_semantic_step_trace(
-                profile=profile, run_dir=run_dir, run_id=run_id, start_offset=0,
+                profile=profile, run_dir=run_dir, run_id=run_id, start_offset=0, source_trace=source,
             )
             complete_events, complete_status = read_semantic_step_trace(
                 complete_owned, Path(run_dir), run_id)
@@ -5895,7 +6035,7 @@ def current_semantic_step_frame(
             else:
                 _, complete_owned = refresh_semantic_step_trace(
                                         profile=profile, run_dir=run_dir,
-                                        run_id=run_id, start_offset=0 )
+                                        run_id=run_id, start_offset=0, source_trace=source )
                 complete_events, complete_status = read_semantic_step_trace(
                                                     complete_owned, Path( run_dir ), run_id )
             if complete_status == "ok":
@@ -5963,7 +6103,7 @@ def open_cockpit_game_service(
     # frame and only its unconsumed successors, rather than re-materializing
     # the whole current-run history on every observation.  The existing cap
     # still rejects an overfull unconsumed window.
-    semantic_cursor = {"offset": trace_start_offset}
+    semantic_cursor = {"offset": trace_start_offset, "source": None}
     semantic_history: Dict[str, Any] = {}
     latest_frame: Dict[str, Mapping[str, Any]] = {}
     performance = None
@@ -5971,13 +6111,19 @@ def open_cockpit_game_service(
 
     def read_frame() -> Mapping[str, Any]:
         source = semantic_step_source_trace(profile, run_dir)
+        source_identity = str(source.resolve())
+        if semantic_cursor["source"] not in {None, source_identity}:
+            # Byte cursors belong to one physical producer file. The mirrored
+            # descriptor keeps its native identity, never the other file's offset.
+            semantic_cursor["offset"] = 0
+        semantic_cursor["source"] = source_identity
         cursor = semantic_step_effective_source_offset(
             source, int(semantic_cursor["offset"]),
         )
         try:
             frame = current_semantic_step_frame(
                 profile=profile, run_dir=run_dir, run_id=run_id,
-                start_offset=cursor, history=semantic_history,
+                start_offset=cursor, history=semantic_history, source_trace=source,
             )
         except ValueError as exc:
             # A recipe may take its initial safety frame and then immediately
@@ -5995,20 +6141,13 @@ def open_cockpit_game_service(
         # synthetic descriptor-required error.
         if frame.get("event") != "surface_descriptor" and latest_frame:
             return dict(latest_frame["value"])
-        frame_offset = frame.get("_event_offset")
-        if isinstance(frame_offset, int) and frame_offset >= 0:
-            # ``current_semantic_step_frame`` locates a frame at the byte that
-            # starts its marker.  Resume after the complete native log line:
-            # starting within the marker would make the trace reader discard
-            # the partial line, while restarting at the marker rematerializes
-            # the consumed frame and hides its successor.
-            try:
-                with source.open("rb") as source_file:
-                    source_file.seek(frame_offset)
-                    semantic_cursor["offset"] = frame_offset + len(source_file.readline())
-            except OSError:
-                semantic_cursor["offset"] = frame_offset + 1
+        frame_end = frame.get("_source_end")
+        if frame.get("_source_path") == source_identity and isinstance(frame_end, int):
+            semantic_cursor["offset"] = frame_end
         else:
+            # Legacy projections have no physical coordinate identity. Retain
+            # the current cursor rather than applying their offset to a file
+            # selected after the observation.
             semantic_cursor["offset"] = cursor
         latest_frame["value"] = dict(frame)
         return frame
@@ -6053,6 +6192,7 @@ def open_cockpit_game_service(
                     trace_start_offset=int(frame.get(
                         "dispatch_descriptor_event_offset", semantic_cursor["offset"]
                     )), pid=pid, session_id=session_id,
+                    trace_source=Path(semantic_cursor["source"]) if semantic_cursor["source"] else None,
                     frame_id=str(frame.get("frame_id", "")), action_id=action_id,
                     transition_timeout_seconds=transition_timeout_seconds,
                     observe_interval_seconds=observe_interval_seconds, observed_frame=frame,
@@ -6071,15 +6211,14 @@ def open_cockpit_game_service(
                 # later empty trace window cannot fall back to the consumed
                 # parent descriptor.
                 latest_frame["value"] = dict(successor)
-                successor_offset = successor.get("_event_offset")
-                if isinstance(successor_offset, int) and successor_offset >= 0:
-                    source = semantic_step_source_trace(profile, run_dir)
-                    try:
-                        with source.open("rb") as source_file:
-                            source_file.seek(successor_offset)
-                            semantic_cursor["offset"] = successor_offset + len(source_file.readline())
-                    except OSError:
-                        semantic_cursor["offset"] = successor_offset + 1
+                successor_source = successor.get("_source_path")
+                successor_end = successor.get("_source_end")
+                if isinstance(successor_source, str) and successor_source and \
+                        isinstance(successor_end, int) and successor_end >= 0:
+                    # The accepted successor carries coordinates in the file
+                    # that produced it. Do not reselect the mirror and seek a
+                    # native offset into that different physical stream.
+                    semantic_cursor.update(source=successor_source, offset=successor_end)
             return outcome
 
     player_fire_setup = None
@@ -6195,13 +6334,17 @@ def open_cockpit_game_service(
                 final_path=final_path,
             )
 
-    original_process_command = pid_command(pid) if pid else ""
+    original_process_generation = current_owned_process_generation(Path(run_dir)).get("expected", {})
 
     def read_process_state() -> Mapping[str, Any]:
-        alive = pid_is_alive(pid) if pid else False
-        if alive and original_process_command and pid_command(pid) != original_process_command:
-            alive = False
-        state: Dict[str, Any] = {"run_id": run_id, "pid": pid, "alive": alive,
+        owned = current_owned_process_generation(Path(run_dir))
+        expected = owned.get("expected", {})
+        identity_ok = (owned.get("pid") == pid
+                       and process_generation_matches(original_process_generation, expected))
+        status = owned.get("status") if identity_ok else "identity_unavailable"
+        state: Dict[str, Any] = {"run_id": run_id, "pid": pid,
+                                 "alive": False if status == "exited" else True if status == "alive" else None,
+                                 "identity_status": status, "process_generation": expected,
                                  "exit_code": None}
         session = os.environ.get("OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR", "")
         if session:
@@ -6210,7 +6353,11 @@ def open_cockpit_game_service(
                 recorded = json.loads(path.read_text(encoding="utf-8"))
                 if recorded.get("pid") == pid and recorded.get("run_id") == run_id and \
                         recorded.get("binding_id") == os.environ.get("OPENCLAW_COCKPIT_BRIDGE_BINDING_ID"):
-                    state.update(recorded, evidence_ref=str(path))
+                    # Exit records supply metadata, never override fresh liveness/identity.
+                    if (status == "exited" and isinstance(recorded.get("process_generation"), Mapping)
+                            and process_generation_matches(expected, recorded["process_generation"])):
+                        state.update(exit_code=recorded.get("exit_code"),
+                                     exit_observed_at=recorded.get("exit_observed_at"), evidence_ref=str(path))
             except (OSError, ValueError):
                 pass
         if state.get("alive") is False and performance is not None:
@@ -6418,6 +6565,10 @@ def compact_cockpit_live_evidence(
         pass
     channel_observation = read_r008_indoor_channel_observation(
         Path( run_dir ), run_id=run_id,
+        # Normal decisions retain validation, counts and exact source path.
+        # Detailed channel rows remain in the original native stream and the
+        # explicit subsystem reader, not copied into every observation.
+        include_records=False,
         source_sha256=str(runtime_binding.get("runtime_source_sha256", "")),
         executable_sha256=str(runtime_binding.get("executable_sha256", "")),
         # The native child writes its bridge identity in a live cockpit.  The
@@ -6525,6 +6676,30 @@ def cockpit_live_final_path( run_dir: Path, proof_step_label: str = "" ) -> Path
     return run_dir / f"{label}.cockpit.live.final.json"
 
 
+def read_completed_cockpit_final(
+    service: Any, final_path: Path, *, run_id: str, binding_id: str,
+) -> Mapping[str, Any]:
+    """Reuse this producer's persisted final; independent readers still verify it."""
+    status_reader = getattr(service.run_channel, "status", None)
+    status = status_reader() if callable(status_reader) else {}
+    final = status.get("final") if isinstance(status, Mapping) else None
+    if isinstance(final, Mapping):
+        if status.get("state") != "finished" or status.get("run_id") != run_id or \
+                status.get("binding_id") != binding_id or final.get("state") != "finished" or \
+                final.get("schema") != "caol-cockpit-live-final-v1" or \
+                final.get("run_id") != run_id or final.get("binding_id") != binding_id:
+            raise ValueError("owned_cockpit_final_identity_mismatch")
+        if not final_path.is_file() or final.get("final_report_ref") != final_path.name:
+            raise ValueError("owned_cockpit_final_not_persisted")
+        # The finalizer adds this retrieval handle to channel status after
+        # persisting the payload. Keep the scenario's logical report unchanged.
+        return {key: value for key, value in final.items() if key != "final_report_ref"}
+    if final_path.is_file():
+        from cockpit_report_reference import load_report
+        return load_report(final_path)[2]
+    return {}
+
+
 def finalize_cockpit_live_session(
     run_dir: Path, pid: int, report: Mapping[str, Any], *, cleanup_process: bool = True,
     final_path: Optional[Path] = None,
@@ -6575,7 +6750,13 @@ def finalize_cockpit_live_session(
                 "reason": "the current process generation could not be authenticated for cleanup",
             },
         }
-    payload = {**dict( report ), "cleanup": cleanup}
+    from process_performance import publish_alarm_evidence
+    performance_directory = Path(os.environ.get("OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR") or run_dir)
+    alarm_evidence = publish_alarm_evidence(
+        performance_directory, run_id=str(report.get("run_id", "")),
+        binding_id=str(report.get("binding_id", "")),
+    )
+    payload = {**dict( report ), "cleanup": cleanup, "performance_evidence": alarm_evidence}
     ensure_dir( final_path.parent )
     transcript = payload.get("action_observation_sequence")
     if isinstance(transcript, ArchiveSequence):
@@ -6585,6 +6766,7 @@ def finalize_cockpit_live_session(
     return {
         "cleanup": cleanup,
         "final_report_ref": final_path.name,
+        "performance_evidence": alarm_evidence,
     }
 
 
@@ -6639,9 +6821,14 @@ def serve_cockpit_live(service: Any, input_stream: Any, output_stream: Any) -> i
     return 0
 
 
-def run_cockpit_live(args: argparse.Namespace) -> int:
+def run_cockpit_live(args: argparse.Namespace, *, input_stream=None, output_stream=None) -> int:
     """Serve one live worker-owned JSONL session until explicit finish or client disconnect."""
     run_dir = Path( args.run_dir )
+    charter_path = getattr(args, "witness_charter", None)
+    scenario_id = str(getattr(args, "scenario_id", "") or "").strip()
+    if charter_path and not scenario_id:
+        raise ValueError("witness_charter_requires_scenario_identity")
+    runtime = json.loads((run_dir / RUNTIME_BINDING_FILENAME).read_text()) if charter_path else {}
     service = open_cockpit_game_service(
         profile=args.profile,
         run_dir=run_dir,
@@ -6652,8 +6839,16 @@ def run_cockpit_live(args: argparse.Namespace) -> int:
         transition_timeout_seconds=args.transition_timeout_seconds,
         observe_interval_seconds=args.observe_interval_seconds,
         live_session=True,
+        witness_charter=json.loads(Path(charter_path).read_text()) if charter_path else None,
+        witness_identity={"scenario_id": scenario_id,
+                          "source_identity": live_witness_source_identity(runtime),
+                          "executable_identity": runtime.get("executable_sha256", "")} if charter_path else None,
     )
-    return serve_cockpit_live( service, sys.stdin, sys.stdout )
+    try:
+        return serve_cockpit_live(service, sys.stdin if input_stream is None else input_stream,
+                                 sys.stdout if output_stream is None else output_stream)
+    finally:
+        service.run_channel.archive.close()
 
 
 def cockpit_observation_advertises_action(
@@ -6721,6 +6916,7 @@ def execute_semantic_act(
     pid: int, session_id: str, frame_id: str, action_id: str,
     transition_timeout_seconds: float, observe_interval_seconds: float,
     observed_frame: Optional[Mapping[str, Any]] = None,
+    trace_source: Optional[Path] = None,
     stable_id: Optional[str] = None,
     parameters: Optional[Mapping[str, str]] = None,
     delay_ms: int = 200,
@@ -6762,15 +6958,28 @@ def execute_semantic_act(
     # One dispatch can poll several times before its receipt and successor
     # arrive.  Keep its source cursor and correlation window local to this
     # transaction rather than replaying the run from its launch cursor.
-    transaction_cursor: Dict[str, int] = {"offset": trace_start_offset}
+    transaction_cursor: Dict[str, Any] = {
+        "offset": trace_start_offset,
+        "source": (observed_frame.get("_source_path") if observed_frame is not None else None)
+        or (str(trace_source.resolve()) if trace_source is not None else None),
+    }
+
+    def transaction_source() -> Path:
+        source = semantic_step_source_trace(profile, run_dir).resolve()
+        identity = str(source)
+        if transaction_cursor["source"] != identity:
+            transaction_cursor["offset"] = 0
+        transaction_cursor["source"] = identity
+        return source
     transaction_history: Dict[str, Any] = {}
     transaction_events: deque[Dict[str, Any]] = deque(maxlen=SEMANTIC_STEP_MAX_EVENTS)
 
     def consume_transaction_trace() -> tuple[Path, list[Dict[str, Any]], str]:
-        source = semantic_step_source_trace(profile, run_dir)
+        source = transaction_source()
         cursor = semantic_step_effective_source_offset(source, transaction_cursor["offset"])
         source, owned = refresh_semantic_step_trace(
             profile=profile, run_dir=run_dir, run_id=run_id, start_offset=cursor,
+            source_trace=source, require_complete=False,
         )
         delta, status = read_semantic_step_trace(owned, run_dir, run_id)
         if status != "ok":
@@ -6802,11 +7011,11 @@ def execute_semantic_act(
 
     def read_frame() -> Mapping[str, Any]:
         try:
-            source = semantic_step_source_trace(profile, run_dir)
+            source = transaction_source()
             cursor = semantic_step_effective_source_offset(source, transaction_cursor["offset"])
             frame = current_semantic_step_frame(
                 profile=profile, run_dir=run_dir, run_id=run_id,
-                start_offset=cursor, history=transaction_history,
+                start_offset=cursor, history=transaction_history, source_trace=source,
             )
         except ValueError as exc:
             # Native input can be accepted before the trace writer publishes
@@ -6817,7 +7026,8 @@ def execute_semantic_act(
                 return dict(latest_frame["value"])
             raise
         frame_end = frame.get("_source_end")
-        if isinstance(frame_end, int) and frame_end > transaction_cursor["offset"]:
+        if frame.get("_source_path") == str(source) and isinstance(frame_end, int) and \
+                frame_end > transaction_cursor["offset"]:
             transaction_cursor["offset"] = frame_end
         latest_frame["value"] = dict(frame)
         return frame
@@ -6896,12 +7106,15 @@ def execute_semantic_act(
                     "action_outcome": "not_dispatched", "cancellation": dict(cancellation),
                     "surface_request": request, "native_receipt": None, "next_frame": None}
         request_path = run_dir / "semantic.requests.jsonl"
+        request_durably_queued = False
+        transport_failure: Optional[Dict[str, Any]] = None
         try:
             with request_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-            if os.name != "nt":
+            request_durably_queued = True
+            if os.name != "nt" or (run_dir / "terminal.owner.json").is_file():
                 pipe_contract = semantic_wake_pipe_contract(run_dir, run_id)
                 if pipe_contract["status"] != "bound":
                     raise OSError("launch-bound anonymous semantic wake pipe is unavailable")
@@ -6912,7 +7125,7 @@ def execute_semantic_act(
                     "run_id": run_id,
                     "request_id": request["request_id"],
                     "contract": pipe_contract["path"],
-                    "transport": "named_fifo",
+                    "transport": pipe_contract["contract"]["transport"],
                     "bytes_written": bytes_written if isinstance(bytes_written, int) else None,
                     "semantic_request_path": str(request_path.resolve()),
                     "run_dir": str(run_dir.resolve()),
@@ -6931,8 +7144,20 @@ def execute_semantic_act(
                 "writer_pid": os.getpid(),
                 "error": str(exc),
             })
-            return {"accepted": False, "reason": "native_surface_transport_failed",
-                    "surface_request": request, "detail": str(exc)}
+            transport_failure = {
+                "accepted": False, "reason": "native_surface_transport_failed",
+                "surface_request": request, "detail": str(exc),
+                "request_durably_queued": request_durably_queued,
+                "action_outcome": "unknown",
+            }
+            process = read_process_state() if request_durably_queued and \
+                read_process_state is not None else {}
+            if not (process.get("alive") is False and process.get("run_id") == run_id
+                    and process.get("pid") == pid):
+                return transport_failure
+            # Native polling can consume the durable request and exit before
+            # the wake writer's live-generation check. Reuse receipt/terminal
+            # reconciliation below; never enqueue or signal this request again.
 
         deadline = time.monotonic() + transition_timeout_seconds
         transition_event: Optional[Dict[str, Any]] = None
@@ -6964,9 +7189,14 @@ def execute_semantic_act(
                 time.sleep(min(observe_interval_seconds, remaining))
                 continue
             if status == "ok":
-                native_receipt = next((event for event in events if
-                                       event.get("event") == "surface_receipt" and
-                                       event.get("request_id") == request_id), None)
+                matching_receipts = [event for event in events if
+                                     event.get("event") == "surface_receipt" and
+                                     event.get("request_id") == request_id]
+                if transport_failure is not None and len(matching_receipts) > 1:
+                    return {**transport_failure,
+                            "reason": "native_surface_receipt_ambiguous",
+                            "native_receipts": matching_receipts, "next_frame": None}
+                native_receipt = next(iter(matching_receipts), None)
                 native_receipt_event = native_receipt
                 # Duration menus are older native owners: their accepted
                 # semantic-step receipt names the internal turn-frame rather
@@ -7350,6 +7580,9 @@ def execute_semantic_act(
                             # without publishing a successor. The last cached
                             # descriptor cannot restore authority after death.
                             next_frame = None
+                    if transport_failure is not None and not process_ended:
+                        return {**transport_failure, "native_receipt": native_receipt,
+                                "next_frame": None}
                     if next_frame is None and (allow_terminal_exit or process_ended):
                         durable_receipt = {
                             "schema": "caol-semantic-step-receipt-v1",
@@ -7366,6 +7599,8 @@ def execute_semantic_act(
                             },
                             "next_frame": None,
                             "native_receipt": native_receipt,
+                            **({"transport_failure": transport_failure}
+                               if transport_failure is not None else {}),
                         }
                         SemanticStepChannel(
                             run_id=run_id,
@@ -7375,7 +7610,9 @@ def execute_semantic_act(
                         )._persist(durable_receipt)
                         return {"accepted": True, "surface_request": request,
                                 "native_receipt": native_receipt,
-                                "transition_event": transition_event, "next_frame": None}
+                                "transition_event": transition_event, "next_frame": None,
+                                **({"transport_failure": transport_failure}
+                                   if transport_failure is not None else {})}
                     if isinstance(next_frame, Mapping) and (
                             str(next_frame.get("frame_id", "")) == resulting_frame_id or
                             str(next_frame.get("frame_id", "")) != str(before.get("frame_id", "")) or
@@ -7400,11 +7637,21 @@ def execute_semantic_act(
                                                  if event.get("event") == "receipt" and
                                                  event.get("action_id") == action_id and
                                                  event.get("coordinate_space") == "absolute_ms"), None)
-                        # Do not publish a successful world movement before
-                        # its coordinate-bearing native completion arrives.
-                        # The successor world frame can be drawn between the
-                        # semantic acknowledgement and this receipt.
-                        if action_id.startswith("world.move.") and movement_receipt is None:
+                        # Movement can open a native decision before it can
+                        # complete (for example, entering fire). Return that
+                        # exact receipted child so the player can answer it;
+                        # its input acceptance is not displacement evidence.
+                        # A World successor still needs coordinate completion.
+                        movement_child = action_id.startswith("world.move.") and \
+                            next_frame.get("event") == "surface_descriptor" and \
+                            next_frame.get("kind") != "world" and \
+                            next_frame.get("frame_id") == resulting_frame_id and \
+                            bool(next_frame.get("surface_id")) and \
+                            next_frame.get("surface_id") != before.get("surface_id") and \
+                            any(isinstance(action, Mapping) and action.get("enabled") is True
+                                for action in next_frame.get("valid_actions", []))
+                        if action_id.startswith("world.move.") and \
+                                movement_receipt is None and not movement_child:
                             cancelled = cancelled_dispatch()
                             if cancelled is not None:
                                 return cancelled
@@ -7429,7 +7676,8 @@ def execute_semantic_act(
                             "action_id": action_id,
                             "declared_action_id": declared_action_id or action_id,
                             "accepted": True,
-                            "reason": "native_surface_transition_accepted",
+                            "reason": "native_surface_child_accepted" if movement_child and
+                                      movement_receipt is None else "native_surface_transition_accepted",
                             "current_frame": {
                                 key: value for key, value in before.items()
                                 if not str(key).startswith("_")
@@ -7461,6 +7709,9 @@ def execute_semantic_act(
             if remaining <= 0:
                 break
             time.sleep(min(observe_interval_seconds, remaining))
+        if transport_failure is not None:
+            return {**transport_failure, "native_receipt": last_native_receipt,
+                    "next_frame": None}
         if isinstance(last_native_receipt, Mapping) and last_native_receipt.get("accepted") is True:
             # The native owner accepted the request, but its semantic successor
             # never appeared before the observation deadline. Preserve that
@@ -19029,7 +19280,9 @@ def capture_terminal_transcript_text_artifact(
             "error": "run-bound terminal transcript is unavailable",
         }
     raw = transcript_path.read_bytes().decode("utf-8", errors="replace")
-    lines = render_curses_terminal_screen(raw)
+    owner_path = run_dir / "terminal.owner.json"
+    terminal_owner = json.loads(owner_path.read_text(encoding="utf-8")) if owner_path.is_file() else None
+    lines = render_curses_terminal_screen(raw, terminal_owner=terminal_owner)
     # These lines are one current frame, not a history.  Keep its HUD and
     # modal regions together; the map-bottom tail alone omits `Move:`.
     tail = lines
@@ -19051,7 +19304,7 @@ def capture_terminal_transcript_text_artifact(
     return payload
 
 
-def render_curses_terminal_screen(raw: str) -> List[str]:
+def render_curses_terminal_screen(raw: str, *, terminal_owner: Optional[Mapping[str, Any]] = None) -> List[str]:
     """Render the current Curses frame, rather than concatenating its history.
 
     PTY logs are an append-only stream: stripping control sequences turns old
@@ -19060,6 +19313,29 @@ def render_curses_terminal_screen(raw: str) -> List[str]:
     xterm PTY and preserves only the final painted cells.
     """
     rows, columns = 60, 200
+    if terminal_owner and terminal_owner.get("transport") == "windows_conpty":
+        dimensions = terminal_owner.get("terminal_size")
+        if dimensions is not None:
+            if (not isinstance(dimensions, Mapping)
+                    or type(dimensions.get("rows")) is not int
+                    or type(dimensions.get("columns")) is not int):
+                raise ValueError("owned ConPTY viewport invalid")
+            rows, columns = dimensions["rows"], dimensions["columns"]
+        else:
+            # Legacy immutable owners predate terminal_size. Their original
+            # conhost generation already records the actual native viewport.
+            # Do not relabel it using a fresh PID lookup or today's defaults.
+            sizes = set()
+            for generation in terminal_owner.get("conhost_process_generations", []):
+                match = re.search(r"--width (\d+) --height (\d+)(?:\s|$)",
+                                  str(generation.get("command", "")))
+                if match:
+                    sizes.add((int(match.group(2)), int(match.group(1))))
+            if len(sizes) != 1:
+                raise ValueError("owned ConPTY viewport unavailable or ambiguous")
+            rows, columns = sizes.pop()
+    if rows <= 0 or columns <= 0:
+        raise ValueError("terminal dimensions must be positive")
     screen = [[" "] * columns for _ in range(rows)]
     row = col = 0
     index = 0
@@ -19083,8 +19359,8 @@ def render_curses_terminal_screen(raw: str) -> List[str]:
                           for value in params.lstrip("?").split(";")]
                 first = values[0] if values and values[0] else 1
                 if command in "Hf":
-                    row = max(0, (values[0] if values and values[0] else 1) - 1)
-                    col = max(0, (values[1] if len(values) > 1 and values[1] else 1) - 1)
+                    row = min(rows - 1, max(0, (values[0] if values and values[0] else 1) - 1))
+                    col = min(columns - 1, max(0, (values[1] if len(values) > 1 and values[1] else 1) - 1))
                 elif command == "A": row = max(0, row - first)
                 elif command in "Be": row = min(rows - 1, row + first)
                 elif command in "Ca": col = min(columns - 1, col + first)
@@ -19099,6 +19375,8 @@ def render_curses_terminal_screen(raw: str) -> List[str]:
                     for cursor in range(start, stop): screen[row][cursor] = " "
                 elif command == "X":
                     for cursor in range(col, min(columns, col + first)): screen[row][cursor] = " "
+                if command in "HfABeCaDG`d":
+                    col = min(columns - 1, col)
                 index = end + 1
                 continue
             if raw[index + 1] == "]":
@@ -19108,11 +19386,24 @@ def render_curses_terminal_screen(raw: str) -> List[str]:
             index += 2
             continue
         if character == "\r": col = 0
-        elif character == "\n": row = min(rows - 1, row + 1)
+        elif character == "\n":
+            col = min(columns - 1, col)
+            row += 1
+            if row == rows:
+                screen.pop(0)
+                screen.append([" "] * columns)
+                row -= 1
         elif character == "\b": col = max(0, col - 1)
         elif ord(character) >= 32:
-            if row < rows and col < columns: screen[row][col] = character
-            col = min(columns - 1, col + 1)
+            if col == columns:
+                col = 0
+                row += 1
+                if row == rows:
+                    screen.pop(0)
+                    screen.append([" "] * columns)
+                    row -= 1
+            screen[row][col] = character
+            col += 1
         index += 1
     return ["".join(line).rstrip() for line in screen if "".join(line).strip()]
 
@@ -20317,6 +20608,7 @@ def await_r014_native_semantic_bootstrap(
     required_actions: Sequence[str], timeout_seconds: float, poll_seconds: float,
     trace_start_offset: int = 0, require_initial_hud_world_ready_frame: bool = False,
     allow_any_native_input_owner: bool = False,
+    live_owner_alive: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Await the launcher's first same-run semantic frame without sending input.
 
@@ -20361,6 +20653,13 @@ def await_r014_native_semantic_bootstrap(
             }
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            # A live terminal controller must outlive a startup modal. Its
+            # original owner can inspect/recover through the startup route;
+            # a wall timeout is neither a World frame nor a reason to orphan
+            # the still-owned game. No dismissal or input occurs here.
+            if live_owner_alive is not None and live_owner_alive():
+                time.sleep(max(poll_seconds, 0.05))
+                continue
             return {
                 **last_metadata,
                 "bootstrap": "launcher_first_same_run_semantic_frame",
@@ -20491,6 +20790,18 @@ def r014_cockpit_observation_metadata(
     return {**metadata, "status": "required_state_present"}
 
 
+def reported_cockpit_outcome(final: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """Recognize an ordinary reported result, never formal proof authority."""
+    detail = final.get("stop_detail")
+    outcome = detail.get("gameplay_outcome") if isinstance(detail, Mapping) else None
+    if final.get("state") == "finished" and final.get("stop_reason") == "outcome_reported" and \
+            isinstance(outcome, Mapping) and isinstance(outcome.get("summary"), str) and \
+            outcome["summary"].strip() and outcome.get("verdict") in {"positive", "negative", "inconclusive"} and \
+            outcome.get("attribution") == "player_report" and outcome.get("proof_promotion_authority") is False:
+        return outcome
+    return None
+
+
 def r014_cockpit_live_session_metadata(
     final: Mapping[str, Any], *, artifact_path: Path, run_id: str, binding_id: str,
     live_status: int,
@@ -20508,6 +20819,15 @@ def r014_cockpit_live_session_metadata(
         return {**metadata, "status": "scanned", "reason": "immutable_final_unavailable"}
     final_run_id = str(final.get("run_id", "")).strip()
     final_binding_id = str(final.get("binding_id", "")).strip()
+    metadata.update({"final_run_id": final_run_id, "final_binding_id": final_binding_id,
+                     "state": str(final.get("state", ""))})
+    if final_run_id != str(run_id) or final_binding_id != str(binding_id):
+        return {**metadata, "status": "scanned", "reason": "wrong_run_or_binding"}
+    if metadata["state"] != "finished":
+        return {**metadata, "status": "scanned", "reason": "unfinished_session"}
+    if reported_cockpit_outcome(final) is not None:
+        return {**metadata, "status": "required_state_present", "completion_kind": "outcome_reported",
+                "action_statistics": "not_requested", "history": "retained_by_reference"}
     transcript = final.get("action_observation_sequence")
     action_count = observation_count = accepted_action_count = 0
     for entry in transcript if is_sequence(transcript) else ():
@@ -20527,10 +20847,6 @@ def r014_cockpit_live_session_metadata(
         "accepted_action_count": accepted_action_count,
         "observation_count": observation_count,
     })
-    if final_run_id != str(run_id) or final_binding_id != str(binding_id):
-        return {**metadata, "status": "scanned", "reason": "wrong_run_or_binding"}
-    if metadata["state"] != "finished":
-        return {**metadata, "status": "scanned", "reason": "unfinished_session"}
     if not accepted_action_count or observation_count < 2:
         return {**metadata, "status": "scanned", "reason": "incomplete_live_transaction"}
     return {**metadata, "status": "required_state_present"}
@@ -21496,13 +21812,14 @@ def cockpit_live_session_step_verdict(
     transcript = final.get( "action_observation_sequence" )
     observation_only = (descriptor.get("live_operations") == [] and
                         "no gameplay input" in descriptor.get("invariants", []))
-    if not is_sequence( transcript ) or (not observation_only and not any(
-            isinstance( entry, Mapping ) and entry.get( "kind" ) == "action" and
-            isinstance( entry.get( "result" ), Mapping ) and entry["result"].get( "ok" ) is True
-            for entry in transcript )) or sum(
-                isinstance( entry, Mapping ) and entry.get( "kind" ) == "observation"
-                for entry in transcript ) < (1 if observation_only else 2):
-        failures.append( "cockpit_transaction_incomplete" )
+    if reported_cockpit_outcome(final) is None:
+        if not is_sequence( transcript ) or (not observation_only and not any(
+                isinstance( entry, Mapping ) and entry.get( "kind" ) == "action" and
+                isinstance( entry.get( "result" ), Mapping ) and entry["result"].get( "ok" ) is True
+                for entry in transcript )) or sum(
+                    isinstance( entry, Mapping ) and entry.get( "kind" ) == "observation"
+                    for entry in transcript ) < (1 if observation_only else 2):
+            failures.append( "cockpit_transaction_incomplete" )
     if not isinstance( watermark, Mapping ) or str( watermark.get( "run_id", "" ) ).strip() != descriptor_run_id or \
             str( watermark.get( "step_label", "" ) ).strip() != label or watermark.get( "step_index" ) != index:
         failures.append( "cockpit_local_boundary_not_same_run" )
@@ -22892,6 +23209,47 @@ def validate_enabled_api_runtime(options: Dict[str, str]) -> None:
         )
 
 
+def canonical_harness_keybindings() -> Tuple[bytes, Dict[str, Any]]:
+    """Load the one runtime control file, including a sparse source export.
+
+    The live worktree is authoritative when present. Source-only/sparse
+    checkouts can omit this tracked fixture, so export its exact HEAD blob
+    directly into the owned profile instead of requiring manual restoration.
+    No save/profile snapshot or source worktree is modified.
+    """
+    root = repo_root()
+    source = root / CANONICAL_KEYBINDINGS_PATH
+    origin = "worktree"
+    try:
+        raw = source.read_bytes()
+    except FileNotFoundError:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", "HEAD:" + CANONICAL_KEYBINDINGS_PATH],
+            capture_output=True, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError("canonical harness keybindings unavailable: " + str(source))
+        raw = result.stdout
+        origin = "git:HEAD"
+    try:
+        if not isinstance(json.loads(raw), list):
+            raise ValueError("expected keybinding array")
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError("canonical harness keybindings invalid: " + str(source)) from error
+    return raw, {"path": str(source), "relative_path": CANONICAL_KEYBINDINGS_PATH,
+                 "source": origin, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def harness_runtime_dependency_readiness() -> Dict[str, Any]:
+    """Use the actual child loader for selection and launch readiness."""
+    try:
+        _, controls = canonical_harness_keybindings()
+        return {"status": "ready", "keybindings": controls}
+    except (OSError, RuntimeError) as error:
+        return {"status": "unavailable", "reason": str(error),
+                "path": str(repo_root() / CANONICAL_KEYBINDINGS_PATH)}
+
+
 def game_child_environment(profile: str) -> Dict[str, str]:
     options = load_game_options(profile)
     validate_enabled_api_runtime(options)
@@ -22907,11 +23265,11 @@ def game_child_environment(profile: str) -> Dict[str, str]:
     env.update(child_overlay)
     # Native setup keystrokes require the same controls in every harness profile,
     # including profiles restored from older snapshots or created from scratch.
-    controls = profile_snapshots_root() / "live-debug" / "mcwilliams_live_debug_2026-04-07" / "config" / "keybindings.json"
+    controls, _ = canonical_harness_keybindings()
     target = config_dir_for_profile(profile) / "keybindings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if not target.exists() or target.read_bytes() != controls.read_bytes():
-        shutil.copyfile(controls, target)
+    if not target.exists() or target.read_bytes() != controls:
+        target.write_bytes(controls)
     env["OPENCLAW_HARNESS_UI_TRACE"] = "1"
     return env
 
@@ -23001,7 +23359,17 @@ def semantic_wake_pipe_contract_path(run_dir: Path) -> Path:
 def open_semantic_wake_pipe(run_dir: Path, run_id: str) -> Tuple[int, int, Dict[str, str]]:
     """Create a run-private FIFO whose writer can outlive the launcher process."""
     if os.name == "nt":
-        return -1, -1, {}
+        event_name = "Local\\caol-semantic-wake-" + uuid.uuid4().hex
+        path = semantic_wake_pipe_contract_path(run_dir)
+        record = {"schema": "caol-semantic-wake-pipe-v2", "transport": "windows_event",
+                  "host": __import__("socket").gethostname(), "run_id": run_id,
+                  "read_descriptor": "native_named_event", "writer_owner": "worker_session",
+                  "writer_endpoint": event_name}
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        return -1, -1, {"OPENCLAW_HARNESS_SEMANTIC_WAKE_EVENT": event_name}
     wake_path = run_dir / "semantic.wake.pipe"
     if wake_path.exists():
         raise RuntimeError("semantic wake FIFO already exists for this run")
@@ -23031,6 +23399,24 @@ def semantic_wake_pipe_contract(run_dir: Path, run_id: str) -> Dict[str, Any]:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         record = {}
+    if os.name == "nt":
+        from windows_native_process import WindowsProcessInspector
+        try:
+            owner = json.loads((run_dir / "terminal.owner.json").read_text(encoding="utf-8"))
+            generation = owner.get("game_process_generation", {})
+            observed = asdict(WindowsProcessInspector().inspect(int(generation.get("pid", 0))))
+            matches = all(observed.get(key) == generation.get(key) for key in ("pid", "birth_identity", "command", "executable_path"))
+            if (record.get("schema") == "caol-semantic-wake-pipe-v2" and
+                    record.get("transport") == "windows_event" and record.get("run_id") == run_id and
+                    record.get("host") == owner.get("host") == __import__("socket").gethostname() and
+                    owner.get("run_id") == run_id and owner.get("wake_event_name") == record.get("writer_endpoint") and
+                    str(record.get("writer_endpoint", "")).startswith("Local\\caol-semantic-wake-") and
+                    record.get("read_descriptor") == "native_named_event" and
+                    record.get("writer_owner") == "worker_session" and matches and observed.get("alive") is True):
+                return {"status": "bound", "contract": dict(record), "path": str(path)}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return {"status": "unavailable", "path": str(path), "run_id": run_id}
     endpoint = Path(str(record.get("writer_endpoint", ""))) if isinstance(record, Mapping) else Path()
     if isinstance(record, Mapping) and record.get("schema") == "caol-semantic-wake-pipe-v2" and \
             record.get("transport") == "named_fifo" and record.get("run_id") == run_id and \
@@ -23045,6 +23431,9 @@ def write_semantic_wake_pipe(run_dir: Path, run_id: str) -> int:
     contract = semantic_wake_pipe_contract(run_dir, run_id)
     if contract["status"] != "bound":
         raise OSError("launch-bound semantic wake FIFO is unavailable")
+    if os.name == "nt":
+        from windows_native_process import signal_semantic_wake_event
+        return signal_semantic_wake_event(contract["contract"]["writer_endpoint"])
     endpoint = Path(str(contract["contract"]["writer_endpoint"]))
     write_fd = os.open(endpoint, os.O_WRONLY | os.O_NONBLOCK)
     try:
@@ -23406,6 +23795,7 @@ def record_bridge_game_process(process: subprocess.Popen, env: Mapping[str, str]
             "path": str(config_dir_for_profile(profile) / "debug.log"), "scope": "profile_shared",
         }
     generation = process_generation_snapshot(process.pid)
+    process._bridge_exit_generation = generation
     value = {"binding_id": bridge, "pid": process.pid,
              "run_id": env.get("OPENCLAW_HARNESS_RUN_ID", ""),
              "command": generation["command"], "process_generation": generation,
@@ -23447,8 +23837,18 @@ def record_bridge_game_exit(process: subprocess.Popen, env: Mapping[str, str], e
         "binding_id": bridge, "pid": process.pid,
         "run_id": env.get("OPENCLAW_HARNESS_RUN_ID", ""),
         "exit_code": exit_code, "exit_observed_at": _utc_timestamp(time.time()),
+        "process_generation": getattr(process, "_bridge_exit_generation", {}),
     }), encoding="utf-8")
     os.replace(temporary, target)
+
+
+def write_startup_process_record(run_dir: Path, process: Any, metadata: Dict[str, Any]) -> None:
+    """Keep the exact PTY launch environment when the outer probe adds facts."""
+    record = dict(metadata)
+    term = getattr(process, "_openclaw_launch_term", None)
+    if term is not None:
+        record["TERM"] = term
+    write_json(run_dir / "process.json", record)
 
 
 def launch_game(
@@ -23508,11 +23908,45 @@ def launch_game(
     if terminal:
         env["OPENCLAW_HARNESS_CACHE_DIR"] = str(userdir_for_profile(profile).resolve() / "cache" / "native")
     inherited_lease = lease.inherited_fds if lease is not None else ()
+    if terminal and os.name == "nt":
+        from windows_curses_terminal_transport import WindowsCursesTerminalTransport
+        from windows_native_process import WindowsOwnedProcess
+        if lease is None or not hasattr(lease, "export_native_lease"):
+            raise WritableRootConflict("native terminal launch requires its transferable writable-root owner")
+        _, _, wake_environment = open_semantic_wake_pipe(run_dir, binding["run_id"])
+        env.update(wake_environment)
+        env.setdefault("TERM", "xterm-256color")
+        lease.begin_launch()
+        generation, endpoint = WindowsCursesTerminalTransport.launch(
+            run_dir / "game.terminal.log", run_id=binding["run_id"], argv=cmd,
+            cwd=repo_root(), env=env, native_lease=lease.export_native_lease())
+        # Persist the creation identity even if an early native exit wins the
+        # race with opening this caller's read-only process handle.
+        write_json(run_dir / "process.json", {"pid": generation["pid"], "command": cmd,
+            "process_generation": generation, "host": __import__("socket").gethostname(),
+            "run_id": binding["run_id"], "userdir": str(userdir_for_profile(profile).resolve()),
+            "mode": "terminal", "transport": "windows_conpty"})
+        lease.bind_game(generation, native_owner_path=run_dir / "terminal.owner.json")
+        try:
+            process = WindowsOwnedProcess(generation, cmd)
+        except (OSError, RuntimeError) as error:
+            from windows_curses_terminal_transport import LaunchOwnershipError
+            raise LaunchOwnershipError("native child exited or identity is unavailable before startup", {
+                "game_process_generation": generation, "endpoint": str(endpoint),
+                "run_owner_path": str(run_dir / "terminal.owner.json"),
+                "run_id": binding["run_id"],
+            }) from error
+        process._openclaw_terminal_input_endpoint = str(endpoint)
+        record_bridge_game_process(process, env)
+        append_semantic_wake_observation(run_dir, {
+            "schema": "caol-semantic-wake-observation-v1", "event": "writer_bound",
+            "run_id": binding["run_id"], "transport": "windows_event", "pid": process.pid})
+        return process
     if terminal:
         transport, slave_fd = CursesTerminalTransport.open(run_dir / "game.terminal.log")
         read_fd, write_fd, wake_environment = open_semantic_wake_pipe(run_dir, binding["run_id"])
         env.update(wake_environment)
-        env.setdefault("TERM", "xterm-256color")
+        env["TERM"] = "xterm-256color"  # PTY renderer requires cursor-addressable output.
         try:
             if lease is not None:
                 lease.begin_launch()
@@ -23522,11 +23956,12 @@ def launch_game(
                 preexec_fn=CursesTerminalTransport.make_controlling_terminal,
                 pass_fds=(read_fd, *inherited_lease),
             )
+            process._openclaw_launch_term = env["TERM"]
             generation = stable_terminal_process_generation(process.pid) if isinstance(process.pid, int) else {}
             write_json(run_dir / "process.json", {"pid": process.pid,
                 "command": cmd, "process_generation": generation,
                 "host": __import__("socket").gethostname(), "run_id": binding["run_id"],
-                "userdir": str(userdir_for_profile(profile).resolve()), "mode": "terminal"})
+                "userdir": str(userdir_for_profile(profile).resolve()), "mode": "terminal", "TERM": env["TERM"]})
             if lease is not None:
                 lease.bind_game(generation)
             record_bridge_game_process(process, env)
@@ -23686,7 +24121,8 @@ def scenario_playtest_mode(scenario: Mapping[str, Any]) -> str:
     return mode
 
 
-def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path) -> Dict[str, Any]:
+def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
+                            selected_product_build: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Validate the additive mechanical lane, without GUI or save substitution."""
     mode = scenario_playtest_mode(scenario)
     row = {"status": "ready", "mode": mode, "host": __import__("socket").gethostname(),
@@ -23696,14 +24132,14 @@ def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path) -> Di
         return row
     contract = scenario.get("runtime_contract", {})
     reason = ""
-    if sys.platform != "darwin":
-        reason = "Mac terminal adapter only; native Windows adapter remains unavailable"
+    if sys.platform not in {"darwin", "win32"}:
+        reason = "terminal adapter is available on native Mac and Windows only"
     elif contract.get("require_screen_observability") is True or scenario.get("capture_world_after") is True:
         reason = "selected scenario requires graphical observability; select Tiles for this claim"
     elif any(step.get("kind") not in {"native_semantic_bootstrap", "cockpit_live_session"}
              for step in scenario.get("steps", []) if isinstance(step, Mapping)):
         reason = "terminal launch requires native semantic bootstrap/live steps; other scripted startup controls are unvalidated"
-    selected = contract.get("selected_product_build")
+    selected = selected_product_build
     if not reason:
         receipt, error = validate_selected_product_build(executable, selected)
         if error:
@@ -23729,7 +24165,11 @@ def terminal_native_startup_identity(
 ) -> Dict[str, Any]:
     """Authenticate a PTY child without inventing a GUI window requirement."""
     expected_executable = str(Path(executable).resolve())
-    command = pid_command(pid)
+    # The inspector brackets command retrieval with the native generation.
+    # A separate CIM/ps query can fail independently or observe another PID
+    # generation; it must not override this authenticated snapshot.
+    observed_generation = process_generation_snapshot(pid)
+    command = str(observed_generation.get("command", "")).strip()
     binding = compare_runtime_binding(dict(runtime_binding))
     result: Dict[str, Any] = {
         "pid": pid,
@@ -23739,13 +24179,16 @@ def terminal_native_startup_identity(
         "runtime_binding": binding,
         "ok": False,
     }
-    observed_generation = process_generation_snapshot(pid)
     result["process_generation"] = observed_generation
-    if not process_generation or not process_generation_matches(process_generation, observed_generation):
+    if not process_generation:
         result["error"] = "terminal_native_process_generation_unproven"
-    elif not pid_is_alive(pid):
+    elif observed_generation.get("alive") is not True:
         result["error"] = "terminal_native_process_not_alive"
-    elif not command or expected_executable not in command:
+    elif not command:
+        result["error"] = "terminal_native_process_command_unavailable"
+    elif not process_generation_matches(process_generation, observed_generation):
+        result["error"] = "terminal_native_process_generation_unproven"
+    elif expected_executable not in command:
         result["error"] = "terminal_native_process_command_mismatch"
     elif binding.get("status") != "matched":
         result["error"] = "terminal_native_runtime_binding_unproven"
@@ -23780,19 +24223,15 @@ def process_generation_snapshot(
     PID with the same executable.  The start identity supplied by the process
     inspector is the stable component used for all bound cleanup decisions.
     """
-    if inspector is None and os.name != "posix":
-        return {"schema": "caol-owned-process-generation-v1", "pid": int(pid),
-                "alive": pid_is_alive(pid), "birth_identity": "", "command": "",
-                "executable_path": "", "status": "native_process_identity_adapter_unavailable"}
     observed = (inspector or SystemProcessInspector()).inspect(int(pid))
     if not isinstance(observed, ProcessSnapshot):
         raise TypeError("process inspector returned an invalid snapshot")
     # POSIX ``kill(pid, 0)`` reports a zombie until its parent reaps it.  A
     # zombie has already exited and must not be mistaken for a reused PID or a
     # still-live cleanup blocker.
-    if inspector is None and observed.alive and not pid_is_alive(pid):
+    if inspector is None and os.name == "posix" and observed.alive and not pid_is_alive(pid):
         observed = ProcessSnapshot(pid=int(pid), alive=False)
-    command = str(observed.command or pid_command(pid)).strip()
+    command = str(observed.command or (pid_command(pid) if os.name == "posix" else "")).strip()
     return {
         "schema": "caol-owned-process-generation-v1",
         "pid": int(pid),
@@ -24167,6 +24606,18 @@ def cleanup_game_process(
 
     if not explicit_quit:
         info["status"] = "retained_waiting_for_player_quit"
+        info["cleanup_finished_at"] = _utc_timestamp(time.time())
+        return info
+
+    if os.name == "nt":
+        # Python's Windows SIGTERM terminates immediately.  Native save/quit
+        # belongs to the current input owner; this fallback retains the child.
+        info["status"] = "graceful_quit_unconfirmed_process_retained"
+        info["next_action"] = {
+            "owner": "launching_worker",
+            "action": "inspect_native_quit_blocker",
+            "reason": "Windows native save/quit has not established process exit",
+        }
         info["cleanup_finished_at"] = _utc_timestamp(time.time())
         return info
 
@@ -31710,8 +32161,6 @@ def load_scenario(name: str, *, source_path: Path | str | None = None,
                   expected_sha256: str = "") -> Dict[str, Any]:
     """Load the selected declaration itself when a registry path is supplied."""
     path = Path(source_path).resolve() if source_path else scenario_path(name)
-    if source_path and path.stem != name:
-        raise SystemExit(f"Selected scenario identity differs from its source path: {path}")
     if not path.exists():
         raise SystemExit(f"Scenario not found: {path}")
     source_bytes = path.read_bytes()
@@ -31726,6 +32175,8 @@ def load_scenario(name: str, *, source_path: Path | str | None = None,
         raise SystemExit(str(exc)) from exc
     if expected_sha256 and registry["source"]["sha256"] != expected_sha256:
         raise SystemExit(f"Selected scenario source changed during validation: {path}")
+    if source_path and registry["declaration"].get("name") != name:
+        raise SystemExit(f"Selected scenario identity differs from its declared name: {path}")
     loaded.setdefault("name", name)
     loaded["path"] = str(path)
     loaded["_scenario_registry"] = registry
@@ -32544,7 +32995,7 @@ def submit_semantic_surface_probe_request(
         bytes_written = write_semantic_wake_pipe(run_dir, run_id)
         return {
             "accepted": True,
-            "transport": "anonymous_pipe",
+            "transport": pipe_contract["contract"]["transport"],
             "bytes_written": bytes_written,
             "request_path": str(request_path),
             "malformed": malformed,
@@ -33065,6 +33516,34 @@ def execute_probe_steps(
             required_actions = checkpoint.get( "required_actions", [] )
             if not isinstance( required_actions, list ):
                 required_actions = []
+            # A full saved-world continuation can resume an activity before
+            # reaching World. Admit its actual native owner to the existing
+            # cockpit; do not require or manufacture fresh-start HUD proof.
+            saved_input_owner = checkpoint.get("allow_saved_native_input_owner") is True
+            if saved_input_owner and (
+                    immutable_saved_world_snapshot is None or
+                    not Path(immutable_saved_world_snapshot).is_dir() or
+                    checkpoint.get("require_initial_hud_world_ready_frame") is True or
+                    not recoverable_selection_handoff_live_step(steps, index - (1 + step_index_offset))):
+                report["abort"] = {
+                    "guard": "native_semantic_bootstrap",
+                    "status": "blocked_saved_native_input_owner_contract",
+                    "reason": "saved input-owner bootstrap requires the immutable snapshot, a following live cockpit, and no strict fresh-HUD claim",
+                }
+                report["stop_after_step"] = True
+                reports.append(report)
+                return reports
+            if saved_input_owner:
+                owned = current_owned_process_generation(run_dir)
+                if owned.get("status") != "alive" or owned.get("pid") != pid:
+                    report["abort"] = {
+                        "guard": "native_semantic_bootstrap",
+                        "status": "blocked_saved_native_process_identity",
+                        "reason": "the saved continuation's original process generation is not currently matched",
+                    }
+                    report["stop_after_step"] = True
+                    reports.append(report)
+                    return reports
             # A saved-world launch can legitimately stop at the native main
             # menu or character chooser before emitting its first World HUD
             # frame.  If this checkpoint explicitly permits that recovery and
@@ -33158,7 +33637,14 @@ def execute_probe_steps(
                 require_initial_hud_world_ready_frame=(
                     checkpoint.get("require_initial_hud_world_ready_frame") is True
                 ),
+                allow_any_native_input_owner=saved_input_owner,
             )
+            if saved_input_owner:
+                report["metadata"].update({
+                    "saved_continuation_input_owner": True,
+                    "initial_world_readiness": "not_claimed_saved_continuation",
+                    "gameplay_credit": False,
+                })
             if checkpoint.get("require_initial_hud_world_ready_frame") is True:
                 matching, foreign = initial_hud_world_frame_counts(
                     profile=profile,
@@ -33317,18 +33803,14 @@ def execute_probe_steps(
                                *( ["run.witness"] if witness_charter is not None else [] ),
                                "run.finish"],
                 **({"witness": {
-                    "action": "WITNESS / FINISH",
-                    "charter": witness_charter,
-                    "sequence": "observe, choose, act, repair or rerun when needed, run.witness, run.finish",
-                    "instruction": "Report the smallest supported conclusion for each affected claim. A single statement remains valid; use a caol-playtest-witness-bundle-v1 when one run has independent claim outcomes or a routed defect. Preserve inconvenient evidence without discarding unaffected observations, and stop requesting proof once the charter is honestly settled.",
+                    "action": "run.finish",
+                    "outcome": str(witness_charter.get("claim", "")),
+                    "instruction": "Report the supported gameplay result with run.finish outcome; select native observations for automatic typed citations when useful. Keep unknown secondary observations and cleanup separate. Detailed run.witness review is optional; exact evidence remains retrievable.",
                 }} if witness_charter is not None else {}),
                 "bound_bases": sorted(["game_mechanic", "scheduler_boundary", "path_progress",
                                        "measured_rate"]),
-                "termination": (
-                    "run.witness then run.finish to conclude the evidence, or run.quit to end without a claim. "
-                    if witness_charter is not None else
-                    "run.finish or run.quit explicitly ends the session. "
-                ) + (
+                "termination": "After native exit, run.finish reports the supported outcome in one operation; "
+                    "run.quit ends without an outcome. " + (
                     "Action failures, binding drift, missing receipts, no progress, and client disconnects "
                     "stop only the current operation and leave the game running."
                 ),
@@ -33363,14 +33845,10 @@ def execute_probe_steps(
                 continue
             live_status = serve_cockpit_live( service, sys.stdin, sys.stdout )
             final_path = cockpit_live_final_path( run_dir, label )
-            reference_path = final_path.with_suffix(".ref.json")
-            if reference_path.is_file():
-                wire = json.loads(reference_path.read_text(encoding="utf-8"))
-                archive_directory = service.run_channel.archive.path.parent
-                final = resolve_wire(wire, directory=archive_directory,
-                                     binding_id=str(service.run_channel._binding_id), exported_path=final_path)
-            else:
-                final = json.loads(final_path.read_text(encoding="utf-8")) if final_path.is_file() else {}
+            final = read_completed_cockpit_final(
+                service, final_path, run_id=semantic_run_id,
+                binding_id=str(service.run_channel._binding_id),
+            )
             selection_world_ready: Optional[bool] = None
             selection_world_resolution: Dict[str, Any] = {}
             if pending_selection_bootstrap is not None:
@@ -38944,11 +39422,33 @@ def require_managed_terminal_root(root: Path) -> None:
         raise WritableRootConflict(f"existing terminal root has no supported owner binding: {root}")
 
 
+def registry_run_binding(args: argparse.Namespace, executable: Optional[Path]) -> Mapping[str, Any]:
+    """Recheck the one selected run before mutable setup or native launch."""
+    text = str(getattr(args, "registry_launch_receipt", "") or "").strip()
+    if not text:
+        return {}
+    receipt = json.loads(text)
+    expected = receipt.get("runtime_binding", {})
+    if not isinstance(expected, dict):
+        raise SystemExit("registry launch runtime binding is malformed")
+    comparison = compare_runtime_binding(expected)
+    if comparison.get("status") != "matched" or (executable is not None and str(executable.resolve()) != expected.get("executable_path")):
+        # Use the registry's existing rejection owner to invalidate an actual
+        # token before mutable setup. The final launch check remains necessary
+        # for changes during setup, and records the same exact binding.
+        validate_registry_launch_receipt_before_launch(
+            text, executable or Path(str(expected.get("executable_path", ""))))
+        raise SystemExit("runtime_binding_changed before startup: " + json.dumps(comparison))
+    return expected
+
+
 def run_startup(args: argparse.Namespace) -> int:
     """Reserve the mutable profile before installation/config/cache writes."""
     profile = resolve_profile_name(args.profile)
     run_id = str(getattr(args, "harness_run_id", "") or uuid.uuid4().hex)
     args.harness_run_id = run_id
+    executable_text = str(getattr(args, "executable", "") or "").strip()
+    expected_runtime = registry_run_binding(args, Path(executable_text) if executable_text else None)
     scenario_contract_path = str(getattr(args, "scenario_contract_path", "") or "").strip()
     if scenario_contract_path:
         declaration = load_scenario(
@@ -38956,8 +39456,9 @@ def run_startup(args: argparse.Namespace) -> int:
             source_path=scenario_contract_path,
             expected_sha256=str(getattr(args, "scenario_source_sha256", "") or "") or None)
         if scenario_playtest_mode(declaration) == "terminal":
-            executable = Path(str(getattr(args, "executable", "") or "")).resolve()
-            mode_readiness = terminal_mode_readiness(declaration, executable)
+            executable = Path(executable_text or expected_runtime.get("executable_path", "") or detect_executable()).resolve()
+            mode_readiness = terminal_mode_readiness(
+                declaration, executable, selected_product_build=expected_runtime.get("selected_product_build"))
             if mode_readiness["status"] != "ready":
                 raise SystemExit("terminal mode refused before profile writes: " + json.dumps(mode_readiness))
             require_managed_terminal_root(userdir_for_profile(profile))
@@ -39086,11 +39587,8 @@ def _run_startup(args: argparse.Namespace) -> int:
             )
         except (OSError, SystemExit, ValueError) as exc:
             raise SystemExit(f"selected scenario source changed before executable binding: {exc}") from exc
-        selected_runtime_contract = selected_declaration.get("runtime_contract", {})
-        selected_value = selected_runtime_contract.get("selected_product_build") \
-            if isinstance(selected_runtime_contract, Mapping) else None
-        if isinstance(selected_value, Mapping):
-            selected_product_build = selected_value
+    expected_runtime = registry_run_binding(args, Path(plan.executable))
+    selected_product_build = expected_runtime.get("selected_product_build")
     runtime_binding = build_runtime_binding(
         Path(plan.executable), selected_product_build=selected_product_build,
     )
@@ -39383,7 +39881,7 @@ def _run_startup(args: argparse.Namespace) -> int:
                 f"no process was signalled: {exc}"
             ) from exc
     process_generation = process_generation_snapshot(proc.pid)
-    write_json(run_dir / "process.json", {
+    write_startup_process_record(run_dir, proc, {
         "pid": proc.pid,
         "command": list(proc.args) if isinstance(proc.args, (list, tuple)) else str(proc.args),
         "process_generation": process_generation,
@@ -39461,7 +39959,14 @@ def _run_startup(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + timeout_seconds
     expected_world = plan.target_world
 
-    while time.monotonic() < deadline:
+    live_terminal_startup = bool(
+        getattr(args, "cockpit_live_session", False) and terminal_native_transport
+        and terminal_identity and terminal_identity.get("ok")
+        and os.environ.get("OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR")
+        and os.environ.get("OPENCLAW_COCKPIT_BRIDGE_BINDING_ID")
+    )
+
+    while time.monotonic() < deadline or (live_terminal_startup and proc.poll() is None):
         code = proc.poll()
         if code is not None:
             if plan.strategy == "harness_new_world":
@@ -39796,6 +40301,7 @@ def _run_startup(args: argparse.Namespace) -> int:
                     allow_any_native_input_owner=( semantic_only_startup or bool(
                         getattr(args, "cockpit_live_session", False)
                     ) ),
+                    live_owner_alive=(lambda: proc.poll() is None) if live_terminal_startup else None,
                 )
                 screen_summary["native_semantic_startup"] = native_semantic_startup
                 # A GUI-backed startup capture can legitimately precede the
@@ -40134,7 +40640,7 @@ def run_json_command(cmd: List[str]) -> Tuple[int, Dict[str, Any], str, str]:
     return proc.returncode, payload, proc.stdout, proc.stderr
 
 
-def run_startup_in_process(cmd: List[str]) -> Tuple[int, Dict[str, Any], str, str]:
+def run_startup_in_process(cmd: List[str], *, live_session: bool = False) -> Tuple[int, Dict[str, Any], str, str]:
     """Run a constructed ``start`` command without losing anonymous wake FDs.
 
     A probe must own both ends of its launch-bound anonymous pipe: startup
@@ -40148,6 +40654,9 @@ def run_startup_in_process(cmd: List[str]) -> Tuple[int, Dict[str, Any], str, st
     stdout_capture = io.StringIO()
     stderr_capture = io.StringIO()
     start_args = build_parser().parse_args(cmd[2:])
+    # This in-process start belongs to the probe's live controller. Preserve
+    # that context without adding a second launch or a new public CLI mode.
+    start_args.cockpit_live_session = live_session
     with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
         returncode = run_startup(start_args)
     stdout = stdout_capture.getvalue()
@@ -41639,8 +42148,10 @@ def run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
     mode = scenario_playtest_mode(scenario)
     if mode != "terminal":
         return _run_probe_mode(args, handoff=handoff)
-    executable = str(getattr(args, "executable", "") or scenario.get("runtime_contract", {}).get("requirements", {}).get("executable", ""))
-    readiness = terminal_mode_readiness(scenario, (repo_root() / executable).resolve())
+    executable = str(getattr(args, "executable", "") or detect_executable())
+    readiness = terminal_mode_readiness(
+        scenario, (repo_root() / executable).resolve(),
+        selected_product_build=getattr(args, "registry_selected_product_build", None))
     if readiness["status"] != "ready":
         raise SystemExit("terminal mode unavailable before launch: " + json.dumps(readiness))
     run_id = registry_authority_transition_run_id(str(getattr(args, "registry_launch_receipt", "") or "")) or uuid.uuid4().hex
@@ -41950,17 +42461,7 @@ def _run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
         start_cmd.extend(["--saved-world-snapshot", explicit_saved_world_snapshot])
     explicit_executable = str(getattr(args, "executable", "") or "").strip()
     if not explicit_executable:
-        runtime_contract = scenario.get("runtime_contract", {})
-        requirements = runtime_contract.get("requirements", {}) if isinstance(runtime_contract, Mapping) else {}
-        declared_executable = str(requirements.get("executable", "")).strip() \
-                            if isinstance(requirements, Mapping) else ""
-        if declared_executable:
-            candidate = (repo_root() / declared_executable).resolve()
-            if not candidate.is_file() or not os.access(candidate, os.X_OK):
-                raise ValueError(
-                    f"scenario runtime executable is unavailable: {declared_executable}"
-                )
-            explicit_executable = str(candidate)
+        explicit_executable = str(detect_executable())
     if explicit_executable:
         start_cmd.extend(["--executable", explicit_executable])
     if profile_snapshot:
@@ -42042,7 +42543,9 @@ def _run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
 
     # Keep the anonymous semantic wake writer in this probe process.  The
     # child only inherits its nonblocking read end during launch.
-    start_rc, start_result, start_stdout, start_stderr = run_startup_in_process(start_cmd)
+    start_rc, start_result, start_stdout, start_stderr = run_startup_in_process(
+        start_cmd, live_session=bool(getattr(args, "cockpit_live_session", False)),
+    )
     if args.dry_run:
         print(json.dumps({
             "mode": mode,
@@ -43480,6 +43983,8 @@ def build_parser() -> argparse.ArgumentParser:
         "cockpit-live",
         help="Serve one worker-controlled native cockpit session over JSON lines until run.finish.",
     )
+    cockpit_live_p.add_argument("--witness-charter", type=Path, help="Existing source-bound witness charter, not gameplay credit")
+    cockpit_live_p.add_argument("--scenario-id", default="", help="Scenario identity for the witness charter")
     cockpit_live_p.add_argument("--run-dir", required=True)
     cockpit_live_p.add_argument("--profile", required=True)
     cockpit_live_p.add_argument("--run-id", required=True)

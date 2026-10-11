@@ -107,7 +107,7 @@ def normalize_witness_charter(value: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _compact_observation(value: Mapping[str, Any]) -> dict[str, Any]:
+def _compact_observation(value: Mapping[str, Any], *, copy_surface: bool = True) -> dict[str, Any]:
     log = value.get("compact_log")
     log = log if isinstance(log, Mapping) else {}
     result = {
@@ -140,21 +140,21 @@ def _compact_observation(value: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "child_resources": log.get("child_resources", {}),
     }
-    # The v2 native surface owns the gameplay facts. Keep its exact payload in
-    # the sealed journal; CLI evidence projection pages bulky fields separately.
-    # Do not retain references to a mutable live frame after sealing.
+    # The optional detailed journal retains exact native facts. An archived
+    # append snapshots immediately and shares identical retained payloads; a
+    # plain in-memory journal must make its own independent copy.
     if isinstance(value.get("surface"), Mapping):
-        result["surface"] = copy.deepcopy(dict(value["surface"]))
+        result["surface"] = copy.deepcopy(dict(value["surface"])) if copy_surface else value["surface"]
         for key in ("frame_id", "surface_id", "breadcrumbs"):
             if key in value:
                 result[key] = copy.deepcopy(value[key])
     return result
 
 
-def _compact_transcript_event(event: Mapping[str, Any]) -> dict[str, Any]:
+def _compact_transcript_event(event: Mapping[str, Any], *, copy_surface: bool = True) -> dict[str, Any]:
     kind = str(event.get("kind", "event"))
     if kind == "observation" and isinstance(event.get("value"), Mapping):
-        return {"kind": kind, "value": _compact_observation(event["value"])}
+        return {"kind": kind, "value": _compact_observation(event["value"], copy_surface=copy_surface)}
     if kind == "action":
         result = event.get("result")
         result = result if isinstance(result, Mapping) else {}
@@ -205,7 +205,7 @@ def build_evidence_journal(
     append("identity", dict(identity))
     for event in transcript:
         if isinstance(event, Mapping):
-            compact = _compact_transcript_event(event)
+            compact = _compact_transcript_event(event, copy_surface=not isinstance(entries, ArchiveSequence))
             event_run_id = ""
             if compact.get("kind") == "observation" and isinstance(compact.get("value"), Mapping):
                 candidate_run_id = compact["value"].get("run_id", "")
@@ -352,7 +352,7 @@ def compose_evidence_journals(
     return result
 
 
-def _path_value(value: Any, path: str) -> Any:
+def citation_value(value: Any, path: str) -> Any:
     current = value
     for part in path.split(".") if path else ():
         # Native surface facts may encode structured values as JSON strings.
@@ -413,11 +413,21 @@ def validate_witness_statement(
         if cited_entry is None or not meaning:
             raise WitnessError("witness_citation_missing_or_unknown:" + citation_id)
         checks = citation.get("checks", {})
+        if isinstance(checks, list):
+            # Selecting fields is enough. Resolve their exact native JSON
+            # values here, so authors need not transcribe strings/booleans or
+            # nested coordinates into a second proof document.
+            if any(not isinstance(path, str) or not path for path in checks):
+                raise WitnessError("witness_citation_paths_must_be_strings")
+            try:
+                checks = {path: citation_value(cited_entry.get("value"), path) for path in checks}
+            except WitnessError as error:
+                raise WitnessError("witness_citation_path_missing:" + citation_id) from error
         if not isinstance(checks, Mapping):
-            raise WitnessError("witness_citation_checks_must_be_an_object")
+            raise WitnessError("witness_citation_checks_must_be_an_object_or_paths")
         for path, expected in checks.items():
             try:
-                actual = _path_value(cited_entry.get("value"), str(path))
+                actual = citation_value(cited_entry.get("value"), str(path))
             except WitnessError as error:
                 raise WitnessError(f"witness_citation_path_missing:{citation_id}:{path}; inspect this citation and use a path inside entry.value") from error
             if actual != expected:

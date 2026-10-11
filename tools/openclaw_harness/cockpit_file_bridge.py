@@ -90,7 +90,11 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
-        os.replace(temporary, path)
+        if os.name == "nt":
+            from windows_native_process import replace_with_readers
+            replace_with_readers(temporary, path)
+        else:
+            os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -181,6 +185,16 @@ def _decode_bridge_response(value: Any) -> tuple[Mapping[str, Any], bytes]:
     raise TypeError("cockpit response must be JSON text or an object")
 
 
+def _send_cleanup_control(session_dir: Path, binding_id: str) -> None:
+    control = {"control": "cleanup", "binding_id": binding_id}
+    if os.name == "nt":
+        _atomic_json(session_dir / "controls" / "pre-descriptor-cleanup.json", control)
+    else:
+        with (session_dir / "requests.fifo").open("w", encoding="utf-8") as sink:
+            sink.write(json.dumps(control) + "\n")
+            sink.flush()
+
+
 class FileBackedCockpitBridge:
     """Own one cockpit child and correlate durable requests to retained replies."""
 
@@ -241,9 +255,14 @@ class FileBackedCockpitBridge:
         self._child_stderr = stderr_path.open("a" if append_stderr else "w", encoding="utf-8")
         self._child_started_ns = time.time_ns()
         self._stdout_pending = b""
+        # The long-lived JSONL owner must encode its pipe before it starts.
+        # Later player CLI environments cannot change this child's stdio.
+        environment = dict(self._child_environment)
+        environment["PYTHONIOENCODING"] = "utf-8"
         self._child = subprocess.Popen(
             list(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=self._child_stderr, text=True, bufsize=1, env=self._child_environment,
+            stderr=self._child_stderr, text=True, encoding="utf-8", bufsize=1,
+            env=environment,
         )
         from startup_harness import process_generation_snapshot
         _atomic_json(self.session_dir / "launcher-process.json", {
@@ -357,7 +376,12 @@ class FileBackedCockpitBridge:
     def _emergency_cleanup(self, *, explicit_quit: bool = False) -> dict[str, Any]:
         """Reap the failed controller; preserve the game unless the player quits."""
         cleanup: dict[str, Any] = {"native_exit_credit": False}
-        if self._child is not None and self._child.poll() is None:
+        if self._child is not None and self._child.poll() is None and os.name == "nt":
+            from startup_harness import process_generation_snapshot
+            cleanup["controller"] = {"status": "retained_native_controller",
+                                     "process_generation": process_generation_snapshot(self._child.pid),
+                                     "next_action": "supported controller/game quit and exact exit observation"}
+        elif self._child is not None and self._child.poll() is None:
             self._child.terminate()
             try:
                 self._child.wait(timeout=2)
@@ -497,13 +521,14 @@ class FileBackedCockpitBridge:
         self.requests_dir.mkdir()
         self.responses_dir.mkdir()
         self.controls_dir.mkdir()
-        os.mkfifo(self.input_path, 0o600)
+        if os.name != "nt":
+            os.mkfifo(self.input_path, 0o600)
         _atomic_json(self.session_dir / "bridge.manifest.json", {
             "schema": SCHEMA,
             "binding_id": self.binding_id,
             "authorization_token_id": self.authorization_token_id,
             "command": self.command,
-            "input_channel": self.input_path.name,
+            "input_channel": "requests" if os.name == "nt" else self.input_path.name,
             "request_directory": self.requests_dir.name,
             "response_directory": self.responses_dir.name,
         })
@@ -573,7 +598,11 @@ class FileBackedCockpitBridge:
                 self._stdout_pending = self._stdout_pending[end + 1:]
                 return candidate
             remaining = None if deadline is None else max(0, deadline - time.monotonic())
-            readable, _, _ = select.select([self._child.stdout], [], [], remaining)
+            if os.name == "nt":
+                from windows_native_process import pipe_readable
+                readable = pipe_readable(self._child.stdout.fileno(), remaining)
+            else:
+                readable, _, _ = select.select([self._child.stdout], [], [], remaining)
             if not readable:
                 return None
             chunk = os.read(self._child.stdout.fileno(), 65536)
@@ -786,8 +815,8 @@ class FileBackedCockpitBridge:
                     # Cleanup is an explicit player decision, unlike losing
                     # a client connection. Send that decision as a real request.
                     assert self._child is not None and self._child.stdin is not None
-                    self._child.stdin.write(json.dumps({"action": "run.quit",
-                        "stop_reason": "explicit_bridge_cleanup"}) + "\n")
+                    self._child.stdin.write(json.dumps({"action": "run.quit", "abort": True,
+                        "stop_reason": "explicit_bridge_abort_cleanup"}) + "\n")
                     self._child.stdin.flush()
                     terminal_line = self._read_complete_response()
                     terminal = json.loads(terminal_line) if terminal_line else {}
@@ -870,9 +899,9 @@ class FileBackedCockpitBridge:
             memory_snapshot("file_bridge", "after_response_persist",
                             response_bytes=len(response_line.encode("utf-8")))
             self.active_request_path.unlink(missing_ok=True)
-            # Native input is paused at a completed response.  Keep only the
-            # recent debug/semantic producer window before the next request.
-            # Immutable receipts and transition evidence remain untouched.
+            # Observation responses can return while a native activity is
+            # still advancing. Window only disposable diagnostic logs; never
+            # rewrite the append-only native authority/receipt stream.
             roll_bound_session_logs(
                 self.session_dir,
                 str(self._active_session_descriptor.get("run_id", "")),
@@ -1085,8 +1114,8 @@ class FileBackedCockpitBridge:
         # of its own writer, then block forever in ``read`` before a client
         # request is delivered.  The anchor writer prevents EOF while the
         # read end remains a genuine externally-written FIFO stream.
-        descriptor = os.open(self.input_path, os.O_RDONLY | os.O_NONBLOCK)
-        anchor_writer = os.open(self.input_path, os.O_WRONLY | os.O_NONBLOCK)
+        descriptor = None if os.name == "nt" else os.open(self.input_path, os.O_RDONLY | os.O_NONBLOCK)
+        anchor_writer = None if os.name == "nt" else os.open(self.input_path, os.O_WRONLY | os.O_NONBLOCK)
         pending = b""
         try:
             while True:
@@ -1113,7 +1142,13 @@ class FileBackedCockpitBridge:
                 # session descriptor.  Ask the kernel for readability before
                 # every drain so an accepted public request cannot be lost
                 # behind that startup handoff.
-                readable, _, _ = select.select([descriptor], [], [], 0.01)
+                if descriptor is None:
+                    # Public requests and cleanup are already durably spooled.
+                    # Native Windows has no FIFO; reuse that existing channel.
+                    time.sleep(0.01)
+                    readable = []
+                else:
+                    readable, _, _ = select.select([descriptor], [], [], 0.01)
                 if readable:
                     try:
                         received = os.read(descriptor, 65536)
@@ -1143,14 +1178,19 @@ class FileBackedCockpitBridge:
                         child_stderr="child.stderr.log", **details)
                     return 1
         finally:
-            os.close(descriptor)
-            os.close(anchor_writer)
+            if descriptor is not None:
+                os.close(descriptor)
+            if anchor_writer is not None:
+                os.close(anchor_writer)
             launcher_retained = None
             if self._child.poll() is None:
-                self._child.terminate()
-                try:
-                    self._child.wait(timeout=2)
-                except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    self._child.terminate()
+                    try:
+                        self._child.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if self._child.poll() is None:
                     from startup_harness import process_generation_snapshot
                     launcher_retained = process_generation_snapshot(self._child.pid)
             previous = json.loads(self.status_path.read_text(encoding="utf-8"))
@@ -1176,6 +1216,13 @@ class FileBackedCockpitBridge:
         status = json.loads((session_dir / "status.json").read_text(encoding="utf-8"))
         identity_error = _bridge_identity_error(status)
         if identity_error:
+            # A retained native startup may outlive its failed reporter. Let
+            # the existing read-only look projection authenticate that native
+            # owner; this is not a request delivered to the dead bridge.
+            if (identity_error == "bridge_process_exited"
+                    and status.get("binding_id") == binding_id
+                    and request.get("action") == "game.observe"):
+                return {"ok": False, "error": identity_error, "status": status}
             return {"ok": False, "error": identity_error}
         if status.get("state") != "ready" or status.get("binding_id") != binding_id:
             return {"ok": False, "status": status}
@@ -1452,9 +1499,7 @@ class FileBackedCockpitBridge:
             from startup_harness import pid_is_alive
             bridge_pid = int(status.get("bridge_pid", 0) or 0)
             if bridge_pid > 0 and pid_is_alive(bridge_pid):
-                with (Path(session_dir) / "requests.fifo").open("w", encoding="utf-8") as sink:
-                    sink.write(json.dumps({"control": "cleanup", "binding_id": binding_id}) + "\n")
-                    sink.flush()
+                _send_cleanup_control(Path(session_dir), binding_id)
                 return {"ok": True, "cleanup": "requested"}
         if status.get("state") in {"process_dead", "bridge_failed", "terminalization_failed", "reentry_failed"}:
             bridge = FileBackedCockpitBridge(Path(session_dir), [], binding_id=binding_id)
@@ -1463,9 +1508,7 @@ class FileBackedCockpitBridge:
             return {"ok": cleanup.get("game", {}).get("status") in {
                 "terminated", "already_exited", "killed", "terminated_during_kill_escalation",
             }, "cleanup": cleanup}
-        with (Path(session_dir) / "requests.fifo").open("w", encoding="utf-8") as sink:
-            sink.write(json.dumps({"control": "cleanup", "binding_id": binding_id}) + "\n")
-            sink.flush()
+        _send_cleanup_control(Path(session_dir), binding_id)
         return {"ok": True, "cleanup": "requested"}
 
     @staticmethod
@@ -1808,7 +1851,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         with error_path.open("a", encoding="utf-8") as error_log:
             child = subprocess.Popen(bridge_command, stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=error_log,
-                                     start_new_session=True)
+                                     **({"creationflags": subprocess.DETACHED_PROCESS |
+                                         subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_BREAKAWAY_FROM_JOB}
+                                        if os.name == "nt" else {"start_new_session": True}))
         from startup_harness import process_generation_snapshot
         print(json.dumps({"ok": True, "schema": SCHEMA, "bridge_pid": child.pid,
                           "host": socket.gethostname(), "bridge_process_generation": process_generation_snapshot(child.pid),

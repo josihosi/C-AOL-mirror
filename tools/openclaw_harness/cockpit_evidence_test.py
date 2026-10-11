@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import cockpit_evidence
 
 CLI = Path(__file__).with_name("cockpit_file_bridge.py")
@@ -166,11 +167,12 @@ class CockpitEvidenceTest(unittest.TestCase):
         sequence = archive.sequence()
         for i in range(12):
             sequence.append({"index": i, "text": "retained evidence"})
-        projected = cockpit_evidence.compact({"entries": sequence})["entries"]
+        with patch.object(sequence, "reference", side_effect=AssertionError("display rescanned history")):
+            projected = cockpit_evidence.compact({"entries": sequence})["entries"]
         self.assertEqual(projected["type"], "list")
         self.assertEqual(projected["count"], 12)
         self.assertEqual(projected["selector"], "entries")
-        self.assertGreater(projected["json_bytes"], 0)
+        self.assertIsNone(projected["json_bytes"])  # A mutable stream has no verified fixed size.
         self.assertEqual(cockpit_evidence.select({"entries": sequence}, "entries.7.index"), 7)
 
     def test_player_status_and_named_effects_are_readable_without_losing_details(self):

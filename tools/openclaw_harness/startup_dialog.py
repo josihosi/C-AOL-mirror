@@ -1,8 +1,8 @@
 """PID-bound observation and explicit recovery of a pre-World native debug dialog.
 
 This is a player accessibility path, not a startup admission or gameplay proof
-path.  A current window or owned terminal frame identifies the UI; a matching profile debug-log line
-supplies exact diagnostic text.  Recovery is a separate, current-capture-bound
+path.  A current window needs matching profile diagnostic text; an owned
+terminal frame carries exact native diagnostic provenance directly.  Recovery is a separate, current-capture-bound
 player command; observation alone never sends input.
 """
 from __future__ import annotations
@@ -58,7 +58,11 @@ def _read_object(path: Path, limit: int = 65536) -> dict[str, Any]:
 def _debug_log_path(owner: Mapping[str, Any], session: Path) -> Path | None:
     """Resolve relative userdir against the game's owned cwd, never its binary."""
     try:
-        command = shlex.split(str(owner["command"]))
+        if os.name == "nt":
+            from windows_native_process import command_line_arguments
+            command = command_line_arguments(str(owner["command"]))
+        else:
+            command = shlex.split(str(owner["command"]))
         userdir = Path(command[command.index("--userdir") + 1])
         if not userdir.is_absolute():
             raw_cwd = str(owner.get("launch_cwd", "")).strip()
@@ -85,7 +89,7 @@ def _debug_log_path(owner: Mapping[str, Any], session: Path) -> Path | None:
         if published.get("scope") != "profile_shared" or path != userdir / "config" / "debug.log":
             return None
         return path
-    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError, OSError):
         return None
 
 
@@ -165,6 +169,29 @@ def correlate_visible_dialog(lines: list[str], clues: list[dict[str, Any]]) -> d
     return result
 
 
+def terminal_debug_provenance(lines: list[str], transcript: Path) -> dict[str, Any]:
+    """Native cells carry diagnostic provenance directly; OCR still needs a log.
+
+    A partial or erased warning cannot grant input. Require the currently
+    painted DEBUG block and its native source/function/version/footer rather
+    than an optional duplicate in profile-shared debug.log.
+    """
+    visible, message = _visible_debug_text(lines)
+    text = "\n".join(lines)
+    source = re.search(r"^[ \t]*C\+\+ SOURCE FILE\s*:\s*(src/[^\r\n]+)$", text, re.M)
+    number = re.search(r"^[ \t]*LINE\s*:\s*(\d+)\s*$", text, re.M)
+    function = re.search(r"^[ \t]*REPORTING FUNCTION\s*:\s*(.+)$", text, re.M)
+    version = re.search(r"^[ \t]*VERSION\s*:\s*(\S+)", text, re.M)
+    advertised = re.search(r"\bPress I\b[^\n]*\bignore\b", text, re.I)
+    if not (visible and message and source and number and function and version and advertised):
+        return {}
+    return {"state": "confirmed_debug_dialog", "message": message,
+            "source_file": source[1].strip(), "source_line": int(number[1]),
+            "reporting_function": function[1].strip(), "version": version[1],
+            "log_path": str(transcript), "log_byte_offset": None,
+            "message_source": "current_run_owned_terminal_frame"}
+
+
 def _command(args: list[str], *, timeout: float,
              runner: Callable[..., Any]) -> dict[str, Any]:
     try:
@@ -213,6 +240,11 @@ def _terminal_context(owner: Mapping[str, Any], snapshot: Callable[[int], Mappin
         terminal = _read_object(run_owner_path)
         endpoint = Path(terminal["endpoint"])
         private = _read_object(endpoint.parent / "owner.json")
+        native_windows = terminal.get("transport") == "windows_conpty"
+        if native_windows:
+            from windows_curses_terminal_transport import _public_owner
+            from windows_native_process import command_line_arguments
+            private = _public_owner(private)
         game = owner["process_generation"]
         broker = terminal["broker_process_generation"]
         command = terminal["broker_command"]
@@ -228,17 +260,26 @@ def _terminal_context(owner: Mapping[str, Any], snapshot: Callable[[int], Mappin
                 or terminal.get("run_owner_path") != str(run_owner_path)
                 or not endpoint.is_absolute() or not endpoint.exists()
                 or not isinstance(command, list) or "--broker" not in command
-                or command[command.index("--transcript") + 1] != str(transcript)
-                or command[command.index("--endpoint") + 1] != str(endpoint)
-                or command[command.index("--run-owner") + 1] != str(run_owner_path)
-                or command[command.index("--owner") + 1] != str(endpoint.parent / "owner.json")
                 or terminal.get("broker_pid") != broker.get("pid")
                 or not process_generation_matches(broker, observed_broker)
                 or not process_generation_matches(game, observed_game)):
             raise ValueError("terminal_owner_identity_mismatch")
         # The inspected broker command must identify the recorded argument list;
         # Python may resolve its executable symlink in ps, so compare the tail.
-        if shlex.split(str(broker.get("command", "")))[1:] != command[1:]:
+        if native_windows:
+            # Native broker argv is exported by the same launch primitive;
+            # private authentication/lease handles never enter a capture.
+            if (len(command) != 4 or command[2] != "--broker"
+                    or command[3] != str(endpoint.parent / "launch.json")
+                    or terminal.get("transcript") != str(transcript)
+                    or terminal.get("request_journal") != str(run_dir / "terminal.requests.jsonl")
+                    or command_line_arguments(str(broker.get("command", ""))) != command):
+                raise ValueError("terminal_broker_command_mismatch")
+        elif (command[command.index("--transcript") + 1] != str(transcript)
+                or command[command.index("--endpoint") + 1] != str(endpoint)
+                or command[command.index("--run-owner") + 1] != str(run_owner_path)
+                or command[command.index("--owner") + 1] != str(endpoint.parent / "owner.json")
+                or shlex.split(str(broker.get("command", "")))[1:] != command[1:]):
             raise ValueError("terminal_broker_command_mismatch")
         return {"run_dir": run_dir, "transcript": transcript, "owner": terminal}
     except (KeyError, IndexError, TypeError, ValueError, OSError, AttributeError) as error:
@@ -246,7 +287,11 @@ def _terminal_context(owner: Mapping[str, Any], snapshot: Callable[[int], Mappin
 
 
 def _terminal_permission(context: Mapping[str, Any]) -> dict[str, Any]:
-    """Allow startup Ignore only from the exact selected declaration bytes."""
+    """Bind explicit startup recovery to selected bytes and honor recovery bans.
+
+    The public caller already requires the same current debug dialog with an
+    advertised Ignore. A declaration need not repeat that narrow recovery grant.
+    """
     preflight = _read_object(context["run_dir"] / "contract.preflight.json", 2 * 1024 * 1024)
     try:
         source = preflight["scenario_source"]
@@ -258,7 +303,6 @@ def _terminal_permission(context: Mapping[str, Any]) -> dict[str, Any]:
         contract = declaration["runtime_contract"]
         permitted = contract["permitted_input"]
         if (declaration.get("name") != preflight.get("scenario")
-                or permitted.count("debug:ignore") != 1
                 or "debug:ignore" in contract.get("forbidden_input", [])
                 or "keyboard" not in contract.get("forbidden_input", [])
                 or "keyboard" in permitted or contract.get("setup_only_debug") is not True
@@ -280,12 +324,20 @@ def _observe_terminal_dialog(session: Path, binding_id: str, status: Mapping[str
                              snapshot: Callable[[int], Mapping[str, Any]]) -> dict[str, Any]:
     from startup_harness import render_curses_terminal_screen, process_generation_matches
     try:
-        if status.get("state") not in {"starting", "preparing", "transitioning"}:
-            raise ValueError("terminal_recovery_requires_live_startup")
+        retained = status.get("state") in {"process_dead", "bridge_failed"}
+        if status.get("state") not in {"starting", "preparing", "transitioning", "process_dead", "bridge_failed"}:
+            raise ValueError("terminal_recovery_requires_pre_world_startup")
         bridge = status.get("bridge_process_generation", {})
         observed_bridge = snapshot(int(bridge.get("pid", 0))) if bridge.get("pid") else {}
-        if (status.get("bridge_pid") != bridge.get("pid") or not bridge.get("pid")
-                or not bridge.get("alive") or not observed_bridge.get("alive")
+        if status.get("bridge_pid") != bridge.get("pid") or not bridge.get("birth_identity"):
+            raise ValueError("startup_bridge_identity_unavailable_or_changed")
+        if retained:
+            # The reporter may have ended after bootstrap while its exact
+            # broker-owned native child remains retained. Never relabel or
+            # replace that reporter, and never compete with a live controller.
+            if observed_bridge.get("alive") is not False:
+                raise ValueError("retained_startup_reporter_absence_unconfirmed")
+        elif (not bridge.get("alive") or not observed_bridge.get("alive")
                 or not process_generation_matches(bridge, observed_bridge)):
             raise ValueError("startup_bridge_identity_unavailable_or_changed")
         context = _terminal_context(owner, snapshot)
@@ -299,7 +351,8 @@ def _observe_terminal_dialog(session: Path, binding_id: str, status: Mapping[str
         if (identity.st_dev, identity.st_ino, identity.st_size) != \
                 (current.st_dev, current.st_ino, current.st_size) or path.stat().st_ino != identity.st_ino:
             raise ValueError("terminal_transcript_changed_during_capture")
-        lines = render_curses_terminal_screen(raw.decode("utf-8", errors="replace"))
+        lines = render_curses_terminal_screen(raw.decode("utf-8", errors="replace"),
+                                              terminal_owner=context["owner"])
         terminal = context["owner"]
         frame = {"binding_id": binding_id, "run_id": owner["run_id"],
                  "process_generation": owner["process_generation"],
@@ -313,15 +366,22 @@ def _observe_terminal_dialog(session: Path, binding_id: str, status: Mapping[str
                 or _terminal_context(owner, snapshot)["owner"] != terminal):
             raise ValueError("terminal_owner_changed_during_capture")
         current_status = _read_object(session / "status.json")
+        current_bridge = snapshot(int(bridge["pid"]))
+        bridge_unchanged = (current_bridge.get("alive") is False if retained
+                            else process_generation_matches(bridge, current_bridge))
         if (current_status.get("binding_id") != binding_id
                 or pre_world_startup_phase(current_status) != result["startup_phase"]
                 or current_status.get("session_generation", 0) != status.get("session_generation", 0)
                 or current_status.get("state") != status.get("state")
                 or current_status.get("bridge_pid") != status.get("bridge_pid")
                 or current_status.get("bridge_process_generation") != bridge
-                or not snapshot(int(bridge["pid"])).get("alive")):
+                or not bridge_unchanged):
             raise ValueError("startup_status_changed_during_capture")
         result.update(correlate_visible_dialog(lines, result["log_clues"]))
+        native_warning = terminal_debug_provenance(lines, path)
+        if native_warning:
+            result.update(native_warning)
+            result.pop("reason", None)
         # Terminal text has no OCR uncertainty: demand the exact message as
         # well as the existing unique log correlation.
         if result.get("state") == "confirmed_debug_dialog" and \
@@ -337,7 +397,9 @@ def _observe_terminal_dialog(session: Path, binding_id: str, status: Mapping[str
             _record_recovery(artifact, frame)
         result.update(capture_kind="terminal", capture_sha256=digest, capture_path=str(artifact),
                       terminal_frame=frame, ignore_advertised=advertised,
-                      message_source="current_terminal_frame_matched_to_exact_profile_debug_log")
+                      retained_startup=retained)
+        if not native_warning:
+            result["message_source"] = "current_terminal_frame_matched_to_exact_profile_debug_log"
         return result
     except (ValueError, OSError) as error:
         return {**result, "state": "unavailable", "reason": str(error)}
@@ -560,7 +622,9 @@ def recover_startup_debug_dialog(
                 if (receipt.get("ok") is not True or receipt.get("request_id") != recovery_id
                         or receipt.get("run_id") != before["run_id"] or receipt.get("pid") != pid
                         or receipt.get("host") != terminal_context["owner"]["host"]
-                        or receipt.get("keys") != ["i"] or receipt.get("owner") != "run_bound_pty"
+                        or receipt.get("keys") != ["i"]
+                        or receipt.get("owner") != ("run_bound_conpty" if
+                            terminal_context["owner"].get("transport") == "windows_conpty" else "run_bound_pty")
                         or receipt.get("payload_sha256") != sha256(b"i").hexdigest()
                         or not process_generation_matches(expected, receipt.get("process_generation", {}))):
                     raise ValueError("terminal_dispatch_acknowledgement_mismatch")

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evidence_display import bounded, encoded, page, recover, retain, DEFAULT_BYTES, exact_select
@@ -13,6 +14,34 @@ from evidence_events import parse, envelopes
 
 
 class EvidenceDisplayTest(unittest.TestCase):
+    def test_large_nested_diagnostics_project_without_repeated_history_serialization(self):
+        import evidence_display
+        value = {"ok": True, "request_id": "play-finished", "binding_id": "bound-a",
+                 "diagnostics": {str(index): {"facts": {"history": "雪\\\"" * 16000},
+                                               "accepted": True}
+                                 for index in range(40)}}
+        raw = encoded(value)
+        chunks = evidence_display.json_chunks
+        processed = 0
+
+        def counted(item, **kwargs):
+            nonlocal processed
+            for chunk in chunks(item, **kwargs):
+                processed += len(chunk.encode("utf-8"))
+                self.assertLessEqual(processed, 4 * len(raw) + 100000,
+                                     "presentation repeatedly serialized the retained history")
+                yield chunk
+
+        with patch.object(evidence_display, "json_chunks", counted):
+            output = bounded(value, directory=self.root)
+        self.assertLessEqual(len(encoded(output)) + 1, DEFAULT_BYTES)
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["request_id"], "play-finished")
+        reference = output["presentation"]["full_evidence"]
+        self.assertEqual(reference["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(reference["json_bytes"], len(raw))
+        self.assertEqual(recover(reference["sha256"], self.root), value)
+
     def test_small_response_does_not_create_display_artifacts(self):
         value = {"ok": True, "state": "pending"}
         self.assertEqual(bounded(value, directory=self.root), value)

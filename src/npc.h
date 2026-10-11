@@ -521,12 +521,45 @@ struct dangerous_sound {
     int volume = 0;
 };
 
+// Durable knowledge of an observed taking. These are source facts, not item
+// pointers, a custody ledger, faction war or an omniscient destination target.
+struct npc_taken_property {
+    std::int64_t source_uid = 0;
+    itype_id type;
+    int quantity = 0;
+    faction_id owner;
+    tripoint_abs_ms position;
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &json );
+};
+
+struct npc_property_theft {
+    std::string incident_key;
+    std::string site_id;
+    std::string operation_id;
+    int generation = 0;
+    character_id collector_id;
+    character_id receiver_id;
+    faction_id wronged_faction;
+    std::vector<character_id> culprit_ids;
+    std::vector<npc_taken_property> property;
+    time_point when = calendar::turn_zero;
+    // Native voluntary pickup supplies evidence of involvement; merely agreeing
+    // to an extorted payment never does. Pickup keeps its ordinary response.
+    bool voluntary_pickup = false;
+    bool valid() const;
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &json );
+};
+
 // Finite knowledge from a received unit alert, independent of combat targets.
 struct npc_alarm {
     std::string group;
     character_id source_id;
     tripoint_abs_ms incident;
     time_point until = calendar::turn_zero;
+    // Absent on legacy alerts; never infer an attack from their coordinates.
+    std::optional<bool> received_attack = std::nullopt;
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &json );
 };
@@ -1321,6 +1354,14 @@ class npc : public Character
                            int heard_volume, const tripoint_bub_ms &spos );
 
         void witness_thievery( item *it ) override;
+        void remember_witnessed_pickup( const item &goods, const Character &thief );
+        bool learn_property_theft( const npc_property_theft &theft );
+        bool knows_property_theft_by( character_id culprit ) const;
+        void announce_property_theft( const std::string &incident_key );
+        bool receive_property_theft_report( const sounds::property_theft_report &report );
+        std::vector<npc_property_theft> known_property_thefts;
+        // Actual launched attacks during a known theft conflict, not faction war.
+        std::set<character_id> property_conflict_attackers;
 
         /* shift() works much like monster::shift(), and is called when the player moves
          * from one submap to an adjacent submap.  It updates our position (shifting by
@@ -1540,6 +1581,10 @@ class npc : public Character
         bool has_omt_destination() const;
         // Pick a place to go
         void set_omt_destination();
+        // Prepare the owning native route without spending a movement action.
+        // Validated cached routes must reach the current waypoint boundary.
+        bool prepare_omt_destination_path( const std::function<bool(
+                                          const std::vector<tripoint_bub_ms> & )> &path_validator = {} );
         // Move there; on the micro scale
         void go_to_omt_destination( const std::function<bool(
                                     const std::vector<tripoint_bub_ms> & )> &path_validator = {} );
@@ -1584,6 +1629,9 @@ class npc : public Character
          * Do not use when placing an NPC in mapgen.
          */
         void travel_overmap( const tripoint_abs_omt &pos );
+        // Deterministic square for a preflighted paired abstract move. Uses the
+        // same native arrival and overmap-container transfer as ordinary travel.
+        void travel_overmap( const tripoint_abs_ms &position );
         npc_attitude get_attitude() const override;
         void set_attitude( npc_attitude new_attitude );
         void set_mission( npc_mission new_mission );
@@ -1722,11 +1770,18 @@ class npc : public Character
         // after loading a save whose member was already in ordinary sleep.
         void reconcile_active_assault_routine( const std::string &operation_key );
         std::string faction_alarm_group() const;
-        bool raise_faction_alarm( const tripoint_abs_ms &incident );
+        bool raise_faction_alarm( const tripoint_abs_ms &incident, bool received_attack = false );
         bool receive_faction_alarm( const npc_alarm &alarm, int heard_volume );
         bool has_active_faction_alarm() const;
+        // Scouting movement uses current incident evidence; alert delivery/waking stays finite.
+        bool faction_alarm_requires_response() const;
+        bool scouting_creature_requires_response( const Creature &creature,
+                std::string_view caller ) const;
         bool has_active_alarm_response() const;
         void reconcile_alarm_response();
+        bool has_active_operation_duty() const;
+        // Outside effect iteration, before sleep can exclude the actor's motor.
+        void reconcile_active_operation_sleep();
         void interrupt_ordinary_sleep_for_duty();
         bool duty_incapacitated() const;
         std::optional<npc_alarm> faction_alarm;
@@ -1878,6 +1933,11 @@ class npc : public Character
          * Retroactively update npc.
          */
         void on_load( map *here );
+        /** Native elapsed body/effect catch-up in the actor's current map.
+         * Does not admit a loaded actor, assign moves or change its orders.
+         * Consumes last_updated exactly once, with the ordinary load bounds.
+         */
+        time_duration catch_up_body();
         /**
          * Update body, but throttled.
          */

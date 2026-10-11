@@ -18,6 +18,8 @@
 #include "cursesdef.h"
 #include "input_context.h"
 #include "inventory_ui.h"
+#include <cstdint>
+#include <tuple>
 #include "item_location.h"
 #include "memory_fast.h"
 #include "point.h"
@@ -63,7 +65,8 @@ class trade_selector : public inventory_drop_selector
 class trade_preset : public inventory_selector_preset
 {
     public:
-        explicit trade_preset( Character const &you, Character const &trader );
+        explicit trade_preset( Character const &you, Character const &trader,
+                               bool encounter_payment = false );
 
         bool is_shown( item_location const &loc ) const override;
         std::string get_denial( const item_location &loc ) const override;
@@ -71,6 +74,19 @@ class trade_preset : public inventory_selector_preset
 
     private:
         Character const &_u, &_trader;
+        const bool _encounter_payment;
+};
+
+// Encounter-only source population is shared with demand and commit.
+void add_encounter_trade_sources( inventory_selector &selector, Character &payer,
+                                  const Character &buyer, int item_radius, int ally_radius, int z_radius );
+std::vector<item_location> encounter_trade_items( Character &payer, const Character &buyer,
+        int item_radius, int ally_radius, int z_radius, bool encounter_payment = true );
+
+struct trade_source_snapshot {
+    item_location location;
+    tripoint_abs_ms position;
+    std::vector<std::tuple<std::int64_t, itype_id, faction_id, int>> items;
 };
 
 class trade_ui
@@ -89,6 +105,9 @@ class trade_ui
             currency_t value_trader = 0;
             select_t items_you;
             select_t items_trader;
+            std::vector<trade_source_snapshot> source_snapshots;
+            bool encounter_payment = false;
+            std::string encounter_identity;
         };
 
         enum class event { TRADECANCEL = 0, TRADEOK = 1, SWITCH = 2, NEVENTS = 3 };
@@ -96,7 +115,7 @@ class trade_ui
         trade_ui( party_t &you, npc &trader, currency_t cost = 0, std::string title = _( "Trade" ),
                   int you_nearby_item_radius = 1, int you_nearby_ally_radius = 0,
                   basecamp *you_basecamp = nullptr, bool encounter_only = false,
-                  bool goods_to_stash = false );
+                  bool goods_to_stash = false, int nearby_z_radius = 0 );
 
         void pushevent( event const &ev );
 
@@ -128,8 +147,11 @@ class trade_ui
         panecont_t::size_type _cpane = 0;
         bool _exit = true;
         bool _traded = false;
+        std::vector<trade_source_snapshot> _source_snapshots;
         const currency_t _requested_cost;
         const bool _goods_to_stash;
+        const bool _encounter_payment;
+        const std::string _encounter_identity;
         currency_t _cost = 0;
         currency_t _balance = 0;
         currency_t _bank = 0;

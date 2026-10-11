@@ -775,7 +775,7 @@ ifeq ($(TARGETSYSTEM),WINDOWS)
   else
     LDFLAGS += -static
   endif
-  W32FLAGS += -Wl,-stack,12000000,-subsystem,windows
+  W32FLAGS += -Wl,-stack,12000000,-subsystem,$(if $(filter 1,$(TILES)),windows,console)
   RFLAGS = -J rc -O coff
   ifeq ($(NATIVE), win64)
     RFLAGS += -F pe-x86-64
@@ -952,10 +952,18 @@ else
       endif
   endif
 
-  # Link to ncurses if we're using a non-tiles, Linux build
+  # Native Windows static headers and import/static libraries must agree.
+  NCURSES_PKG_CONFIG_FLAGS =
+  ifeq ($(TARGETSYSTEM),WINDOWS)
+    ifneq ($(DYNAMIC_LINKING),1)
+      NCURSES_PKG_CONFIG_FLAGS = --static
+    endif
+  endif
+
+  # Select curses for the native terminal target.
   ifeq ($(HAVE_PKGCONFIG),1)
-    CXXFLAGS += $(subst -I,-isystem ,$(shell $(PKG_CONFIG) --cflags $(NCURSES_PREFIX)))
-    LDFLAGS += $(shell $(PKG_CONFIG) --libs $(NCURSES_PREFIX))
+    CXXFLAGS += $(subst -I,-isystem ,$(shell $(PKG_CONFIG) $(NCURSES_PKG_CONFIG_FLAGS) --cflags $(NCURSES_PREFIX)))
+    LDFLAGS += $(shell $(PKG_CONFIG) $(NCURSES_PKG_CONFIG_FLAGS) --libs $(NCURSES_PREFIX))
   else
     ifeq ($(HAVE_NCURSES5CONFIG),1)
       CXXFLAGS += $(shell $(NCURSES_PREFIX)5-config --cflags)
@@ -1284,8 +1292,16 @@ ifeq ($(RELEASE), 1)
   endif
 endif
 
-$(PCH_P): $(PCH_H)
-	-$(COMPILE.cc) $(OUTPUT_OPTION) -MMD -MP -Wno-error $<
+# Native Windows GCC with the forced PCH include can omit project headers
+# from -MMD output.  Keep all headers so changes invalidate their consumers.
+ifeq ($(TARGETSYSTEM),WINDOWS)
+  DEPFLAGS = -MD -MP
+else
+  DEPFLAGS = -MMD -MP
+endif
+
+$(PCH_P): $(PCH_H) Makefile
+	-$(COMPILE.cc) $(OUTPUT_OPTION) $(DEPFLAGS) -Wno-error $<
 
 $(BUILD_PREFIX)$(TARGET_NAME).a: $(OBJS)
 	$(AR) rcs $(AR_FLAGS) $(BUILD_PREFIX)$(TARGET_NAME).a $(filter-out $(ODIR)/main.o $(ODIR)/messages.o,$(OBJS))
@@ -1299,7 +1315,7 @@ $(SRC_DIR)/version.h: version-force
           VERSION_STRING="$$CAOL_RELEASE_VERSION" ; \
         elif [ -e ".git" ]; then \
           GITVERSION=$$( git describe --tags --always --match "[0-9A-Z]*.[0-9A-Z]*" --match "cdda-experimental-*" --exact-match 2>/dev/null || true ) && \
-          GITSHA=$$( git rev-parse --short HEAD ) && \
+          GITSHA=$$( git rev-parse --short=10 HEAD ) && \
           DIRTYFLAG=$$( [ -z "$$(git -c core.autocrlf=input -c core.safecrlf=false status --porcelain --untracked-files=all -- . ':(exclude)lang/po/**')" ] || echo "-dirty") && \
           VERSION_STRING="$$GITVERSION $$GITSHA$$DIRTYFLAG" && \
           VERSION_STRING="$${VERSION_STRING## }" ; \
@@ -1345,8 +1361,13 @@ $(ODIR)/third-party/%.o: $(SRC_DIR)/third-party/%.cc
 $(ODIR)/third-party/%.o: $(SRC_DIR)/third-party/%.c
 	$(COMPILE.c) $(OUTPUT_OPTION) -x c $(CFLAGS) -w -MMD -MP $<
 
-$(ODIR)/%.o: $(SRC_DIR)/%.cpp $(PCH_P)
-	$(COMPILE.cc) $(OUTPUT_OPTION) $(PCHFLAGS) -MMD -MP $<
+# snmalloc is included through -isystem; retain its headers in allocator deps.
+# Makefile also invalidates old allocator objects when this recipe changes.
+$(ODIR)/cata_allocator.o: $(SRC_DIR)/cata_allocator.cpp $(PCH_P) Makefile
+	$(COMPILE.cc) $(OUTPUT_OPTION) $(PCHFLAGS) -MD -MP $<
+
+$(ODIR)/%.o: $(SRC_DIR)/%.cpp $(PCH_P) Makefile
+	$(COMPILE.cc) $(OUTPUT_OPTION) $(PCHFLAGS) $(DEPFLAGS) $<
 
 $(ODIR)/%.o: $(SRC_DIR)/%.c
 	$(COMPILE.c) $(OUTPUT_OPTION) -x c $(CFLAGS) -MMD -MP $<
@@ -1357,6 +1378,8 @@ $(ODIR)/%.o: $(SRC_DIR)/%.rc
 $(ODIR)/resource.o: data/cataicon.ico data/application_manifest.xml
 
 src/version.cpp: src/version.h
+# Bind the embedded revision even when native dependency output omits it.
+$(ODIR)/version.o: $(SRC_DIR)/version.h
 
 TEST_MO := data/mods/TEST_DATA/lang/mo/ru/LC_MESSAGES/TEST_DATA.mo
 

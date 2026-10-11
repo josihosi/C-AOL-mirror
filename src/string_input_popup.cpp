@@ -553,9 +553,8 @@ const std::string &string_input_popup::query_string( const bool loop, const bool
         }
 
         const std::string action = ctxt->handle_input();
-        // The blocking input context consumes transport requests itself.
-        // Apply its result before a loop=false query returns and destroys
-        // this invocation's consumer, text and cancellation flags.
+        // The input owner dispatches accepted transport before returning.
+        // Apply that native result before a loop=false editor yields a step.
         if( semantic_scope && apply_semantic_result() ) {
             return _text;
         }

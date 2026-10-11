@@ -399,6 +399,10 @@ struct sortie_observation {
     sortie_observation_sense sense = sortie_observation_sense::visual;
     character_id observer_id;
     tripoint_abs_omt source_omt;
+    // Optional actual smoke geometry; old records remain unavailable. The
+    // exterior component never replaces emitter/site identity or sample time.
+    std::optional<tripoint_abs_ms> emitter_ms;
+    std::optional<tripoint_abs_ms> observable_ms;
     tripoint_abs_omt receiver_omt;
     int bucket_start_minutes = -1;
     int strength = 0;
@@ -627,6 +631,20 @@ enum class local_handoff_commit_result {
     rolled_back,
 };
 
+// Route experience belongs to the assessment, not its optical fact ledger.
+// A recovery time closes this interruption without erasing where/why it happened.
+struct scout_watch_interruption {
+    tripoint_abs_omt lookout;
+    int minutes = -1;
+    std::string cause;
+    int watch_started_minutes = -1;
+    int resumed_minutes = -1;
+
+    bool pending() const { return resumed_minutes < 0; }
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &jo );
+};
+
 struct scout_assessment_state {
     int schema_version = 3;
     int observation_started_minutes = -1;
@@ -654,6 +672,7 @@ struct scout_assessment_state {
     int pinned_target_revision = 0;
     int next_eligible_minutes = -1;
     std::string exit_reason;
+    std::optional<scout_watch_interruption> interruption;
 
     void clear();
     void serialize( JsonOut &json ) const;
@@ -875,6 +894,12 @@ struct hostile_operation_state {
     // Communication belongs to this reservation, not to simulation ownership.
     // A camp receiver authorizes player control of the camp response, never
     // knowledge of a distant avatar or use of that avatar's inventory.
+    // The last successful native emission is bounded to this exact reservation.
+    // The receiver fields below also retain an actually heard, not-yet-awake
+    // recipient while normal sleep effect expiry completes.
+    int shakedown_demand_emitted_turn = -1;
+    int shakedown_demand_volume = 0;
+    character_id shakedown_demand_speaker_id;
     bool shakedown_contact_established = false;
     character_id shakedown_receiver_id;
     bool shakedown_receiver_is_avatar = false;
@@ -1161,6 +1186,12 @@ struct site_record {
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &jo );
 
+    private:
+        friend struct world_state;
+        void deserialize( const JsonObject &jo,
+                          const std::vector<hostile_target_opportunity_record> &claims );
+
+    public:
     bool has_member( character_id npc_id ) const;
     member_record *find_member( character_id npc_id );
     const member_record *find_member( character_id npc_id ) const;
@@ -1177,6 +1208,10 @@ struct site_record {
     active_outing_state *active_external_outing();
     const active_outing_state *active_external_outing() const;
 };
+
+// A crossing is historical evidence for this exact operation/owner epoch.
+// Its clock may precede current progress, but never belong to another owner.
+bool crossing_receipt_has_current_owner( const active_outing_state &outing );
 
 struct world_state {
     struct crossing_receipt_identity {
@@ -1528,6 +1563,10 @@ struct structural_signal_read {
     sortie_observation_sense sense = sortie_observation_sense::smoke;
     structural_sound_kind sound_kind = structural_sound_kind::none;
     tripoint_abs_omt source_omt;
+    // Optional actual smoke geometry; old records remain unavailable. The
+    // exterior component never replaces emitter/site identity or sample time.
+    std::optional<tripoint_abs_ms> emitter_ms;
+    std::optional<tripoint_abs_ms> observable_ms;
     // A physical stationary watch reader supplies the actual capable member.
     // Unset preserves the ordinary travel/camp reader's existing leader basis.
     character_id observer_id;
@@ -2040,6 +2079,16 @@ structural_watch_route_apply_result apply_structural_watch_route_selection(
     const std::vector<tripoint_abs_omt> &target_footprint,
     const std::vector<watch_selection_candidate> &candidates,
     const std::vector<tripoint_abs_omt> &alternate_watch_shared_route = {} );
+bool remember_scout_watch_interruption(
+    site_record &site, const simulation_advance_cursor &cursor,
+    const std::string &cause, int current_minutes );
+bool refresh_interrupted_scout_watch_route(
+    site_record &site, const simulation_advance_cursor &cursor,
+    const structural_route_read &read, int current_minutes );
+watch_selection_result select_scout_watch_candidate(
+    const site_record &site, const std::string &lead_id,
+    const std::vector<tripoint_abs_omt> &footprint,
+    const std::vector<watch_selection_candidate> &candidates, int current_minutes );
 bool local_elevated_signal_watch_recovery_needed( const site_record &site );
 structural_watch_route_apply_result recover_local_elevated_signal_watch(
     site_record &site, const simulation_advance_cursor &expected_cursor,
@@ -2057,6 +2106,10 @@ int ordinary_scout_sortie_limit_minutes();
 sight_avoid_decision choose_sight_avoid_reposition( const tripoint_abs_ms &current_tile,
         bool current_exposure, bool recent_exposure,
         const std::vector<sight_avoid_candidate> &candidates, bool current_smoke_obscured = false );
+// Current unresolved member duty, independent of local/abstract motor ownership.
+// A cursor alone, a historical reservation or an arbitrary destination is not duty.
+const site_record *active_operation_duty_site_for( const world_state &state,
+        character_id npc_id );
 std::optional<simulation_advance_cursor> current_external_simulation_cursor(
         const site_record &site );
 local_projection_reconciliation_result reconcile_loaded_local_projections(
@@ -2124,9 +2177,12 @@ local_handoff_commit_result commit_local_pair_dematerialization( site_record &si
 bool begin_abstract_pair_homeward_resume( site_record &site,
         const simulation_advance_cursor &expected_cursor, int current_minutes,
         const std::vector<local_abstract_resume_progress_read> &member_reads );
+// Validate the complete next snapshot before invoking the preflighted native
+// motor. Its callback must commit all surviving actors without refusal.
 bool record_local_pair_abstract_resume_progress( site_record &site,
         const simulation_advance_cursor &expected_cursor, int current_minutes,
-        const std::vector<local_abstract_resume_progress_read> &member_reads );
+        const std::vector<local_abstract_resume_progress_read> &member_reads,
+        const std::function<void()> &commit_members = {} );
 bool record_structural_member_physical_return( site_record &site,
         const simulation_advance_cursor &expected_cursor, character_id member_id,
         const tripoint_abs_omt &returned_omt, int current_minutes );

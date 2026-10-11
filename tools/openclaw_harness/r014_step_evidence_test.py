@@ -7,6 +7,7 @@ import copy
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -55,6 +56,7 @@ class R014StepEvidenceTest( unittest.TestCase ):
                 ))
 
     def test_menu_handoff_publishes_live_descriptor_then_rechecks_world( self ) -> None:
+        from cockpit_witness_test import CHARTER
         run_id = "run-a"
         menu_owner = {
             "status": "required_state_present",
@@ -122,7 +124,7 @@ class R014StepEvidenceTest( unittest.TestCase ):
                                       return_value=world_metadata) as strict_bootstrap, \
                     mock.patch.object(startup_harness, "open_cockpit_game_service",
                                       return_value=service), \
-                    mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=None), \
+                    mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=CHARTER), \
                     mock.patch.object(startup_harness.time, "sleep"), \
                     mock.patch.object(startup_harness, "serve_cockpit_live",
                                       side_effect=finish_live_session):
@@ -130,6 +132,8 @@ class R014StepEvidenceTest( unittest.TestCase ):
                     12345, run_dir, steps, profile="profile-a", world="Test00",
                     grants_gameplay_proof=True,
                 )
+                descriptor = json.loads(
+                    (run_dir / "select_saved_character.cockpit_live_session.json").read_text())
 
         descriptor_lines = [line for line in output.getvalue().splitlines()
                             if "cockpit_live_session" in line]
@@ -142,6 +146,13 @@ class R014StepEvidenceTest( unittest.TestCase ):
         self.assertEqual(reports[0]["metadata"]["frame_state"], "world")
         self.assertEqual(reports[1]["kind"], "wait")
         self.assertTrue(reports[2]["metadata"]["gameplay_credit"])
+        self.assertEqual(descriptor["witness"]["action"], "run.finish")
+        self.assertEqual(descriptor["witness"]["outcome"], CHARTER["claim"])
+        self.assertNotIn("charter", descriptor["witness"])
+        self.assertIn("optional", descriptor["witness"]["instruction"])
+        self.assertNotIn("sequence", descriptor["witness"])
+        self.assertIn("one operation", descriptor["termination"])
+        self.assertNotIn("run.witness then", descriptor["termination"])
 
     def test_menu_handoff_without_world_keeps_zero_credit_and_stops( self ) -> None:
         run_id = "run-a"
@@ -437,6 +448,155 @@ class R014StepEvidenceTest( unittest.TestCase ):
             self.assertEqual( second["final_report_ref"], persisted.name )
             self.assertTrue( crossing.is_file() )
             self.assertTrue( persisted.is_file() )
+
+
+class SavedInputOwnerBootstrapTest(unittest.TestCase):
+    """Real selector/bootstrap/factory/public reader; no native action dispatch."""
+
+    @staticmethod
+    def owner(sequence, kind, actions, run_id="saved-run"):
+        return {"event": "surface_descriptor", "schema_version": 1,
+                "run_id": run_id, "process_instance": "fixture-process",
+                "sequence": sequence, "game_turn": 5228405,
+                "game_minutes": 7940, "surface_id": "surface:" + str(sequence),
+                "frame_id": "frame:" + str(sequence), "kind": kind,
+                "breadcrumbs": [kind], "payload": {}, "valid_actions": actions}
+
+    @staticmethod
+    def encode(events):
+        return b"".join((startup_harness.SEMANTIC_STEP_PREFIX + json.dumps(x) + "\n").encode()
+                        for x in events)
+
+    def pipeline(self, events, *, saved=True, strict=False, changed_birth=False, mirror=None, native_bytes=None, run_id="saved-run", declared_steps=None):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "run"
+            run.mkdir()
+            config = root / "config"
+            config.mkdir()
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            native = run / "semantic.native.events.jsonl"
+            native.write_bytes(self.encode(events) if native_bytes is None else native_bytes)
+            # Older mirrored owner must not replace a later same-process native owner.
+            (config / "debug.log").write_bytes(self.encode(events[:1] if mirror is None else mirror))
+            (run / startup_harness.TRANSITION_EVENT_BINDING_FILENAME).write_text(
+                json.dumps({"run_id": run_id}))
+            generation = startup_harness.process_generation_snapshot(os.getpid())
+            if changed_birth:
+                generation["birth_identity"] = "wrong-birth"
+            (run / "process.json").write_text(json.dumps({"pid": os.getpid(),
+                "process_generation": generation}))
+            checkpoint = {"required_state": "native_input_owner", "required_actions": [],
+                          "allow_saved_native_input_owner": True,
+                          "require_initial_hud_world_ready_frame": strict}
+            steps = [{"kind": "native_semantic_bootstrap", "label": "bind_saved_owner",
+                      "native_semantic_checkpoint": checkpoint},
+                     {"kind": "cockpit_live_session", "label": "story",
+                      "live_operations": ["game.act"], "cleanup_on_finish": False}]
+            if declared_steps is not None:
+                steps = copy.deepcopy(declared_steps)
+            public = []
+            services = []
+            real_serve = startup_harness.serve_cockpit_live
+
+            def serve(service, _stdin, _stdout):
+                services.append(service)
+                output = io.StringIO()
+                # EOF is fixture-only and cleanup_on_finish=False; no game exists.
+                status = real_serve(service, io.StringIO('{"action":"game.observe"}\n'), output)
+                for line in output.getvalue().splitlines():
+                    wire = json.loads(line)
+                    public.append(startup_harness.resolve_wire(wire,
+                        directory=service.run_channel.archive.path.parent,
+                        binding_id=service.run_channel._binding_id))
+                return status
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), \
+                    mock.patch.object(startup_harness, "config_dir_for_profile", return_value=config), \
+                    mock.patch.object(startup_harness, "semantic_wake_pipe_contract",
+                                      return_value={"status": "bound", "path": "fixture-only"}), \
+                    mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=None), \
+                    mock.patch.dict(os.environ, {"OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": "fixture-binding",
+                                                 "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(root)}), \
+                    mock.patch.object(startup_harness, "execute_semantic_act") as dispatch, \
+                    mock.patch.object(startup_harness, "cleanup_game_process") as cleanup, \
+                    mock.patch.object(startup_harness, "serve_cockpit_live", side_effect=serve):
+                reports = startup_harness.execute_probe_steps(os.getpid(), run, steps,
+                    profile="saved-profile", world="TestSetup00",
+                    immutable_saved_world_snapshot=snapshot if saved else None,
+                    semantic_bootstrap_timeout_seconds=0, semantic_bootstrap_poll_seconds=0)
+                dispatch.assert_not_called()
+                cleanup.assert_not_called()
+            for service in services:
+                # Factory retained the selected physical source, not the mirror's byte cursor.
+                with mock.patch.object(startup_harness, "config_dir_for_profile", return_value=config):
+                    native_frame = service.run_channel._read_native_frame()
+                    selected = startup_harness.semantic_step_source_trace("saved-profile", run)
+                self.assertEqual(native_frame["_source_path"], str(selected.resolve()))
+                self.assertGreater(native_frame["_source_end"], native_frame["_source_offset"])
+                service.run_channel.archive.close()
+            self.assertFalse((run / "semantic.requests.jsonl").exists())
+            envelopes = [json.loads(line) for line in output.getvalue().splitlines()
+                         if "cockpit_live_session" in line]
+            return reports, public, envelopes, str(native.resolve())
+
+    def test_saved_activity_distraction_prompt_reaches_actual_public_factory(self):
+        activity = self.owner(1, "activity_wait", [
+            {"id": "activity.pause", "stable_id": "", "label": "Pause", "enabled": True}])
+        distraction = self.owner(204, "activity_distraction", [
+            {"id": "activity.continue", "stable_id": "", "label": "Continue", "enabled": True}])
+        prompt = self.owner(205, "prompt", [
+            {"id": "prompt.choose", "stable_id": "prompt-option:2", "label": "NO", "enabled": True}])
+        for current in (activity, distraction, prompt):
+            with self.subTest(kind=current["kind"]):
+                turns = [{"event": "turn", "run_id": "saved-run"} for _ in range(80)]
+                records = [activity, *turns, current] if current is not activity else [activity]
+                reports, public, envelopes, source = self.pipeline(records)
+                self.assertEqual(reports[0]["metadata"]["status"], "required_state_present")
+                self.assertEqual(reports[0]["metadata"]["frame_state"], current["kind"])
+                self.assertEqual(reports[0]["metadata"]["initial_world_readiness"],
+                                 "not_claimed_saved_continuation")
+                self.assertFalse(reports[0]["metadata"]["gameplay_credit"])
+                self.assertEqual(len(envelopes), 1)
+                self.assertTrue(public[0]["ok"], public[0])
+                self.assertEqual(public[0]["result"]["surface"]["kind"], current["kind"])
+                self.assertTrue(public[0]["operation_availability"]["game.act"])
+                self.assertFalse(reports[1]["metadata"]["gameplay_credit"])
+
+    def test_saved_owner_contract_refuses_fresh_start_strict_claim_or_changed_birth(self):
+        event = self.owner(1, "activity_wait", [
+            {"id": "activity.pause", "stable_id": "", "label": "Pause", "enabled": True}])
+        for options in ({"saved": False}, {"strict": True}, {"changed_birth": True}):
+            with self.subTest(options=options):
+                reports, public, envelopes, _ = self.pipeline([event], **options)
+                self.assertIn("abort", reports[0])
+                self.assertFalse(public)
+                self.assertFalse(envelopes)
+
+    def test_newer_mirror_does_not_replace_native_bootstrap_owner(self):
+        action = {"id": "prompt.choose", "stable_id": "prompt-option:2", "label": "NO", "enabled": True}
+        native = self.owner(204, "activity_distraction", [action])
+        mirror = self.owner(205, "prompt", [action])
+        reports, public, envelopes, _ = self.pipeline([native], mirror=[mirror])
+        self.assertEqual(reports[0]["metadata"]["frame_state"], "activity_distraction")
+        self.assertEqual(public[0]["result"]["sequence"], 204)
+        self.assertEqual(len(envelopes), 1)
+        foreign = {**mirror, "process_instance": "other-process"}
+        reports, public, envelopes, _ = self.pipeline([native], mirror=[foreign])
+        self.assertEqual(public[0]["result"]["sequence"], 204)
+
+    def test_current_owner_refuses_foreign_or_malformed_records(self):
+        action = {"id": "prompt.choose", "stable_id": "prompt-option:2", "label": "NO", "enabled": True}
+        foreign = self.owner(205, "prompt", [action], run_id="foreign-run")
+        malformed = self.owner(205, "prompt", [action, action])
+        for event in (foreign, malformed):
+            with self.subTest(event=event):
+                reports, public, envelopes, _ = self.pipeline([event])
+                self.assertIn("abort", reports[0])
+                self.assertFalse(public)
+                self.assertFalse(envelopes)
 
 
 if __name__ == "__main__":

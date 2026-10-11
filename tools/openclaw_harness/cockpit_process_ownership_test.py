@@ -163,6 +163,27 @@ class ProcessOwnershipTest(unittest.TestCase):
         self.assertEqual(cleanup["status"], "retained_process_identity_changed")
         kill.assert_not_called()
 
+    def test_windows_explicit_cleanup_retains_native_quit_blocker(self):
+        class StillAliveInspector:
+            def inspect(self, pid):
+                return harness.ProcessSnapshot(
+                    pid=pid, alive=True, birth_identity="birth-123",
+                    command="C:/test/cataclysm.exe",
+                )
+
+        expected = {
+            "pid": 123, "birth_identity": "birth-123", "command": "C:/test/cataclysm.exe",
+        }
+        with patch.object(harness.os, "name", "nt"), patch.object(harness.os, "kill") as kill:
+            result = harness.cleanup_game_process(
+                123, explicit_quit=True, expected_process_generation=expected,
+                inspector=StillAliveInspector(),
+            )
+        self.assertEqual(result["status"], "graceful_quit_unconfirmed_process_retained")
+        self.assertEqual(result["expected_process_generation"], expected)
+        self.assertFalse(result["native_exit_credit"])
+        kill.assert_not_called()
+
     def test_explicit_cleanup_does_not_escalate_to_forced_kill(self):
         class StillAliveInspector:
             def inspect(self, pid):
@@ -304,7 +325,7 @@ class ProcessOwnershipTest(unittest.TestCase):
 
     def test_exit_receipt_binds_observed_return_code_to_owned_run(self):
         with tempfile.TemporaryDirectory() as tmp:
-            harness.record_bridge_game_exit(Mock(pid=123), {
+            harness.record_bridge_game_exit(Mock(pid=123, _bridge_exit_generation={"pid": 123, "birth_identity": "birth", "command": "game"}), {
                 "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": tmp,
                 "OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": "bound",
                 "OPENCLAW_HARNESS_RUN_ID": "run"}, 0)
@@ -332,5 +353,153 @@ class ProcessOwnershipTest(unittest.TestCase):
                     "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(Path(tmp) / "missing"),
                     "OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": "bound"})
             process.terminate.assert_not_called()
+
+class DisposableConPTYOwnershipTest(unittest.TestCase):
+    def fixture(self, *, alive, disposable=True):
+        from windows_native_process import NativeConPTY
+        child = NativeConPTY.__new__(NativeConPTY)
+        child._disposable_test = disposable
+        child.child_role = 'disposable_test' if disposable else 'game'
+        child._test_generation = {'pid': 123, 'birth_identity': 'windows-filetime:456'}
+        child.pi = Mock(process=77, pid=123)
+        child.k = Mock()
+        child.k.TerminateProcess.return_value = True
+        child.k.WaitForSingleObject.return_value = 0
+        child.alive = Mock(side_effect=alive)
+        child.exit_code = Mock(return_value=1)
+        child.transcript_path = Path('retained-fixture.vt')
+        child.reader_error = ''
+        child._closed = False
+        child.close_after_exit = Mock(side_effect=lambda: setattr(child, '_closed', True))
+        return child
+
+    def test_utf8_setup_preserves_fixture_or_gameplay_ownership(self):
+        from windows_native_process import NativeConPTY
+        for disposable in (False, True):
+            with self.subTest(disposable=disposable), tempfile.TemporaryDirectory() as directory:
+                child = self.fixture(alive=[], disposable=disposable)
+                child.transcript_path = Path(directory) / 'fixture.vt'
+                receipt = child.transcript_path.with_name('fixture.vt.utf8.json')
+                def launch_helper(argv, cwd):
+                    receipt.write_text(json.dumps({'pid': 123, 'set_output_ok': True,
+                        'after_output_cp': 65001, 'before_input_cp': 437, 'after_input_cp': 437}))
+                    return {'pid': 123}
+                child._launch_child = launch_helper
+                child.exit_code.return_value = 0
+                child._prime_utf8(Path(directory))
+                self.assertEqual(child._disposable_test, disposable)
+                self.assertEqual(child.child_role, 'unlaunched')
+                self.assertEqual(child.utf8_setup_receipt['exit_code'], 0)
+
+    def test_settled_fixture_cannot_reuse_closed_handles(self):
+        child = self.fixture(alive=[])
+        child._closed = True
+        with self.assertRaisesRegex(RuntimeError, 'already_settled'):
+            child.wait_for_disposable_test(timeout=1)
+        child.k.TerminateProcess.assert_not_called()
+
+    def test_invalid_timeout_retains_child_and_output(self):
+        for timeout in (0, -1, float('inf'), float('nan')):
+            with self.subTest(timeout=timeout):
+                child = self.fixture(alive=[])
+                with self.assertRaisesRegex(ValueError, 'finite_positive'):
+                    child.wait_for_disposable_test(timeout=timeout)
+                child.k.TerminateProcess.assert_not_called()
+                child.close_after_exit.assert_not_called()
+
+    def test_gameplay_child_cannot_use_fixture_disposal(self):
+        child = self.fixture(alive=[True], disposable=False)
+        with self.assertRaisesRegex(RuntimeError, 'disposable_test_ownership_required'):
+            child.wait_for_disposable_test(timeout=1)
+        child.k.TerminateProcess.assert_not_called()
+        child.close_after_exit.assert_not_called()
+
+    def test_timeout_and_cancel_bind_original_handle_and_report_failure(self):
+        from threading import Event
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                child = self.fixture(alive=[True, True]); event = Event()
+                if cancelled: event.set()
+                with patch('windows_native_process.time.monotonic', side_effect=[0, 2, 2]), patch('windows_native_process.handle_birth', return_value=456):
+                    result = child.wait_for_disposable_test(timeout=1, cancel=event)
+                self.assertEqual(result['status'], 'cancelled' if cancelled else 'timed_out')
+                self.assertFalse(result['native_gameplay_exit_credit'])
+                self.assertTrue(result['handles_closed'])
+                child.k.TerminateProcess.assert_called_once_with(77, 1)
+                child.close_after_exit.assert_called_once()
+
+    def test_already_exited_fixture_is_collected_without_termination(self):
+        child = self.fixture(alive=[False, False]); child.exit_code.return_value = 0
+        result = child.wait_for_disposable_test(timeout=1)
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['exit_code'], 0)
+        child.k.TerminateProcess.assert_not_called()
+        self.assertTrue(result['handles_closed'])
+
+    def test_nonzero_native_completion_is_failure_with_retained_output(self):
+        child = self.fixture(alive=[False, False])
+        result = child.wait_for_disposable_test(timeout=1)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['exit_code'], 1)
+        self.assertEqual(result['transcript_path'], 'retained-fixture.vt')
+        self.assertTrue(result['handles_closed'])
+        child.k.TerminateProcess.assert_not_called()
+
+    def test_unobserved_exit_retains_handles_and_does_not_report_cleanup(self):
+        child = self.fixture(alive=[True, True])
+        child.k.WaitForSingleObject.return_value = 258
+        with patch('windows_native_process.time.monotonic', side_effect=[0, 2]), patch('windows_native_process.handle_birth', return_value=456):
+            with self.assertRaisesRegex(RuntimeError, 'exit_unobserved_handles_retained'):
+                child.wait_for_disposable_test(timeout=1)
+        child.close_after_exit.assert_not_called()
+        self.assertFalse(child._closed)
+
+    def test_changed_birth_refuses_disposal_and_retains_output_owner(self):
+        child = self.fixture(alive=[True, True])
+        with patch('windows_native_process.time.monotonic', side_effect=[0, 2]), patch('windows_native_process.handle_birth', return_value=999):
+            with self.assertRaisesRegex(RuntimeError, 'generation_changed_child_retained'):
+                child.wait_for_disposable_test(timeout=1)
+        child.k.TerminateProcess.assert_not_called()
+        child.close_after_exit.assert_not_called()
+
+@unittest.skipUnless(os.name == 'nt', 'actual Windows ConPTY fixture controls')
+class DisposableConPTYNativeTest(unittest.TestCase):
+    def test_normal_input_wait_timeout_cancel_and_already_exited(self):
+        from windows_native_process import NativeConPTY
+        from threading import Event
+        for condition in ('normal', 'failed', 'timeout', 'cancel', 'already_exited'):
+            with self.subTest(condition=condition), tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / 'test.vt'
+                child = NativeConPTY(transcript, disposable_test=True)
+                source = "import sys; print('fixture output',flush=True); " + ("sys.stdin.readline()" if condition in ('timeout', 'cancel') else "sys.exit(1)" if condition == 'failed' else "sys.exit(0)")
+                child.launch([sys.executable, '-u', '-c', source], Path(directory))
+                event = Event()
+                if condition in ('timeout', 'cancel'):
+                    end = time.monotonic() + 10
+                    while b'fixture output' not in transcript.read_bytes() and child.alive() and time.monotonic() < end:
+                        time.sleep(.01)
+                    if b'fixture output' not in transcript.read_bytes():
+                        result = child.wait_for_disposable_test(timeout=.5)
+                        self.fail('input-wait fixture did not publish its startup output: ' + repr(result))
+                    if condition == 'cancel': event.set()
+                if condition == 'already_exited':
+                    end = time.monotonic() + 5
+                    while child.alive() and time.monotonic() < end: time.sleep(.01)
+                    self.assertFalse(child.alive())
+                result = child.wait_for_disposable_test(timeout=.5 if condition == 'timeout' else 5, cancel=event)
+                self.assertEqual(result['status'], {'timeout': 'timed_out', 'cancel': 'cancelled', 'failed': 'failed'}.get(condition, 'completed'))
+                self.assertTrue(result['handles_closed'])
+                self.assertFalse(child.alive())
+                self.assertFalse(result['native_gameplay_exit_credit'])
+                self.assertTrue(transcript.exists())
+                self.assertIn(b'fixture output', transcript.read_bytes())
+                # Hosts may retain the complete raw fixture output and result in
+                # their existing task evidence before TemporaryDirectory cleanup.
+                evidence = os.environ.get('CAOL_DISPOSABLE_TEST_EVIDENCE_DIR')
+                if evidence:
+                    destination = Path(evidence)
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / (condition + '.vt')).write_bytes(transcript.read_bytes())
+                    (destination / (condition + '.json')).write_text(json.dumps(result, indent=2))
 
 if __name__ == "__main__": unittest.main()

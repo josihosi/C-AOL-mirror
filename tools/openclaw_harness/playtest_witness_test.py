@@ -106,6 +106,26 @@ def current_journal(*, charter: dict[str, object], run_id: str) -> dict[str, obj
 
 
 class PlaytestWitnessTest(unittest.TestCase):
+    def test_selected_paths_generate_exact_typed_citations_without_manual_copying(self):
+        facts = {"accepted": "true", "saved": False, "position": [3159, 3449, 1],
+                 "last_save_checkpoint": '{"confirmed_turn":5256024}'}
+        sealed = build_evidence_journal(
+            charter=CHARTER, identity={"scenario_id": "native-world", "source_identity": "source-a",
+                "executable_identity": "exe-a", "run_id": "run-a", "binding_id": "binding-a"},
+            transcript=[{"kind": "observation", "value": {"run_id": "run-a",
+                "observation_id": "run-a:2", "surface": {"kind": "world", "facts": facts, "actions": []}}}],
+            terminal={"stop_reason": "result collected"}, evidence_ceiling="focused")
+        value = statement()
+        paths = ["value.surface.facts." + name for name in facts]
+        value["citations"] = [{"citation_id": "J0002", "meaning": "selected native facts", "checks": paths}]
+        checked = validate_witness_statement(charter=CHARTER, journal=sealed, statement=value)
+        self.assertEqual(checked["witness"]["citations"][0]["checks"],
+                         {"value.surface.facts." + key: item for key, item in facts.items()})
+        self.assertFalse(checked["proof_promotion_authority"])
+        value["citations"][0]["checks"].append("value.surface.facts.missing")
+        with self.assertRaisesRegex(WitnessError, "witness_citation_path_missing"):
+            validate_witness_statement(charter=CHARTER, journal=sealed, statement=value)
+
     def test_native_surface_facts_survive_sealing_retrieval_and_citation(self) -> None:
         from cockpit_evidence import compact, select
 

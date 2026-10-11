@@ -1,5 +1,6 @@
 import gc
 import io
+import contextlib
 import os
 from unittest.mock import patch
 import startup_harness
@@ -42,6 +43,139 @@ class ArchiveTest(unittest.TestCase):
              witness_charter=CHARTER, witness_identity={"scenario_id": "scenario-a", "source_identity": "source-a", "executable_identity": "exe-a"})
         return CockpitService(run_channel=channel)
 
+    def test_ordinary_scenario_reuses_its_published_final_without_history_rescans(self):
+        run_dir = self.directory
+        (run_dir / "process.json").write_text(json.dumps({"run_id": "run-a"}), encoding="utf-8")
+        (run_dir / startup_harness.TRANSITION_EVENT_BINDING_FILENAME).write_text(
+            json.dumps({"run_id": "run-a"}), encoding="utf-8")
+        final_path = startup_harness.cockpit_live_final_path(run_dir, "ordinary")
+        process = {"pid": 42, "run_id": "run-a", "alive": True}
+        channel = CockpitRunChannel(frame, binding_id="binding-a", archive=self.archive,
+            read_process_state=lambda: dict(process),
+            finalize_session=lambda report: startup_harness.finalize_cockpit_live_session(
+                run_dir, 42, report, cleanup_process=False, final_path=final_path))
+        service = CockpitService(run_channel=channel)
+        real_serve = startup_harness.serve_cockpit_live
+        with contextlib.ExitStack() as guards:
+            def serve(_service, _stdin, output):
+                observed = _service.call({"action": "game.observe"})["result"]
+                process["alive"] = False
+                observed = _service.call({"action": "game.observe"})["result"]
+                request = {"action": "run.finish", "observation_id": observed["observation_id"],
+                           "stop_reason": "outcome_reported", "unused_authority": "released",
+                           "outcome": {"summary": "Ordinary result retained", "verdict": "positive"}}
+                status = real_serve(_service, io.StringIO(json.dumps(request) + "\n"), output)
+                self.assertEqual(status, 0, output.getvalue())
+                guards.enter_context(mock.patch.object(startup_harness, "resolve_wire",
+                    side_effect=AssertionError("producer recovered its own final again")))
+                guards.enter_context(mock.patch.object(ArchiveSequence, "__iter__",
+                    side_effect=AssertionError("ordinary terminal metadata enumerated history")))
+                return status
+
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 mock.patch.object(startup_harness, "semantic_step_trace_start_for_source", return_value=0), \
+                 mock.patch.object(startup_harness, "cockpit_controller_binding_id", return_value="binding-a"), \
+                 mock.patch.object(startup_harness, "semantic_wake_pipe_contract", return_value={"status": "bound"}), \
+                 mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=None), \
+                 mock.patch.object(startup_harness, "open_cockpit_game_service", return_value=service), \
+                 mock.patch.object(startup_harness, "current_owned_process_generation",
+                                   return_value={"pid": 42, "status": "exited", "expected": {"pid": 42}}), \
+                 mock.patch.object(startup_harness, "serve_cockpit_live", side_effect=serve):
+                reports = startup_harness.execute_probe_steps(42, run_dir, [{
+                    "kind": "cockpit_live_session", "label": "ordinary",
+                    "r014_step_evidence": True, "stop_after_live_session": True,
+                }], profile="profile-a", world="Test00")
+            self.assertEqual(len(reports), 1)
+            final = reports[0]["cockpit_live_session"]["final"]
+            self.assertEqual(final["stop_detail"]["gameplay_outcome"]["verdict"], "positive")
+            self.assertIs(final["action_observation_sequence"], channel._transcript)
+            self.assertNotIn("target_receipt", final["stop_detail"])
+            verdict, issues = startup_harness.cockpit_live_session_step_verdict(
+                reports[0], wec_authority={}, report_binding_id="binding-a", scenario_source_sha256="source-a")
+            self.assertTrue(verdict.startswith("yellow"))  # Reporting never mints formal proof.
+            self.assertIn("cockpit_target_not_explicitly_proved", issues)
+        # An independent consumer still verifies the exact published archive.
+        from cockpit_report_reference import load_report
+        _, _, recovered = load_report(final_path)
+        self.addCleanup(recovered["action_observation_sequence"].archive.close)
+        self.assertEqual(recovered["stop_detail"]["gameplay_outcome"], final["stop_detail"]["gameplay_outcome"])
+        final_path.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "identity_mismatch"):
+            load_report(final_path)
+
+    def test_owned_final_reuse_preserves_identity_publication_and_cold_integrity_checks(self):
+        from types import SimpleNamespace
+        final_path = self.directory / "ordinary.final.json"
+        channel = CockpitRunChannel(frame, binding_id="binding-a", archive=self.archive,
+            read_process_state=lambda: {"pid": 42, "run_id": "run-a", "alive": False},
+            finalize_session=lambda report: startup_harness.finalize_cockpit_live_session(
+                self.directory, 42, report, cleanup_process=False, final_path=final_path))
+        service = CockpitService(run_channel=channel)
+        observed = service.call({"action": "game.observe"})["result"]
+        with mock.patch.object(startup_harness, "current_owned_process_generation",
+                               return_value={"pid": 42, "status": "exited", "expected": {"pid": 42}}):
+            result = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+                                   "stop_reason": "outcome_reported", "unused_authority": "released",
+                                   "outcome": {"summary": "Reported negative result", "verdict": "negative"}})
+        self.assertTrue(result["ok"], result)
+        for run_id, binding in (("foreign", "binding-a"), ("run-a", "foreign")):
+            with self.subTest(run_id=run_id, binding=binding), self.assertRaisesRegex(
+                    ValueError, "owned_cockpit_final_identity_mismatch"):
+                startup_harness.read_completed_cockpit_final(
+                    service, final_path, run_id=run_id, binding_id=binding)
+        stale_owner = SimpleNamespace(run_channel=SimpleNamespace(status=lambda: {
+            **channel.status(), "run_id": "replacement-run"}))
+        with self.assertRaisesRegex(ValueError, "owned_cockpit_final_identity_mismatch"):
+            startup_harness.read_completed_cockpit_final(
+                stale_owner, final_path, run_id="run-a", binding_id="binding-a")
+        raw = final_path.read_bytes()
+        final_path.unlink()
+        with self.assertRaisesRegex(ValueError, "owned_cockpit_final_not_persisted"):
+            startup_harness.read_completed_cockpit_final(
+                service, final_path, run_id="run-a", binding_id="binding-a")
+        final_path.write_bytes(raw)
+        cold = SimpleNamespace(run_channel=SimpleNamespace(status=lambda: {}))
+        recovered = startup_harness.read_completed_cockpit_final(
+            cold, final_path, run_id="run-a", binding_id="binding-a")
+        self.addCleanup(recovered["action_observation_sequence"].archive.close)
+        self.assertEqual(recovered["stop_detail"], result["result"]["stop_detail"])
+        final_path.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "identity_mismatch"):
+            startup_harness.read_completed_cockpit_final(
+                cold, final_path, run_id="run-a", binding_id="binding-a")
+
+    def test_ordinary_metadata_is_bound_and_never_promotes_a_formal_claim(self):
+        service = self.service()
+        observed = service.call({"action": "game.observe"})["result"]
+        request = {"action": "run.finish", "observation_id": observed["observation_id"],
+                   "stop_reason": "target_predicate_proved", "unused_authority": "released"}
+        self.assertEqual(service.call(request)["error"], "target_predicate_proved_requires_validated_witness")
+        response = service.call({**request, "outcome": {
+            "summary": "Ordinary inconclusive result", "verdict": "inconclusive"}})
+        self.assertTrue(response["ok"], response)
+        final = response["result"]
+        self.assertEqual(final["stop_reason"], "outcome_reported")
+        self.assertNotIn("target_receipt", final["stop_detail"])
+        final_path = self.directory / "ordinary.final.json"
+        startup_harness.write_json(final_path, final)
+        with mock.patch.object(ArchiveSequence, "__iter__", side_effect=AssertionError("history scan")):
+            metadata = startup_harness.r014_cockpit_live_session_metadata(
+                final, artifact_path=final_path, run_id="run-a", binding_id="binding-a", live_status=0)
+            self.assertEqual(metadata["completion_kind"], "outcome_reported")
+            self.assertFalse(metadata["gameplay_credit"])
+            self.assertEqual(metadata["action_statistics"], "not_requested")
+            for changed in ({"run_id": "foreign"}, {"binding_id": "foreign"}, {"state": "active"}):
+                rejected = startup_harness.r014_cockpit_live_session_metadata(
+                    {**final, **changed}, artifact_path=final_path,
+                    run_id="run-a", binding_id="binding-a", live_status=0)
+                self.assertEqual(rejected["status"], "scanned")
+            # A formal-proof-shaped record still takes the existing history
+            # path; the ordinary result must not become a shortcut for proof.
+            with self.assertRaisesRegex(AssertionError, "history scan"):
+                startup_harness.r014_cockpit_live_session_metadata(
+                    {**final, "stop_reason": "target_predicate_proved"},
+                    artifact_path=final_path, run_id="run-a", binding_id="binding-a", live_status=0)
+
     def test_observe_seal_finish_values_order_and_hash_match_legacy(self):
         sealed = []
         for archived in (False, True):
@@ -76,6 +210,160 @@ class ArchiveTest(unittest.TestCase):
         path = self.directory / "export.json"
         write_json_stream(path, sequence)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), legacy)
+
+    def test_ordinary_finish_cites_consumed_facts_without_restoring_authority(self):
+        for archived in (False, True):
+            with self.subTest(archived=archived):
+                current = {"event": "surface_descriptor", "schema_version": 1,
+                           "run_id": "run-a", "frame_id": "frame:prior", "surface_id": "inventory:prior",
+                           "kind": "inventory", "breadcrumbs": ["Inventory"],
+                           "payload": {"title": "Before native redraw"},
+                           "valid_actions": [{"id": "inventory.toggle", "stable_id": "item:1",
+                                              "label": "Select physical item", "enabled": True}]}
+                dispatched = []
+
+                def dispatch(issuing, action_id, stable_id):
+                    dispatched.append((action_id, stable_id))
+                    current.update(frame_id="frame:current", surface_id="inventory:current",
+                                   payload={"title": "Current native fact"})
+                    return {"native_receipt": {
+                        "run_id": "run-a", "requested_run_id": "run-a", "accepted": True,
+                        "requested_frame_id": issuing["frame_id"], "consuming_frame_id": issuing["frame_id"],
+                        "requested_surface_id": issuing["surface_id"], "consuming_surface_id": issuing["surface_id"],
+                        "action_id": action_id, "stable_id": stable_id}, "next_frame": dict(current)}
+
+                channel = CockpitRunChannel(lambda: current, dispatch,
+                    archive=self.archive if archived else None, binding_id="binding-a")
+                service = CockpitService(run_channel=channel)
+                service.call({"action": "game.observe"})
+                current["payload"] = {"title": "Prior native fact"}
+                prior = service.call({"action": "game.observe"})["result"]
+                action = {"action": "game.act", "observation_id": prior["observation_id"],
+                          "action_id": "inventory.toggle", "stable_id": "item:1"}
+                accepted = service.call(action)
+                self.assertTrue(accepted["ok"], accepted)
+                self.assertEqual(service.call(action)["error"], "duplicate_submission")
+                if archived:
+                    self.assertNotIn("public_state", channel._observations[prior["observation_id"]])
+                channel._read_process_state = lambda: {"run_id": "run-a", "pid": 123, "alive": False}
+                terminal = service.call({"action": "game.observe"})["result"]
+                finish = {"action": "run.finish", "observation_id": terminal["observation_id"],
+                          "stop_reason": "reported", "unused_authority": "released"}
+                self.assertFalse(channel._observations[terminal["observation_id"]]["used"])
+                channel._read_binding_id = lambda: "foreign-binding"
+                self.assertEqual(service.call(finish)["error"], "native_exit_required_before_reporting")
+                channel._read_binding_id = lambda: "binding-a"
+                for source_id, field in (("other-run:prior", "surface.facts.title"),
+                                         ("frame:missing", "surface.facts.title"),
+                                         (prior["observation_id"], "fabricated_fact")):
+                    refused = service.call({**finish, "outcome": {
+                        "summary": "Player report", "verdict": "positive",
+                        "citations": [{"observation_id": source_id, "select": [field]}]}})
+                    self.assertFalse(refused["ok"], refused)
+                    self.assertEqual(channel.status()["state"], "active")
+                    self.assertFalse(channel._observations[terminal["observation_id"]]["used"], refused)
+                stale_terminal = service.call({**finish, "observation_id": prior["observation_id"]})
+                self.assertEqual(stale_terminal["error"], "unknown_or_stale_observation")
+                retrieve = channel._outcome_citation_state
+
+                def indexed_citation(source_id):
+                    with patch.object(ArchiveSequence, "__iter__", side_effect=AssertionError("citation history scan")):
+                        return retrieve(source_id)
+
+                with patch("cockpit.build_evidence_journal", side_effect=AssertionError("unrequested journal")), \
+                     patch.object(channel, "_outcome_citation_state", side_effect=indexed_citation):
+                    finished = service.call({**finish, "outcome": {
+                        "summary": "Selected item once", "verdict": "positive",
+                        "citations": [{"observation_id": prior["observation_id"],
+                                       "select": ["surface.facts.title"]}]}})
+                self.assertTrue(finished["ok"], finished)
+                report = finished["result"]["stop_detail"]["gameplay_outcome"]
+                self.assertEqual(report["citations"][0]["values"],
+                                 {"surface.facts.title": "Prior native fact"})
+                self.assertEqual(report["citations"][0]["binding_id"], "binding-a")
+                self.assertFalse(report["proof_promotion_authority"])
+                self.assertNotIn("target_receipt", finished["result"]["stop_detail"])
+                self.assertEqual(dispatched, [("inventory.toggle", "item:1")])
+
+    def test_native_catalogue_snapshots_are_stored_once_and_keep_current_authority(self):
+        actions = [{"id": "inventory.toggle", "stable_id": f"item:{i}",
+                    "label": "same label", "enabled": True} for i in range(300)]
+        facts = {"title": "Inventory", "contents": "native facts " * 1000}
+        current = {"event": "surface_descriptor", "schema_version": 1,
+                   "run_id": "run-a", "frame_id": "frame:0", "surface_id": "inventory:0",
+                   "kind": "inventory", "breadcrumbs": ["Inventory"],
+                   "payload": facts, "valid_actions": actions}
+        dispatched = []
+
+        def dispatch(issuing, action_id, stable_id):
+            dispatched.append((action_id, stable_id))
+            old = dict(issuing)
+            current.update(frame_id="frame:selected", surface_id="inventory:selected")
+            return {"native_receipt": {
+                "run_id": "run-a", "requested_run_id": "run-a", "accepted": True,
+                "requested_frame_id": old["frame_id"], "consuming_frame_id": old["frame_id"],
+                "requested_surface_id": old["surface_id"], "consuming_surface_id": old["surface_id"],
+                "action_id": action_id, "stable_id": stable_id}, "next_frame": dict(current)}
+
+        channel = CockpitRunChannel(lambda: current, dispatch, archive=self.archive,
+                                    binding_id="binding-a")
+        service = CockpitService(run_channel=channel)
+        originals = []
+        for i in range(6):
+            current.update(frame_id=f"frame:{i}", surface_id=f"inventory:{i}")
+            result = service.call({"action": "game.observe"})["result"]
+            originals.append(json.loads("".join(json_chunks(result))))
+        identity = {"scenario_id": "scenario-a", "source_identity": "source-a",
+                    "executable_identity": "exe-a", "run_id": "run-a", "binding_id": "binding-a"}
+        journal_args = dict(charter=CHARTER, identity=identity,
+                            terminal={"run_id": "run-a", "stop_reason": "selected detail"},
+                            evidence_ceiling="focused")
+        legacy_journal = build_evidence_journal(
+            **journal_args, transcript=list(channel._transcript))
+        journal = build_evidence_journal(**journal_args, transcript=channel._transcript)
+        self.assertEqual(json.loads("".join(json_chunks(journal))), legacy_journal)
+        # Repeated labels retain all distinct physical identities, not just the
+        # preview. The current native receipt consumes one exact item once.
+        chosen = {"action": "game.act", "observation_id": result["observation_id"],
+                  "action_id": "inventory.toggle", "stable_id": "item:299"}
+        accepted = service.call(chosen)
+        self.assertTrue(accepted["ok"], accepted)
+        self.assertFalse(service.call(chosen)["ok"])
+        self.assertEqual(dispatched, [("inventory.toggle", "item:299")])
+        payloads = self.archive.connection.execute(
+            "SELECT count(*),sum(length(value)) FROM objects WHERE namespace='payloads'").fetchone()
+        record_bytes = self.archive.connection.execute(
+            "SELECT sum(length(value)) FROM records").fetchone()[0]
+        logical_bytes = sum(len(json.dumps(item)) for item in originals)
+        self.assertLess(record_bytes + (payloads[1] or 0), logical_bytes // 2)
+        # Two shared native payloads and the action's distinct successor
+        # observation. The latter references those same facts and catalogue.
+        self.assertEqual(payloads[0], 3)
+        for i, original in enumerate(originals):
+            self.assertEqual(channel._transcript[i]["value"], original)
+        # A live mutation cannot change any historical snapshot, and a native
+        # disabled action in a new publication cannot inherit old authority.
+        current["payload"]["title"] = "Changed"
+        current["valid_actions"][299]["enabled"] = False
+        current.update(frame_id="frame:changed", surface_id="inventory:changed")
+        changed = service.call({"action": "game.observe"})["result"]
+        denied = service.call({**chosen, "observation_id": changed["observation_id"]})
+        self.assertFalse(denied["ok"])
+        self.assertEqual(dispatched, [("inventory.toggle", "item:299")])
+        self.assertEqual(channel._transcript[0]["value"], originals[0])
+        self.assertEqual(journal["entries"][1]["value"]["value"]["surface"]["facts"]["title"],
+                         "Inventory")
+        wire = self.archive.wire({"entries": channel._transcript})
+        recovered = resolve_wire(wire, directory=self.directory, binding_id="binding-a")
+        self.addCleanup(recovered["entries"].archive.close)
+        recovered["entries"][0]["value"]["surface"]["facts"]["title"] = "caller mutation"
+        self.assertEqual(recovered["entries"][0]["value"], originals[0])
+        with self.archive.connection:
+            self.archive.connection.execute(
+                "UPDATE objects SET value='{}' WHERE namespace='payloads' AND id="
+                "(SELECT id FROM objects WHERE namespace='payloads' LIMIT 1)")
+        with self.assertRaisesRegex(ValueError, "payload_digest_mismatch"):
+            resolve_wire(wire, directory=self.directory, binding_id="binding-a")
 
     def test_old_authority_flags_and_payloads_are_exact_without_hot_history(self):
         records = ArchiveMap(self.archive, "observations")

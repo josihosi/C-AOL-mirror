@@ -278,9 +278,8 @@ class SemanticStepChannelTest(unittest.TestCase):
             run_dir.mkdir()
             event = self.frame("frame-current", "world", {"world.wait": "|"}, 100)
             prefix = "activity query output omitted from semantic copy\n"
-            source.write_text(
-                prefix + "openclaw_harness_semantic_step: " + json.dumps(event) + "\n",
-                encoding="utf-8",
+            source.write_bytes(
+                (prefix + "openclaw_harness_semantic_step: " + json.dumps(event) + "\n").encode("utf-8")
             )
 
             with patch("startup_harness.semantic_step_source_trace", return_value=source):
@@ -776,6 +775,7 @@ class SemanticStepChannelTest(unittest.TestCase):
             ) + "\n", encoding="utf-8")
             with patch.object(startup_harness, "semantic_wake_pipe_contract", return_value={
                 "status": "bound", "path": "pipe-contract",
+                "contract": {"transport": "anonymous_pipe"},
             }), patch.object(startup_harness, "write_semantic_wake_pipe", return_value=1), \
                     patch.object(startup_harness, "semantic_step_source_trace", return_value=trace), \
                     patch.object(startup_harness, "current_semantic_step_frame",
@@ -1855,7 +1855,7 @@ class SemanticStepChannelTest(unittest.TestCase):
                 (True, False, True, False), (True, False, False, True)):
             with self.subTest(present=present, alive=alive, wrong_run=wrong_run, wrong_receipt=wrong_receipt), \
                     tempfile.TemporaryDirectory() as temp, \
-                    patch.object(startup_harness, "semantic_wake_pipe_contract", return_value={"status": "bound", "path": "pipe-contract"}), \
+                    patch.object(startup_harness, "semantic_wake_pipe_contract", return_value={"status": "bound", "path": "pipe-contract", "contract": {"transport": "named_fifo"}}), \
                     patch.object(startup_harness, "write_semantic_wake_pipe", return_value=1):
                 root = Path(temp)
                 trace = root / "semantic.native.log"
@@ -1882,6 +1882,120 @@ class SemanticStepChannelTest(unittest.TestCase):
                     self.assertIsNone(result["native_receipt"])
                 elif wrong_receipt:
                     self.assertEqual(result["reason"], "native_surface_receipt_correlation_mismatch")
+
+    def test_post_enqueue_exit_reconciles_without_another_wake(self) -> None:
+        descriptor = {
+            "event": "surface_descriptor", "schema_version": 1, "run_id": self.run_id,
+            "surface_id": "quit-prompt", "frame_id": "quit-frame", "kind": "prompt",
+            "breadcrumbs": ["Main menu", "Quit?"], "payload": {}, "valid_actions": [{
+                "id": "prompt.choose", "stable_id": "prompt-option:3", "label": "YES", "enabled": True,
+            }],
+        }
+        identity = json.dumps({"stable_id": "prompt-option:3", "parameters": {}},
+                              sort_keys=True, separators=(",", ":"))
+        request_id = "cockpit:worker:quit-frame:prompt.choose:" + hashlib.sha256(
+            identity.encode()).hexdigest()[:16]
+        native = {
+            "event": "surface_receipt", "run_id": self.run_id, "request_id": request_id,
+            "requested_run_id": self.run_id, "requested_surface_id": "quit-prompt",
+            "requested_frame_id": "quit-frame", "consuming_surface_id": "quit-prompt",
+            "consuming_frame_id": "quit-frame", "action_id": "prompt.choose",
+            "accepted": True, "rejection_reason": "", "resulting_frame_id": "",
+        }
+        cases = ("matched", "missing", "other_request", "stale", "ambiguous",
+                 "wrong_frame", "rejected", "alive", "wrong_run", "wrong_pid",
+                 "unknown_process", "write_failed")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                trace = root / "native.log"
+                (root / "terminal.owner.json").write_text("{}")
+                encode = lambda event: "openclaw_harness_semantic_step: " + json.dumps(event) + "\n"
+                trace.write_text(encode(descriptor) + (encode(native) if case == "stale" else ""))
+                issuing_cursor = trace.stat().st_size
+                rows = [] if case in {"missing", "stale"} else [dict(native)]
+                if case == "other_request":
+                    rows[0]["request_id"] = "earlier-other-request"
+                if case == "wrong_frame":
+                    rows[0]["requested_frame_id"] = "older-frame"
+                if case == "rejected":
+                    rows[0].update(accepted=False, rejection_reason="wrong_surface")
+                if case == "ambiguous":
+                    rows.append(dict(native))
+                def consume_before_wake_check(*_args):
+                    # Exercise the real append/fsync before native consumption
+                    # and the failed wake guard; there is no second delivery.
+                    queued = json.loads((root / "semantic.requests.jsonl").read_text())
+                    self.assertEqual(queued["request_id"], request_id)
+                    with trace.open("a") as stream:
+                        stream.write("".join(encode(row) for row in rows))
+                    return {"status": "unavailable", "path": "original-contract"}
+                process = {"alive": case == "alive", "run_id": self.run_id,
+                           "pid": 17, "exit_code": 0}
+                if case == "wrong_run":
+                    process["run_id"] = "other-run"
+                if case == "wrong_pid":
+                    process["pid"] = 18
+                if case == "unknown_process":
+                    process = {}
+                with patch.object(startup_harness, "semantic_step_source_trace", return_value=trace), \
+                        patch.object(startup_harness, "semantic_wake_pipe_contract",
+                                     side_effect=consume_before_wake_check) as contract, \
+                        patch.object(startup_harness, "write_semantic_wake_pipe") as wake, \
+                        patch.object(startup_harness.os, "fsync", side_effect=
+                                     [OSError("fsync failed"), None] if case == "write_failed" else None):
+                    result = execute_semantic_act(
+                        run_dir=root, profile="ignored", run_id=self.run_id,
+                        trace_start_offset=issuing_cursor, pid=17, session_id="worker",
+                        frame_id="quit-frame", action_id="prompt.choose", stable_id="prompt-option:3",
+                        observed_frame=descriptor, transition_timeout_seconds=.01,
+                        observe_interval_seconds=.001, allow_terminal_exit=True,
+                        read_process_state=lambda: process,
+                    )
+                self.assertEqual(wake.call_count, 0)
+                self.assertEqual(contract.call_count, 0 if case == "write_failed" else 1)
+                self.assertEqual(len((root / "semantic.requests.jsonl").read_text().splitlines()), 1)
+                self.assertEqual(result["accepted"], case == "matched", result)
+                if case == "matched":
+                    self.assertEqual(result["native_receipt"]["request_id"], request_id)
+                    self.assertIsNone(result["next_frame"])
+                    self.assertEqual(result["transport_failure"]["action_outcome"], "unknown")
+                    durable = json.loads((root / "semantic.steps.jsonl").read_text())
+                    self.assertEqual(durable["transport_failure"]["reason"], "native_surface_transport_failed")
+                elif case == "ambiguous":
+                    self.assertEqual(result["reason"], "native_surface_receipt_ambiguous")
+                elif case == "wrong_frame":
+                    self.assertEqual(result["reason"], "native_surface_receipt_correlation_mismatch")
+                elif case == "rejected":
+                    self.assertEqual(result["reason"], "wrong_surface")
+                else:
+                    self.assertEqual(result["reason"], "native_surface_transport_failed")
+
+    def test_unknown_surface_transport_outcome_keeps_frame_consumed(self) -> None:
+        from cockpit import CockpitRunChannel
+        descriptor = {
+            "event": "surface_descriptor", "schema_version": 1, "run_id": self.run_id,
+            "surface_id": "quit-prompt", "frame_id": "quit-frame", "kind": "prompt",
+            "breadcrumbs": ["Main menu", "Quit?"], "payload": {}, "valid_actions": [{
+                "id": "prompt.choose", "stable_id": "prompt-option:3", "label": "YES", "enabled": True,
+            }],
+        }
+        dispatches = []
+        def uncertain(*args):
+            dispatches.append(args)
+            return {"accepted": False, "reason": "native_surface_transport_failed",
+                    "action_outcome": "unknown", "request_durably_queued": True}
+        channel = CockpitRunChannel(lambda: descriptor, uncertain)
+        observed = channel.observe()
+        result = channel.act(observation_id=observed["observation_id"],
+                             action_id="prompt.choose", stable_id="prompt-option:3")
+        self.assertEqual(result["error"], "native_surface_transport_failed")
+        self.assertEqual(result["failure"]["detail"]["action_outcome"], "unknown")
+        for observation in (observed, channel.observe()):
+            replay = channel.act(observation_id=observation["observation_id"],
+                                 action_id="prompt.choose", stable_id="prompt-option:3")
+            self.assertEqual(replay["error"], "duplicate_submission")
+        self.assertEqual(len(dispatches), 1)
 
     def test_surface_descriptor_serializes_the_advertised_stable_id(self) -> None:
         descriptor = {
@@ -2064,6 +2178,8 @@ class SemanticStepChannelTest(unittest.TestCase):
 
             source = run_dir / "debug.log"
             source.write_text("x" * 300, encoding="utf-8")
+            for frame in frames:
+                frame.update(_source_path=str(source.resolve()), _source_end=300)
             with patch("startup_harness.semantic_step_source_trace", return_value=source), \
                     patch("startup_harness.current_semantic_step_frame", side_effect=current):
                 service = startup_harness.open_cockpit_game_service(
@@ -2075,6 +2191,170 @@ class SemanticStepChannelTest(unittest.TestCase):
 
             self.assertEqual(read_offsets, [0, 300])
 
+
+
+class SemanticSourceMirrorTest(unittest.TestCase):
+    def test_same_observer_keeps_identity_when_canonical_stream_appears(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            config = run / "config"
+            config.mkdir()
+            native = run / "semantic.native.events.jsonl"
+            debug = config / "debug.log"
+            def descriptor(number, kind):
+                return {"event": "surface_descriptor", "schema_version": 1,
+                        "run_id": "run", "process_instance": "process", "sequence": number,
+                        "game_turn": 100 + number, "game_minutes": number,
+                        "frame_id": f"run:frame:{number}", "surface_id": f"run:surface:{number}",
+                        "kind": kind, "breadcrumbs": [kind], "payload": {},
+                        "valid_actions": [{"id": "activity.pause" if kind == "activity_wait" else "world.wait",
+                                           "stable_id": "", "label": "action", "enabled": True}]}
+            encode = lambda row: ("openclaw_harness_semantic_step: " + json.dumps(row) + "\n").encode()
+            native.write_bytes(b"noise\n" * 25000)
+            debug.write_bytes(encode(descriptor(10, "activity_wait")) + b"noise\n" * 25000)
+            with patch.object(startup_harness, "config_dir_for_profile", return_value=config), \
+                    patch.object(startup_harness, "resolve_profile_name", return_value="owned"):
+                service = startup_harness.open_cockpit_game_service(
+                    profile="owned", run_dir=run, run_id="run", trace_start_offset=0,
+                    live_session=False, cleanup_on_finish=False)
+                channel = service.live_channel
+                before = service.call({"action": "game.observe"})["result"]
+                # The first canonical descriptor uses a different byte space.
+                # It supersedes the legacy-only source, even when that mirror
+                # subsequently claims a newer owner.
+                native.write_bytes(encode(descriptor(11, "world")))
+                debug.write_bytes(encode(descriptor(12, "world")) + b"noise\n" * 35000)
+                after = service.call({"action": "game.observe"})["result"]
+                self.assertIs(service.live_channel, channel)
+                self.assertEqual(before["observation_id"], "run:frame:10")
+                self.assertEqual(after["observation_id"], "run:frame:11")
+                self.assertEqual(after["surface"]["kind"], "world")
+                self.assertIn(before["observation_id"], channel._observations)
+                self.assertIn(after["observation_id"], channel._observations)
+
+    @staticmethod
+    def source_owner(number, kind="activity_wait"):
+        return {"event": "surface_descriptor", "schema_version": 1,
+                "run_id": "run", "process_instance": "process", "sequence": number,
+                "game_turn": 100 + number, "game_minutes": number,
+                "frame_id": f"run:frame:{number}", "surface_id": f"run:surface:{number}",
+                "kind": kind, "breadcrumbs": [kind],
+                "payload": {"padding": "x" * 200000} if kind == "world" else {},
+                "valid_actions": [{"id": "wait.1m", "stable_id": "", "label": "wait", "enabled": True}]}
+
+    @staticmethod
+    def source_line(row):
+        return (startup_harness.SEMANTIC_STEP_PREFIX + json.dumps(row) + "\n").encode()
+
+    def test_factory_preserves_canonical_successor_with_or_without_source_provenance(self):
+        for provenance in (True, False):
+            with self.subTest(provenance=provenance), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                run, config = root / "run", root / "config"
+                run.mkdir()
+                config.mkdir()
+                native, debug = run / "semantic.native.events.jsonl", config / "debug.log"
+                activity = self.source_line(self.source_owner(506))
+                intermediate = self.source_line(self.source_owner(508))
+                world = self.source_line(self.source_owner(509, "world"))
+                raw = self.source_line({"event": "frame", "run_id": "run", "state": "world",
+                                        "frame_id": "run:160:28", "game_turn": 160, "game_minutes": 509,
+                                        "valid_actions": [], "action_inputs": {}})
+                native_prefix, mirror_prefix = b"noise\n" * 20, b"noise\n" * 200
+                full_native = native_prefix + activity + intermediate + world + raw
+                full_debug = mirror_prefix + activity + intermediate + world + raw
+                native.write_bytes(native_prefix + activity)
+                debug.write_bytes(mirror_prefix + activity)
+                with patch.object(startup_harness, "config_dir_for_profile", return_value=config), \
+                        patch.object(startup_harness, "current_owned_process_generation", return_value={}):
+                    service = startup_harness.open_cockpit_game_service(
+                        profile="owned", run_dir=run, run_id="run", trace_start_offset=0,
+                        pid=999999, session_id="offline", cleanup_on_finish=False)
+                    channel = service.live_channel
+                    first = channel._read_native_frame()
+                    self.assertEqual(first["_source_path"], str(native))
+                    native.write_bytes(native_prefix + activity + intermediate)
+                    debug.write_bytes(mirror_prefix + activity + intermediate)
+                    successor = dict(first)
+                    if not provenance:
+                        successor.pop("_source_path")
+                        successor.pop("_source_end")
+                        successor["_event_offset"] = len(full_debug) - 1
+                    with patch.object(startup_harness, "execute_semantic_act", return_value={
+                            "accepted": True, "next_frame": successor}):
+                        channel._dispatch_advertised_action(first, "wait.1m")
+                    native.write_bytes(full_native)
+                    debug.write_bytes(full_debug)
+                    after = channel._read_native_frame()
+                    self.assertEqual(after["sequence"], 509)
+                    self.assertTrue(startup_harness.is_native_wait_completion_successor(
+                        after, activity_frame_id=first["frame_id"]))
+                    self.assertEqual(after["_source_path"], str(native))
+                    self.assertEqual(channel._read_native_frame()["sequence"], 509)
+
+    def test_selected_source_and_split_successor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory).resolve()
+            native, other = run / "semantic.native.events.jsonl", run / "debug.log"
+            row = self.source_owner(10, "world")
+            native.write_bytes(self.source_line(row))
+            other.write_bytes(self.source_line({**row, "sequence": 99, "run_id": "other"}))
+            with patch.object(startup_harness, "semantic_step_source_trace", return_value=other) as selector:
+                before = startup_harness.current_semantic_step_frame(
+                    profile="owned", run_dir=run, run_id="run", start_offset=0, source_trace=native)
+                self.assertEqual(selector.call_args_list, [unittest.mock.call("owned")])
+            self.assertEqual(before["sequence"], 10)
+            self.assertEqual(before["_source_path"], str(native))
+            successor = self.source_line({**row, "sequence": 11, "frame_id": "run:frame:11"})
+            with native.open("ab") as stream:
+                stream.write(successor[:-1])
+            with self.assertRaisesRegex(ValueError, "incomplete_native_semantic_record"):
+                startup_harness.refresh_semantic_step_trace(
+                    profile="owned", run_dir=run, run_id="run", start_offset=0, source_trace=native)
+            _, owned = startup_harness.refresh_semantic_step_trace(
+                profile="owned", run_dir=run, run_id="run", start_offset=0, source_trace=native,
+                require_complete=False)
+            events, status = startup_harness.read_semantic_step_trace(owned, run, "run")
+            self.assertEqual(status, "ok")
+            self.assertEqual([r["sequence"] for r in events], [10])
+            with native.open("ab") as stream:
+                stream.write(b"\n")
+            after = startup_harness.current_semantic_step_frame(
+                profile="owned", run_dir=run, run_id="run", start_offset=before["_source_end"],
+                source_trace=native)
+            self.assertEqual(after["sequence"], 11)
+
+    def test_canonical_native_owner_is_not_replaced_by_optional_mirror(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "run"
+            run.mkdir()
+            config = root / "config"
+            config.mkdir()
+            native = run / "semantic.native.events.jsonl"
+            debug = config / "debug.log"
+            owner = {"event": "surface_descriptor", "run_id": "run", "process_instance": "process",
+                     "sequence": 10, "game_turn": 100, "frame_id": "run:frame:10"}
+            encode = lambda row: ("openclaw_harness_semantic_step: " + json.dumps(row) + "\n").encode()
+            native.write_bytes(encode(owner))
+            cases = [
+                ({"sequence": 11, "game_turn": 101}, native),
+                ({"sequence": 9}, native),
+                ({"sequence": 11, "run_id": "other"}, native),
+                ({"sequence": 11, "process_instance": "other"}, native),
+                ({"sequence": 11, "game_turn": 99}, native),
+                ({"sequence": "invalid"}, native),
+            ]
+            with patch.object(startup_harness, "config_dir_for_profile", return_value=config), \
+                    patch.object(startup_harness, "resolve_profile_name", return_value="owned"):
+                for delta, expected in cases:
+                    with self.subTest(delta=delta):
+                        debug.write_bytes(encode({**owner, **delta}))
+                        self.assertEqual(startup_harness.semantic_step_source_trace("owned", run), expected)
+                debug.write_bytes(encode({**owner, "sequence": 11})[:-1])
+                self.assertEqual(startup_harness.semantic_step_source_trace("owned", run), native)
+                debug.unlink()
+                self.assertEqual(startup_harness.semantic_step_source_trace("owned", run), native)
 
 if __name__ == "__main__":
     unittest.main()

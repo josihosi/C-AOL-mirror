@@ -26,6 +26,7 @@
 #include "character_martial_arts.h"
 #include "creature.h"
 #include "creature_tracker.h"
+#include "current_map.h"
 #include "cursesdef.h"
 #include "damage.h"
 #include "debug.h"
@@ -58,6 +59,7 @@
 #include "map.h"
 #include "map_iterator.h"
 #include "mapdata.h"
+#include "mattack_actors.h"
 #include "messages.h"
 #include "mission.h"
 #include "monster.h"
@@ -134,6 +136,8 @@ static const item_group_id Item_spawn_data_survivor_stabbing( "survivor_stabbing
 static const itype_id itype_molotov( "molotov" );
 
 static const json_character_flag json_flag_CANNOT_MOVE( "CANNOT_MOVE" );
+static const json_character_flag json_flag_CANNOT_ATTACK( "CANNOT_ATTACK" );
+static const json_character_flag json_flag_FREEZE_EFFECTS( "FREEZE_EFFECTS" );
 static const json_character_flag json_flag_READ_IN_DARKNESS( "READ_IN_DARKNESS" );
 static const json_character_flag json_flag_SAPIOVORE( "SAPIOVORE" );
 
@@ -1557,11 +1561,19 @@ void npc::on_move( const tripoint_abs_ms &old_pos )
 
 void npc::travel_overmap( const tripoint_abs_omt &pos )
 {
+    const int max_coord = coords::map_squares_per( coords::omt ) - 1;
+    const point_rel_ms offset( rng( 0, max_coord ), rng( 0, max_coord ) );
+    travel_overmap( project_to<coords::ms>( pos ) + offset );
+}
+
+void npc::travel_overmap( const tripoint_abs_ms &position )
+{
+    const tripoint_abs_omt pos = project_to<coords::omt>( position );
     const point_abs_om pos_om_old = project_to<coords::om>( pos_abs_omt().xy() );
     const bool completes_assigned_route = is_travelling() && pos == goal &&
                                          pos != pos_abs_omt() && !omt_path.empty() && omt_path.front() == goal &&
                                          omt_path.back() == pos;
-    spawn_at_omt( pos );
+    spawn_at_precise( position );
     const point_abs_om pos_om_new = project_to<coords::om>( pos_abs_omt().xy() );
     if( pos_abs_omt() == goal ) {
         if( completes_assigned_route && live_bandit_scout_watch_order_pending( *this ) ) {
@@ -2371,6 +2383,11 @@ void npc::on_attacked( const Creature &attacker )
 
     hallucination_die( &here, nullptr );
 
+    const bool theft_conflict_attack = attacker.is_npc() &&
+        attacker.as_npc()->knows_property_theft_by( getID() );
+    if( theft_conflict_attack && !is_dead() ) {
+        property_conflict_attackers.insert( attacker.as_npc()->getID() );
+    }
     const bool defender_attacked_shakedown =
         ( attacker.is_avatar() || ( attacker.is_npc() && attacker.as_npc()->is_player_ally() ) ) &&
         bandit_live_world::release_shakedown_combat_on_player_attack(
@@ -2385,11 +2402,12 @@ void npc::on_attacked( const Creature &attacker )
     // This callback represents a launched melee/projectile attack even when damage is avoided.
     // Ranged shot commitment may already have set hit_by_player, so qualify the exact assignment
     // without consulting that flag.  Player-allied defenders break the same relationship.
-    std::string_view anger_branch = "none";
+    std::string_view anger_branch = theft_conflict_attack ? "property_conflict" : "none";
     if( !is_dead() && ( active_covert_scout || defender_attacked_shakedown ) ) {
         anger_branch = "covert_or_shakedown";
         make_angry();
-        hit_by_player = true;
+        hit_by_player = hit_by_player || attacker.is_avatar() ||
+                        ( attacker.is_npc() && attacker.as_npc()->is_player_ally() );
     } else if( attacker.is_avatar() && !is_enemy() && !is_dead() && !guaranteed_hostile() ) {
         anger_branch = "avatar_nonhostile";
         make_angry();
@@ -2401,10 +2419,150 @@ void npc::on_attacked( const Creature &attacker )
         alarm_invoked = true;
         // A received attack establishes an incident here, even without sight
         // of the attacker. It does not establish the attacker's coordinates.
-        alarm_raised = raise_faction_alarm( pos_abs() );
+        alarm_raised = raise_faction_alarm( pos_abs(), true );
     }
     raid_decision_trace::record_attack_callback_outcome( trace_entry, *this,
             defender_attacked_shakedown, active_covert_scout, anger_branch, alarm_invoked, alarm_raised );
+}
+
+void npc_taken_property::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "source_uid", source_uid );
+    json.member( "type", type );
+    json.member( "quantity", quantity );
+    json.member( "owner", owner );
+    json.member( "position", position );
+    json.end_object();
+}
+
+void npc_taken_property::deserialize( const JsonObject &json )
+{
+    json.read( "source_uid", source_uid ); json.read( "type", type );
+    json.read( "quantity", quantity ); json.read( "owner", owner );
+    json.read( "position", position );
+}
+
+bool npc_property_theft::valid() const
+{
+    std::set<character_id> unique;
+    return !incident_key.empty() && !wronged_faction.is_null() && wronged_faction.is_valid() &&
+           !property.empty() && !culprit_ids.empty() &&
+           ( voluntary_pickup || ( !site_id.empty() && !operation_id.empty() && generation > 0 &&
+                                   collector_id.is_valid() && receiver_id.is_valid() ) ) &&
+           std::all_of( culprit_ids.begin(), culprit_ids.end(), [&]( character_id id ) {
+               return id.is_valid() && unique.insert( id ).second;
+           } ) && std::all_of( property.begin(), property.end(), [&]( const auto &goods ) {
+               return goods.source_uid != 0 && goods.type.is_valid() && goods.quantity > 0 &&
+                      goods.owner == wronged_faction;
+           } );
+}
+
+void npc_property_theft::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "incident_key", incident_key ); json.member( "site_id", site_id );
+    json.member( "operation_id", operation_id ); json.member( "generation", generation );
+    json.member( "collector_id", collector_id ); json.member( "receiver_id", receiver_id );
+    json.member( "wronged_faction", wronged_faction ); json.member( "culprit_ids", culprit_ids );
+    json.member( "property", property ); json.member( "when", when );
+    json.member( "voluntary_pickup", voluntary_pickup );
+    json.end_object();
+}
+
+void npc_property_theft::deserialize( const JsonObject &json )
+{
+    json.read( "incident_key", incident_key ); json.read( "site_id", site_id );
+    json.read( "operation_id", operation_id ); json.read( "generation", generation );
+    json.read( "collector_id", collector_id ); json.read( "receiver_id", receiver_id );
+    json.read( "wronged_faction", wronged_faction ); json.read( "culprit_ids", culprit_ids );
+    json.read( "property", property ); json.read( "when", when );
+    json.read( "voluntary_pickup", voluntary_pickup );
+    if( !valid() ) { json.throw_error( "Invalid witnessed property theft" ); }
+}
+
+void npc::remember_witnessed_pickup( const item &goods, const Character &thief )
+{
+    if( is_blind() || in_sleep_state() || has_effect( efftype_id( "narcosis" ) ) ||
+        has_effect( effect_npc_suspend ) ) { return; }
+    npc_property_theft fact;
+    fact.incident_key = "pickup:" + std::to_string( goods.uid().get_value() );
+    fact.wronged_faction = goods.get_owner();
+    fact.culprit_ids = { thief.getID() };
+    fact.property = { { goods.uid().get_value(), goods.typeId(),
+        goods.count_by_charges() ? goods.charges : 1, goods.get_owner(), thief.pos_abs() } };
+    fact.when = calendar::turn;
+    fact.voluntary_pickup = true;
+    learn_property_theft( fact );
+}
+
+bool npc::learn_property_theft( const npc_property_theft &theft )
+{
+    if( !theft.valid() || theft.wronged_faction != get_fac_id() || is_dead() || is_fake() ||
+        is_hallucination() ) {
+        return false;
+    }
+    auto existing = std::find_if( known_property_thefts.begin(), known_property_thefts.end(), [&]( const auto &known ) {
+        return known.incident_key == theft.incident_key && known.wronged_faction == theft.wronged_faction;
+    } );
+    if( existing == known_property_thefts.end() ) {
+        known_property_thefts.push_back( theft );
+        return true;
+    }
+    if( existing->site_id != theft.site_id || existing->operation_id != theft.operation_id ||
+        existing->generation != theft.generation || existing->collector_id != theft.collector_id ||
+        existing->receiver_id != theft.receiver_id || existing->when != theft.when ||
+        existing->voluntary_pickup != theft.voluntary_pickup ) { return false; }
+    npc_property_theft merged = *existing;
+    bool changed = false;
+    for( const auto &source : theft.property ) {
+        const auto previous = std::find_if( merged.property.begin(), merged.property.end(), [&]( const auto &known ) {
+            return known.source_uid == source.source_uid;
+        } );
+        if( previous == merged.property.end() ) {
+            merged.property.push_back( source ); changed = true;
+        } else if( previous->owner != source.owner || previous->quantity != source.quantity ||
+                   previous->position != source.position || previous->type != source.type ) { return false; }
+    }
+    for( const auto id : theft.culprit_ids ) {
+        if( std::find( merged.culprit_ids.begin(), merged.culprit_ids.end(), id ) == merged.culprit_ids.end() ) {
+            merged.culprit_ids.push_back( id ); changed = true;
+        }
+    }
+    if( changed ) { *existing = std::move( merged ); }
+    return changed;
+}
+
+bool npc::knows_property_theft_by( character_id culprit ) const
+{
+    return std::any_of( known_property_thefts.begin(), known_property_thefts.end(), [&]( const auto &known ) {
+        return !known.voluntary_pickup && known.wronged_faction == get_fac_id() &&
+               std::find( known.culprit_ids.begin(), known.culprit_ids.end(), culprit ) != known.culprit_ids.end();
+    } );
+}
+
+void npc::announce_property_theft( const std::string &incident_key )
+{
+    if( is_dead() || is_fake() || is_mute() || is_hallucination() || in_sleep_state() ||
+        has_effect( efftype_id( "narcosis" ) ) || has_effect( effect_npc_suspend ) ) { return; }
+    const auto fact = std::find_if( known_property_thefts.begin(), known_property_thefts.end(),
+    [&]( const auto &known ) {
+        return known.incident_key == incident_key && !known.voluntary_pickup &&
+               known.wronged_faction == get_fac_id() && known.valid();
+    } );
+    if( fact == known_property_thefts.end() ) { return; }
+    const auto utterance = std::make_shared<const npc_property_theft>( *fact );
+    // say owns the actual native voice event. Only an emitted event carries
+    // this immutable utterance through ordinary hearing, independent of later
+    // speaker death, unloading or additional knowledge.
+    say( std::string( _( "Those bandits are stealing our property!" ) ), sounds::sound_t::alert );
+    sounds::attach_property_theft_report( pos_bub(), { getID(), utterance } );
+}
+
+bool npc::receive_property_theft_report( const sounds::property_theft_report &report )
+{
+    return report.reporter_id.is_valid() && report.reporter_id != getID() && report.fact &&
+           !report.fact->voluntary_pickup && learn_property_theft( *report.fact );
 }
 
 void npc_alarm::serialize( JsonOut &json ) const
@@ -2414,6 +2572,9 @@ void npc_alarm::serialize( JsonOut &json ) const
     json.member( "source_id", source_id );
     json.member( "incident", incident );
     json.member( "until", until );
+    if( received_attack ) {
+        json.member( "received_attack", *received_attack );
+    }
     json.end_object();
 }
 
@@ -2423,6 +2584,8 @@ void npc_alarm::deserialize( const JsonObject &json )
     json.read( "source_id", source_id );
     json.read( "incident", incident );
     json.read( "until", until );
+    received_attack.reset();
+    json.read( "received_attack", received_attack );
 }
 
 std::string npc::faction_alarm_group() const
@@ -2479,16 +2642,201 @@ bool npc::has_active_faction_alarm() const
            is_ally( *source );
 }
 
-bool npc::raise_faction_alarm( const tripoint_abs_ms &incident )
+bool npc::faction_alarm_requires_response() const
+{
+    if( !has_active_faction_alarm() ) {
+        return false;
+    }
+    const bandit_live_world::site_record *site = bandit_live_world::active_operation_duty_site_for(
+                overmap_buffer.global_state.bandit_live_world, getID() );
+    if( site == nullptr || site->active_outing.kind != bandit_live_world::outing_kind::structural_sortie ||
+        site->active_outing.job_type != "scout" ) {
+        return true;
+    }
+    const npc *source = nullptr;
+    raid_decision_trace::scout_alarm_response_read read;
+    const auto finish = [&]( const bool response, const std::string_view reason ) {
+        read.response = response;
+        read.reason = reason;
+        raid_decision_trace::record_scout_alarm_response( *this, *faction_alarm, *site, source, read );
+        return response;
+    };
+    if( faction_alarm->received_attack.value_or( false ) ) {
+        // A real launched attack remains a finite credible incident, including
+        // when its attacker is no longer visible. Hearing copies this fact.
+        return finish( true, "authenticated received attack" );
+    }
+    source = g->find_npc( faction_alarm->source_id );
+    map &here = get_map();
+    // A receiver need not see the incident. An unavailable source or hidden
+    // incident cannot certify that its authenticated warning is now clear.
+    read.source_available = source != nullptr && source->is_active() && !source->is_dead() &&
+                            here.inbounds( source->pos_abs() ) && here.inbounds( faction_alarm->incident );
+    if( !*read.source_available ) {
+        return finish( true, "source or incident unavailable for current assessment" );
+    }
+    read.source_incapacitated = source->duty_incapacitated();
+    if( *read.source_incapacitated ) {
+        return finish( true, "source is incapacitated" );
+    }
+    read.source_flight = source->get_attitude() == NPCATT_FLEE ||
+                        source->get_attitude() == NPCATT_FLEE_TEMP ||
+                        source->has_effect( effect_npc_flee_player ) ||
+                        source->has_effect( efftype_id( "npc_run_away" ) );
+    if( *read.source_flight ) {
+        return finish( true, "source is in native flight" );
+    }
+    read.incident_visible = source->sees( here, here.get_bub( faction_alarm->incident ) );
+    if( !*read.incident_visible ) {
+        return finish( true, "source cannot currently inspect the incident" );
+    }
+    read.incident_field = source->sees_dangerous_field( here.get_bub( faction_alarm->incident ) );
+    if( *read.incident_field ) {
+        return finish( true, "incident has a dangerous field" );
+    }
+    read.source_field = source->sees_dangerous_field( source->pos_bub() );
+    if( *read.source_field ) {
+        return finish( true, "source occupies a dangerous field" );
+    }
+    for( const Creature *creature : source->get_visible_creatures( MAX_VIEW_DISTANCE ) ) {
+        if( creature != source && !creature->is_dead_state() &&
+            source->attitude_to( *creature ) == Creature::Attitude::HOSTILE &&
+            source->scouting_creature_requires_response( *creature, "alarm_response" ) ) {
+            return finish( true, "current perceived creature requires a response" );
+        }
+    }
+    // Actual current source perception cleared the visible incident, not merely
+    // a null target, zero danger or absence of an attack. Keep the alert itself.
+    return finish( false, "current source assessment permits scouting with alert retained" );
+}
+
+bool npc::scouting_creature_requires_response( const Creature &creature,
+        const std::string_view caller ) const
+{
+    const auto *site = bandit_live_world::active_operation_duty_site_for(
+                           overmap_buffer.global_state.bandit_live_world, getID() );
+    if( !site || site->active_outing.kind != bandit_live_world::outing_kind::structural_sortie ||
+        site->active_outing.job_type != "scout" || !creature.is_monster() ) {
+        return true; // Other operation and hostile-character policies are unchanged.
+    }
+    const monster &critter = *creature.as_monster();
+    map &here = get_map();
+    raid_decision_trace::scout_threat_read read;
+    const auto finish = [&]( bool response, std::string_view reason ) {
+        read.response = response;
+        read.reason = reason;
+        raid_decision_trace::record_scout_threat_read( *this, creature, *site, caller, read );
+        return response;
+    };
+    const monster_attitude behavior = critter.attitude( this );
+    read.native_attitude = static_cast<int>( behavior );
+    if( behavior != MATT_ATTACK && behavior != MATT_FOLLOW ) {
+        // HIT_AND_RUN coarsens IGNORE/FLEE to HOSTILE. That is alert knowledge,
+        // not evidence that this currently perceived animal is attacking us.
+        return finish( behavior == MATT_NULL, "native behavior is not attacking or approaching" );
+    }
+    read.approaching = false;
+    for( const auto id : site->active_outing.member_ids ) {
+        const npc *member = g->find_npc( id );
+        if( member && !member->is_dead() && critter.has_dest() &&
+            rl_dist( critter.get_dest(), member->pos_abs() ) <
+            rl_dist( critter.pos_abs(), member->pos_abs() ) ) {
+            read.approaching = true;
+            break;
+        }
+    }
+    if( behavior == MATT_FOLLOW && !*read.approaching ) {
+        return finish( false, "native follow behavior has no approach to this party" );
+    }
+    if( critter.has_flag( json_flag_CANNOT_ATTACK ) ) {
+        return finish( false, "creature cannot attack" );
+    }
+    // Qualify reach to the actual living party, not only the scout whose
+    // perception first raised the alert. A creature beside the partner is real
+    // danger even when this observer is farther away.
+    read.route_reachable = false;
+    for( const auto id : site->active_outing.member_ids ) {
+        const npc *member = g->find_npc( id );
+        if( !member || member->is_dead() ) {
+            continue;
+        }
+        const int distance = rl_dist( critter.pos_abs(), member->pos_abs() );
+        read.threatened_member = id;
+        read.distance = distance;
+        read.melee_reach = distance <= 1 && critter.type->melee_dice > 0 &&
+                           critter.can_reach_to( member->pos_bub() );
+        if( *read.melee_reach ) {
+            return finish( true, "native melee reach" );
+        }
+        for( const auto &[name, special] : critter.type->special_attacks ) {
+            if( !critter.has_special( name ) ) {
+                continue;
+            }
+            if( const auto *gun = dynamic_cast<const gun_actor *>( special.get() ) ) {
+                read.special_range = gun->get_max_range();
+                const auto ammunition = critter.ammo.find( gun->ammo_type );
+                const bool in_range = std::any_of( gun->ranges.begin(), gun->ranges.end(),
+                [distance]( const auto &range ) {
+                    return distance >= range.first.first && distance <= range.first.second;
+                } );
+                if( in_range && critter.sees( here, *member ) &&
+                    ammunition != critter.ammo.end() && ammunition->second > 0 ) {
+                    return finish( true, "native ranged capability and visible reach" );
+                }
+            } else if( const auto *melee = dynamic_cast<const melee_actor *>( special.get() ) ) {
+                read.special_range = melee->range;
+                const int reach_distance = rl_dist( critter.pos_bub().xy(), member->pos_bub().xy() ) +
+                                           4 * std::abs( critter.pos_bub().z() - member->pos_bub().z() );
+                if( ( melee->range == 1 && critter.is_adjacent( member, false ) ) ||
+                    ( melee->range > 1 && reach_distance <= melee->range && critter.sees( here, *member ) ) ) {
+                    // Use the native reach attack's thin-obstacle and occupied
+                    // ray rules; visibility alone does not certify attack reach.
+                    auto ray = line_to( critter.pos_bub(), member->pos_bub(), 0, 0 );
+                    if( !ray.empty() ) {
+                        ray.pop_back();
+                    }
+                    const bool blocked = std::any_of( ray.begin(), ray.end(), [&]( const auto &point ) {
+                        return ( point != critter.pos_bub() && get_creature_tracker().creature_at( point ) ) ||
+                               ( here.impassable( point ) &&
+                                 !here.has_flag( ter_furn_flag::TFLAG_THIN_OBSTACLE, point ) );
+                    } );
+                    if( !blocked && !( melee->no_adjacent && critter.is_adjacent( member, false ) ) ) {
+                        return finish( true, "native special melee reach" );
+                    }
+                }
+            } else {
+                // Legacy function/spell/leap actors do not share a pure reach
+                // query. Do not execute them or certify an attacking creature safe.
+                return finish( true, "attacking or approaching with unclassified special capability" );
+            }
+        }
+        if( !critter.has_flag( mon_flag_IMMOBILE ) && !critter.has_flag( json_flag_CANNOT_MOVE ) &&
+            critter.can_reach_to( member->pos_bub() ) && critter.type->melee_dice > 0 ) {
+            read.route_reachable = !here.route( critter, pathfinding_target::point( member->pos_bub() ) ).empty();
+            if( *read.route_reachable ) {
+                return finish( true, "native attack approach has a physical route" );
+            }
+        }
+    }
+    return finish( false, "no applicable current attack reach or route" );
+}
+
+bool npc::raise_faction_alarm( const tripoint_abs_ms &incident, const bool received_attack )
 {
     const std::string group = faction_alarm_group();
-    if( group.empty() || has_active_faction_alarm() || duty_incapacitated() ) {
+    if( group.empty() || duty_incapacitated() ) {
+        return false;
+    }
+    const bool active = has_active_faction_alarm();
+    if( active && ( !received_attack || faction_alarm->received_attack.value_or( false ) ) ) {
         return false;
     }
     // Match the existing patrol alarm's finite response duration. Only an
     // actual new perception/attack can renew it after expiry.
-    faction_alarm = npc_alarm{ group, getID(), incident, calendar::turn + 30_minutes };
-    raid_decision_trace::record_alarm_edge( *this, *faction_alarm, "perceived_or_attacked",
+    const time_point until = active ? faction_alarm->until : calendar::turn + 30_minutes;
+    faction_alarm = npc_alarm{ group, getID(), incident, until, received_attack };
+    raid_decision_trace::record_alarm_edge( *this, *faction_alarm,
+                                          received_attack ? "received_attack" : "perceived",
                                           in_sleep_state() );
     sounds::sound( pos_bub(), get_shout_volume(), sounds::sound_t::alert,
                    _( "To arms!" ), *faction_alarm );
@@ -2975,6 +3323,10 @@ const npc &npc::get_trade_delegate() const
 
 void npc::reconcile_schedule()
 {
+    if( has_active_operation_duty() ) {
+        reconcile_active_operation_sleep();
+        return;
+    }
     if( myclass.is_null() ) {
         return;
     }
@@ -3007,7 +3359,7 @@ void npc::reconcile_schedule_on_load()
 {
     reconcile_schedule();
 
-    if( needs_food() || myclass.is_null() ) {
+    if( has_active_operation_duty() || needs_food() || myclass.is_null() ) {
         return;
     }
     const auto &[shift_start, shift_end] = myclass.obj().get_work_hours();
@@ -3693,6 +4045,13 @@ bool npc::is_travelling() const
 
 Creature::Attitude npc::attitude_to( const Creature &other ) const
 {
+    if( ( other.is_avatar() || other.is_npc() ) &&
+        ( knows_property_theft_by( other.as_character()->getID() ) ||
+          property_conflict_attackers.count( other.as_character()->getID() ) ) ) {
+        // Specific, actually learned culprit knowledge is a real cause that
+        // can end peaceful contact. It does not make an entire faction an enemy.
+        return Attitude::HOSTILE;
+    }
     if( other.is_avatar() ) {
         const bandit_live_world::hostile_operation_player_relationship operation_relationship =
             bandit_live_world::hostile_operation_player_relationship_for(
@@ -4397,6 +4756,25 @@ void npc::add_new_mission( class mission *miss )
 
 void npc::on_unload()
 {
+    // Active effects have already run each turn. Finish only the throttled body
+    // interval so a later native catch-up cannot replay those active turns.
+    if( !is_dead() && last_updated < calendar::turn ) {
+        const auto finish_body_interval = [&]() {
+            update_body( last_updated, calendar::turn );
+            last_updated = calendar::turn;
+            check_dead_state( &get_map() );
+        };
+        if( get_map().inbounds( pos_abs() ) ) {
+            finish_body_interval();
+        } else {
+            // Map shifts can precede unloading the old active NPC list.
+            tinymap body_map;
+            body_map.load( pos_abs_omt(), false );
+            swap_map current( *body_map.cast_to_map() );
+            finish_body_interval();
+            body_map.save();
+        }
+    }
 }
 
 void npc::update_bodytemp_and_wetness()
@@ -4418,12 +4796,21 @@ void npc::npc_update_body()
     }
 }
 
-void npc::on_load( map *here )
+time_duration npc::catch_up_body()
 {
+    if( last_updated >= calendar::turn ) {
+        return 0_turns;
+    }
     const auto advance_effects = [&]( const time_duration & elapsed_dur ) {
         for( auto &elem : *effects ) {
             for( auto &_effect_it : elem.second ) {
                 effect &e = _effect_it.second;
+                // Bulk aging must obey the same permanence/freeze contract as
+                // Creature::process_effects. The final native turns own removal.
+                if( e.is_permanent() || ( has_flag( json_flag_FREEZE_EFFECTS ) &&
+                                         !e.has_flag( json_flag_FREEZE_EFFECTS ) ) ) {
+                    continue;
+                }
                 const time_duration &time_left = e.get_duration();
                 if( time_left > 1_turns ) {
                     if( time_left < elapsed_dur ) {
@@ -4447,21 +4834,20 @@ void npc::on_load( map *here )
     // Cap at some reasonable number, say 2 days
     const time_duration dt = std::min( calendar::turn - last_updated, 2_days );
     // TODO: Sleeping, healing etc.
-    last_updated = calendar::turn;
     time_point cur = calendar::turn - dt;
     add_msg_debug( debugmode::DF_NPC, "on_load() by %s, %d turns", get_name(), to_turns<int>( dt ) );
     // First update with 30 minute granularity, then 5 minutes, then turns
-    for( ; cur < calendar::turn - 30_minutes; cur += 30_minutes + 1_turns ) {
+    for( ; !is_dead() && cur < calendar::turn - 30_minutes; cur += 30_minutes + 1_turns ) {
         update_body( cur, cur + 30_minutes );
         advance_effects( 30_minutes );
         advance_focus( 30 );
     }
-    for( ; cur < calendar::turn - 5_minutes; cur += 5_minutes + 1_turns ) {
+    for( ; !is_dead() && cur < calendar::turn - 5_minutes; cur += 5_minutes + 1_turns ) {
         update_body( cur, cur + 5_minutes );
         advance_effects( 5_minutes );
         advance_focus( 5 );
     }
-    for( ; cur < calendar::turn; cur += 1_turns ) {
+    for( ; !is_dead() && cur < calendar::turn; cur += 1_turns ) {
         update_body( cur, cur + 1_turns );
         process_effects();
         if( ( cur - calendar::turn_zero ) % 1_minutes == 0_turns ) {
@@ -4469,8 +4855,25 @@ void npc::on_load( map *here )
         }
     }
 
+    // Stamp completion after catch-up. Stamping first makes update_body skip
+    // and rewind the first interval, so repeated loads replay needs and injury.
+    last_updated = calendar::turn;
+    check_dead_state( &get_map() );
+    // The loaded move owner releases this temporary attitude when its native
+    // effect expires. Off-bubble bodies need the same expiry consequence.
+    if( !is_dead() && attitude == NPCATT_FLEE_TEMP &&
+        !has_effect( effect_npc_flee_player ) ) {
+        set_attitude( NPCATT_NULL );
+    }
+    return dt;
+}
+
+void npc::on_load( map *here )
+{
+    const time_duration dt = catch_up_body();
+
     // Reconcile body temperature and wetness with current weather.
-    // The catch-up loops above ran update_body() but not update_bodytemp();
+    // The shared catch-up ran update_body() but not update_bodytemp();
     // one recompute at current conditions is enough since temp converges fast.
     update_bodytemp_and_wetness();
 
@@ -4567,7 +4970,11 @@ bool npc::dispose_item( item_location &&obj, const std::string & )
 
 void npc::process_turn()
 {
+    reconcile_active_operation_sleep();
     Character::process_turn();
+    // Effects may select sleep. Preserve actual physiological collapse as well
+    // as explicit incapacity; never remove effects while iterating them.
+    reconcile_active_operation_sleep();
 
     if( get_option<bool>( "LLM_INTENT_ENABLE" ) ) {
         llm_intent_state &state = llm_intent_state_for( *this );

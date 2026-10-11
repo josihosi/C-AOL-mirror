@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -548,7 +549,7 @@ class TerminalStartupDialogTest(unittest.TestCase):
                    str(self.transcript), "--endpoint", str(self.endpoint), "--owner",
                    str(self.endpoint.parent / "owner.json"), "--run-owner", str(self.run / "terminal.owner.json")]
         self.broker = {"pid": 70000, "alive": True, "birth_identity": "broker-birth",
-                       "command": " ".join(command)}
+                       "command": shlex.join(command)}
         self.terminal = {"schema": "caol-curses-terminal-owner-v1", "host": host,
                          "run_id": self.owner["run_id"], "game_pid": self.generation["pid"],
                          "game_process_generation": self.generation,
@@ -594,6 +595,141 @@ class TerminalStartupDialogTest(unittest.TestCase):
                 "process_generation": self.generation, "owner": "run_bound_pty",
                 "payload_sha256": sha256(b"i").hexdigest()}
 
+    def _retained_native_warning(self):
+        self.status["state"] = "process_dead"
+        self.status["child_exit_code"] = 1
+        self._write("status.json", self.status)
+        (self.userdir / "config" / "debug.log").write_text("no duplicate ERROR line here")
+        self._frame([" " + line for line in [self.lines[0], self.lines[1],
+                     "REPORTING FUNCTION : " + ERRORS[0][1],
+                     "C++ SOURCE FILE : src/item_location.cpp", "LINE : 388",
+                     "VERSION : f4bef7f87e-dirty", *self.lines[-2:]]])
+        original_snapshot = self._snapshot
+        self._snapshot = lambda pid: {"pid": pid, "alive": False} if pid == self.bridge["pid"] else original_snapshot(pid)
+
+    def _retained_look(self):
+        self.status["host"] = self.terminal["host"]
+        self._write("status.json", self.status)
+        output = io.StringIO()
+        with patch("startup_harness.process_generation_snapshot", side_effect=self._snapshot), \
+                patch("curses_terminal_transport.dispatch_input") as send, \
+                contextlib.redirect_stdout(output):
+            code = play_cli.main(["--session", str(self.session), "--diagnostics", "look"])
+        send.assert_not_called()
+        self.assertFalse(list((self.session / "requests").glob("*.json")))
+        return code, json.loads(output.getvalue())
+
+    def test_retained_look_projects_authenticated_warning_without_dead_bridge_request(self):
+        self._retained_native_warning()
+        code, result = self._retained_look()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error"], "bridge_process_exited")
+        seen = result["startup_dialog"]
+        self.assertEqual(seen["state"], "confirmed_debug_dialog")
+        self.assertTrue(seen["retained_startup"])
+        self.assertTrue(seen["ignore_advertised"])
+        self.assertEqual(seen["pid"], self.generation["pid"])
+        self.assertEqual(seen["birth_identity"], self.generation["birth_identity"])
+        self.assertEqual(seen["source_line"], 388)
+        self.assertFalse(json.loads((self.session / "play-client.json").read_text()).get("pending"))
+
+    def test_retained_look_wrong_binding_does_not_project_capture(self):
+        self._retained_native_warning()
+        self.status["binding_id"] = "different-binding"
+        code, result = self._retained_look()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error"], "bridge_process_exited")
+        self.assertNotIn("status", result)
+        self.assertNotIn("startup_dialog", result)
+        self.assertFalse((self.session / "startup-dialog-captures").exists())
+
+    def test_retained_look_preserves_original_pending_request_without_capture(self):
+        self._retained_native_warning()
+        pending = {"request_id": "original-pending", "request": {"action": "game.act"}}
+        self._write("play-client.json", {"binding_id": self.binding, "pending": pending})
+        code, result = self._retained_look()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error"], "request_in_flight")
+        self.assertEqual(result["request_id"], pending["request_id"])
+        self.assertNotIn("startup_dialog", result)
+        self.assertEqual(json.loads((self.session / "play-client.json").read_text())["pending"], pending)
+        self.assertFalse((self.session / "startup-dialog-captures").exists())
+
+    def test_retained_look_changed_game_generation_does_not_confirm_warning(self):
+        self._retained_native_warning()
+        original_snapshot = self._snapshot
+        self._snapshot = lambda pid: ({**original_snapshot(pid), "birth_identity": "changed"}
+                                     if pid == self.generation["pid"] else original_snapshot(pid))
+        code, result = self._retained_look()
+        self.assertEqual(code, 1)
+        self.assertNotEqual(result["startup_dialog"]["state"], "confirmed_debug_dialog")
+
+    def test_dead_bridge_native_action_does_not_gain_status_or_dispatch(self):
+        from cockpit_file_bridge import FileBackedCockpitBridge
+        self._retained_native_warning()
+        self.status["host"] = self.terminal["host"]
+        self._write("status.json", self.status)
+        with patch("startup_harness.process_generation_snapshot", side_effect=self._snapshot):
+            result = FileBackedCockpitBridge.send_request(
+                self.session, request_id="not-delivered", binding_id=self.binding,
+                request={"action": "game.act", "action_id": "world.move.east"})
+        self.assertEqual(result, {"ok": False, "error": "bridge_process_exited"})
+        self.assertFalse(list((self.session / "requests").glob("*.json")))
+
+    def test_dead_bridge_post_world_look_does_not_claim_startup_or_new_frame(self):
+        self._retained_native_warning()
+        self.status["session_descriptor"] = {"run_id": self.owner["run_id"]}
+        code, result = self._retained_look()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error"], "bridge_process_exited")
+        self.assertNotIn("startup_dialog", result)
+        client = json.loads((self.session / "play-client.json").read_text())
+        self.assertFalse(client.get("observation_id"))
+        self.assertFalse(client.get("pending"))
+
+    def test_retained_native_warning_without_profile_duplicate_uses_existing_transaction(self):
+        self._retained_native_warning()
+        seen = self._observe()
+        self.assertEqual(seen["state"], "confirmed_debug_dialog")
+        self.assertEqual(seen["source_file"], "src/item_location.cpp")
+        self.assertEqual(seen["source_line"], 388)
+        self.assertEqual(seen["message_source"], "current_run_owned_terminal_frame")
+        self.assertTrue(seen["retained_startup"])
+        with patch("curses_terminal_transport.dispatch_input", side_effect=self._receipt) as send:
+            result = self._recover(seen["capture_sha256"])
+        self.assertTrue(result["ok"])
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["process_generation"], self.generation)
+        attempt = json.loads(Path(result["attempt_path"]).read_text())
+        self.assertEqual(attempt["birth_identity"], self.generation["birth_identity"])
+        self.assertEqual(attempt["current_dialog"]["capture_sha256"], seen["capture_sha256"])
+        self.assertTrue(Path(result["result_path"]).exists())
+
+    def test_retained_recovery_refuses_changed_capture_owner_and_unknown_reporter(self):
+        self._retained_native_warning()
+        capture = self._observe()["capture_sha256"]
+        original_snapshot = self._snapshot
+        for changed_pid in (self.generation["pid"], self.broker["pid"], self.bridge["pid"]):
+            self._snapshot = lambda pid: ({**original_snapshot(pid), "birth_identity": "other"} if pid == changed_pid else original_snapshot(pid)) if changed_pid != self.bridge["pid"] else ({"pid":pid,"alive":True} if pid == changed_pid else original_snapshot(pid))
+            with patch("curses_terminal_transport.dispatch_input") as send:
+                result = self._recover(capture)
+            self.assertFalse(result["ok"])
+            send.assert_not_called()
+        self._snapshot = original_snapshot
+        self._frame(["\x1b[2J", "Loading character save"])
+        with patch("curses_terminal_transport.dispatch_input") as send:
+            result = self._recover(capture)
+        self.assertFalse(result["ok"])
+        send.assert_not_called()
+
+    def test_native_provenance_requires_complete_current_block(self):
+        self._retained_native_warning()
+        original = self.transcript.read_text()
+        for field in ("C++ SOURCE FILE : src/item_location.cpp", "LINE : 388",
+                      "VERSION : f4bef7f87e-dirty", self.lines[-1]):
+            self.transcript.write_text(original.replace(field, ""))
+            self.assertNotEqual(self._observe()["state"], "confirmed_debug_dialog")
+
     def test_valid_terminal_warning_single_dispatch_and_attempt(self):
         seen = self._observe()
         self.assertEqual(seen["state"], "confirmed_debug_dialog")
@@ -610,6 +746,49 @@ class TerminalStartupDialogTest(unittest.TestCase):
         output = plain_player_output({"ok": False, "status": self.status, "startup_dialog": seen})
         self.assertIn("terminal frame", output)
         self.assertIn("debug-ignore --capture " + seen["capture_sha256"], output)
+
+    def test_explicit_startup_ignore_without_declaration_whitelist_uses_same_transaction(self):
+        from hashlib import sha256
+        declaration = json.loads(self.declaration.read_text())
+        declaration["runtime_contract"]["permitted_input"].remove("debug:ignore")
+        selected = (json.dumps(declaration, indent=2) + "\n").encode()
+        self.declaration.write_bytes(selected)
+        preflight = json.loads((self.run / "contract.preflight.json").read_text())
+        preflight["scenario_source"]["sha256"] = sha256(selected).hexdigest()
+        (self.run / "contract.preflight.json").write_text(json.dumps(preflight))
+        capture = self._observe()["capture_sha256"]
+        with patch("curses_terminal_transport.dispatch_input", side_effect=self._receipt) as send:
+            result = self._recover(capture)
+        self.assertTrue(result["ok"], result)
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["keys"], ["i"])
+        self.assertEqual(result["authorization"]["selected_declaration_sha256"], sha256(selected).hexdigest())
+        attempt = json.loads(Path(result["attempt_path"]).read_text())
+        self.assertEqual(attempt["current_dialog"]["capture_sha256"], capture)
+        self.assertEqual(attempt["pid"], self.generation["pid"])
+        self.assertEqual(json.loads(Path(result["result_path"]).read_text())["state"], "input_reported_delivered")
+
+    def test_selected_explicit_recovery_ban_and_raw_key_permission_still_refuse(self):
+        from hashlib import sha256
+        original = json.loads(self.declaration.read_text())
+        capture = self._observe()["capture_sha256"]
+        for mutation in ("recovery_ban", "raw_keys", "not_setup", "wrong_mode"):
+            with self.subTest(mutation=mutation):
+                declaration = json.loads(json.dumps(original))
+                contract = declaration["runtime_contract"]
+                if mutation == "recovery_ban": contract["forbidden_input"].append("debug:ignore")
+                elif mutation == "raw_keys": contract["permitted_input"].append("keyboard")
+                elif mutation == "not_setup": contract["setup_only_debug"] = False
+                else: contract["playtest_mode"] = "tiles"
+                selected = (json.dumps(declaration, indent=2) + "\n").encode()
+                self.declaration.write_bytes(selected)
+                preflight = json.loads((self.run / "contract.preflight.json").read_text())
+                preflight["scenario_source"]["sha256"] = sha256(selected).hexdigest()
+                (self.run / "contract.preflight.json").write_text(json.dumps(preflight))
+                with patch("curses_terminal_transport.dispatch_input") as send:
+                    result = self._recover(capture)
+                self.assertEqual(result["reason"], "startup_debug_ignore_permission_unavailable")
+                send.assert_not_called()
 
     def test_stale_owner_wrong_run_and_private_mismatch_refuse(self):
         original = dict(self.terminal)
@@ -650,7 +829,7 @@ class TerminalStartupDialogTest(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 send.assert_not_called()
 
-    def test_only_exact_selected_debug_ignore_permission_is_accepted(self):
+    def test_changed_selected_source_still_refuses_startup_recovery(self):
         capture = self._observe()["capture_sha256"]
         original = json.loads(self.declaration.read_text())
         for mutation in ["remove_permission", "allow_keyboard", "different_name", "extra_permission"]:

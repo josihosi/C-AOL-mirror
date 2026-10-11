@@ -41,7 +41,8 @@ def _persistent_result_cache(value: Any) -> Any:
     reference rather than materializing its history into play-client.json.
     """
     if isinstance(value, ArchiveSequence):
-        return {"schema": "caol-archive-sequence-ref-v1", **value.reference()}
+        return {"schema": "caol-archive-sequence-ref-v1",
+                **(value.verified_reference or value.reference())}
     if isinstance(value, dict):
         return {key: _persistent_result_cache(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -437,6 +438,8 @@ class PlayerClient:
                 complete = state == "safe_to_cleanup"
                 return {"ok": not failed, "state": "finished" if complete else "cleanup_failed" if failed else "finishing",
                         "bridge_state": state, "cleanup": cleanup,
+                        **({"gameplay_outcome": self.state["gameplay_outcome"]}
+                           if self.state.get("gameplay_outcome") else {}),
                         "cleanup_pending": not complete and not failed,
                         "bridge_cleanup": status.get("cleanup"), "terminalization": terminal,
                         "reason": status.get("reason", status.get("error")),
@@ -504,7 +507,7 @@ class PlayerClient:
 
         assessment: dict[str, Any] | None = None
         while True:
-            result = Bridge.response_status(self.session, request_id)
+            result = Bridge.response_status(self.session, request_id, summary=False)
             assessment = _merge_turn_assessments(assessment, turn_assessment())
             if result.get("ok") or result.get("error") != "response_not_available_or_stale":
                 break
@@ -546,6 +549,8 @@ class PlayerClient:
         if not full.get("ok"):
             return full
         response = full["response"]
+        if response.get("ok") is not True:
+            result["startup_diagnostics"] = Bridge.startup_diagnostics(self.session)
         receipt_generation = result["receipt"].get("session_generation", 0)
         try:
             current_status = json.loads((self.session / "status.json").read_text(encoding="utf-8"))
@@ -621,6 +626,9 @@ class PlayerClient:
                               and terminal.get("state") == "finished")
         if terminal_request and confirmed_terminal:
             self.state["finished"] = True
+            reported = terminal.get("stop_detail", {}).get("gameplay_outcome")
+            if isinstance(reported, dict):
+                self.state["gameplay_outcome"] = reported
             self.state["finished_generation"] = result["receipt"].get("session_generation", 0)
             self.state.pop("observation_id", None)
         try:
@@ -650,30 +658,19 @@ class PlayerClient:
         self.state.pop("pending", None)
         self.save()
         output = {**result, "ok": response.get("ok") is True,
+                  **({"gameplay_outcome": self.state["gameplay_outcome"]}
+                     if self.state.get("gameplay_outcome") else {}),
                   "world_controls_unchanged": world_controls_unchanged,
                   "world_observation": world_observation,
                   "turn_assessment": assessment,
                   "state": "collected" if response.get("ok") else "rejected", "request_id": request_id,
                   "next": "collect" if self.state.get("finished") else
-                          "finish --witness FILE" if self.state.get("sealed_terminal") else
-                          "journal --reason REASON" if self.state.get("process_exited") else
-                          "act, look, inspect, or journal" if self.state.get("observation_id") else "look"}
+                          ("finish --outcome TEXT --verdict positive|negative|inconclusive" if self.state.get("process_exited") else
+                           "status; preserve the sealed journal and live game; native exit is unverified") if self.state.get("sealed_terminal") else
+                          "finish --outcome TEXT --verdict positive|negative|inconclusive" if self.state.get("process_exited") else
+                          "act, look, inspect, evidence, messages, or status" if self.state.get("observation_id") else "look"}
         if self.state.get("process_exited") and not self.state.get("finished"):
             output["state"] = "process_exited"
-        if self.state.get("sealed_terminal") and not self.state.get("finished"):
-            output["witness_fields"] = {
-                "citation_paths": "Checks are relative to entry.value, not the whole response. Observation checks start value.surface.facts. Inspect the actual journal entry first; do not guess paths.",
-                "value_types": "Copy exact JSON values from the journal: false differs from the string \"false\", and 0 differs from \"0\". Do not coerce native string facts.",
-                "verdict": "proved | contradicted | inconclusive",
-                "smallest_supported_claim": "Your conclusion limited to cited facts",
-                "causal_account": "Why the observed facts support that conclusion",
-                "citations": [{"citation_id": "J... from journal entries", "meaning": "What this establishes",
-                               "checks": {"value.surface.facts.FIELD": "Exact observed value; nested JSON paths supported"}}],
-                "recommended_disposition": "accept | continue | repair | change-strategy",
-                "contradictions": "List every supplied contradiction with its citation_id and meaning",
-                "remaining_unknowns": "Optional list of unresolved questions",
-                "evidence_ceiling": "Optional: omit this field to use the sealed journal's evidence_ceiling. If supplied, copy that exact value; this is not a prose explanation.",
-            }
         if terminal_request and confirmed_terminal:
             output.update(state="finishing", cleanup_pending=True,
                           note="Finish accepted; collect reports scenario cleanup. Native save/exit evidence remains separate.")
@@ -736,7 +733,7 @@ class PlayerClient:
         if self.state.get("pending"):
             raise ValueError("request_in_flight: use collect")
         if self.state.get("sealed_terminal"):
-            raise ValueError("journal_is_sealed: submit finish --witness FILE")
+            raise ValueError("journal_is_sealed: immutable historical seal; verify native exit before reporting; preserve any live game and consult its owner")
         frame = self.state.get("terminal_observation_id") if terminal else self.state.get("observation_id")
         if terminal:
             if not frame or not self.state.get("process_exited"):
@@ -981,7 +978,7 @@ class PlayerClient:
         if not isinstance(request, dict) or not isinstance(request.get("action"), str) or not request["action"].strip().lower().startswith("game."):
             raise ValueError("call_requires_a_structured_game_request")
         if self.state.get("sealed_terminal"):
-            raise ValueError("journal_is_sealed: submit finish --witness FILE")
+            raise ValueError("journal_is_sealed: immutable historical seal; verify native exit before reporting; preserve any live game and consult its owner")
         if self.state.get("process_exited") and request["action"].strip().lower() not in {"game.observe", "game.look"}:
             return {"ok": False, "error": "game_process_exited", "next": "journal --reason REASON"}
         # Keep recipes and their types intact. The service owns operation
@@ -1016,30 +1013,37 @@ class PlayerClient:
                       "unit": "steps", "maximum": bound_maximum},
         }}, wait_seconds)
 
+    def _reporting_exit_refusal(self):
+        if not self.state.get("process_exited"):
+            return {"ok": False, "error": "native_exit_required_before_reporting",
+                    "next": "Use inspect/evidence/messages/status for live evidence. When authorized, use the current advertised native save/quit action and look to observe exit. No reporting request submitted."}
+        return None
+
     def journal(self, reason: str, unused: str, wait_seconds: float):
+        refusal = self._reporting_exit_refusal()
+        if refusal is not None:
+            return refusal
         return self.submit({"action": "run.witness", "observation_id": self.frame(terminal=self.state.get("process_exited", False)),
                             "stop_reason": reason, "unused_authority": unused}, wait_seconds)
 
-    def finish(self, witness: dict[str, Any], wait_seconds: float):
-        if isinstance(witness, dict):
-            statements = [claim.get("statement") for claim in witness.get("claims", [])
-                          if isinstance(claim, dict)] if witness.get("schema") == \
-                "caol-playtest-witness-bundle-v1" else [witness]
-            for statement in statements if isinstance(statements, list) else []:
-                for citation in statement.get("citations", []) if isinstance(statement, dict) else []:
-                    checks = citation.get("checks", {}) if isinstance(citation, dict) else {}
-                    for path, value in checks.items() if isinstance(checks, dict) else []:
-                        if path.endswith(".last_save_checkpoint") and not isinstance(value, str):
-                            return {"ok": False, "error": "witness_checkpoint_requires_string",
-                                    "path": path, "supplied_type": type(value).__name__,
-                                    "expected_shape": {"type": "string", "example":
-                                        json.dumps({"confirmed_turn": 5248280}, separators=(",", ":"))},
-                                    "next": "Copy the exact STRING from the cited journal row; no request submitted."}
-        terminal = self.state.get("sealed_terminal")
-        if not terminal:
-            return {"ok": False, "error": "journal_required_before_finish",
-                    "next": "journal --reason REASON; inspect result.evidence_journal.entries --limit 10"}
-        return self.submit({"action": "run.finish", **terminal, "witness": witness}, wait_seconds)
+    def finish(self, witness: dict[str, Any] | None, wait_seconds: float, *,
+               outcome: dict[str, Any] | None = None):
+        refusal = self._reporting_exit_refusal()
+        if refusal is not None:
+            return refusal
+        terminal = self.state.get("sealed_terminal") or {
+            "observation_id": self.state.get("terminal_observation_id"),
+            "stop_reason": "outcome_reported" if outcome is not None else "witness_reported",
+            "unused_authority": "released",
+        }
+        if not terminal.get("observation_id"):
+            return {"ok": False, "error": "terminal_observation_required", "next": "look"}
+        request = {"action": "run.finish", **terminal}
+        if witness is not None:
+            request["witness"] = witness
+        if outcome is not None:
+            request["outcome"] = outcome
+        return self.submit(request, wait_seconds)
 
     def messages(self, offset: int | None, limit: int, contains: str | None):
         from cockpit_evidence import select
@@ -1168,8 +1172,10 @@ def main(argv=None):
     resume.add_argument("--request-id", help="Required when no active/last request identity is retained")
     cancel = commands.add_parser("cancel", help="Request cooperative cancellation of the outstanding request")
     cancel.add_argument("--reason", default="player_cancelled")
-    quit_command = commands.add_parser("quit", help="Explicitly end the owned run without a gameplay claim")
+    quit_command = commands.add_parser("quit", help="Native close guidance; process termination requires explicit --abort")
     quit_command.add_argument("--reason", default="player requested quit")
+    quit_command.add_argument("--abort", action="store_true",
+                              help="Explicitly terminate the owned process; no native save or normal-exit credit")
     messages = commands.add_parser("messages", help="Read native messages from the displayed observation; latest matching page by default")
     messages.add_argument("--contains")
     messages.add_argument("--offset", type=int)
@@ -1274,11 +1280,17 @@ def main(argv=None):
     inspect.add_argument("--limit", type=int)
     inspect.add_argument("--contains")
     inspect.add_argument("--request-id", help="Inspect an earlier retained response without sending input")
-    journal = commands.add_parser("journal", help="Seal immutable evidence before writing the witness; ends play")
+    journal = commands.add_parser("journal", help="Terminal seal after native exit; live evidence uses inspect/evidence/messages/status")
     journal.add_argument("--reason", required=True)
     journal.add_argument("--unused-authority", default="released")
-    finish = commands.add_parser("finish", help="Submit your witness against the sealed journal")
-    finish.add_argument("--witness", type=Path, required=True)
+    finish = commands.add_parser("finish", help="Report the gameplay result after native exit; cleanup is separate")
+    report = finish.add_mutually_exclusive_group(required=True)
+    report.add_argument("--outcome", help="Concise supported gameplay conclusion; no journal ceremony required")
+    report.add_argument("--witness", type=Path, help="Optional detailed witness review; selected paths generate typed values")
+    finish.add_argument("--verdict", choices=("positive", "negative", "inconclusive"), default="inconclusive")
+    finish.add_argument("--unknown", action="append", default=[], help="Unresolved secondary observation")
+    finish.add_argument("--cite", action="append", default=[], help="Existing native observation ID to cite")
+    finish.add_argument("--select", action="append", default=[], help="Selected native fields; their exact values are derived")
     # argparse accepts global options before a subcommand only.  Keep the
     # same destination and default when a caller places this display choice
     # after any subcommand; absent subparser options must not reset a true
@@ -1324,7 +1336,7 @@ def main(argv=None):
                         status = json.loads((args.session / "status.json").read_text(encoding="utf-8"))
                         if (status.get("binding_id") != client.binding or
                                 pre_world_startup_phase(status) != "declared_reentry"):
-                            raise ValueError("journal_is_sealed: submit finish --witness FILE")
+                            raise ValueError("journal_is_sealed: immutable historical seal; verify native exit before reporting; preserve any live game and consult its owner")
                         # The prior journal stays sealed until a new World owner
                         # publishes its descriptor. This is a read-only view of
                         # the replacement process, never a game.observe request.
@@ -1380,13 +1392,18 @@ def main(argv=None):
                                                   danger_handling=args.danger_handling,
                                                   wait_seconds=args.wait_seconds)
                 elif args.command == "quit":
-                    result = client.submit({"action": "run.quit", "stop_reason": args.reason}, args.wait_seconds)
+                    result = client.submit({"action": "run.quit", "stop_reason": args.reason,
+                                            "abort": args.abort}, args.wait_seconds)
                 elif args.command == "call":
                     result = client.call(json.loads(args.request.read_text()), args.wait_seconds)
                 elif args.command == "journal":
                     result = client.journal(args.reason, args.unused_authority, args.wait_seconds)
                 else:
-                    result = client.finish(json.loads(args.witness.read_text()), args.wait_seconds)
+                    outcome = ({"summary": args.outcome, "verdict": args.verdict, "unknowns": args.unknown,
+                                "citations": [{"observation_id": identity, "select": args.select}
+                                              for identity in args.cite]} if args.outcome is not None else None)
+                    result = client.finish(json.loads(args.witness.read_text()) if args.witness else None,
+                                           args.wait_seconds, outcome=outcome)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result = {"ok": False, "error": str(error)}
     if args.command == "look" and "client" in locals() and isinstance(result.get("status"), dict):
@@ -1446,7 +1463,22 @@ def main(argv=None):
             with (args.session / "playtest.txt").open("a", encoding="utf-8") as transcript:
                 transcript.write("> play " + shlex.join(entered) + "\n" + text + "\n\n")
     else:
-        emit(result)
+        try:
+            emit(result)
+        except (OSError, ValueError) as error:
+            # Collection commits before presentation. A failed stdout/store
+            # write must never suggest resubmitting the native action.
+            committed = (not client.state.get("pending") and
+                         bool(client.state.get("last_request_id")) and
+                         client.state.get("last_request_id") == result.get("request_id"))
+            sys.stderr.write(json.dumps({
+                "ok": False, "error": "presentation_failed", "detail": str(error),
+                "collection_committed": committed,
+                "request_id": result.get("request_id"),
+                "session": str(args.session),
+                "next": "play collect retrieves the retained result; do not repeat the native action",
+            }, ensure_ascii=False) + "\n")
+            return 1
     return 0 if result.get("ok") else 1
 
 

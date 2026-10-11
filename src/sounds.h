@@ -3,12 +3,14 @@
 #define CATA_SRC_SOUNDS_H
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string> // IWYU pragma: keep
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "character_id.h"
 #include "coords_fwd.h"
 #include "units_fwd.h"
 
@@ -18,6 +20,7 @@ class JsonObject;
 class item;
 class monster;
 struct npc_alarm;
+struct npc_property_theft;
 class translation;
 template <typename E> struct enum_traits;
 
@@ -52,6 +55,27 @@ inline auto format_as( sound_t st )
     return static_cast<std::underlying_type_t<sound_t>>( st );
 }
 
+// This is an ephemeral sound-delivery identity, not a second encounter owner.
+// The existing hostile reservation owns the persisted emission and receiver.
+struct robbery_demand {
+    std::string site_id;
+    std::string operation_id;
+    int generation = 0;
+    character_id speaker_id;
+    int emitted_turn = -1;
+};
+
+struct property_theft_report {
+    character_id reporter_id;
+    // A value snapshot of the utterance, owned only by its ephemeral sound.
+    // Current speaker memory/lifetime must not rewrite already-emitted facts.
+    std::shared_ptr<const npc_property_theft> fact;
+};
+// Attach knowledge to the speaker's just-emitted native speech event; this
+// never emits another sound or recomputes a recipient's hearing.
+void attach_property_theft_report( const tripoint_bub_ms &speaker,
+                                 const property_theft_report &report );
+
 // Methods for recording sound events.
 /**
  * Sound at (p) of intensity (vol)
@@ -74,6 +98,9 @@ void sound( const tripoint_bub_ms &p, int vol, sound_t category, const std::stri
 void sound( const tripoint_bub_ms &p, int vol, sound_t category, const std::string &description,
             bool ambient, const std::string &id, const std::string &variant,
             significant_sound_t significant_kind );
+void sound( const tripoint_bub_ms &p, int vol, sound_t category,
+            const std::string &description, const robbery_demand &demand,
+            const std::string &id, const std::string &variant );
 // A spoken unit alert uses the same hearing/weather/distance delivery as sound.
 void sound( const tripoint_bub_ms &p, int vol, sound_t category,
             const std::string &description, const npc_alarm &alarm );
@@ -105,6 +132,13 @@ bool has_significant_sounds();
 void process_sounds();
 // process_sound_markers applies sound events to the player and records them for display.
 void process_sound_markers( Character *you );
+// Loaded NPCs outside the avatar's ordinary sound-processing cutoff still hear
+// this local demand through the same hearing/weather/distance calculation.
+void process_sound_markers( Character *you, bool robbery_only );
+/** Current native audibility only; this is not a delivered sound receipt. */
+bool can_hear_local_sound( const Character &hearer, const tripoint_bub_ms &source, int volume );
+/** Exact transient event still awaiting the normal sound delivery pass. */
+bool robbery_demand_pending( const robbery_demand &demand );
 
 // Return list of points that have sound events the player can hear.
 std::vector<tripoint_bub_ms> get_footstep_markers();

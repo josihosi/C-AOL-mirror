@@ -11,6 +11,40 @@ import startup_harness as harness
 
 
 class StartupEnvironmentTest(unittest.TestCase):
+    def test_reporting_process_reader_rejects_stale_exit_and_generation(self):
+        # Execute the actual closure, with its existing OS identity probe supplied.
+        import ast
+        source = ast.parse(Path(harness.__file__).read_text())
+        nodes = [n for n in ast.walk(source) if isinstance(n, ast.FunctionDef) and n.name == "read_process_state"]
+        node = next(n for n in nodes if "current_owned_process_generation" in ast.unparse(n))
+        expected = {"pid": 42, "birth_identity": "birth-new", "command": "game"}
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict(os.environ, {
+                "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": raw,
+                "OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": "binding-a"}):
+            path = Path(raw) / "game-process-exit.json"
+            stale = {"pid": 42, "run_id": "run-a", "binding_id": "binding-a", "alive": False,
+                     "exit_code": 0, "process_generation": {**expected, "birth_identity": "old"}}
+            path.write_text(json.dumps(stale))
+            probe = mock.Mock(return_value={"pid": 42, "status": "alive", "expected": expected})
+            scope = dict(harness.__dict__, pid=42, run_id="run-a", run_dir=raw, performance=None,
+                         current_owned_process_generation=probe, original_process_generation=expected)
+            exec(compile(ast.Module(body=[node], type_ignores=[]), harness.__file__, "exec"), scope)
+            read = scope["read_process_state"]
+            self.assertTrue(read()["alive"])
+            self.assertIsNone(read()["exit_code"])
+            for status in ("identity_changed", "identity_unavailable"):
+                probe.return_value = {"pid": 42, "status": status, "expected": expected}
+                self.assertIsNone(read()["alive"])
+            probe.return_value = {"pid": 42, "status": "exited", "expected": expected}
+            self.assertFalse(read()["alive"])
+            self.assertIsNone(read()["exit_code"])
+            path.write_text(json.dumps({**stale, "process_generation": expected, "exit_code": 7}))
+            self.assertEqual(read()["exit_code"], 7)
+            probe.return_value = {"pid": 43, "status": "exited", "expected": expected}
+            self.assertIsNone(read()["alive"])
+            probe.return_value = {"pid": 42, "status": "exited", "expected": {**expected, "birth_identity": "another"}}
+            self.assertIsNone(read()["alive"])
+
     def test_fresh_profile_inherits_config_before_overrides_without_mutating_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -54,6 +88,59 @@ class StartupEnvironmentTest(unittest.TestCase):
                 mock.patch.object(Path, "is_file", return_value=True), \
                 mock.patch.object(harness.os, "access", return_value=False):
             self.assertIsNone(harness.harness_tool_binary("peekaboo"))
+
+    def test_sparse_canonical_blob_exports_exact_controls_without_restoring_worktree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / harness.CANONICAL_KEYBINDINGS_PATH
+            source.parent.mkdir(parents=True)
+            raw = b'[{"id":"debug","bindings":[{"key":["}"]}]}]\n'
+            source.write_bytes(raw)
+            for args in (["init", "-q"], ["add", "."],
+                         ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]):
+                subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+            source.unlink()  # The exact original Windows omission.
+            target = root / "owned-profile" / "keybindings.json"
+            with mock.patch.object(harness, "repo_root", return_value=root), \
+                    mock.patch.object(harness, "config_dir_for_profile", return_value=target.parent), \
+                    mock.patch.object(harness, "load_game_options", return_value={}), \
+                    mock.patch.object(harness, "provision_llm_api_key_environment", return_value=({"status":"disabled"}, {})):
+                readiness = harness.harness_runtime_dependency_readiness()
+                self.assertEqual(readiness["status"], "ready")
+                self.assertEqual(readiness["keybindings"]["source"], "git:HEAD")
+                harness.game_child_environment("test")
+                self.assertEqual(target.read_bytes(), raw)
+                self.assertFalse(source.exists())
+                self.assertEqual(harness.harness_runtime_dependency_readiness(), readiness)
+                source.write_bytes(b"[]\n")
+                harness.game_child_environment("test")
+                self.assertEqual(target.read_bytes(), b"[]\n")  # Present current worktree is authoritative.
+
+    def test_missing_or_invalid_canonical_controls_refuse_before_profile_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(harness, "repo_root", return_value=root), \
+                    mock.patch.object(harness, "load_game_options", return_value={}), \
+                    mock.patch.object(harness, "provision_llm_api_key_environment", return_value=({"status":"disabled"}, {})), \
+                    mock.patch.object(harness, "config_dir_for_profile") as target:
+                for contents in (None, b"not-json", b"{}"):
+                    source = root / harness.CANONICAL_KEYBINDINGS_PATH
+                    if contents is not None:
+                        source.parent.mkdir(parents=True, exist_ok=True)
+                        source.write_bytes(contents)
+                    self.assertEqual(harness.harness_runtime_dependency_readiness()["status"], "unavailable")
+                    with self.assertRaisesRegex(RuntimeError, "canonical harness keybindings"):
+                        harness.game_child_environment("test")
+                    target.assert_not_called()
+
+    def test_selected_readiness_uses_same_runtime_dependency_loader(self):
+        import scenario_registry_cli as cli
+        with mock.patch.object(harness, "executable_source_readiness", return_value={"status":"ready"}), \
+                mock.patch.object(harness, "harness_runtime_dependency_readiness", return_value={"status":"unavailable", "reason":"missing controls"}):
+            result = cli._current_source_executable_readiness(executable="selected-game")
+            self.assertEqual(result["status"], "runtime_dependency_unavailable")
+            self.assertEqual(result["reason"], "missing controls")
+            self.assertEqual(result["runtime_dependencies"]["status"], "unavailable")
 
     def test_disabled_api_still_loads_key_and_controls_on_every_launch(self):
         with tempfile.TemporaryDirectory() as directory, \

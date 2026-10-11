@@ -6,10 +6,12 @@ the typed registry CLI.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from cockpit_archive import ArchiveMap, ArchiveSequence
 
 import json
 import secrets
+from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional
 
 import startup_harness
@@ -35,13 +37,14 @@ from scenario_registry_store import (
 from playtest_witness import (
     WitnessError,
     build_evidence_journal,
+    citation_value,
     normalize_witness_charter,
     validate_witness_bundle,
     validate_witness_statement,
 )
 
 _FORBIDDEN = {"token", "tokens", "token_id", "query_sha256", "offset", "offsets", "candidate_offsets", "pid", "pids", "ocr", "logs", "raw_logs", "physical_key", "physical_keys", "source_path", "draft_path", "manual", "full_manual", "executable", "executables", "executable_path", "manifest_sha256", "hash", "hashes", "sha256", "path", "paths", "key", "subprocess"}
-_ALLOWED = {"action", "frontier", "capability", "scenario", "requirements", "preferences", "id", "name", "detail", "declaration", "world", "required_typeid", "candidate_offsets", "player_save", "handle", "observation_id", "action_id", "stable_id", "parameters", "recovery", "run_id", "scenario_id", "selection_id", "binding_id", "blocked_intent", "missing_kind", "evidence", "reusable_outcome", "affected_scenarios", "expected_signal", "bound", "stop_reason", "unused_authority", "wait", "keep_watch", "raw_wait", "move_relative", "raw_move_relative", "guarded_move_relative", "player_fire_setup", "r019_acceptance_matrix", "witness", "witness_statement", "target_delta_game_minutes"}
+_ALLOWED = {"action", "frontier", "capability", "scenario", "requirements", "preferences", "id", "name", "detail", "declaration", "world", "required_typeid", "candidate_offsets", "player_save", "handle", "observation_id", "action_id", "stable_id", "parameters", "recovery", "run_id", "scenario_id", "selection_id", "binding_id", "blocked_intent", "missing_kind", "evidence", "reusable_outcome", "affected_scenarios", "expected_signal", "bound", "stop_reason", "unused_authority", "wait", "keep_watch", "raw_wait", "move_relative", "raw_move_relative", "guarded_move_relative", "player_fire_setup", "r019_acceptance_matrix", "witness", "witness_statement", "outcome", "target_delta_game_minutes", "abort"}
 
 _DANGER_HANDLING_MODES = {
     "stop_on_interruption",
@@ -144,6 +147,54 @@ class CockpitRunChannel:
         self._active_operation: Optional[Dict[str, Any]] = None
 
     @staticmethod
+    def _stopped_wait_operation( operation, prompt, request, receipt, successor):
+        """Native stop semantics require the whole consumed owner/receipt chain.
+
+        Stable IDs are generated per owner. YES means stop only in the native
+        CANCEL_ACTIVITY_OR_IGNORE_QUERY producer, not an arbitrary yes/no menu.
+        """
+        duration, start, now = (operation.get("requested_duration_game_minutes"),
+                                operation.get("start_game_minutes"), successor.get("game_minutes"))
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (duration, start, now)):
+            return None  # A non-scalar operation does not inherit a scalar-wait stop.
+        elapsed = now - start
+        if not 0 <= elapsed < duration:
+            return None  # A later unrelated stop cannot cancel an already elapsed wait.
+        options = [a for a in prompt.get("valid_actions", [])
+                   if a.get("id") == request.get("action_id")
+                   and a.get("stable_id") == request.get("stable_id")]
+        payload = prompt.get("payload", {})
+        run, process = operation["run_id"], prompt.get("process_instance")
+        if (request.get("action") != "game.act" or request.get("action_id") != "prompt.choose"
+                or prompt.get("kind") != "prompt" or payload.get("title") != "CANCEL_ACTIVITY_OR_IGNORE_QUERY"
+                or len(options) != 1 or options[0].get("enabled") is not True or options[0].get("label") != "YES"
+                or prompt.get("run_id") != run or successor.get("run_id") != run
+                or not process or receipt.get("process_instance") != process or successor.get("process_instance") != process
+                or request.get("observation_id") != prompt.get("frame_id")
+                or receipt.get("accepted") is not True or receipt.get("action_id") != request["action_id"]
+                or receipt.get("requested_run_id") != run or receipt.get("run_id") != run
+                or receipt.get("requested_surface_id") != prompt.get("surface_id")
+                or receipt.get("consuming_surface_id") != prompt.get("surface_id")
+                or receipt.get("requested_frame_id") != prompt.get("frame_id")
+                or receipt.get("consuming_frame_id") != prompt.get("frame_id")
+                or receipt.get("resulting_frame_id") != successor.get("frame_id")
+                or successor.get("kind") != "world"
+                or prompt.get("sequence", -1) <= operation["accepted_receipt"]["sequence"]
+                or successor.get("sequence", -1) <= prompt.get("sequence", -1)
+                or receipt.get("sequence", -1) <= prompt.get("sequence", -1)
+                or successor.get("game_minutes") != receipt.get("game_minutes")
+                or successor.get("game_turn") != receipt.get("game_turn")):
+            raise ValueError("wait_stop_owner_or_receipt_unproved")
+        result = dict(operation)
+        result.update(state="cancelled", blocker=None, completed_progress_game_minutes=elapsed,
+                      termination={"reason": "native_activity_stopped", "receipt": dict(receipt),
+                                   "prompt_frame_id": prompt["frame_id"], "stable_id": request["stable_id"],
+                                   "world_frame_id": successor["frame_id"], "world_sequence": successor["sequence"],
+                                   "game_minutes": successor["game_minutes"], "duration_fulfilled": False})
+        return result
+
+
+    @staticmethod
     def _duration_from_action(action_id: str) -> Optional[float]:
         """Decode only the public native wait-duration action vocabulary."""
         return {
@@ -166,7 +217,7 @@ class CockpitRunChannel:
         result = dict(operation)
         if isinstance(observed, Mapping):
             current = self._signal_value(observed, "game_minutes")
-            if current is not None:
+            if current is not None and result.get("state") != "cancelled":
                 result["completed_progress_game_minutes"] = max(
                     0.0, current - float(result.get("start_game_minutes", current)),
                 )
@@ -245,6 +296,8 @@ class CockpitRunChannel:
             operation["state"] = "outcome_unknown"
             operation["blocker"] = "run_or_binding_changed"
             return "unknown", None
+        if operation.get("state") == "cancelled":
+            return "cancelled", None
         projection = self._operation_projection(observed)
         if projection is not None:
             operation.update(projection)
@@ -798,6 +851,12 @@ class CockpitRunChannel:
             "declared_reentry_ready": declared_reentry_ready,
             "native_save_completion": native_save_completion,
         }
+        if detail.get("explicit_player_abort") is True:
+            # An authenticated abort is process termination, never a native
+            # save/menu quit receipt or a saved-world reentry authorization.
+            report.update(closure_kind="explicit_abort", native_save_credit=False,
+                          native_exit_credit=False, normal_exit_credit=False,
+                          declared_reentry_ready=False)
         if self._finalize_session is not None:
             finalized = self._finalize_session(report)
             if not isinstance(finalized, Mapping):
@@ -847,7 +906,7 @@ class CockpitRunChannel:
         self._transcript.append({"kind": "operation_failure", "value": failure})
         return {"ok": False, "error": reason, "failure": failure,
                 "session_state": self._state,
-                "next_action": "Observe the current game before choosing another action, or use run.quit to end the session. Do not replay the failed operation automatically."}
+                "next_action": "Observe the current game before choosing another action, or use the current native close controls. An explicitly authorized abort is run.quit with abort=true. Do not replay the failed operation automatically."}
 
     def _native_receipt_run_matches(
         self, native: Mapping[str, Any], run_id: str, *, surface_owned: bool,
@@ -936,7 +995,7 @@ class CockpitRunChannel:
             "compact_log": {"persistence": "not_established_by_process_exit",
                             "evidence_refs": [process["evidence_ref"]] if process.get("evidence_ref") else [],
                             "contradictory_evidence": []},
-            "next_calls": ["run.witness", "run.finish"],
+            "next_calls": ["run.finish"],
             "note": "The bound game process ended. Its cached native frame is no longer actionable. Exit alone establishes neither saving nor gameplay success.",
         }
         if isinstance(self._observations, ArchiveMap):
@@ -3049,13 +3108,13 @@ class CockpitRunChannel:
         native = receipt.get("native_receipt")
         next_frame = receipt.get("_next_frame") or receipt.get("next_frame")
         if not isinstance(native, Mapping):
-            if receipt.get("reason") == "native_surface_receipt_timeout":
+            if receipt.get("reason") == "native_surface_receipt_timeout" or receipt.get("action_outcome") == "unknown":
                 # Missing acknowledgment does not prove rejection: native code
                 # may already have acted. Keep this issuing frame consumed and
                 # require a genuinely fresh owner instead of authorizing replay.
                 observed["submission_outcome"] = "unknown"
                 self._observations[str(observation_id)] = observed
-                return {**self._fail_operation("native_surface_receipt_timeout", {
+                return {**self._fail_operation(str(receipt.get("reason") or "native_receipt_missing"), {
                     "action_id": str(action_id), "observation_id": str(observation_id),
                     "action_outcome": "unknown",
                 }), "receipt": dict(receipt)}
@@ -3301,6 +3360,28 @@ class CockpitRunChannel:
                 "observation_id": str(observation_id), "result": result,
             })
             return result
+        operation = self._active_operation
+        if (isinstance(operation, Mapping) and operation.get("state") not in
+                {"cancelled", "completed", "outcome_unknown"} and
+                issuing_raw.get("payload", {}).get("title") == "CANCEL_ACTIVITY_OR_IGNORE_QUERY" and
+                next_frame.get("kind") == "world"):
+            selected = [a for a in issuing_raw.get("valid_actions", [])
+                        if a.get("id") == action_id and a.get("stable_id") == stable_id]
+            if len(selected) == 1 and selected[0].get("label") == "YES":
+                # A native acknowledged stop settles this wait, not its duration.
+                # It uses the same consumed owner/receipt as the ordinary action.
+                try:
+                    operation = self._stopped_wait_operation(operation, issuing_raw,
+                        {"action": "game.act", "action_id": action_id,
+                         "stable_id": stable_id, "observation_id": issuing_raw["frame_id"]},
+                        native, next_frame)
+                except ValueError as exc:
+                    return {**self._fail_operation(str(exc), {"exception_type": type(exc).__name__}),
+                            "receipt": dict(receipt)}
+                if operation is not None:
+                    self._active_operation = operation
+                    self._transcript.append({"kind": "operation_collection", "operation": dict(operation),
+                                             "action_outcome": "accepted", "native_receipt": dict(native)})
         try:
             # A semantic menu selection changes the native highlight but does
             # not leave its owner.  Its same-frame receipt is therefore the
@@ -3647,12 +3728,38 @@ class CockpitRunChannel:
             "gameplay_credit": False,
         }
 
+    def _reporting_exit_refusal(self) -> Optional[Dict[str, Any]]:
+        # Reporting is not native termination. Recheck even after sealing: an
+        # old exit observation cannot authorize finalizing a replacement game.
+        # Pure in-memory channels have neither a native reader nor a process finalizer.
+        if self._read_process_state is None and self._finalize_session is None:
+            return None
+        process = dict(self._read_process_state()) if self._read_process_state else {}
+        if (process.get("alive") is False and process.get("run_id") == self._run_id
+                and isinstance(process.get("pid"), int) and process["pid"] > 0
+                and process.get("identity_status") not in {"identity_changed", "identity_unavailable"}
+                and self._binding_matches()):
+            return None
+        return {"ok": False, "error": "native_exit_required_before_reporting",
+                "native_process": process or {"alive": "unknown"},
+                "next": "Keep the game and save intact. Use the currently advertised native save/quit action when authorized; then look to observe exit. Live evidence remains available through inspect, evidence, messages and status. A historical sealed journal stays immutable; return that exact held state to its owner."}
+
     def seal_witness_journal(
         self, *, observation_id: str, stop_reason: str, unused_authority: str,
     ) -> Dict[str, Any]:
-        """Stop gameplay input and expose the immutable facts the worker may cite."""
+        """Seal immutable evidence after the bound native game has exited."""
+        refusal = self._reporting_exit_refusal()
+        if refusal is not None:
+            return refusal
         if self._witness_charter is None:
-            return {"ok": False, "error": "playtest_has_no_witness_charter"}
+            # An ordinary selected experiment still owns an honest immutable
+            # journal. Proof acceptance remains the later witness validation;
+            # missing duplicate prose cannot erase the actual run evidence.
+            self._witness_charter = normalize_witness_charter({
+                "claim": "Retain the actual selected run outcome",
+                "material_proof": "Bound native observations, requests, receipts and saved state",
+                "current_uncertainty": "Outcome acceptance requires review of this journal",
+            })
         if self._state != "active":
             return {"ok": False, "error": "live_session_not_actionable"}
         observed = self._observations.get(str(observation_id))
@@ -3694,18 +3801,45 @@ class CockpitRunChannel:
         return {
             "ok": True,
             "result": {
-                "action": "WITNESS / FINISH",
+                "action": "TERMINAL SEAL / REPORT",
+                "native_process": dict(self._read_process_state()) if self._read_process_state else {"owned_native_process": False},
+                "save_evidence": "Use retained native save facts; exit alone does not establish a save.",
                 "charter": dict(self._witness_charter),
                 "evidence_journal": dict(self._sealed_journal),
                 "next_calls": ["run.finish"],
             },
         }
 
+    def _outcome_citation_state(self, observation_id: str) -> Optional[Mapping[str, Any]]:
+        """Read retained facts without reviving a consumed input grant."""
+        record = self._observations.get(observation_id)
+        if not isinstance(record, Mapping) or record.get("run_id") != self._run_id:
+            return None
+        if self.archive is not None:
+            if self.archive.run_id != self._run_id or self.archive.binding_id != self._binding_id:
+                return None
+            entry = self._transcript.lookup(observation_id)
+        else:
+            entry = next((entry for entry in reversed(self._transcript)
+                          if entry.get("kind") == "observation" and
+                          entry.get("value", {}).get("observation_id") == observation_id), None)
+        if not isinstance(entry, Mapping) or entry.get("kind") != "observation":
+            return None
+        state = entry.get("value")
+        if not isinstance(state, Mapping) or state.get("observation_id") != observation_id or \
+                state.get("run_id") != self._run_id:
+            return None
+        return state
+
     def finish(
         self, *, observation_id: str, stop_reason: str, unused_authority: str,
         r019_acceptance_matrix: Optional[Mapping[str, Any]] = None,
         witness: Optional[Mapping[str, Any]] = None,
+        outcome: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
+        refusal = self._reporting_exit_refusal()
+        if refusal is not None:
+            return refusal
         if self._state not in {"active", "witnessing"}:
             return {"ok": False, "error": "live_session_finished", "final": self._final_report}
         observed = self._observations.get(str(observation_id))
@@ -3719,8 +3853,43 @@ class CockpitRunChannel:
             return self._fail_operation("binding_drift", {"unused_authority": "revoked"})
         if r019_acceptance_matrix is not None and not isinstance(r019_acceptance_matrix, Mapping):
             return {"ok": False, "error": "r019_acceptance_matrix must be an object"}
+        reported_outcome = None
+        if outcome is not None:
+            if not isinstance(outcome, Mapping) or not isinstance(outcome.get("summary"), str) or \
+                    not outcome["summary"].strip() or outcome.get("verdict") not in {"positive", "negative", "inconclusive"}:
+                return {"ok": False, "error": "outcome_requires_summary_and_verdict"}
+            unknowns = outcome.get("unknowns", [])
+            citations = outcome.get("citations", [])
+            if not isinstance(unknowns, list) or any(not isinstance(value, str) for value in unknowns) or \
+                    not isinstance(citations, list):
+                return {"ok": False, "error": "outcome_unknowns_and_citations_must_be_lists"}
+            resolved = []
+            for citation in citations:
+                if not isinstance(citation, Mapping):
+                    return {"ok": False, "error": "outcome_citation_must_be_an_object"}
+                source_id = str(citation.get("observation_id", ""))
+                source = self._outcome_citation_state(source_id)
+                fields = citation.get("select", [])
+                if source is None:
+                    return {"ok": False, "error": "outcome_citation_observation_unavailable", "observation_id": source_id}
+                if not isinstance(fields, list) or any(not isinstance(field, str) or not field for field in fields):
+                    return {"ok": False, "error": "outcome_citation_select_requires_paths"}
+                try:
+                    values = {field: citation_value(source, field) for field in fields}
+                except WitnessError as error:
+                    return {"ok": False, "error": str(error)}
+                resolved.append({"observation_id": source_id, "run_id": self._run_id,
+                                 "binding_id": self._binding_id, "values": values})
+            reported_outcome = {"summary": outcome["summary"].strip(), "verdict": outcome["verdict"],
+                                "unknowns": list(unknowns), "citations": resolved,
+                                "attribution": "player_report", "proof_promotion_authority": False}
         witness_validation: Optional[Dict[str, Any]] = None
-        if self._witness_charter is not None:
+        if witness is not None:
+            if self._sealed_journal is None and self._state == "active":
+                sealed = self.seal_witness_journal(observation_id=observation_id,
+                    stop_reason=reason, unused_authority=disposition)
+                if not sealed.get("ok"):
+                    return sealed
             if self._sealed_journal is None or self._state != "witnessing":
                 return {"ok": False, "error": "witness_journal_must_be_sealed_before_finish"}
             if not isinstance(witness, Mapping):
@@ -3744,6 +3913,12 @@ class CockpitRunChannel:
                     )
             except WitnessError as exc:
                 return {"ok": False, "error": str(exc)}
+        witness_promoted_target = (
+            isinstance(witness_validation, Mapping) and
+            witness_validation.get("witness", {}).get("verdict") == "proved"
+        )
+        if reason == "target_predicate_proved" and reported_outcome is None and not witness_promoted_target:
+            return {"ok": False, "error": "target_predicate_proved_requires_validated_witness"}
         r019_receipt: Optional[Dict[str, Any]] = None
         if isinstance(r019_acceptance_matrix, Mapping):
             r019_receipt = self._r019_receipt(
@@ -3800,22 +3975,14 @@ class CockpitRunChannel:
             self._continuation = None
         if diagnostic_terminal is not None:
             self._continuation = None
-        # Witness sealing is the authoritative terminal decision for a
-        # claimed live step.  Workers may supply a human-readable stop reason
-        # (the sealed witness preserves it), but the durable cockpit protocol
-        # needs one canonical reason so the target receipt is machine-bound.
-        # Only a mechanically validated proved witness can promote it; failed
-        # or inconclusive witnesses retain their original terminal reason.
-        canonical_reason = reason
-        witness_promoted_target = (
-            isinstance( witness_validation, Mapping ) and
-            witness_validation.get( "witness", {} ).get( "verdict" ) == "proved"
-            if isinstance( witness_validation, Mapping ) else False
-        )
+        # A reported gameplay result is independent of formal proof.  Only a
+        # validated proved witness can authorize the reserved reason/receipt;
+        # a caller-supplied reason is never proof authority.
+        canonical_reason = "outcome_reported" if reported_outcome is not None else reason
         if witness_promoted_target:
             canonical_reason = "target_predicate_proved"
         target_receipt: Dict[str, Any] = {}
-        if canonical_reason == "target_predicate_proved":
+        if witness_promoted_target:
             target_receipt = {
                 "schema": "caol-cockpit-target-receipt-v1",
                 "run_id": self._run_id,
@@ -3829,6 +3996,7 @@ class CockpitRunChannel:
         return {"ok": True, "result": self._stop(canonical_reason, {
             "observation_id": str(observation_id),
             "unused_authority": disposition,
+            **({"gameplay_outcome": reported_outcome} if reported_outcome is not None else {}),
             **({"requested_stop_reason": reason} if canonical_reason != reason else {}),
             **({"target_receipt": target_receipt} if target_receipt else {}),
             **({"r019_hostile_stop_receipt": {
@@ -3850,11 +4018,15 @@ class CockpitRunChannel:
                if witness_validation is not None else {}),
         })}
 
-    def quit(self, reason: str = "player_quit") -> Dict[str, Any]:
-        """Explicitly end the owned session without requiring a gameplay claim."""
-        return {"ok": True, "result": self._stop(reason or "player_quit", {
+    def quit(self, reason: str = "player_quit", *, abort: bool = False) -> Dict[str, Any]:
+        """Never translate an ordinary quit request into process termination."""
+        if abort is not True:
+            return {"ok": False, "error": "native_graceful_close_required",
+                    "termination_requested": False,
+                    "next_action": "Use current native SaveQuit/YES, verify the serializer, then current MainMenuQuit/YES and actual process exit before reporting. An explicitly authorized abort uses abort=true and earns no save or normal-exit credit."}
+        return {"ok": True, "result": self._stop(reason or "player_abort", {
             "unused_authority": "released", "explicit_player_quit": True,
-            "gameplay_credit": False,
+            "explicit_player_abort": True, "gameplay_credit": False,
         })}
 
     def close_unfinished(self) -> Dict[str, Any]:
@@ -3893,12 +4065,22 @@ def player_controls(availability: Optional[Mapping[str, bool]] = None) -> Dict[s
             "game.wait": None, "game.move_relative": None,
         },
         "availability_note": "Session permission only, not current-surface readiness. null means unknown: look and collect first. The service rechecks permission on every call.",
+        "setup": {
+            "debug_life_support": {
+                "mutation_id": "DEBUG_LS",
+                "when": "Before long roof/faction waits when Life Support is the assigned survival setup; inspect at setup or load, not before every wait.",
+                "sequence": "Inspect current avatar mutations. Keep Debug Life Support active if already present. Only if missing, use advertised world.debug_menu, then current Player -> Mutate entries, filter Debug Life Support and select that individual trait. Return to World and verify active; use advertised world.pause only if needed to apply setup.",
+                "owner": "Resolve each current advertised target. This guidance does not dispatch input or grant debug permission; never reuse historical menu IDs, toggle an active trait off, or use the debug mutation bundle.",
+                "scope": "Recorded survival setup, not signal/actor proof or combat immunity. Preserve ordinary vision and actual wounds/incapacity.",
+                "recipe": ".agents/skills/caol-harness/references/setup-and-interactions.md#get-and-verify-debug-life-support",
+            },
+        },
         "danger_handling": {
             "stop_on_interruption": "Default. Stop the macro at a native interruption; movement requires World but does not perform the guarded danger/terrain checks.",
             "handle_classified_non_dangerous": "Handle only recognized non-dangerous native interruptions. Stop for danger, damage, unknown safety, or unavailable recovery. Movement also checks visible next-tile terrain and occupants.",
             "ignore_danger_and_interruptions": "Explicitly continue through classified in-game danger/damage where a supported native continuation exists; not permission to bypass unknown owners, unavailable recovery, or blocked movement.",
         },
-        "interruption_caveat": "An ordinary interruption stops only the macro and releases its unused continuation. Inspect result.terminal_observation and partial progress, then choose a native action or observe again; do not replay the recipe automatically. Cancellation is cooperative: an input already emitted may have an unknown outcome, so collect the original request and perform a fresh look. All action and observation failures leave the game running. Failed ownership or receipt checks revoke the current grants; observe again before choosing another action. Only explicit run.quit or run.finish ends the session.",
+        "interruption_caveat": "An ordinary interruption stops only the macro and releases its unused continuation. Inspect result.terminal_observation and partial progress, then choose a native action or observe again; do not replay the recipe automatically. Cancellation is cooperative: an input already emitted may have an unknown outcome, so collect the original request and perform a fresh look. All action and observation failures leave the game running. Failed ownership or receipt checks revoke the current grants; observe again before choosing another action. Only explicit run.quit with abort=true requests termination; ordinary quit never signals the native process. Reporting run.finish requires the bound native game already exited.",
         "speech": {
             "sequence": "Submit free text through the current native prompt. Correlate the utterance/hearer and prompt request ID with llm_request_started, then llm_response_emitted in the runner log. The response event proves calculation ended and was emitted, not that the game applied it. Once completion is evidenced, choose world.pause from the current World owner and inspect the reply/action and game-time change. Advance further turns only as the behavior requires.",
             "launch": "The current npctalk free-text route enqueues the first hearer immediately; later serial hearers can require a turn to apply the prior response and dispatch the next. If no matching request started, inspect launch/queue evidence before waiting.",
@@ -3936,7 +4118,9 @@ class CockpitService:
     """Stateless request/response boundary for human-facing exploration."""
 
     def __init__(self, registry: str | None = None, run_channel: Optional[CockpitRunChannel] = None,
-                 allowed_live_operations: Optional[set[str]] = None):
+                 allowed_live_operations: Optional[set[str]] = None,
+                 run_executable: Optional[str] = None):
+        self._run_executable = run_executable
         self.registry = registry
         self.run_channel = run_channel
         self._allowed_live_operations = allowed_live_operations
@@ -4091,7 +4275,8 @@ class CockpitService:
                 r019_acceptance_matrix=matrix,
             )
         if action == "run.quit" and self.run_channel is not None:
-            return self.run_channel.quit(str(request.get("stop_reason", "player_quit")))
+            return self.run_channel.quit(str(request.get("stop_reason", "player_quit")),
+                                         abort=request.get("abort") is True)
         if action == "run.status" and self.run_channel is not None:
             return {"ok": True, "result": self.run_channel.status()}
         if action == "run.witness" and self.run_channel is not None:
@@ -4107,15 +4292,19 @@ class CockpitService:
                 return {"ok": False, "error": "finish_accepts_one_witness_payload"}
             if witness is None:
                 witness = witness_statement
+            if witness is not None and not isinstance(witness, Mapping):
+                return {"ok": False, "error": "witness_statement_must_be_an_object"}
             return self.run_channel.finish(
                 observation_id=str(request.get("observation_id", "")),
                 stop_reason=str(request.get("stop_reason", "")),
                 unused_authority=str(request.get("unused_authority", "")),
                 r019_acceptance_matrix=request.get("r019_acceptance_matrix"),
                 witness=witness if isinstance(witness, Mapping) else None,
+                outcome=request.get("outcome"),
             )
         try:
-            with open_registry(self.registry, writable=True) as connection:
+            # Finish the SQLite transaction before closing, including early returns.
+            with closing(open_registry(self.registry, writable=True)) as connection, connection:
                 if request.get("frontier") is True or action == "frontier":
                     return {"ok": True, "result": _frontier(connection)}
                 if action == "capability.search":
@@ -4140,6 +4329,8 @@ class CockpitService:
                         return {"ok": False, "error": "run.open needs a scenario selection"}
                     result = open_cockpit_run(
                         connection, selection_id=selection_id, owner_id=self._run_owner_id,
+                        executable=(Path(self._run_executable)
+                                    if self._run_executable else None),
                     )
                     return {"ok": True, "result": _public(result)}
                 if action == "run.status":

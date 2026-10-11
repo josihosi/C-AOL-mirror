@@ -1,3 +1,4 @@
+#include "save_continuity.h"
 #include "main_menu.h"
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #if defined(EMSCRIPTEN)
 #include <emscripten.h>
@@ -651,6 +653,9 @@ void main_menu::load_char_templates()
 
 bool main_menu::opening_screen()
 {
+    // Preserve the actual dead avatar/world before registry/player disposal.
+    // Retry is explicit; no turn or automatic write retry occurs here.
+    g->await_retirement_protection();
     // set holiday based on local system time
     current_holiday = get_holiday_from_time();
 
@@ -754,13 +759,22 @@ bool main_menu::opening_screen()
         semantic_session.emplace( *semantic_manager );
     }
 
+    // The logical menu owns its callback storage, not an individual input
+    // poll.  ERROR transport wakes, timeouts and redraws leave it current.
+    std::string semantic_action;
+    std::optional<semantic_surface_scope> semantic_scope;
     while( !start ) {
+        const int previous_sel1 = sel1;
+        const int previous_sel2 = sel2;
+        const int previous_sel_line = sel_line;
         ui_manager::redraw();
-        std::string semantic_action;
-        std::optional<semantic_surface_scope> semantic_scope;
-        if( semantic_manager != nullptr ) {
+        if( semantic_manager != nullptr && !semantic_scope ) {
             semantic_scope.emplace( *semantic_manager, "main_menu", "Main menu",
-            std::map<std::string, std::string>{},
+            std::map<std::string, std::string>{
+                { "selected_menu", std::to_string( sel1 ) },
+                { "selected_item", std::to_string( sel2 ) },
+                { "scroll_offset", std::to_string( sel_line ) }
+            },
             std::vector<semantic_action_descriptor>{
                 { "main_menu.quit", "", _( "Quit" ), true }
             }, [ &semantic_action]( const semantic_action_request &request ) {
@@ -782,6 +796,8 @@ bool main_menu::opening_screen()
                 // successor if the process exits or a host closes the window.
                 return semantic_action_dispatch_result{ true, "", "", false, false };
             } );
+        }
+        if( semantic_scope ) {
             semantic_scope->consume_request();
         }
         bool semantic_action_consumed = !semantic_action.empty();
@@ -794,7 +810,7 @@ bool main_menu::opening_screen()
             // redraw can become the next published frame and prevent the
             // confirmation owner from ever being entered.
             semantic_scope.reset();
-            action = std::move( semantic_action );
+            action = std::exchange( semantic_action, std::string() );
             sInput = ctxt.get_raw_input();
         } else {
             action = ctxt.handle_input();
@@ -807,7 +823,7 @@ bool main_menu::opening_screen()
             semantic_action_consumed = !semantic_action.empty();
             if( semantic_action_consumed ) {
                 semantic_scope.reset();
-                action = std::move( semantic_action );
+                action = std::exchange( semantic_action, std::string() );
             }
         }
 
@@ -897,6 +913,13 @@ bool main_menu::opening_screen()
                     }
                 }
             }
+        }
+
+        // A real child/activation retires the parent before that native owner
+        // runs.  In particular No must recreate a current menu, not restore
+        // the consumed quit callback or publish its old frame.
+        if( action == "QUIT" || action == "CONFIRM" || action == "HELP_KEYBINDINGS" ) {
+            semantic_scope.reset();
         }
 
         // also check special keys
@@ -1066,6 +1089,11 @@ bool main_menu::opening_screen()
                     break;
             }
         }
+        // Native selection/scroll changes invalidate the old grant even when
+        // the advertised Quit action is otherwise unchanged.
+        if( sel1 != previous_sel1 || sel2 != previous_sel2 || sel_line != previous_sel_line ) {
+            semantic_scope.reset();
+        }
     }
     if( start && !load_game && get_scenario() ) {
         add_msg( get_scenario()->description( player_character.male ) );
@@ -1082,7 +1110,6 @@ bool main_menu::opening_screen()
 
 bool main_menu::new_character_tab()
 {
-    avatar &pc = get_avatar();
     // Preset character templates
     if( sel2 == 1 ) {
         if( templates.empty() ) {
@@ -1118,39 +1145,19 @@ bool main_menu::new_character_tab()
                     templates.erase( templates.begin() + opt_val );
                 }
             } else if( res == "LOAD" ) {
-                on_out_of_scope cleanup( [&pc]() {
-                    pc = avatar();
-                    world_generator->set_active_world( nullptr );
-                } );
                 g->gamemode = nullptr;
                 WORLD *world = world_generator->pick_world();
                 if( world == nullptr ) {
                     continue;
                 }
-                if( !world->world_saves.empty() ) {
-                    if( !query_yn(
-                            _( "Many game features will not work correctly with multiple characters in the same world.  Create a new character anyway?" ) ) ) {
+                try {
+                    if( !start_new_character( world->world_name, character_type::TEMPLATE, templates[opt_val] ) ) {
                         return false;
                     }
-                }
-
-                world_generator->set_active_world( world );
-                try {
-                    g->setup();
                 } catch( const std::exception &err ) {
                     debugmsg( "Error: %s", err.what() );
                     continue;
                 }
-                if( !pc.create( character_type::TEMPLATE, templates[opt_val] ) ) {
-                    load_char_templates();
-                    MAPBUFFER.clear();
-                    overmap_buffer.clear();
-                    return false;
-                }
-                if( !g->start_game() ) {
-                    return false;
-                }
-                cleanup.cancel();
                 return true;
             }
 
@@ -1159,10 +1166,6 @@ bool main_menu::new_character_tab()
             }
         }
     } else { ///Non-template options
-        on_out_of_scope cleanup( [&pc]() {
-            pc = avatar();
-            world_generator->set_active_world( nullptr );
-        } );
         g->gamemode = nullptr;
         // First load the mods, this is done by
         // loading the world.
@@ -1170,19 +1173,6 @@ bool main_menu::new_character_tab()
         const bool is_play_now = sel2 == 3 || sel2 == 4;
         WORLD *world = world_generator->pick_world( !is_play_now, is_play_now );
         if( world == nullptr ) {
-            return false;
-        }
-        if( !world->world_saves.empty() ) {
-            if( !query_yn(
-                    _( "Many game features will not work correctly with multiple characters in the same world.  Create a new character anyway?" ) ) ) {
-                return false;
-            }
-        }
-        world_generator->set_active_world( world );
-        try {
-            g->setup();
-        } catch( const std::exception &err ) {
-            debugmsg( "Error: %s", err.what() );
             return false;
         }
         character_type play_type = character_type::CUSTOM;
@@ -1200,20 +1190,53 @@ bool main_menu::new_character_tab()
                 play_type = character_type::FULL_RANDOM;
                 break;
         }
-        if( !pc.create( play_type ) ) {
-            load_char_templates();
-            MAPBUFFER.clear();
-            overmap_buffer.clear();
+        try {
+            if( !start_new_character( world->world_name, play_type ) ) {
+                return false;
+            }
+        } catch( const std::exception &err ) {
+            debugmsg( "Error: %s", err.what() );
             return false;
         }
-
-        if( !g->start_game() ) {
-            return false;
-        }
-        cleanup.cancel();
         return true;
     }
     return false;
+}
+
+bool main_menu::start_new_character( const std::string &worldname, character_type type,
+                                     const std::string &character_template )
+{
+    const std::string selected_world = worldname;
+    bool restored = false;
+    if( !g->admit_world( selected_world, restored ) ) {
+        return false;
+    }
+    on_out_of_scope cleanup( [&]() {
+        get_avatar() = avatar();
+        world_generator->set_active_world( nullptr );
+    } );
+    WORLD *const world = world_generator->get_world( selected_world );
+    if( !world->world_saves.empty() && !query_yn(
+            _( "Many game features will not work correctly with multiple characters in the same world.  Create a new character anyway?" ) ) ) {
+        return false;
+    }
+    g->gamemode = nullptr;
+    world_generator->set_active_world( world );
+    // Creation owns a fresh avatar only after admission and the user's world
+    // choice succeed. Canceling recovery above keeps the in-memory game intact.
+    get_avatar() = avatar();
+    g->setup();
+    if( !get_avatar().create( type, character_template ) ) {
+        load_char_templates();
+        MAPBUFFER.clear();
+        overmap_buffer.clear();
+        return false;
+    }
+    if( !g->start_game() ) {
+        return false;
+    }
+    cleanup.cancel();
+    return true;
 }
 
 bool main_menu::load_game( std::string const &worldname, save_t const &savegame )
@@ -1224,10 +1247,17 @@ bool main_menu::load_game( std::string const &worldname, save_t const &savegame 
         world_generator->set_active_world( nullptr );
     } );
 
+    // Copy before refreshing registry storage on explicit restore.
+    const save_t selected_save = savegame;
+    const std::string selected_world = worldname;
+    bool restored = false;
+    if( !g->admit_world( selected_world, restored ) ) {
+        return false;
+    }
     g->gamemode = nullptr;
-    WORLD *world = world_generator->get_world( worldname );
+    WORLD *world = world_generator->get_world( selected_world );
     world_generator->last_world_name = world->world_name;
-    world_generator->last_character_name = savegame.decoded_name();
+    world_generator->last_character_name = selected_save.decoded_name();
     world_generator->save_last_world_info();
     world_generator->set_active_world( world );
 
@@ -1238,7 +1268,7 @@ bool main_menu::load_game( std::string const &worldname, save_t const &savegame 
         return false;
     }
 
-    if( g->load( savegame ) ) {
+    if( g->load( selected_save ) ) {
         llm_intent::prewarm();
         cleanup.cancel();
         return true;

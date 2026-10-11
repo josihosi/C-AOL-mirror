@@ -73,12 +73,14 @@
 #include "mod_manager.h"
 #include "options.h"
 #include "output.h"
+#include "semantic_surface.h"
 #include "overmapbuffer.h"
 #include "path_info.h"
 #include "perf.h"
 #include "pimpl.h"
 #include "popup.h"
 #include "safemode_ui.h"
+#include "save_continuity.h"
 #if defined(TILES)
 #include "sdltiles.h"
 #endif
@@ -104,6 +106,64 @@ static const dimension_id dimension_world_default( "default" );
 
 namespace
 {
+
+// Validate the actual save owners, not a lease inferred from the world state.
+// Abstract resumes carry exact physical exit snapshots; local movement carries
+// current identity/epoch/cursor leases on every copy instead.
+bool crossing_actor_copies_match( const bandit_live_world::site_record &site )
+{
+    const auto *outing = site.active_external_outing();
+    if( outing == nullptr || !bandit_live_world::current_external_simulation_cursor( site ) ||
+        !bandit_live_world::crossing_receipt_has_current_owner( *outing ) ) {
+        return false;
+    }
+    for( const character_id id : outing->member_ids ) {
+        if( outing->member_is_resolved( id ) ) {
+            continue;
+        }
+        const auto actor = overmap_buffer.find_npc( id );
+        const auto persistent = overmap_buffer.get_overmap_npcs();
+        if( std::count_if( persistent.begin(), persistent.end(), [id]( const auto &copy ) {
+            return copy && copy->getID() == id;
+        } ) != 1 ) {
+            return false;
+        }
+        if( !actor || actor->is_dead() ||
+            bandit_live_world::active_operation_duty_site_for(
+                overmap_buffer.global_state.bandit_live_world, id ) != &site ) {
+            return false;
+        }
+        for( const npc *copy : bandit_live_world_projection_lease_copies( *actor ) ) {
+            const auto &lease = copy->get_bandit_live_world_projection_lease();
+            if( copy->getID() != id || copy->is_dead() || copy->pos_abs() != actor->pos_abs() ||
+                copy->hp_percentage() != actor->hp_percentage() ) {
+                return false;
+            }
+            if( outing->owner == bandit_live_world::simulation_owner::local ) {
+                if( !lease.present || lease.site_id != site.site_id ||
+                    lease.activity_id != outing->activity_id || lease.owner != "local" ||
+                    lease.generation != outing->generation || lease.handoff_epoch != outing->handoff_epoch ||
+                    lease.last_advanced_minutes != outing->last_advanced_minutes ) {
+                    return false;
+                }
+            } else if( lease.present ) {
+                return false;
+            }
+        }
+        if( outing->owner == bandit_live_world::simulation_owner::abstract &&
+            outing->local_handoff.is_abstract_resume() ) {
+            const auto &members = outing->local_handoff.members;
+            const auto snapshot = std::find_if( members.begin(), members.end(),
+            [id]( const auto &member ) { return member.npc_id == id; } );
+            if( snapshot == members.end() || snapshot->dead ||
+                snapshot->exit_position != actor->pos_abs() ||
+                snapshot->hp_percent != actor->hp_percentage() ) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 bandit_live_world::local_projection_reconciliation_result
 reconcile_loaded_bandit_live_world_projections()
@@ -172,7 +232,7 @@ reconcile_loaded_bandit_live_world_projections()
     }
     std::vector<character_id> retired_old_leases;
     std::vector<character_id> refreshed_local_leases;
-    const auto result = bandit_live_world::reconcile_loaded_local_projections(
+    auto result = bandit_live_world::reconcile_loaded_local_projections(
                             overmap_buffer.global_state.bandit_live_world, claims,
                             &retired_old_leases, &refreshed_local_leases );
     // Output IDs belong only to fully validated, committed operations, even
@@ -200,10 +260,44 @@ reconcile_loaded_bandit_live_world_projections()
                 *member, bandit_live_world_projection_lease() );
         }
     }
+    for( auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        auto *outing = site.active_external_outing();
+        if( outing == nullptr || !outing->crossing.persistence_acknowledged ||
+            outing->owner != bandit_live_world::simulation_owner::abstract ||
+            !outing->local_handoff.is_abstract_resume() ) {
+            continue;
+        }
+        // Resolve the persisted containing overmap even when it is beyond the
+        // new reality bubble. This loads the NPC's existing save, not a body.
+        for( const auto &member : outing->local_handoff.members ) {
+            if( !member.dead ) {
+                overmap_buffer.get( project_to<coords::om>( member.exit_position.xy() ) );
+            }
+        }
+        if( !crossing_actor_copies_match( site ) ) {
+            outing->local_projection_reconciliation_rejected = true;
+            result = bandit_live_world::local_projection_reconciliation_result::rejected;
+        }
+    }
     return result;
 }
 
 } // namespace
+
+void game::validate_bandit_crossing_save() const
+{
+    for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        const auto *outing = site.active_external_outing();
+        const bool persists_current_abstract_snapshot = outing != nullptr &&
+                outing->crossing.persistence_acknowledged &&
+                outing->owner == bandit_live_world::simulation_owner::abstract &&
+                outing->local_handoff.is_abstract_resume();
+        if( outing != nullptr && ( outing->crossing.pending() || persists_current_abstract_snapshot ) &&
+            !crossing_actor_copies_match( site ) ) {
+            throw std::runtime_error( "crossing save has incompatible actor or operation copies" );
+        }
+    }
+}
 
 static const mod_id MOD_INFORMATION_dda( "dda" );
 
@@ -353,36 +447,86 @@ void game::load_map( const tripoint_abs_sm &pos_sm,
     here.load( pos_sm, true, pump_events );
 }
 
-void game::move_save_to_graveyard()
+bool game::move_save_to_graveyard()
 {
-    const cata_path save_dir      = PATH_INFO::world_base_save_path();
-    const cata_path graveyard_dir = PATH_INFO::graveyarddir_path() / timestamp_now();
-    const std::string prefix      = base64_encode( u.get_save_id() ) + ".";
-
-    if( !assure_dir_exist( graveyard_dir ) ) {
-        debugmsg( "could not create graveyard path '%s'", graveyard_dir );
+    try {
+        save_continuity::archive_retirement( PATH_INFO::world_base_save_path().get_unrelative_path() );
+        return true;
+    } catch( const std::exception &error ) {
+        last_save_result_ = "failed_character_archive_or_exclusion";
+        popup( _( "Character retirement failed. The living save will not be restored. %s" ), error.what() );
+        return false;
     }
+}
 
-    const auto save_files = get_files_from_path( prefix, save_dir );
-    if( save_files.empty() ) {
-        debugmsg( "could not find save files in '%s'", save_dir );
+bool game::can_load_world_after_retirement( const std::string &world ) const
+{
+    // This also handles inability to persist the initial refusal marker while
+    // the process still owns the actual death. It is not crash durability.
+    const auto failed = incomplete_retirement_worlds_.find( world );
+    if( failed == incomplete_retirement_worlds_.end() ) {
+        return true;
     }
+    if( failed->second.empty() || !world_generator->has_world( world ) ) {
+        return false; // Unavailable identity cannot discharge the refusal.
+    }
+    const std::string &current = world_generator->get_world( world )->timestamp;
+    // Intentional deletion and a new world's ordinary creation are a new
+    // identity, even if its displayed name is reused. Durable pending metadata
+    // is still checked independently by prepare_load.
+    return !current.empty() && current != failed->second;
+}
 
-    for( const cata_path &src_path : save_files ) {
-        const cata_path dst_path = graveyard_dir / src_path.get_relative_path().filename();
+bool game::admit_world( const std::string &world, bool &restored )
+{
+    // World registry refresh invalidates callers' WORLD/name references.
+    const std::string selected_world = world;
+    restored = false;
+    if( !world_generator->has_world( selected_world ) ) {
+        return false;
+    }
+    if( !can_load_world_after_retirement( selected_world ) ) {
+        popup( _( "Death retirement did not complete. Entering this world was canceled; a living fallback will not be restored." ) );
+        return false;
+    }
+    if( !save_continuity::prepare_load( world_generator->get_world( selected_world )->folder_path().get_unrelative_path(),
+                                      restored ) ) {
+        return false;
+    }
+    if( restored ) {
+        MAPBUFFER.clear();
+        overmap_buffer.clear();
+        world_generator->set_active_world( nullptr );
+        world_generator->init();
+    }
+    return world_generator->has_world( selected_world );
+}
 
-        if( rename_file( src_path, dst_path ) ) {
-            continue;
+void game::await_retirement_protection()
+{
+    if( !world_generator->active_world ) {
+        return;
+    }
+    const std::string world = world_generator->active_world->world_name;
+    if( can_load_world_after_retirement( world ) ) {
+        return;
+    }
+    const auto path = world_generator->active_world->folder_path().get_unrelative_path();
+    std::optional<semantic_surface_manager_session> session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    while( !save_continuity::retirement_refusal_persisted( path ) ) {
+        if( query_yn( _( "Death retirement failed and no durable refusal could be written. Closing now could restore this character's living save. Resolve the storage failure, then retry retirement? No keeps this pending without advancing play." ) ) ) {
+            turn_handler::cleanup_at_end();
+            if( can_load_world_after_retirement( world ) ) {
+                return; // Actual completed retirement, not refusal credit.
+            }
+        } else {
+            popup( _( "Retry canceled. The unresolved retirement remains in memory; ordinary menu disposal and successful close are unavailable until refusal or retirement is persisted." ) );
         }
-
-        debugmsg( "could not rename file '%s' to '%s'", src_path, dst_path );
-
-        if( remove_file( src_path ) ) {
-            continue;
-        }
-
-        debugmsg( "could not remove file '%s'", src_path );
     }
+    popup( _( "Death retirement is still incomplete (%s), but its refusal is persisted. Closing is now safe; no saved turn or retirement success was confirmed. The living fallback remains unavailable." ), last_save_result_ );
 }
 
 void game::load_master()
@@ -404,22 +548,30 @@ bool game::load_dimension_data()
 
 bool game::load( const std::string &world )
 {
+    // The caller may hold a registry-owned name; init replaces that storage.
+    const std::string world_name = world;
+    bool restored = false;
+    if( !admit_world( world_name, restored ) ) {
+        return false;
+    }
     world_generator->init();
-    WORLD *const wptr = world_generator->get_world( world );
+    WORLD *const wptr = world_generator->get_world( world_name );
     if( !wptr ) {
         return false;
     }
     if( wptr->world_saves.empty() ) {
-        debugmsg( "world '%s' contains no saves", world );
+        debugmsg( "world '%s' contains no saves", world_name );
         return false;
     }
 
     try {
         world_generator->set_active_world( wptr );
         g->setup();
-        g->load( wptr->world_saves.front() );
+        if( !g->load( wptr->world_saves.front() ) ) {
+            return false;
+        }
     } catch( const std::exception &err ) {
-        debugmsg( "cannot load world '%s': %s", world, err.what() );
+        debugmsg( "cannot load world '%s': %s", world_name, err.what() );
         return false;
     }
 
@@ -428,13 +580,24 @@ bool game::load( const std::string &world )
 
 bool game::load( const save_t &name )
 {
+    const save_t selected_save = name;
+    // Only the normal menu/public world loader owns admission and setup.
+    // Refuse a changed boundary rather than asking a second recovery question
+    // after setup has already consumed this world's options/mod definitions.
+    if( !can_load_world_after_retirement( world_generator->active_world->world_name ) ||
+        save_continuity::incomplete( world_generator->active_world->folder_path().get_unrelative_path() ) ) {
+        return false;
+    }
+    if( !world_generator->active_world->save_exists( selected_save ) ) {
+        return false;
+    }
     map &here = get_map();
     last_save_result_ = "unattempted";
     last_confirmed_save_turn_.reset();
 
     const cata_path worldpath = PATH_INFO::world_base_save_path();
     const cata_path save_file_path = PATH_INFO::world_base_save_path() /
-                                     ( name.base_path() + SAVE_EXTENSION );
+                                     ( selected_save.base_path() + SAVE_EXTENSION );
 
     bool abort = false;
     std::optional<int> loaded_character_turn;
@@ -459,7 +622,7 @@ bool game::load( const save_t &name )
                 _( "Character save" ), [&]()
                 {
                     u = avatar();
-                    u.set_save_id( name.decoded_name() );
+                    u.set_save_id( selected_save.decoded_name() );
 
                     if( world_generator->active_world->has_compression_enabled() ) {
                         std::optional<zzip> z = zzip::load( ( save_file_path + zzip_suffix ).get_unrelative_path() );
@@ -496,7 +659,7 @@ bool game::load( const save_t &name )
                 _( "Memorial" ), [&]()
                 {
                     const cata_path log_filename =
-                    worldpath / ( name.base_path() + SAVE_EXTENSION_LOG );
+                    worldpath / ( selected_save.base_path() + SAVE_EXTENSION_LOG );
                     read_from_file_optional(
                         log_filename.get_unrelative_path(),
                     [this]( std::istream & is ) {
@@ -510,7 +673,7 @@ bool game::load( const save_t &name )
 
 #if defined(__ANDROID__)
                     const cata_path shortcuts_filename =
-                    worldpath / ( name.base_path() + SAVE_EXTENSION_SHORTCUTS );
+                    worldpath / ( selected_save.base_path() + SAVE_EXTENSION_SHORTCUTS );
                     if( file_exist( shortcuts_filename ) ) {
                         load_shortcuts( shortcuts_filename );
                     }
@@ -704,6 +867,7 @@ bool game::save_dimension_data()
 {
     cata_path data_file = PATH_INFO::current_dimension_save_path() / SAVE_DIMENSION_DATA;
     return write_to_file( data_file, [&]( std::ostream & fout ) {
+        save_continuity::begin_write( PATH_INFO::world_base_save_path().get_unrelative_path() );
         serialize_dimension_data( fout );
     }, _( "dimension data" ) );
 }
@@ -712,6 +876,7 @@ bool game::save_maps()
     map &here = get_map();
 
     try {
+        save_continuity::begin_write( PATH_INFO::world_base_save_path().get_unrelative_path() );
         here.save();
         overmap_buffer.save(); // can throw
         MAPBUFFER.save(); // can throw
@@ -872,6 +1037,21 @@ bool game::save()
     std::chrono::seconds total_time_played = time_played_at_last_load + time_since_load;
     events().send<event_type::game_save>( time_since_load, total_time_played );
     try {
+        if( !can_load_world_after_retirement( world_generator->active_world->world_name ) ) {
+            throw std::runtime_error( "ordinary save cannot replace the process-owned incomplete retirement" );
+        }
+        save_continuity::require_ordinary_save( PATH_INFO::world_base_save_path().get_unrelative_path() );
+        save_continuity::begin_write( PATH_INFO::world_base_save_path().get_unrelative_path() );
+        validate_bandit_crossing_save();
+        const auto acknowledged_crossings =
+            overmap_buffer.global_state.bandit_live_world.acknowledge_persisted_crossings();
+        bool complete_published = false;
+        on_out_of_scope restore_unpublished_acknowledgments( [&]() {
+            if( !complete_published ) {
+                overmap_buffer.global_state.bandit_live_world.rollback_persisted_crossings(
+                    acknowledged_crossings );
+            }
+        } );
         if( !save_player_data() ) {
             last_save_result_ = "failed_player_data";
             return false;
@@ -929,15 +1109,11 @@ bool game::save()
                 fout.imbue( std::locale::classic() );
                 fout << total_time_played.count();
             } );
-        const std::vector<bandit_live_world::world_state::crossing_receipt_identity>
-            acknowledged_crossings =
-                overmap_buffer.global_state.bandit_live_world.acknowledge_persisted_crossings();
-        if( !acknowledged_crossings.empty() && !save_maps() ) {
-            overmap_buffer.global_state.bandit_live_world.rollback_persisted_crossings(
-                    acknowledged_crossings );
-            last_save_result_ = "failed_crossing_acknowledgement";
-            return false;
-        }
+        // Global state and NPCs were written with the same acknowledgment.
+        // Existing complete-generation publication is their single commit point.
+        save_continuity::publish_complete( PATH_INFO::world_base_save_path().get_unrelative_path(),
+                                          to_turns<int>( calendar::turn - calendar::turn_zero ), u.get_save_id() );
+        complete_published = true;
         // The certification digest must describe the completed ordinary
         // save, including any persisted crossing acknowledgement above.
         bandit_live_world_probe::record_certification_save_receipt(
@@ -1188,6 +1364,9 @@ cata_path PATH_INFO::current_dimension_player_save_path()
 {
     return PATH_INFO::current_dimension_save_path() / base64_encode( get_avatar().get_save_id() );
 }
+
+bandit_live_world::local_projection_reconciliation_result
+reconcile_loaded_bandit_live_world_projections_for_test();
 
 bandit_live_world::local_projection_reconciliation_result
 reconcile_loaded_bandit_live_world_projections_for_test()

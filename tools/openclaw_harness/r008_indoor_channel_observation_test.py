@@ -39,7 +39,9 @@ def _stream(run_id="run-a", source="source-a", executable="exe-a", scenario="sce
 
 class R008IndoorChannelObservationTest(unittest.TestCase):
     def write(self, rows, contract=True):
-        root = Path(tempfile.mkdtemp())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
         (root / R008_CHANNEL_RECORD_FILENAME).write_text(
             "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
         )
@@ -48,6 +50,38 @@ class R008IndoorChannelObservationTest(unittest.TestCase):
                 json.dumps({"scenario": "scenario-a"}), encoding="utf-8"
             )
         return root
+
+    def test_live_summary_validates_all_rows_and_detail_remains_exact(self):
+        from startup_harness import compact_cockpit_live_evidence, RUNTIME_BINDING_FILENAME
+        rows = _stream()
+        for row in rows:
+            row["diagnostic_context"] = "retained native context " * 1000
+        root = self.write(rows)
+        (root / RUNTIME_BINDING_FILENAME).write_text(json.dumps({
+            "runtime_source_sha256": "source-a", "executable_sha256": "exe-a"}))
+        summary = compact_cockpit_live_evidence(root, "run-a", binding_id="binding-a")
+        channel = summary["production_channel_observation"]
+        self.assertTrue(channel["eligible"], channel)
+        self.assertEqual(channel["record_count"], len(rows))
+        self.assertFalse(channel["records_included"])
+        self.assertEqual(channel["records"], [])
+        self.assertEqual(channel["latest_game_minutes"], 100)
+        self.assertEqual(Path(channel["path"]), root / R008_CHANNEL_RECORD_FILENAME)
+        detail = read_r008_indoor_channel_observation(root, run_id="run-a",
+            source_sha256="source-a", executable_sha256="exe-a", binding_id="binding-a")
+        self.assertEqual(detail["records"], rows)
+        self.assertTrue(detail["records_included"])
+        self.assertLess(len(json.dumps(summary)), len(json.dumps(detail)) // 10)
+        # A malformed/foreign row is still a refusal when its detail is not
+        # copied into the ordinary decision. Omission cannot conceal it.
+        rows[2]["run_id"] = "foreign"
+        (root / R008_CHANNEL_RECORD_FILENAME).write_text(
+            "".join(json.dumps(row) + "\n" for row in rows) + "partial row")
+        rejected = compact_cockpit_live_evidence(root, "run-a", binding_id="binding-a")
+        channel = rejected["production_channel_observation"]
+        self.assertFalse(channel["eligible"])
+        self.assertIn("wrong_run", channel["issues"])
+        self.assertIn("malformed_record", channel["issues"])
 
     def test_accepts_complete_bound_isolated_scan(self):
         result = read_r008_indoor_channel_observation(

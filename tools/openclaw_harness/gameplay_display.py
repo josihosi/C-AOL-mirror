@@ -193,7 +193,7 @@ def world_look(snapshot, operation_availability=None, *, show_controls=True, con
         lines.append("Local layout → play look --map (optional current observation).")
 
     if operations.get("game.act") is False:
-        controls = "Observation-only phase.\nplay look — observe · play quit — end playtest"
+        controls = "Observation-only phase.\nplay look — observe; native close requires the current advertised save/menu controls."
         return controls if controls_only else "\n".join(lines) + "\n\n" + controls
     if not show_controls:
         return "\n".join(lines) + "\nControls unchanged → play controls"
@@ -862,9 +862,14 @@ def plain_player_output(result, *, snapshot=None, full_look=True, startup_error=
     if isinstance(controls, dict) and "danger_handling" in controls and "availability" in controls:
         availability = controls["availability"]
         if availability.get("game.act") is False:
-            return "Observation-only phase.\nplay look — observe · play quit — end playtest"
+            return "Observation-only phase.\nplay look — observe; native close requires the current advertised save/menu controls."
         lines = ["Use only the current menu's actions → play look",
-                 "Pending result → play collect; end playtest → play quit"]
+                 "Pending result → play collect; close through current native SaveQuit/MenuQuit and verify exit."]
+        life_support = controls.get("setup", {}).get("debug_life_support")
+        if isinstance(life_support, dict):
+            lines += ["Roof survival setup → inspect exact DEBUG_LS; keep active, add only if missing.",
+                      "Use current advertised Debug menu → Player → Mutate → Debug Life Support; verify active in World.",
+                      "No active-trait toggle-off/debug bundle. Life Support is not combat immunity."]
         if availability.get("game.wait"):
             lines += ["Wait → play wait 5m [ignore|safe|stop] (example duration)",
                       "ignore: continue through danger (default); safe: inspect danger/damage; stop: each interruption.",
@@ -899,19 +904,10 @@ def plain_player_output(result, *, snapshot=None, full_look=True, startup_error=
         entries = journal.get("entries", [])
         request_option = (" --request-id " + shlex.quote(str(result["request_id"]))
                           if result.get("request_id") else "")
-        return (f"Journal ready: {len(entries)} entries.\n"
-                f"Read entries → play inspect result.evidence_journal.entries --limit 10{request_option}\n"
-                "Finish → play finish --witness FILE\n"
-                "FILE is JSON with these existing fields:\n"
-                "verdict: proved | contradicted | inconclusive\n"
-                "smallest_supported_claim, causal_account: your conclusion and why\n"
-                "citations: list of citation_id, meaning, checks\n"
-                'checks: object mapping paths to exact values, e.g. {"action_id":"wait.1m"}; not a list\n'
-                "Paths start inside entry.value: actions use action_id; observations use value.surface.facts.FIELD. Inspect first.\n"
-                'Field inspection prints copyable checks with exact types; "true" differs from true.\n'
-                "recommended_disposition: accept | continue | repair | change-strategy\n"
-                "contradictions: list all supplied contradictions with citation_id and meaning; [] if none\n"
-                "Omit evidence_ceiling. Read cited entries before finishing.")
+        return (f"Optional evidence journal: {len(entries)} entries.\n"
+                f"Exact retrieval → play inspect result.evidence_journal.entries --limit 10{request_option}\n"
+                "Report → play finish --outcome TEXT --verdict positive|negative|inconclusive\n"
+                "Detailed review, when useful → play finish --witness FILE. Select citation paths; exact types are generated.")
     selected = view.get("slice")
     selector = str(result.get("selector", ""))
     citation_field = re.search(r"(?:^|\.)entries\.\d+\.value\.(.+)$", selector)
@@ -942,7 +938,7 @@ def plain_player_output(result, *, snapshot=None, full_look=True, startup_error=
         request_option = (" --request-id " + shlex.quote(inspection_request_id)
                           if inspection_request_id else "")
         summary.append(f"Inspect → play inspect SELECTOR{request_option}\n"
-                       "Replace INDEX/FIELD in the complete SELECTOR below. Copy exact values into checks.")
+                       "Select fields for optional detailed review; their exact typed values are generated.")
         field_sets = {}
         for index, entry in zip(indices, selected):
             value = entry.get("value", {})
@@ -984,6 +980,11 @@ def plain_player_output(result, *, snapshot=None, full_look=True, startup_error=
     if "slice" in view and selector.endswith("diagnostic_rules") and isinstance(selected, dict):
         view["slice"] = {"rules": selected}
     if result.get("state") in {"finishing", "finished", "cleanup_failed", "reentered"}:
+        outcome = result.get("gameplay_outcome")
+        if isinstance(outcome, dict):
+            lines.append("Gameplay " + str(outcome.get("verdict", "inconclusive")) + ": " + str(outcome.get("summary", "")))
+            if outcome.get("unknowns"):
+                lines.append("Unknown: " + "; ".join(outcome["unknowns"]))
         state = result["state"]
         if state == "reentered":
             lines.append("Saved game reloaded. Observe → play look")
@@ -1332,7 +1333,7 @@ def plain_player_output(result, *, snapshot=None, full_look=True, startup_error=
                     continue
                 if key == "performance" and item == {"status": "retained_by_public_collect"}:
                     continue
-                if key == "next" and item == "act, look, inspect, or journal":
+                if key == "next" and item == "act, look, inspect, evidence, messages, or status":
                     continue
                 if key == "next" and isinstance(item, str) and item in {"look", "collect"}:
                     hint = "Next: play " + item

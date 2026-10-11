@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import sqlite3
 import time
 from typing import Any, Mapping
 import uuid
@@ -35,11 +36,13 @@ def update_waiting_performance(state: dict, measurement: dict) -> tuple[dict, di
         return {}, None
     identity = [measurement.get("native_process_instance"), generation]
     if state.get("identity") != identity:
-        state = {"identity": identity, "seconds": [], "alarmed": False}
+        state = {"identity": identity, "seconds": [], "measurements": [], "alarmed": False}
     if state.get("last_measurement") == measurement["measurement_id"]:
         return state, None
     seconds = (state["seconds"] + [measurement["simulation_seconds"]])[-WAITING_WINDOW_TURNS:]
-    state = {**state, "seconds": seconds, "last_measurement": measurement["measurement_id"]}
+    measurements = (state.get("measurements", []) + [measurement])[-WAITING_WINDOW_TURNS:]
+    state = {**state, "seconds": seconds, "measurements": measurements,
+             "last_measurement": measurement["measurement_id"]}
     if len(seconds) < WAITING_WINDOW_TURNS:
         return state, None
     mean = math.fsum(seconds) / len(seconds)
@@ -70,6 +73,111 @@ def write_json(path: Path, value: dict):
 def _finite_number(value: Any, *, positive: bool = False) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and \
         math.isfinite(value) and (value > 0 if positive else True)
+
+
+def retain_alarm_evidence(directory: Path, state: dict, assessment: dict, *,
+                          waiting_windows: Mapping[int, list], added: list[dict]) -> dict:
+    """Retain only emitted alarm facts in the existing content-addressed store."""
+    import evidence_display
+
+    records = list(state.get("unretained_alarm_records", []))
+    for alarm in assessment["alarms"]:
+        waiting = alarm.get("kind") == "waiting_slow"
+        samples = waiting_windows[id(alarm)] if waiting else state.get("completed", [])
+        if alarm.get("kind") in {"spike", "slow_turn"}:
+            samples = [item for item in added if item.get("end") == alarm.get("evidence")]
+        elif alarm.get("kind") == "sustained_regression":
+            samples = samples[-len(alarm["observed"]):]
+        elif alarm.get("kind") in {"stalled_progress", "incomplete_turn"}:
+            samples = []
+        identity = alarm.get("key") or (str(alarm["kind"]) + ":" +
+                    str(samples[-1]["measurement_id"] if samples else None))
+        records.append({
+            "schema": "caol-performance-alarm-evidence-v1", "identity": identity,
+            "alarm": alarm, "owner": assessment["owner"], "operation": assessment["pending_operation"],
+            "configuration": assessment["configuration"], "trace": assessment["trace"],
+            "window": {"first": samples[0]["measurement_id"] if samples else None,
+                       "last": samples[-1]["measurement_id"] if samples else None,
+                       "sample_count": len(samples)},
+            "measurements": samples, "incomplete_turn": assessment["current_incomplete_turn"],
+            "process_interval": {key: assessment["metric"].get(key) for key in
+                                 ("cpu_seconds", "cpu_scope", "cpu_evidence", "elapsed_wall_seconds",
+                                  "elapsed_wall_scope")},
+            "phase_scope": "Only native phase facts observed in this alarm window; not a complete subphase profile.",
+        })
+    pending = []
+    errors = []
+    count = state.get("alarm_retention", {}).get("count", 0)
+    if records:
+        from cockpit_archive import Archive, ArchiveMap
+        archive = None
+        try:
+            archive = Archive(directory / "cockpit-evidence.sqlite",
+                              run_id=assessment["owner"]["run_id"],
+                              binding_id=assessment["owner"]["binding_id"])
+            retained = ArchiveMap(archive, "performance_alarms")
+            for record in records:
+                if record["identity"] in retained:
+                    continue
+                try:
+                    artifact = evidence_display.retain(record, directory=evidence_display.STORE)
+                    retained[record["identity"]] = {"identity": record["identity"],
+                        "kind": record["alarm"]["kind"], "evidence": artifact}
+                except OSError as error:
+                    pending.append(record)
+                    errors.append(str(error))
+            count = len(retained)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            pending = records
+            errors.append(str(error))
+        finally:
+            if archive is not None:
+                archive.close()
+    state["unretained_alarm_records"] = pending
+    summary = {"status": "failed" if pending else "retained" if count else "none_observed",
+               "count": count, "unretained_count": len(pending),
+               **({"errors": errors} if errors else {}), "store": str(evidence_display.STORE)}
+    state["alarm_retention"] = summary
+    return summary
+
+
+def publish_alarm_evidence(directory: Path, *, run_id: str, binding_id: str) -> dict:
+    """Bind compact alarm retrieval to the ordinary final, outside session cleanup."""
+    import evidence_display
+
+    state = read_json(directory / TURN_STATE_NAME)
+    owner = state.get("owner", {})
+    if owner.get("run_id") != run_id or owner.get("binding_id") != binding_id:
+        return {"status": "unavailable", "reason": "alarm_assessment_run_or_binding_unavailable"}
+    from cockpit_archive import Archive, ArchiveMap
+    archive_path = directory / "cockpit-evidence.sqlite"
+    alarms = []
+    if archive_path.is_file():
+        archive = None
+        try:
+            archive = Archive(archive_path, run_id=run_id, binding_id=binding_id, readonly=True)
+            retained = ArchiveMap(archive, "performance_alarms")
+            alarms = list(retained.values())
+        except (OSError, ValueError, sqlite3.Error) as error:
+            return {"status": "unavailable", "reason": str(error)}
+        finally:
+            if archive is not None:
+                archive.close()
+    pending = len(state.get("unretained_alarm_records", []))
+    if not alarms:
+        return {"status": "failed" if pending else "none_observed", "count": 0,
+                "unretained_count": pending}
+    try:
+        artifact = evidence_display.retain({
+            "schema": "caol-performance-alarm-index-v1", "run_id": run_id,
+            "binding_id": binding_id, "alarms": alarms, "unretained_count": pending,
+        }, directory=evidence_display.STORE)
+    except OSError as error:
+        return {"status": "failed", "reason": str(error), "count": len(alarms)}
+    return {"status": "partial" if pending else "retained", "count": len(alarms),
+            "unretained_count": pending, "evidence": artifact,
+            "store": str(evidence_display.STORE),
+            "retrieval": "evidence_display.py --sha256 DIGEST --selector alarms --limit 20"}
 
 
 def _turn_config(directory: Path) -> tuple[dict | None, str | None]:
@@ -287,6 +395,7 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
     completed = list(state.get("completed", []))[-window_turns:]
     waiting_state = state.get("waiting", {})
     waiting_changes = []
+    waiting_windows = {}
     active = dict(state.get("active", {}))
     added: list[dict] = []
     game_turn_rewound = False
@@ -321,6 +430,7 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
         if event_type == "turn_phase":
             if active_identity in active:
                 current_active = dict(active[active_identity])
+                current_active["phase_events"] = current_active.get("phase_events", []) + [_event_summary(event)]
                 phase_wall = _event_wall_seconds(event)
                 if event.get("stage") == "begin":
                     current_active.update(phase=event.get("phase"),
@@ -362,13 +472,16 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
                                "waiting_generation": start.get("waiting_generation"),
                                "native_process_instance": event_process_instance,
                                "start_wall_time_seconds": _event_wall_seconds(start),
-                               "end_wall_time_seconds": _event_wall_seconds(event)}
+                               "end_wall_time_seconds": _event_wall_seconds(event),
+                               "phase_events": active_turn.get("phase_events", [])}
                 if not any(item.get("measurement_id") == identity for item in completed):
                     completed.append(measurement)
                     added.append(measurement)
                     waiting_state, waiting_change = update_waiting_performance(waiting_state, measurement)
                     if waiting_change:
                         waiting_changes.append(waiting_change)
+                        if waiting_change["kind"] == "waiting_slow":
+                            waiting_windows[id(waiting_change)] = waiting_state["measurements"]
     completed = completed[-window_turns:]
     values = [item["simulation_seconds"] for item in completed if _finite_number(item.get("simulation_seconds"))]
     native_wall_seconds = None
@@ -539,9 +652,11 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
         "source_freshness": {"last_event": last_source_event, "pending_observation": pending_observation},
         "alarms": changed + [item for item in waiting_changes if item["kind"] == "waiting_slow"],
         "recoveries": recoveries + [item for item in waiting_changes if item["kind"] == "waiting_recovery"],
-        "waiting": {key: value for key, value in waiting_state.items() if key not in {"seconds", "identity", "last_measurement"}},
+        "waiting": {key: value for key, value in waiting_state.items() if key not in {"seconds", "measurements", "identity", "last_measurement"}},
         "pending_operation": operation, "observation_uncertainty": observation_uncertainty,
         "note": "Native turn boundaries measure simulation only. Input, pause, load, save and transport phases do not create simulation alarms."}
+    assessment["alarm_retention"] = retain_alarm_evidence(
+        directory, state, assessment, waiting_windows=waiting_windows, added=added)
     state["assessment"] = assessment
     try:
         write_json(directory / TURN_STATE_NAME, state)

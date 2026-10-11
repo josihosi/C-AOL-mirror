@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, closing, redirect_stderr, redirect_stdout
 from unittest import mock
 
 
@@ -272,7 +272,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
         self.assertTrue(namespace.post_relaunch_continuation)
         self.assertEqual(namespace.saved_world_snapshot, snapshot)
 
-    def test_selected_probe_namespace_retains_declared_immutable_product_build(self) -> None:
+    def test_selected_probe_namespace_retains_run_selected_immutable_product_build(self) -> None:
         scenario = "cli.selected-product-build"
         source_path = Path("/tmp/selected-product-build.json")
         source_hash = "a" * 64
@@ -284,7 +284,8 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             "product_source_sha256": "d" * 64,
         }
         selection = scenario_registry_cli.RegistryBootstrapToken(
-            "token", True, "current", scenario, str(source_path), {}, source_hash,
+            "token", True, "current", scenario, str(source_path),
+            {"executable_path": "/exact/run/game", "selected_product_build": selected_build}, source_hash,
         )
         declaration = {
             "name": scenario,
@@ -531,7 +532,8 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                        "executable_path": str(selected_executable),
                        "executable_sha256": "selected-test-binary",
                        "runtime_source_sha256": "selected-test-source"}
-            with mock.patch.object(startup_harness, "scenarios_root", return_value=canonical), \
+            with mock.patch.object(startup_harness, "detect_executable", return_value=selected_executable), \
+                    mock.patch.object(startup_harness, "scenarios_root", return_value=canonical), \
                     mock.patch.object(scenario_registry_cli, "_current_source_executable_readiness",
                                       return_value={"status": "ready"}) as readiness, \
                     mock.patch.object(startup_harness, "build_runtime_binding", return_value=runtime), \
@@ -632,12 +634,12 @@ class ScenarioRegistryCliTest(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_selected_renderer_identity_does_not_use_default_executable(self) -> None:
-        with mock.patch.object(startup_harness, "load_scenario", return_value={
-                "runtime_contract": {"requirements": {"executable": "cataclysm"}}}), \
+    def test_selected_renderer_identity_uses_run_binding_not_scenario_or_default(self) -> None:
+        selected = scenario_registry_cli.RegistryLaunchToken(
+            "token", True, "current", "curses", runtime_binding={"executable_path": "/exact/cataclysm"})
+        with mock.patch.object(startup_harness, "load_scenario", side_effect=AssertionError("scenario build is obsolete")), \
                 mock.patch.object(startup_harness, "detect_executable", side_effect=AssertionError("wrong renderer")):
-            self.assertEqual(scenario_registry_cli._selected_executable("curses"),
-                             (startup_harness.repo_root() / "cataclysm").resolve())
+            self.assertEqual(scenario_registry_cli._selected_executable(selected), Path("/exact/cataclysm").resolve())
 
     def run_registry_launch(
         self,
@@ -667,7 +669,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
         return result, run_probe
 
     def test_unreported_native_launch_exception_revokes_selection_authority(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir, ExitStack() as connection_cleanup:
             root = Path(temp_dir)
             registry_path, scenarios, token_id = self.issue_selection_token(root)
             executable = root / "selected-runtime"
@@ -677,7 +679,16 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                                "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                                "runtime_source_sha256": "test-runtime-source"}
             errors = io.StringIO()
-            with mock.patch.object(startup_harness, "scenarios_root", return_value=scenarios), \
+            opened = []
+
+            def track_connection(*args, **kwargs):
+                connection = open_registry(*args, **kwargs)
+                opened.append(connection)
+                connection_cleanup.callback(connection.close)
+                return connection
+
+            with mock.patch.object(scenario_registry_cli, "open_registry", side_effect=track_connection), \
+                    mock.patch.object(startup_harness, "scenarios_root", return_value=scenarios), \
                     mock.patch.object(startup_harness, "detect_executable", return_value=executable), \
                     mock.patch.object(startup_harness, "build_runtime_binding", return_value=runtime_binding), \
                     mock.patch.object(scenario_registry_cli, "_current_source_executable_readiness",
@@ -694,12 +705,67 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             self.assertIn("peekaboo missing after game launch", errors.getvalue())
             self.assertIn('"selection_invalidated": true', errors.getvalue())
             self.assertIn('"cleanup": "unconfirmed', errors.getvalue())
+            self.assertEqual(len(opened), 2)
+            for connection in opened:
+                with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                    connection.execute("SELECT 1")
             self.assertIn(("invalidated", "registry_launch_adapter_failed_before_report"),
                           self.token_events(registry_path, token_id))
-            with open_registry(str(registry_path)) as connection:
+            with closing(open_registry(str(registry_path))) as connection:
                 reused = reload_selection_token_for_launch(connection, token_id)
             self.assertFalse(reused.accepted)
             self.assertEqual(reused.reason, "token_invalidated")
+
+    def test_failed_launch_invalidation_rolls_back_and_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, ExitStack() as connection_cleanup:
+            root = Path(temp_dir)
+            registry_path, scenarios, token_id = self.issue_selection_token(root)
+            executable = root / "selected-runtime"
+            executable.write_bytes(b"selected runtime")
+            runtime = self.bootstrap_runtime(executable)
+            opened = []
+
+            def track_connection(*args, **kwargs):
+                connection = open_registry(*args, **kwargs)
+                opened.append(connection)
+                connection_cleanup.callback(connection.close)
+                return connection
+
+            def fail_invalidation(connection, *args, **kwargs):
+                connection.execute("BEGIN")
+                connection.execute("CREATE TABLE fixture_failed_invalidation (marker TEXT)")
+                raise OSError("invalidation storage failure")
+
+            errors = io.StringIO()
+            with mock.patch.object(scenario_registry_cli, "open_registry", side_effect=track_connection), \
+                    mock.patch.object(startup_harness, "scenarios_root", return_value=scenarios), \
+                    mock.patch.object(startup_harness, "detect_executable", return_value=executable), \
+                    mock.patch.object(startup_harness, "build_runtime_binding", return_value=runtime), \
+                    mock.patch.object(scenario_registry_cli, "_current_source_executable_readiness",
+                                      return_value={"status": "ready"}), \
+                    mock.patch.object(startup_harness, "run_probe_mode", side_effect=RuntimeError("adapter failed")), \
+                    mock.patch.object(scenario_registry_cli, "record_selection_token_rejection",
+                                      side_effect=fail_invalidation), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(errors):
+                result = scenario_registry_cli.main([
+                    "--json", "--registry", str(registry_path), "registry-launch", token_id,
+                ])
+            self.assertEqual(result, 1)
+            self.assertIn('"selection_invalidation_error": "invalidation storage failure"', errors.getvalue())
+            self.assertIn('"cleanup": "unconfirmed', errors.getvalue())
+            self.assertEqual(len(opened), 2)
+            for connection in opened:
+                with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                    connection.execute("SELECT 1")
+            with closing(open_registry(str(registry_path))) as connection:
+                self.assertIsNone(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name='fixture_failed_invalidation'",
+                ).fetchone())
+                reused = reload_selection_token_for_launch(connection, token_id)
+            # This injected failure preserves existing CLI degradation: the
+            # invalidation error is explicit; no invalidation was committed.
+            self.assertTrue(reused.accepted)
+            self.assertEqual(reused.reason, "current")
 
     def bootstrap_runtime(self, executable: Path) -> dict:
         source = runtime_source_binding()
@@ -723,7 +789,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             "preferences": [],
         }
 
-    def test_bootstrap_binds_selected_manifest_executable_before_token_issue(self) -> None:
+    def test_bootstrap_binds_run_executable_and_ignores_legacy_scenario_build(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             scenarios = root / "selected scenarios"
@@ -767,15 +833,15 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                                     return_value={"status": "ready"}) as readiness,
                   redirect_stdout(output)):
                 code = scenario_registry_cli.main(["--json", "--registry", str(registry),
-                    "registry-bootstrap", "--query-json", json.dumps(self.bootstrap_request())])
+                    "registry-bootstrap", "--executable", str(selected), "--query-json", json.dumps(self.bootstrap_request())])
             self.assertEqual(code, 0)
             result = json.loads(output.getvalue())["result"]
             self.assertTrue(result["accepted"])
             self.assertEqual(result["runtime_binding"]["executable_path"], str(selected.resolve()))
-            self.assertEqual(result["runtime_binding"]["selected_product_build"], selected_product_build)
-            built.assert_called_once_with(selected.resolve(), selected_product_build=selected_product_build)
+            self.assertIsNone(result["runtime_binding"].get("selected_product_build"))
+            built.assert_called_once_with(selected.resolve(), selected_product_build=None)
             readiness.assert_called_once_with(
-                executable=str(selected.resolve()), selected_product_build=selected_product_build,
+                executable=str(selected.resolve()),
             )
 
     def test_bootstrap_rejects_stale_selected_executable_without_token(self) -> None:
@@ -797,13 +863,15 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             finally:
                 connection.close()
             output = io.StringIO()
+            runtime = self.bootstrap_runtime(selected)
             with (mock.patch.object(startup_harness, "repo_root", return_value=root),
                   mock.patch.object(scenario_registry_cli, "_current_source_executable_readiness",
                                     return_value={"status": "build_required", "reason": "stale"}),
+                  mock.patch.object(startup_harness, "build_runtime_binding", return_value=runtime),
                   mock.patch.object(scenario_registry_cli, "issue_registry_bootstrap_token") as issue,
                   redirect_stdout(output)):
                 code = scenario_registry_cli.main(["--json", "--registry", str(registry),
-                    "registry-bootstrap", "--query-json", json.dumps(self.bootstrap_request())])
+                    "registry-bootstrap", "--executable", str(selected), "--query-json", json.dumps(self.bootstrap_request())])
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(output.getvalue())["result"]["reason"],
                              "source_matching_executable_required")
@@ -1305,7 +1373,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                     mock.patch.object(scenario_registry_cli.startup_harness, "load_scenario", return_value=self.strict_manifest()), \
                     mock.patch.object(scenario_registry_cli, "_write_result") as write_result:
                 query_exit = scenario_registry_cli.main(["--json",
-                    "--registry", str(registry_path), "registry-query",
+                    "--registry", str(registry_path), "registry-query", "--executable", str(executable),
                     "--query-json", json.dumps(query),
                     "--coordinator-brief", str(brief_path), "--witness-charter", str(charter_path),
                 ])
@@ -1391,6 +1459,8 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                     binding=binding,
                 )
                 self.assertTrue(repair.accepted, repair.reason)
+                self.assertEqual(repair.scenario, self.strict_manifest()["name"])
+                self.assertEqual(repair.source_path, str(manifest_path.resolve()))
                 return registry_path, scenarios, repair.token_id, binding
             finally:
                 connection.close()
@@ -1415,6 +1485,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                     red_verification_id=issued["verification_id"], binding=binding,
                 )
                 self.assertTrue(successor.accepted, successor.reason)
+                self.assertEqual(successor.scenario, self.strict_manifest()["name"])
                 self.assertNotEqual(successor.token_id, token_id)
                 successor_details = json.loads(connection.execute(
                     "SELECT details_json FROM token_history WHERE token_id = ? AND event_kind = 'repair_issued'",
@@ -1440,6 +1511,8 @@ class ScenarioRegistryCliTest(unittest.TestCase):
                 ])
             self.assertEqual(result, 31)
             run_probe.assert_called_once()
+            self.assertEqual(run_probe.call_args.args[0].scenario, self.strict_manifest()["name"])
+            self.assertEqual(Path(run_probe.call_args.args[0].registry_selected_source_path).name, "repair.json")
             self.assertTrue(run_probe.call_args.args[0].adaptive_semantic_autodrive)
             receipt = json.loads(run_probe.call_args.args[0].registry_launch_receipt)
             self.assertEqual(receipt["authority_kind"], "registry_repair_exact_contradiction")
@@ -1982,7 +2055,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             # This fixture lives outside the canonical scenario directory.
             def run_query(*arguments):
                 out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(scenario_registry_cli, "_selected_executable", return_value=executable_path), \
+                with mock.patch.object(startup_harness, "detect_executable", return_value=executable_path), \
                         redirect_stdout(out), redirect_stderr(err):
                     code = scenario_registry_cli.main(["--json", *arguments])
                 return subprocess.CompletedProcess([], code, out.getvalue(), err.getvalue())
@@ -2374,7 +2447,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             })
             self.assertNotIn("full-only-payload", compact_stdout.getvalue())
             status.assert_called_once_with(
-                executable="/exact/cataclysm-tiles", isolated_harness_diagnosis=False,
+                executable="/exact/cataclysm-tiles", selected_product_build=None, isolated_harness_diagnosis=False,
             )
 
             full_stdout = io.StringIO()
@@ -2401,8 +2474,15 @@ class ScenarioRegistryCliTest(unittest.TestCase):
 
             def run_probe(namespace: argparse.Namespace) -> int:
                 seen_namespaces.append(namespace)
+                loaded = startup_harness.load_scenario(
+                    namespace.scenario, source_path=namespace.registry_selected_source_path,
+                    expected_sha256=namespace.registry_selected_source_sha256,
+                )
+                self.assertEqual(loaded["name"], self.strict_manifest()["name"])
+                self.assertEqual(loaded["path"], str(manifest_path.resolve()))
                 run_dir = root / "finalized"
                 report = self.migration_report(manifest_path, namespace.profile)
+                report["scenario"] = namespace.scenario
                 with redirect_stdout(io.StringIO()):
                     finalize_probe_report(
                         run_dir,
@@ -2423,7 +2503,7 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             self.assertEqual(len(seen_namespaces), 1)
             namespace = seen_namespaces[0]
             expected = startup_harness.build_parser().parse_args([
-                "probe", "valid", "--profile", namespace.profile,
+                "probe", self.strict_manifest()["name"], "--profile", namespace.profile,
             ])
             received = vars(namespace).copy()
             receipt = json.loads(received.pop("registry_migration_receipt"))
