@@ -13,6 +13,7 @@ from pathlib import Path
 import socket
 import stat
 from typing import Callable, Mapping
+from certification_process_lease import process_command_identity
 
 
 class WritableRootConflict(RuntimeError):
@@ -34,9 +35,8 @@ def _generation_matches(expected: Mapping, observed: Mapping) -> bool:
             and str(expected.get('birth_identity', '')).strip()
             and str(expected.get('birth_identity', '')).strip()
             == str(observed.get('birth_identity', '')).strip()
-            and str(expected.get('command', '')).strip()
-            and str(expected.get('command', '')).strip()
-            == str(observed.get('command', '')).strip()
+            and process_command_identity(expected)
+            and process_command_identity(expected) == process_command_identity(observed)
         )
     except (TypeError, ValueError):
         return False
@@ -74,8 +74,8 @@ class WritableRunOwner:
         self.root = reject_aliases(root)
         self.run_id = run_id
         self.inspect = inspect
-        # Kept for the existing startup wrapper's API shape. Process identity
-        # validation below uses the same PID/birth/command fields directly.
+        # Startup supplies its existing exact matcher; standalone owners use
+        # the same PID/birth and legacy-command/fingerprint identity below.
         self.matches = matches
         self._directory_fds = []
         self.handle = None
@@ -171,31 +171,31 @@ class WritableRunOwner:
         except (TypeError, ValueError):
             return False
         return bool(pid > 0 and str(generation.get('birth_identity', '')).strip()
-                    and str(generation.get('command', '')).strip())
+                    and process_command_identity(generation))
 
     def _inspect_generation(self, generation, *, source: str) -> None:
         if not self._valid_generation(generation):
-            raise WritableRootConflict(f"incomplete process generation in {source}: {generation!r}",
+            raise WritableRootConflict(f"incomplete process generation in {source}",
                                        reason="incomplete_generation")
         try:
             observed = self.inspect(int(generation['pid']))
         except Exception as error:
-            raise WritableRootConflict(f"process identity inspection failed in {source}: {generation!r}",
+            raise WritableRootConflict(f"process identity inspection failed in {source}",
                                        reason="identity_unavailable") from error
         if not isinstance(observed, Mapping) or not isinstance(observed.get('alive'), bool):
-            raise WritableRootConflict(f"process identity unavailable in {source}: {generation!r}",
+            raise WritableRootConflict(f"process identity unavailable in {source}",
                                        reason="identity_unavailable")
         if observed['alive']:
             matcher = self.matches if callable(self.matches) else _generation_matches
             try:
                 matched = matcher(generation, observed)
             except Exception as error:
-                raise WritableRootConflict(f"process identity comparison failed in {source}: {generation!r}",
+                raise WritableRootConflict(f"process identity comparison failed in {source}",
                                            reason="identity_unavailable") from error
             if matched:
-                raise WritableRootConflict(f"live prior owner retained in {source}: {generation}",
+                raise WritableRootConflict(f"live prior owner retained in {source}",
                                            reason="live_generation")
-            raise WritableRootConflict(f"PID birth/command changed for prior owner in {source}: {generation}",
+            raise WritableRootConflict(f"PID birth/command changed for prior owner in {source}",
                                        reason="generation_mismatch")
 
     def _check_prior_owner(self, *, existed: bool):
@@ -291,12 +291,12 @@ class WritableRunOwner:
             raise WritableRootConflict(f"game bind requires begin_launch at {self.root}",
                                        reason="invalid_launch_transition")
         if not self._valid_generation(generation):
-            raise WritableRootConflict(f"game generation unavailable; retain run at {self.root}: {generation}",
+            raise WritableRootConflict(f"game generation unavailable; retain run at {self.root}",
                                        reason="identity_unavailable")
         try:
             observed = self.inspect(int(generation['pid']))
         except Exception as error:
-            raise WritableRootConflict(f"game process generation unavailable at {self.root}: {generation}",
+            raise WritableRootConflict(f"game process generation unavailable at {self.root}",
                                        reason="identity_unavailable") from error
         matcher = self.matches if callable(self.matches) else _generation_matches
         try:
@@ -306,7 +306,7 @@ class WritableRunOwner:
             raise WritableRootConflict(f"game process generation comparison unavailable at {self.root}",
                                        reason="identity_unavailable") from error
         if not exact:
-            raise WritableRootConflict(f"game process generation changed before binding at {self.root}: {generation}",
+            raise WritableRootConflict(f"game process generation changed before binding at {self.root}",
                                        reason="generation_mismatch")
         self.record['game_generation'] = dict(generation)
         self.record['launch_state'] = 'bound'

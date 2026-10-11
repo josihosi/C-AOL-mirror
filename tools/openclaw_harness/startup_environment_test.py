@@ -11,6 +11,167 @@ import startup_harness as harness
 
 
 class StartupEnvironmentTest(unittest.TestCase):
+    def test_windows_dispatcher_status_projects_actual_launch_owner_without_argv(self):
+        import socket
+        import windows_curses_terminal_transport as transport
+        command = 'C:/game.exe --password synthetic-private-value'
+        game = {'pid': 42, 'alive': True, 'birth_identity': 'birth-a',
+                'executable_path': 'C:/game.exe', 'command': command}
+        broker = {**game, 'pid': 43, 'birth_identity': 'birth-b'}
+        owner = transport._public_owner({
+            'schema': transport.OWNER_SCHEMA, 'host': socket.gethostname(), 'run_id': 'run-a',
+            'endpoint': 'fixture/input.pipe', 'transport': 'windows_conpty',
+            'argv': ['C:/game.exe', '--password', 'synthetic-private-value'],
+            'auth_key': 'synthetic-private-value', 'native_lease': {'private': 'synthetic-private-value'},
+            'game_pid': 42, 'game_process_generation': game,
+            'broker_pid': 43, 'broker_process_generation': broker,
+            'conhost_process_generations': [broker]})
+        self.assertIn('argv', owner)  # Internal legacy launch binding is intact.
+        with mock.patch.object(transport, '_read_owner', return_value=owner), \
+             mock.patch.object(transport, '_process_generation', side_effect=lambda pid: game if pid == 42 else broker):
+            status = transport.dispatcher_status(Path('fixture/input.pipe'))
+        self.assertEqual(status['game_status'], 'alive')
+        self.assertEqual(status['broker_status'], 'alive')
+        self.assertNotIn('argv', status['owner'])
+        self.assertNotIn('synthetic-private-value', json.dumps(status))
+        self.assertEqual(status['owner']['conhost_process_generations'][0]['command_sha256'],
+                         harness.process_command_identity(broker))
+
+    def test_process_diagnostics_keep_identity_without_arguments_or_environment(self):
+        command = "/bin/cataclysm --api-key synthetic-private-value"
+        legacy = {"pid": 42, "alive": True, "birth_identity": "birth-a", "command": command,
+                  "executable_path": "/bin/cataclysm", "environment": {"API_KEY": "synthetic-private-value"}}
+        inspector = mock.Mock()
+        inspector.inspect.return_value = harness.ProcessSnapshot(
+            pid=42, alive=True, birth_identity="birth-a", executable_path="/bin/cataclysm", command=command)
+        observed = harness.process_generation_snapshot(42, inspector=inspector)
+        self.assertNotIn("synthetic-private-value", json.dumps(observed))
+        self.assertNotIn("command", observed)
+        self.assertNotIn("environment", observed)
+        self.assertTrue(harness.process_generation_matches(legacy, observed))
+        from writable_run_owner import WritableRunOwner, _generation_matches as owner_matches
+        self.assertTrue(WritableRunOwner._valid_generation(observed))
+        self.assertTrue(owner_matches(legacy, observed))
+        self.assertFalse(WritableRunOwner._valid_generation({**observed,
+            "command_sha256": "invalid", "command": command}))
+        from curses_terminal_transport import _same_generation as posix_matches
+        from windows_curses_terminal_transport import _same_generation as windows_matches
+        self.assertTrue(posix_matches(observed, legacy))
+        self.assertTrue(windows_matches(observed, legacy))
+        for changed in ({**legacy, "command": command + " changed"},
+                        {**legacy, "birth_identity": "reused"},
+                        {**observed, "command_sha256": "invalid", "command": command}):
+            self.assertFalse(harness.process_generation_matches(changed, observed))
+            self.assertFalse(owner_matches(changed, observed))
+            self.assertFalse(posix_matches(changed, observed))
+            self.assertFalse(windows_matches(changed, observed))
+        self.assertFalse(windows_matches({**legacy, "executable_path": "/bin/wrong"}, observed))
+        with mock.patch.object(harness, "process_generation_snapshot", return_value=observed), \
+                mock.patch.object(harness, "compare_runtime_binding", return_value={"status": "matched"}):
+            identity = harness.terminal_native_startup_identity(42, Path("/bin/cataclysm"), {}, legacy)
+        self.assertTrue(identity["ok"], identity)
+        self.assertNotIn("synthetic-private-value", json.dumps(identity))
+        self.assertNotIn("observed_command", identity)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "process.json").write_text(json.dumps({"process_generation": legacy}))
+            owned = harness.current_owned_process_generation(root, inspector=inspector)
+            self.assertEqual(owned["status"], "alive")
+            self.assertNotIn("synthetic-private-value", json.dumps(owned))
+        result = harness.cleanup_game_process(42, expected_process_generation=legacy, inspector=inspector)
+        self.assertEqual(result["status"], "retained_waiting_for_player_quit")
+        self.assertNotIn("synthetic-private-value", json.dumps(result))
+        inspector.signal.assert_not_called()
+
+    def test_bound_exit_and_bridge_reports_do_not_echo_process_arguments(self):
+        from cockpit_file_bridge import FileBackedCockpitBridge
+        command = "/bin/cataclysm --password synthetic-private-value"
+        generation = {"pid": 42, "birth_identity": "birth-a", "alive": True,
+                      "executable_path": "/bin/cataclysm", "command": command}
+        with mock.patch.object(harness, "pid_is_alive", side_effect=[True, False]), \
+                mock.patch.object(harness, "pid_command", return_value=command), \
+                mock.patch.object(harness.time, "sleep"):
+            result = harness.observe_bound_process_exit(42, 1, expected_command=command)
+        self.assertEqual(result["status"], "native_exit")
+        self.assertNotIn("synthetic-private-value", json.dumps(result))
+        with mock.patch.object(harness, "pid_is_alive", return_value=True), \
+                mock.patch.object(harness, "pid_command", return_value=command + " changed"):
+            wrong = harness.observe_bound_process_exit(42, 0, expected_command=command)
+        self.assertEqual(wrong["status"], "wrong_process_identity")
+        self.assertNotIn("synthetic-private-value", json.dumps(wrong))
+        with tempfile.TemporaryDirectory() as raw:
+            bridge = FileBackedCockpitBridge(Path(raw) / "session",
+                                            ["/bin/cataclysm", "--password", "synthetic-private-value"],
+                                            binding_id="binding-a")
+            bridge.prepare()
+            self.assertNotIn("synthetic-private-value",
+                             (bridge.session_dir / "bridge.manifest.json").read_text())
+            (bridge.session_dir / "game-process.json").write_text(json.dumps({
+                "pid": 42, "binding_id": "binding-a", "command": command,
+                "process_generation": generation}))
+            with mock.patch.object(harness, "process_generation_snapshot",
+                                   return_value=harness.public_process_generation(generation)):
+                evidence = bridge._owned_game_process_evidence()
+            self.assertEqual(evidence["status"], "alive")
+            self.assertNotIn("synthetic-private-value", json.dumps(evidence))
+            with mock.patch.object(harness, "process_generation_snapshot", return_value={
+                    **harness.public_process_generation(generation), "birth_identity": "reused"}):
+                refused = bridge._owned_game_process_evidence()
+            self.assertEqual(refused["status"], "exited_or_identity_changed")
+            self.assertNotIn("synthetic-private-value", json.dumps(refused))
+
+    def test_launch_credentials_use_child_environment_not_argv_or_process_record(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            process = mock.Mock(pid=None)
+            environment = {"CATA_API_KEY": "synthetic-private-value"}
+            with mock.patch.object(harness, "should_use_curses_terminal", return_value=False), \
+                    mock.patch.object(harness, "current_owner", return_value=None), \
+                    mock.patch.object(harness, "open_semantic_wake_pipe", return_value=(-1, -1, {})), \
+                    mock.patch.object(harness, "record_bridge_game_process"), \
+                    mock.patch.object(harness.threading, "Thread"), \
+                    mock.patch.object(harness.subprocess, "Popen", return_value=process) as launch:
+                harness.launch_game("privacy-fixture", "TestSetup00", root,
+                                    executable="/bin/cataclysm", child_environment=environment)
+                args, options = launch.call_args
+                self.assertEqual(options["env"]["CATA_API_KEY"], "synthetic-private-value")
+                self.assertEqual(args[0][0], "/bin/cataclysm")
+                self.assertNotIn("synthetic-private-value", json.dumps(args[0]))
+                self.assertNotIn("synthetic-private-value", (root / "process.json").read_text())
+                self.assertNotIn("command", json.loads((root / "process.json").read_text()))
+                options["stdout"].close()
+                options["stderr"].close()
+
+    def test_registered_world_reentry_uses_explicit_metadata_without_argv(self):
+        from cockpit_file_bridge import FileBackedCockpitBridge
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            userdir = root / "user"
+            saved_world = userdir / "save" / "TestSetup00"
+            saved_world.mkdir(parents=True)
+            (saved_world / "worldoptions.json").write_text('{"saved":true}')
+            bridge = FileBackedCockpitBridge(root / "session", ["unused"], binding_id="binding-a")
+            bridge.prepare()
+            generation = {"pid": 42, "alive": True, "birth_identity": "birth-a",
+                          "command": "/bin/cataclysm --password synthetic-private-value",
+                          "executable_path": "/bin/cataclysm"}
+            with mock.patch.object(harness, "process_generation_snapshot",
+                                   return_value=harness.public_process_generation(generation)), \
+                    mock.patch.object(harness, "userdir_for_profile", return_value=userdir):
+                harness.record_bridge_game_process(mock.Mock(pid=42), {
+                    "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(bridge.session_dir),
+                    "OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": "binding-a",
+                    "OPENCLAW_HARNESS_PROFILE": "test",
+                    "OPENCLAW_HARNESS_WORLD": "TestSetup00",
+                    "OPENCLAW_HARNESS_RUN_ID": "run-a"})
+            record = (bridge.session_dir / "game-process.json").read_text()
+            self.assertNotIn("synthetic-private-value", record)
+            self.assertEqual(json.loads(record)["world"], "TestSetup00")
+            bridge._freeze_saved_world_for_reentry({
+                "native_save_completion": {"completion": {"world_name": "TestSetup00"}}})
+            pointer = json.loads((bridge.session_dir / "replacement_saved_world.snapshot.json").read_text())
+            self.assertEqual((Path(pointer["snapshot"]) / "worldoptions.json").read_text(), '{"saved":true}')
+
     def test_reporting_process_reader_rejects_stale_exit_and_generation(self):
         # Execute the actual closure, with its existing OS identity probe supplied.
         import ast

@@ -264,12 +264,12 @@ class FileBackedCockpitBridge:
             stderr=self._child_stderr, text=True, encoding="utf-8", bufsize=1,
             env=environment,
         )
-        from startup_harness import process_generation_snapshot
+        from startup_harness import process_generation_snapshot, public_process_generation
         _atomic_json(self.session_dir / "launcher-process.json", {
             "schema": "caol-owned-launcher-process-v1", "host": socket.gethostname(),
             "binding_id": self.binding_id, "session_generation": self._session_generation,
             "process_generation": process_generation_snapshot(self._child.pid),
-            "bridge_process_generation": self._bridge_generation,
+            "bridge_process_generation": public_process_generation(self._bridge_generation),
         })
 
     def _bootstrap_receipt(self, *, sequence: int, stage: Mapping[str, Any],
@@ -319,12 +319,13 @@ class FileBackedCockpitBridge:
         return True
 
     def _status(self, state: str, **extra: Any) -> dict[str, Any]:
+        from startup_harness import public_process_generation
         return {
             "schema": SCHEMA,
             "binding_id": self.binding_id,
             "bridge_pid": os.getpid(),
             "host": socket.gethostname(),
-            "bridge_process_generation": self._bridge_generation,
+            "bridge_process_generation": public_process_generation(self._bridge_generation),
             "state": state,
             "request_count": self._sequence,
             "session_generation": self._session_generation,
@@ -340,15 +341,15 @@ class FileBackedCockpitBridge:
 
     def _owned_game_process_evidence(self) -> dict[str, Any]:
         """Observe the registered game identity independently of the bridge child."""
-        from startup_harness import (pid_command, process_generation_matches,
-                                     process_generation_snapshot)
+        from startup_harness import (pid_command, process_command_identity, process_generation_matches,
+                                     process_generation_snapshot, public_process_generation)
         ownership_path = self.session_dir / "game-process.json"
         if not ownership_path.exists():
             return {"status": "unconfirmed_missing_process_record", "pid": 0}
         try:
             ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
             pid = int(ownership.get("pid", 0) or 0)
-            expected_command = str(ownership.get("command", ""))
+            expected_command = process_command_identity(ownership)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return {"status": "unconfirmed_invalid_process_record", "pid": 0}
         if ownership.get("binding_id") != self.binding_id or pid <= 0 or not expected_command:
@@ -360,18 +361,19 @@ class FileBackedCockpitBridge:
                     expected_generation, observed_generation):
                 return {
                     "status": "exited_or_identity_changed", "pid": pid,
-                    "expected_process_generation": dict(expected_generation),
-                    "observed_process_generation": observed_generation,
+                    "expected_process_generation": public_process_generation(expected_generation),
+                    "observed_process_generation": public_process_generation(observed_generation),
                 }
             return {
-                "status": "alive", "pid": pid, "command": observed_generation["command"],
-                "process_generation": dict(expected_generation),
+                "status": "alive", "pid": pid, "command_sha256": process_command_identity(observed_generation),
+                "process_generation": public_process_generation(expected_generation),
             }
         observed_command = pid_command(pid)
-        if observed_command != expected_command:
+        observed_identity = process_command_identity({"command": observed_command})
+        if observed_identity != expected_command:
             return {"status": "exited_or_identity_changed", "pid": pid,
-                    "expected_command": expected_command, "observed_command": observed_command}
-        return {"status": "alive", "pid": pid, "command": observed_command}
+                    "expected_command_sha256": expected_command, "observed_command_sha256": observed_identity}
+        return {"status": "alive", "pid": pid, "command_sha256": observed_identity}
 
     def _emergency_cleanup(self, *, explicit_quit: bool = False) -> dict[str, Any]:
         """Reap the failed controller; preserve the game unless the player quits."""
@@ -390,13 +392,16 @@ class FileBackedCockpitBridge:
                 self._child.wait(timeout=2)
         # Progress is diagnostic, not process ownership authority.
         game_pid = 0
-        from startup_harness import cleanup_game_process, pid_command
+        from startup_harness import (cleanup_game_process, process_command_identity,
+                                     process_generation_snapshot,
+                                     public_process_generation)
         ownership_path = self.session_dir / "game-process.json"
         if ownership_path.exists():
             ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
             owned_pid = int(ownership.get("pid", 0) or 0)
             if ownership.get("binding_id") == self.binding_id and owned_pid > 0 and \
-                    ownership.get("command") and pid_command(owned_pid) == ownership["command"]:
+                    process_command_identity(ownership) and \
+                    process_command_identity(ownership) == process_command_identity(process_generation_snapshot(owned_pid)):
                 game_pid = owned_pid
             else:
                 game_pid = 0
@@ -406,7 +411,7 @@ class FileBackedCockpitBridge:
         if game_pid:
             expected_generation = ownership.get("process_generation")
             if isinstance(expected_generation, Mapping) and \
-                    expected_generation.get("birth_identity") and expected_generation.get("command"):
+                    expected_generation.get("birth_identity") and process_command_identity(expected_generation):
                 cleanup["game"] = cleanup_game_process(
                     game_pid, explicit_quit=explicit_quit,
                     expected_process_generation=expected_generation,
@@ -415,7 +420,7 @@ class FileBackedCockpitBridge:
                 cleanup["game"] = {
                     "status": "retained_process_identity_unavailable",
                     "pid": game_pid,
-                    "recorded_process": ownership,
+                    "recorded_process": public_process_generation(ownership),
                     "native_exit_credit": False,
                     "next_action": {
                         "owner": "launching_worker",
@@ -476,13 +481,18 @@ class FileBackedCockpitBridge:
             owner = json.loads(ownership_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ValueError("reentry_saved_world_owner_missing") from exc
-        command = str(owner.get("command", "") or "") if isinstance(owner, Mapping) else ""
-        try:
-            arguments = shlex.split(command)
-            userdir = arguments[arguments.index("--userdir") + 1]
-            world = arguments[arguments.index("--world") + 1]
-        except (ValueError, IndexError) as exc:
-            raise ValueError("reentry_saved_world_command_incomplete") from exc
+        userdir = str(owner.get("userdir", "") or "") if isinstance(owner, Mapping) else ""
+        world = str(owner.get("world", "") or "") if isinstance(owner, Mapping) else ""
+        if not userdir or not world:
+            # Legacy records have no explicit world binding. Read their
+            # internal launch identity without echoing argv in diagnostics.
+            command = str(owner.get("command", "") or "") if isinstance(owner, Mapping) else ""
+            try:
+                arguments = shlex.split(command)
+                userdir = arguments[arguments.index("--userdir") + 1]
+                world = arguments[arguments.index("--world") + 1]
+            except (ValueError, IndexError) as exc:
+                raise ValueError("reentry_saved_world_command_incomplete") from exc
         if not world or Path(world).name != world:
             raise ValueError("reentry_saved_world_name_invalid")
         completion_packet = terminal.get("native_save_completion")
@@ -527,7 +537,7 @@ class FileBackedCockpitBridge:
             "schema": SCHEMA,
             "binding_id": self.binding_id,
             "authorization_token_id": self.authorization_token_id,
-            "command": self.command,
+            "executable_path": self.command[0],
             "input_channel": "requests" if os.name == "nt" else self.input_path.name,
             "request_directory": self.requests_dir.name,
             "response_directory": self.responses_dir.name,

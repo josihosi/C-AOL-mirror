@@ -25,6 +25,7 @@ import threading
 import time
 import uuid
 from typing import IO, Any, Mapping
+from certification_process_lease import process_command_identity, public_process_generation, public_process_owner
 
 
 OWNER_SCHEMA = "caol-curses-terminal-owner-v1"
@@ -74,11 +75,11 @@ def _same_generation(expected: Mapping[str, Any], observed: Mapping[str, Any]) -
     except (TypeError, ValueError):
         return False
     birth = str(expected.get("birth_identity", "")).strip()
-    command = str(expected.get("command", "")).strip()
+    command = process_command_identity(expected)
     return bool(
         pid_matches and birth and command
         and birth == str(observed.get("birth_identity", "")).strip()
-        and command == str(observed.get("command", "")).strip()
+        and command == process_command_identity(observed)
     )
 
 
@@ -362,6 +363,7 @@ def dispatch_input(
                 break
             response += chunk
     receipt = json.loads(response.decode() or "{}")
+    receipt = public_process_owner(receipt)
     if receipt.get("request_id") != request["request_id"] or not receipt.get("ok"):
         raise RuntimeError("terminal input dispatcher rejected request: " + json.dumps(receipt, sort_keys=True))
     return receipt
@@ -388,7 +390,7 @@ def dispatcher_status(endpoint: Path, *, owner_path: Path | None = None) -> dict
         else "identity_changed_or_exited",
         "broker_status": "alive" if broker.get("alive") and _same_generation(owner.get("broker_process_generation", {}), broker)
         else "identity_changed_or_exited",
-        "owner": owner,
+        "owner": public_process_owner(owner),
     }
 
 
@@ -600,7 +602,7 @@ def _broker(
                         os.write(master_fd, payload)
                     receipt = {"ok": True, "request_id": request_id, "host": host,
                                "run_id": run_id, "pid": pid,
-                               "process_generation": dict(game_generation), "keys": keys,
+                               "process_generation": public_process_generation(game_generation), "keys": keys,
                                "payload_sha256": hashlib.sha256(payload).hexdigest(),
                                "owner": "run_bound_pty"}
                     processed_requests[request_id] = receipt

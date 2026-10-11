@@ -15,6 +15,57 @@ from writable_run_owner import own_writable_root, WritableRootConflict
 
 
 class TerminalModeIsolationTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'POSIX owning wrapper integration')
+    def test_startup_and_probe_own_real_roots_with_fingerprinted_processes(self):
+        import subprocess
+        from writable_run_owner import current_owner
+        calls = []
+        def body(args, **kwargs):
+            root = harness.userdir_for_profile(args.profile)
+            owner = current_owner(root)
+            self.assertIsNotNone(owner)
+            self.assertNotIn('command', owner.record['launcher_generation'])
+            owner.begin_launch()
+            child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.readline()'],
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                pass_fds=owner.inherited_fds, start_new_session=True)
+            try:
+                generation = harness.public_process_generation(harness.stable_terminal_process_generation(child.pid))
+                owner.bind_game(generation)
+                self.assertEqual(owner.record['launch_state'], 'bound')
+                self.assertTrue(harness.process_generation_matches(generation,
+                    harness.process_generation_snapshot(child.pid)))
+                calls.append(args.profile)
+            finally:
+                child.stdin.write(b'exit\n'); child.stdin.flush()
+                self.assertEqual(child.wait(timeout=5), 0)
+                child.stdin.close()
+            return 0
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / '.userdata').mkdir()
+            scenario = {'name': 'fixture', 'profile': 'probe-fixture',
+                        'runtime_contract': {'playtest_mode': 'terminal', 'terminal_transport': 'pty'}}
+            with patch.object(harness, 'repo_root', return_value=root), \
+                 patch.object(harness, '_run_startup', side_effect=body), \
+                 patch.object(harness, '_run_probe_mode', side_effect=body), \
+                 patch.object(harness, 'load_scenario', return_value=scenario), \
+                 patch.object(harness, 'terminal_mode_readiness', return_value={'status': 'ready'}):
+                for index in range(2):
+                    # Second entry reconciles the persisted returned owner and
+                    # actually exited child instead of bypassing ownership.
+                    args = argparse.Namespace(profile='startup-fixture', executable=sys.executable,
+                        harness_run_id=f'startup-{index}', dry_run=False, scenario_contract_path='')
+                    self.assertEqual(harness.run_startup(args), 0)
+                    probe = argparse.Namespace(scenario='fixture', profile='probe-fixture',
+                        executable=sys.executable, dry_run=False)
+                    self.assertEqual(harness.run_probe_mode(probe), 0)
+            self.assertEqual(calls, ['startup-fixture', 'probe-fixture'] * 2)
+            for profile in set(calls):
+                record = json.loads((root / '.userdata' / profile / '.harness-owner.lock').read_text())
+                self.assertEqual(record['launcher_state'], 'returned')
+                self.assertNotIn('command', record['game_generation'])
+
     @unittest.skipUnless(os.name == 'posix', 'POSIX adapter')
     def test_real_startup_profiles_and_reusable_roots_refuse_overlap_before_writes(self):
         from writable_run_owner import WritableRunOwner
@@ -238,7 +289,7 @@ class TerminalModeIsolationTest(unittest.TestCase):
                 self.assertEqual(record['mode'], 'terminal' if selected_term else 'tiles')
 
     def test_startup_identity_rejects_missing_or_wrong_birth(self):
-        observed = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': '/bin/game'}
+        observed = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': '/bin/game', 'executable_path': '/bin/game'}
         with patch.object(harness, 'process_generation_snapshot', return_value=observed), \
              patch.object(harness, 'pid_command', return_value='/bin/game'), \
              patch.object(harness, 'pid_is_alive', return_value=True), \
@@ -257,13 +308,14 @@ class TerminalModeIsolationTest(unittest.TestCase):
              patch.object(harness, 'compare_runtime_binding', return_value={'status': 'matched'}):
             identity = harness.terminal_native_startup_identity(42, executable, {}, observed)
             self.assertTrue(identity['ok'], identity)
-            self.assertEqual(identity['observed_command'], observed['command'])
+            self.assertEqual(identity['observed_executable'], str(executable))
+            self.assertNotIn('command', identity['process_generation'])
             snapshot.assert_called_once_with(42)
             auxiliary.assert_not_called()
 
     def test_startup_identity_refuses_incomplete_changed_dead_wrong_executable_and_binding(self):
         executable = Path(sys.executable).resolve()
-        expected = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': str(executable)}
+        expected = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': str(executable), 'executable_path': str(executable)}
         cases = (
             ({**expected, 'command': ''}, expected, 'matched',
              'terminal_native_process_command_unavailable'),
@@ -271,7 +323,7 @@ class TerminalModeIsolationTest(unittest.TestCase):
              'terminal_native_process_generation_unproven'),
             ({**expected, 'alive': False}, expected, 'matched',
              'terminal_native_process_not_alive'),
-            ({**expected, 'command': '/bin/wrong'}, {**expected, 'command': '/bin/wrong'}, 'matched',
+            ({**expected, 'command': '/bin/wrong', 'executable_path': '/bin/wrong'}, {**expected, 'command': '/bin/wrong', 'executable_path': '/bin/wrong'}, 'matched',
              'terminal_native_process_command_mismatch'),
             (expected, expected, 'mismatched', 'terminal_native_runtime_binding_unproven'),
             (expected, None, 'matched', 'terminal_native_process_generation_unproven'),
@@ -292,7 +344,7 @@ class TerminalModeIsolationTest(unittest.TestCase):
         from types import SimpleNamespace
         from cockpit_file_bridge import FileBackedCockpitBridge
         executable = Path(sys.executable).resolve()
-        expected = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': str(executable)}
+        expected = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': str(executable), 'executable_path': str(executable)}
         for current_command in (str(executable), ''):
             with self.subTest(current_command=current_command), tempfile.TemporaryDirectory() as raw, \
                  patch.object(harness, 'process_generation_snapshot',

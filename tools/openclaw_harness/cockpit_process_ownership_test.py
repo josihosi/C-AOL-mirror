@@ -180,7 +180,7 @@ class ProcessOwnershipTest(unittest.TestCase):
                 inspector=StillAliveInspector(),
             )
         self.assertEqual(result["status"], "graceful_quit_unconfirmed_process_retained")
-        self.assertEqual(result["expected_process_generation"], expected)
+        self.assertEqual(result["expected_process_generation"], harness.public_process_generation(expected))
         self.assertFalse(result["native_exit_credit"])
         kill.assert_not_called()
 

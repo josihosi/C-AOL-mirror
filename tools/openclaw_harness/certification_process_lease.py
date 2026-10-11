@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 import signal
@@ -35,6 +36,38 @@ class ProcessSnapshot:
     executable_path: str = ""
     birth_identity: str = ""
     command: str = ""
+
+
+def process_command_identity(record: Mapping[str, Any]) -> str:
+    """Compare private argv with a persisted fingerprint without exporting it."""
+    if "command_sha256" in record:
+        digest = record["command_sha256"]
+        return digest if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) else ""
+    command = str(record.get("command", "") or "").strip()
+    return hashlib.sha256(command.encode("utf-8")).hexdigest() if command else ""
+
+
+def public_process_generation(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Expose identity metadata, never inspected arguments or environment."""
+    result = {key: record[key] for key in (
+        "schema", "pid", "ppid", "alive", "birth_identity", "executable_path",
+        "start_time", "resources",
+    ) if key in record}
+    result["command_sha256"] = process_command_identity(record)
+    return result
+
+
+def public_process_owner(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project the native terminal's process identities for diagnostics."""
+    result = {key: value for key, value in record.items()
+              if key not in {"command", "argv", "broker_command", "environment", "env"}}
+    for key in ("process_generation", "game_process_generation", "broker_process_generation"):
+        if isinstance(result.get(key), Mapping):
+            result[key] = public_process_generation(result[key])
+    if "conhost_process_generations" in result:
+        result["conhost_process_generations"] = [
+            public_process_generation(generation) for generation in result["conhost_process_generations"]]
+    return result
 
 
 class ProcessInspector(Protocol):

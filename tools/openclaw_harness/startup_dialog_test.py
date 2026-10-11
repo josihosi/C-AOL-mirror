@@ -94,7 +94,8 @@ class StartupDialogTest(unittest.TestCase):
         self.assertEqual(result["window_id"], 48694)
         self.assertTrue(Path(result["image_path"]).is_file())
         self.assertEqual(len(result["image_sha256"]), 64)
-        self.assertIn("--userdir", result["command"])
+        self.assertNotIn("command", result)
+        self.assertEqual(len(result["command_sha256"]), 64)
         text = plain_player_output({"ok": False, "status": self.status, "startup_dialog": result})
         self.assertIn("startup_ui_only", text)
         self.assertIn("src/item_location.cpp:1012", text)
@@ -102,6 +103,29 @@ class StartupDialogTest(unittest.TestCase):
         self.assertIn("No input sent", text)
         self.assertIn("do not prove save integrity", text)
         self.assertIn("Other profile log clues", text)
+
+    def test_legacy_and_fingerprinted_startup_owners_do_not_publish_arguments(self):
+        from startup_harness import public_process_generation, process_command_identity
+        lines = ["An error has occurred!", "DEBUG : " + ERRORS[0][2]]
+        command = self.command + " --password synthetic-private-value"
+        legacy = {**self.generation, "command": command}
+        for fingerprinted in (False, True):
+            with self.subTest(fingerprinted=fingerprinted):
+                generation = public_process_generation(legacy) if fingerprinted else legacy
+                owner = {"binding_id": self.binding, "pid": generation["pid"],
+                         "run_id": "run-r014", "process_generation": generation,
+                         "log_paths": {"profile_diagnostic_debug": {
+                             "path": str(self.log), "scope": "profile_shared"}}}
+                if fingerprinted:
+                    owner.update(command_sha256=process_command_identity(generation), userdir=str(self.userdir))
+                else:
+                    owner["command"] = command
+                self._write("game-process.json", owner)
+                result = observe_startup_dialog(self.session, self.binding, self.status,
+                    snapshot=lambda _pid: generation, runner=self._runner(lines))
+                self.assertEqual(result["state"], "confirmed_debug_dialog")
+                self.assertNotIn("synthetic-private-value", json.dumps(result))
+                self.assertEqual(result["command_sha256"], process_command_identity(legacy))
 
     def test_first_known_error_is_distinct_from_later_item_location_messages(self):
         lines = ["An error has occurred! Written below is the error report:",
@@ -746,6 +770,25 @@ class TerminalStartupDialogTest(unittest.TestCase):
         output = plain_player_output({"ok": False, "status": self.status, "startup_dialog": seen})
         self.assertIn("terminal frame", output)
         self.assertIn("debug-ignore --capture " + seen["capture_sha256"], output)
+
+    def test_terminal_capture_and_recovery_keep_raw_identity_private(self):
+        from startup_harness import public_process_generation, process_command_identity
+        self.generation["command"] += " --password synthetic-private-value"
+        self.terminal["argv"] = ["C:/game.exe", "--password", "synthetic-private-value"]
+        self.owner.pop("command")
+        self.owner.update(command_sha256=process_command_identity(self.generation),
+                          process_generation=public_process_generation(self.generation))
+        self._write("game-process.json", self.owner)
+        self._owners()
+        seen = self._observe()
+        self.assertEqual(seen["state"], "confirmed_debug_dialog")
+        self.assertNotIn("synthetic-private-value", json.dumps(seen))
+        self.assertNotIn("synthetic-private-value", Path(seen["capture_path"]).read_text())
+        with patch("curses_terminal_transport.dispatch_input", side_effect=self._receipt) as send:
+            result = self._recover(seen["capture_sha256"])
+        self.assertTrue(result["ok"], result)
+        send.assert_called_once()
+        self.assertNotIn("synthetic-private-value", json.dumps(result))
 
     def test_explicit_startup_ignore_without_declaration_whitelist_uses_same_transaction(self):
         from hashlib import sha256

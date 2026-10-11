@@ -58,12 +58,16 @@ def _read_object(path: Path, limit: int = 65536) -> dict[str, Any]:
 def _debug_log_path(owner: Mapping[str, Any], session: Path) -> Path | None:
     """Resolve relative userdir against the game's owned cwd, never its binary."""
     try:
-        if os.name == "nt":
-            from windows_native_process import command_line_arguments
-            command = command_line_arguments(str(owner["command"]))
+        if owner.get("userdir"):
+            userdir = Path(str(owner["userdir"]))
         else:
-            command = shlex.split(str(owner["command"]))
-        userdir = Path(command[command.index("--userdir") + 1])
+            # Read legacy launch arguments internally; never publish them.
+            if os.name == "nt":
+                from windows_native_process import command_line_arguments
+                command = command_line_arguments(str(owner["command"]))
+            else:
+                command = shlex.split(str(owner["command"]))
+            userdir = Path(command[command.index("--userdir") + 1])
         if not userdir.is_absolute():
             raw_cwd = str(owner.get("launch_cwd", "")).strip()
             if raw_cwd:
@@ -354,11 +358,12 @@ def _observe_terminal_dialog(session: Path, binding_id: str, status: Mapping[str
         lines = render_curses_terminal_screen(raw.decode("utf-8", errors="replace"),
                                               terminal_owner=context["owner"])
         terminal = context["owner"]
+        from certification_process_lease import public_process_generation, public_process_owner
         frame = {"binding_id": binding_id, "run_id": owner["run_id"],
-                 "process_generation": owner["process_generation"],
+                 "process_generation": public_process_generation(owner["process_generation"]),
                  "session_generation": status.get("session_generation", 0),
-                 "startup_phase": result["startup_phase"], "terminal_owner": terminal,
-                 "bridge_process_generation": bridge,
+                 "startup_phase": result["startup_phase"], "terminal_owner": public_process_owner(terminal),
+                 "bridge_process_generation": public_process_generation(bridge),
                  "transcript_path": str(path), "transcript_sha256": sha256(raw).hexdigest(),
                  "transcript_bytes": len(raw), "lines": lines}
         digest = sha256(json.dumps(frame, sort_keys=True).encode()).hexdigest()
@@ -427,17 +432,17 @@ def observe_startup_dialog(
         pid = int(owner.get("pid", 0))
     except (TypeError, ValueError):
         return result
+    from startup_harness import process_command_identity, process_generation_matches, process_generation_snapshot
     birth = str(expected.get("birth_identity", "")).strip()
-    command = str(expected.get("command", "")).strip()
-    if pid <= 0 or expected.get("pid") != pid or not birth or not command or command != owner.get("command"):
+    command_identity = process_command_identity(expected)
+    if pid <= 0 or expected.get("pid") != pid or not birth or not command_identity or command_identity != process_command_identity(owner):
         return result
     result.update(pid=pid, birth_identity=birth, run_id=owner.get("run_id"),
-                  command=command)
+                  command_sha256=command_identity)
     log_path = _debug_log_path(owner, Path(session))
     clues = debug_log_clues(log_path)
     result["log_clues"] = clues
     result["log_path"] = str(log_path) if log_path else None
-    from startup_harness import process_generation_matches, process_generation_snapshot
     process_snapshot = snapshot or process_generation_snapshot
     observed = process_snapshot(pid)
     if not observed.get("alive"):
@@ -551,7 +556,8 @@ def recover_startup_debug_dialog(
     expected = owner.get("process_generation")
     phase = before.get("startup_phase")
     generation = status.get("session_generation", 0)
-    from startup_harness import process_generation_matches, process_generation_snapshot
+    from startup_harness import (process_command_identity, process_generation_matches,
+                                 process_generation_snapshot, public_process_generation)
     process_snapshot = snapshot or process_generation_snapshot
     pid = before["pid"]
     def still_current() -> bool:
@@ -561,7 +567,7 @@ def recover_startup_debug_dialog(
                 and current_owner.get("binding_id") == binding_id
                 and current_owner.get("run_id") == before["run_id"]
                 and current_owner.get("pid") == pid
-                and current_owner.get("command") == before["command"]
+                and process_command_identity(current_owner) == before["command_sha256"]
                 and current_owner.get("process_generation") == expected
                 and current_status.get("binding_id") == binding_id
                 and pre_world_startup_phase(current_status) == phase
@@ -617,8 +623,11 @@ def recover_startup_debug_dialog(
                 receipt = dispatch_input(Path(terminal_context["owner"]["endpoint"]),
                     run_id=before["run_id"], pid=pid, keys=["i"],
                     process_generation=expected, request_id=recovery_id)
+                public_receipt = dict(receipt)
+                if isinstance(public_receipt.get("process_generation"), Mapping):
+                    public_receipt["process_generation"] = public_process_generation(public_receipt["process_generation"])
                 result["input"] = {"key": "i", "pid": pid, "delivery": "acknowledgement_unconfirmed",
-                                   "terminal_receipt": receipt}
+                                   "terminal_receipt": public_receipt}
                 if (receipt.get("ok") is not True or receipt.get("request_id") != recovery_id
                         or receipt.get("run_id") != before["run_id"] or receipt.get("pid") != pid
                         or receipt.get("host") != terminal_context["owner"]["host"]
@@ -630,7 +639,7 @@ def recover_startup_debug_dialog(
                     raise ValueError("terminal_dispatch_acknowledgement_mismatch")
                 result.update(ok=True, state="input_reported_delivered",
                               input={"key": "i", "pid": pid, "delivery": "reported_delivered",
-                                     "terminal_receipt": receipt})
+                                     "terminal_receipt": public_receipt})
             except (RuntimeError, OSError, ValueError, TypeError, AttributeError) as error:
                 result.setdefault("input", {"key": "i", "pid": pid, "delivery": "unknown"})
                 result["input"]["error_type"] = type(error).__name__

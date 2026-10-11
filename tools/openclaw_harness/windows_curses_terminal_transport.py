@@ -24,6 +24,7 @@ import uuid
 
 from windows_native_process import (NativeConPTY, WindowsProcessInspector, cim_process,
     adopt_native_lease, create_semantic_wake_event, lease_kernel, replace_with_readers)
+from certification_process_lease import process_command_identity, public_process_generation, public_process_owner
 
 OWNER_SCHEMA = 'caol-curses-terminal-owner-v1'
 REQUEST_SCHEMA = 'caol-curses-terminal-request-v1'
@@ -41,10 +42,10 @@ def _process_generation(pid):
 def _same_generation(expected, observed):
     try:
         return bool(int(expected.get('pid', 0)) == int(observed.get('pid', 0)) > 0
-            and expected.get('birth_identity') and expected.get('command')
+            and expected.get('birth_identity') and process_command_identity(expected)
             and expected.get('executable_path')
             and expected['birth_identity'] == observed.get('birth_identity')
-            and expected['command'] == observed.get('command')
+            and process_command_identity(expected) == process_command_identity(observed)
             and os.path.normcase(expected['executable_path']) == os.path.normcase(observed.get('executable_path', '')))
     except (TypeError, ValueError, AttributeError):
         return False
@@ -181,11 +182,11 @@ def dispatch_input(endpoint, *, run_id, pid, keys, delay_ms=0, host=None,
         if record.get('run_id') != run_id or not _same_generation(record.get('process_generation', {}), owner['game_process_generation']):
             raise RuntimeError('terminal request journal identity mismatch')
     if previous and previous.get('ok'):
-        return previous
+        return public_process_owner(previous)
     if previous and previous.get('error') != 'request_delivery_ambiguous':
-        raise RuntimeError('terminal input dispatcher rejected request: ' + json.dumps(previous))
+        raise RuntimeError('terminal input dispatcher rejected request: ' + json.dumps(public_process_owner(previous)))
     if previous and previous.get('delivery_state') == 'ambiguous':
-        raise RuntimeError('terminal input dispatcher rejected request: ' + json.dumps(previous))
+        raise RuntimeError('terminal input dispatcher rejected request: ' + json.dumps(public_process_owner(previous)))
     # An in-flight live broker may finish and provide the committed receipt;
     # connecting with the same ID never writes again. A dead broker stays ambiguous.
     game = _process_generation(pid)
@@ -195,6 +196,7 @@ def dispatch_input(endpoint, *, run_id, pid, keys, delay_ms=0, host=None,
     if previous is None and (not game.get('alive') or not _same_generation(owner['game_process_generation'], game)):
         raise RuntimeError('terminal game process generation is stale or unavailable')
     receipt = _exchange(owner, request)
+    receipt = public_process_owner(receipt)
     if receipt.get('request_id') != request['request_id'] or not receipt.get('ok'):
         raise RuntimeError('terminal input dispatcher rejected request: ' + json.dumps(receipt))
     return receipt
@@ -214,7 +216,7 @@ def dispatcher_status(endpoint, *, owner_path=None):
         'game_status': 'alive' if game.get('alive') and _same_generation(owner.get('game_process_generation', {}), game)
             else 'identity_changed_or_exited',
         'broker_status': 'alive' if broker.get('alive') and _same_generation(owner.get('broker_process_generation', {}), broker)
-            else 'identity_changed_or_exited', 'owner': _public_owner(owner)}
+            else 'identity_changed_or_exited', 'owner': public_process_owner(_public_owner(owner))}
 
 
 def cleanup_dispatcher(endpoint, *, timeout=2.0, owner_path=None):
@@ -449,7 +451,7 @@ def _broker(config_path):
                         else:
                             native.write(_key_bytes(keys))
                         receipt = {'ok': True, 'request_id': request_id, 'host': owner['host'],
-                            'run_id': owner['run_id'], 'pid': game['pid'], 'process_generation': game,
+                            'run_id': owner['run_id'], 'pid': game['pid'], 'process_generation': public_process_generation(game),
                             'keys': keys, 'payload_sha256': hashlib.sha256(_key_bytes(keys)).hexdigest(),
                             'owner': 'run_bound_conpty'}
                         journal.append(dict(pending, state='delivered', receipt=receipt))

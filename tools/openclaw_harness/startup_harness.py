@@ -72,6 +72,8 @@ from certification_process_lease import (
     ProcessSnapshot,
     SystemProcessInspector,
     load_certification_manifest,
+    process_command_identity,
+    public_process_generation,
     release_certification_lease_handle,
     reserve_certification_lease,
     transfer_certification_lease,
@@ -6767,7 +6769,7 @@ def finalize_cockpit_live_session(
     if explicit_quit:
         write_json(run_dir / "cockpit.player_quit.json", {
             "schema": "caol-cockpit-player-quit-v1", "pid": cleanup_pid,
-            "command": str(owned.get("expected", {}).get("command", "")),
+            "command_sha256": process_command_identity(owned.get("expected", {})),
             "process_generation": owned,
             "run_id": report.get("run_id"),
             "binding_id": report.get("binding_id"), "stop_reason": report.get("stop_reason"),
@@ -23873,14 +23875,15 @@ def record_bridge_game_process(process: subprocess.Popen, env: Mapping[str, str]
     process._bridge_exit_generation = generation
     value = {"binding_id": bridge, "pid": process.pid,
              "run_id": env.get("OPENCLAW_HARNESS_RUN_ID", ""),
-             "command": generation["command"], "process_generation": generation,
+             "command_sha256": process_command_identity(generation), "process_generation": generation,
+             "world": env.get("OPENCLAW_HARNESS_WORLD", ""),
              "host": __import__("socket").gethostname(),
              "playtest_mode": env.get("OPENCLAW_HARNESS_PLAYTEST_MODE", "tiles"),
              "userdir": str(userdir_for_profile(profile).resolve()) if profile else "",
              "launch_cwd": str(repo_root().resolve()),
              "log_paths": log_paths}
     try:
-        if not value["command"]:
+        if not value["command_sha256"]:
             raise OSError("game process identity unavailable before startup")
         temporary = target.with_suffix(".tmp")
         temporary.write_text(json.dumps(value), encoding="utf-8")
@@ -23912,14 +23915,17 @@ def record_bridge_game_exit(process: subprocess.Popen, env: Mapping[str, str], e
         "binding_id": bridge, "pid": process.pid,
         "run_id": env.get("OPENCLAW_HARNESS_RUN_ID", ""),
         "exit_code": exit_code, "exit_observed_at": _utc_timestamp(time.time()),
-        "process_generation": getattr(process, "_bridge_exit_generation", {}),
+        "process_generation": public_process_generation(getattr(process, "_bridge_exit_generation", {})),
     }), encoding="utf-8")
     os.replace(temporary, target)
 
 
 def write_startup_process_record(run_dir: Path, process: Any, metadata: Dict[str, Any]) -> None:
-    """Keep the exact PTY launch environment when the outer probe adds facts."""
+    """Keep renderer and process identity metadata when the outer probe adds facts."""
     record = dict(metadata)
+    record.pop("command", None)
+    if isinstance(record.get("process_generation"), Mapping):
+        record["process_generation"] = public_process_generation(record["process_generation"])
     term = getattr(process, "_openclaw_launch_term", None)
     if term is not None:
         record["TERM"] = term
@@ -23997,8 +24003,8 @@ def launch_game(
             cwd=repo_root(), env=env, native_lease=lease.export_native_lease())
         # Persist the creation identity even if an early native exit wins the
         # race with opening this caller's read-only process handle.
-        write_json(run_dir / "process.json", {"pid": generation["pid"], "command": cmd,
-            "process_generation": generation, "host": __import__("socket").gethostname(),
+        write_json(run_dir / "process.json", {"pid": generation["pid"], "executable_path": str(exe),
+            "process_generation": public_process_generation(generation), "host": __import__("socket").gethostname(),
             "run_id": binding["run_id"], "userdir": str(userdir_for_profile(profile).resolve()),
             "mode": "terminal", "transport": "windows_conpty"})
         lease.bind_game(generation, native_owner_path=run_dir / "terminal.owner.json")
@@ -24034,7 +24040,7 @@ def launch_game(
             process._openclaw_launch_term = env["TERM"]
             generation = stable_terminal_process_generation(process.pid) if isinstance(process.pid, int) else {}
             write_json(run_dir / "process.json", {"pid": process.pid,
-                "command": cmd, "process_generation": generation,
+                "executable_path": str(exe), "process_generation": public_process_generation(generation),
                 "host": __import__("socket").gethostname(), "run_id": binding["run_id"],
                 "userdir": str(userdir_for_profile(profile).resolve()), "mode": "terminal", "TERM": env["TERM"]})
             if lease is not None:
@@ -24106,7 +24112,7 @@ def launch_game(
         generation = (stable_terminal_process_generation(process.pid) if os.name == "posix"
                       else process_generation_snapshot(process.pid)) if isinstance(process.pid, int) else {}
         write_json(run_dir / "process.json", {"pid": process.pid,
-            "command": cmd, "process_generation": generation,
+            "executable_path": str(exe), "process_generation": public_process_generation(generation),
             "host": __import__("socket").gethostname(), "run_id": binding["run_id"],
             "userdir": str(userdir_for_profile(profile).resolve()), "mode": "tiles"})
         if lease is not None:
@@ -24244,26 +24250,27 @@ def terminal_native_startup_identity(
     # A separate CIM/ps query can fail independently or observe another PID
     # generation; it must not override this authenticated snapshot.
     observed_generation = process_generation_snapshot(pid)
-    command = str(observed_generation.get("command", "")).strip()
+    command_identity = process_command_identity(observed_generation)
+    observed_executable = str(observed_generation.get("executable_path", "")).strip()
     binding = compare_runtime_binding(dict(runtime_binding))
     result: Dict[str, Any] = {
         "pid": pid,
         "transport": "terminal_native",
         "expected_executable": expected_executable,
-        "observed_command": command,
+        "observed_executable": observed_executable,
         "runtime_binding": binding,
         "ok": False,
     }
-    result["process_generation"] = observed_generation
+    result["process_generation"] = public_process_generation(observed_generation)
     if not process_generation:
         result["error"] = "terminal_native_process_generation_unproven"
     elif observed_generation.get("alive") is not True:
         result["error"] = "terminal_native_process_not_alive"
-    elif not command:
+    elif not command_identity:
         result["error"] = "terminal_native_process_command_unavailable"
     elif not process_generation_matches(process_generation, observed_generation):
         result["error"] = "terminal_native_process_generation_unproven"
-    elif expected_executable not in command:
+    elif not observed_executable or str(Path(observed_executable).resolve()) != expected_executable:
         result["error"] = "terminal_native_process_command_mismatch"
     elif binding.get("status") != "matched":
         result["error"] = "terminal_native_runtime_binding_unproven"
@@ -24289,7 +24296,7 @@ def pid_command(pid: int) -> str:
     return proc.stdout.strip()
 
 
-def process_generation_snapshot(
+def _process_generation_snapshot(
     pid: int, *, inspector: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Return the current PID generation without granting cleanup authority.
@@ -24317,6 +24324,11 @@ def process_generation_snapshot(
     }
 
 
+def process_generation_snapshot(pid: int, *, inspector: Optional[Any] = None) -> Dict[str, Any]:
+    """Return a birth-bound fingerprint suitable for status and persisted custody."""
+    return public_process_generation(_process_generation_snapshot(pid, inspector=inspector))
+
+
 def process_generation_matches(
     expected: Mapping[str, Any], observed: Mapping[str, Any],
 ) -> bool:
@@ -24332,9 +24344,8 @@ def process_generation_matches(
         and str(expected.get("birth_identity", "")).strip()
         and str(expected.get("birth_identity", "")).strip()
         == str(observed.get("birth_identity", "")).strip()
-        and str(expected.get("command", "")).strip()
-        and str(expected.get("command", "")).strip()
-        == str(observed.get("command", "")).strip()
+        and process_command_identity(expected)
+        and process_command_identity(expected) == process_command_identity(observed)
     )
 
 
@@ -24350,7 +24361,7 @@ def recorded_process_generation(record: Mapping[str, Any]) -> Dict[str, Any]:
         return {}
     if result["pid"] <= 0:
         return {}
-    return result
+    return public_process_generation(result)
 
 
 def persisted_run_process_generation(run_dir: Path) -> Dict[str, Any]:
@@ -24408,7 +24419,7 @@ def current_owned_process_generation(
     }
     if not observed.get("alive"):
         result["status"] = "exited"
-    elif not expected.get("birth_identity") or not expected.get("command"):
+    elif not expected.get("birth_identity") or not process_command_identity(expected):
         result.update({
             "status": "identity_unavailable",
             "reason": "current process record lacks a stable birth and command identity",
@@ -24451,7 +24462,7 @@ def observe_bound_process_exit(
     expected = str(expected_command or "").strip()
     result: Dict[str, Any] = {
         "pid": int(pid),
-        "expected_command": expected,
+        "expected_command_sha256": process_command_identity({"command": expected}),
         "started_at": _utc_timestamp(started_epoch),
         "started_epoch_seconds": started_epoch,
         "poll_seconds": float(poll_seconds),
@@ -24475,7 +24486,7 @@ def observe_bound_process_exit(
             "sampled_epoch_seconds": sampled_epoch,
             "pid": int(pid),
             "alive": bool(alive),
-            "command": command,
+            "command_sha256": process_command_identity({"command": command}),
         }
         result["observations"].append(observation)
         # During SDL/native teardown, macOS can briefly report an exact PID as
@@ -24490,7 +24501,7 @@ def observe_bound_process_exit(
             result.update({
                 "status": "wrong_process_identity",
                 "reason": "PID remained alive with unavailable command identity",
-                "observed_command": command,
+                "observed_command_sha256": process_command_identity({"command": command}),
                 "identity_mismatch_at": observation["sampled_at"],
                 "elapsed_seconds": time.monotonic() - started_monotonic,
             })
@@ -24499,7 +24510,7 @@ def observe_bound_process_exit(
             result.update({
                 "status": "wrong_process_identity",
                 "reason": "PID remained alive but command identity changed",
-                "observed_command": command,
+                "observed_command_sha256": process_command_identity({"command": command}),
                 "identity_mismatch_at": observation["sampled_at"],
                 "elapsed_seconds": time.monotonic() - started_monotonic,
             })
@@ -24646,14 +24657,14 @@ def cleanup_game_process(
         info["cleanup_finished_at"] = _utc_timestamp(time.time())
         return info
     expected = dict(expected_process_generation)
-    info["expected_process_generation"] = expected
-    observed = process_generation_snapshot(pid, inspector=inspector)
-    info["observed_process_generation"] = observed
+    info["expected_process_generation"] = public_process_generation(expected)
+    observed = _process_generation_snapshot(pid, inspector=inspector)
+    info["observed_process_generation"] = public_process_generation(observed)
     if not observed.get("alive"):
         info["status"] = "already_exited"
         info["cleanup_finished_at"] = _utc_timestamp(time.time())
         return info
-    if not expected.get("birth_identity") or not expected.get("command"):
+    if not expected.get("birth_identity") or not process_command_identity(expected):
         info["status"] = "retained_process_identity_unavailable"
         info["cleanup_finished_at"] = _utc_timestamp(time.time())
         return info
@@ -24662,7 +24673,7 @@ def cleanup_game_process(
         info["cleanup_finished_at"] = _utc_timestamp(time.time())
         return info
     command = str(observed["command"])
-    info["command"] = command
+    info["command_sha256"] = process_command_identity(observed)
     if not command:
         if not pid_is_alive(pid):
             info["status"] = "already_exited"
@@ -39958,7 +39969,7 @@ def _run_startup(args: argparse.Namespace) -> int:
     process_generation = process_generation_snapshot(proc.pid)
     write_startup_process_record(run_dir, proc, {
         "pid": proc.pid,
-        "command": list(proc.args) if isinstance(proc.args, (list, tuple)) else str(proc.args),
+        "executable_path": str(plan.executable),
         "process_generation": process_generation,
         "host": __import__("socket").gethostname(),
         "run_id": transition_binding["run_id"],
@@ -40121,7 +40132,7 @@ def _run_startup(args: argparse.Namespace) -> int:
                     "harness_new_world": plan.harness_new_world,
                     "harness_raw_seed": plan.harness_raw_seed,
                     "harness_bandit_feasibility": plan.harness_bandit_feasibility,
-                    "command": list(proc.args) if isinstance(proc.args, (list, tuple)) else str(proc.args),
+                    "executable_path": str(plan.executable),
                     "readiness": readiness,
                     "exit_code": code,
                     "world_cleanup": world_cleanup,
@@ -40587,13 +40598,7 @@ def _run_startup(args: argparse.Namespace) -> int:
             "strategy": plan.strategy,
             "harness_new_world": plan.harness_new_world,
             "harness_raw_seed": plan.harness_raw_seed,
-            "command": build_game_command(
-                Path(plan.executable),
-                profile,
-                plan.target_world,
-                harness_new_world=plan.harness_new_world,
-                harness_raw_seed=plan.harness_raw_seed,
-            ),
+            "executable_path": str(plan.executable),
             "peekaboo_permissions": peekaboo_permissions,
             "focus": focus_result,
             "readiness": readiness,
@@ -40890,7 +40895,7 @@ def assess_completed_cockpit_exit(
         issues.append("final_cleanup_incomplete")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or \
             cleanup.get("pid") != pid or generation.get("pid") != pid or \
-            not expected.get("birth_identity") or not expected.get("command"):
+            not expected.get("birth_identity") or not process_command_identity(expected):
         issues.append("owned_process_generation_missing")
     final_cleanup = final.get("cleanup") if isinstance(final.get("cleanup"), Mapping) else {}
     if final_cleanup.get("status") not in {
@@ -40901,12 +40906,12 @@ def assess_completed_cockpit_exit(
     if quit_request.get("schema") != "caol-cockpit-player-quit-v1" or \
             quit_request.get("run_id") != run_id or quit_request.get("binding_id") != binding_id or \
             quit_request.get("stop_reason") != stop_reason or quit_request.get("pid") != pid or \
-            quit_request.get("command") != expected.get("command") or \
+            process_command_identity(quit_request) != process_command_identity(expected) or \
             record(quit_request.get("process_generation")).get("expected") != expected:
         issues.append("quit_request_identity_mismatch")
     if bridge_process.get("run_id") != run_id or bridge_process.get("binding_id") != binding_id or \
-            bridge_process.get("pid") != pid or bridge_process.get("command") != expected.get("command") or \
-            bridge_process.get("process_generation") != expected:
+            bridge_process.get("pid") != pid or process_command_identity(bridge_process) != process_command_identity(expected) or \
+            public_process_generation(record(bridge_process.get("process_generation"))) != public_process_generation(expected):
         issues.append("bridge_process_identity_mismatch")
     if bridge_exit.get("run_id") != run_id or bridge_exit.get("binding_id") != binding_id or \
             bridge_exit.get("pid") != pid:
@@ -41108,7 +41113,7 @@ def finalize_probe_report(
         explicit_quit = isinstance(quit_request, Mapping) and \
             quit_request.get("schema") == "caol-cockpit-player-quit-v1" and \
             quit_request.get("pid") == current_pid and \
-            quit_request.get("command") == str(owned.get("expected", {}).get("command", ""))
+            process_command_identity(quit_request) == process_command_identity(owned.get("expected", {})) and bool(process_command_identity(quit_request))
         pending_recovery = pending_adaptive_semantic_recovery(report)
         if pending_recovery is not None and not explicit_quit:
             # A report can describe an incomplete transaction, but it cannot
@@ -41958,7 +41963,7 @@ def run_launch_only_handoff(
         )
         process = {
             "pid": proc.pid,
-            "command": [plan.executable, "--userdir", f".userdata/{profile}/", "--world", plan.target_world],
+            "executable_path": plan.executable,
             "process_generation": process_generation_snapshot(proc.pid),
             "killed_previous_pids": [],
             "launch_only": True,

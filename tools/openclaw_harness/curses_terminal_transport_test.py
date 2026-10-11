@@ -152,7 +152,8 @@ class CursesTerminalTransportTest(unittest.TestCase):
             transport, slave_fd = CursesTerminalTransport.open(run_dir / "game.terminal.log")
             try:
                 process = subprocess.Popen(
-                    [sys.executable, "-c", "import os, sys, tty, time; tty.setraw(0); print(os.read(0, 1).decode(), flush=True); time.sleep(.2)"],
+                    [sys.executable, "-c", "import os, sys, tty, time; tty.setraw(0); print(os.read(0, 1).decode(), flush=True); time.sleep(.2)",
+                     "synthetic-private-value"],
                     stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=True,
                     preexec_fn=CursesTerminalTransport.make_controlling_terminal,
                 )
@@ -176,8 +177,15 @@ class CursesTerminalTransportTest(unittest.TestCase):
             self.assertTrue(owner["broker_command"])
             self.assertEqual(endpoint.stat().st_mode & 0o777, 0o600)
             self.assertEqual(endpoint.parent.stat().st_mode & 0o777, 0o700)
-            receipt = dispatch_input(endpoint, run_id="run-a", pid=process.pid, keys=["f"])
+            from certification_process_lease import public_process_generation
+            status = dispatcher_status(endpoint)
+            self.assertEqual(status["game_status"], "alive")
+            self.assertNotIn("synthetic-private-value", json.dumps(status))
+            receipt = dispatch_input(endpoint, run_id="run-a", pid=process.pid, keys=["f"],
+                                     process_generation=public_process_generation(owner["game_process_generation"]))
             self.assertTrue(receipt["ok"])
+            self.assertNotIn("synthetic-private-value", json.dumps(receipt))
+            self.assertNotIn("command", receipt["process_generation"])
             self.assertEqual(receipt["owner"], "run_bound_pty")
             self.assertEqual(receipt["host"], owner["host"])
             deadline = time.monotonic() + 2
