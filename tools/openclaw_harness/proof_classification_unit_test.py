@@ -563,6 +563,132 @@ def matches() -> List[Dict[str, Any]]:
     return [{"pattern": "claim scoped line", "lines": ["claim scoped line"]}]
 
 
+class CaptureWorkingFilesTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "native crop is a macOS capture path")
+    def test_native_crop_uses_scratch_then_leaves_only_the_requested_capture(self):
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+        png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 3, 3, 8, 2, 0, 0, 0))
+        png += chunk(b"IDAT", zlib.compress((b"\0" + b"\xff\0\0" * 3) * 3)) + chunk(b"IEND", b"")
+        native_run = subprocess.run
+        with tempfile.TemporaryDirectory() as raw:
+            run = Path(raw)
+
+            def capture_or_crop(command, **kwargs):
+                if command[0] == "sips":
+                    return native_run(command, **kwargs)
+                (run / "shot.png").write_bytes(png)
+                return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+            with patch.object(harness, "bound_surface_identity", return_value=None), \
+                    patch.object(harness, "choose_capture_window", return_value={"window_id": 1}), \
+                    patch.object(harness, "peekaboo_command", return_value=["fixture-capture"]), \
+                    patch.object(harness.subprocess, "run", side_effect=capture_or_crop), \
+                    patch.object(harness, "summarize_peekaboo_image_capture", return_value={"peekaboo_success": True}), \
+                    patch.object(harness, "load_runtime_binding", return_value=None):
+                report = harness.capture_screenshot(1, run, "shot", {"width": 2, "height": 2})
+            self.assertTrue(report["crop"]["ok"], report["crop"])
+            self.assertEqual(struct.unpack(">II", (run / "shot.png").read_bytes()[16:24]), (2, 2))
+            self.assertEqual({path.name for path in run.iterdir()}, {"shot.png", "shot.peekaboo.json"})
+
+    def test_saved_world_report_references_working_save_without_copying_or_removing_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            save = root / "save" / "TestWorld"
+            save.mkdir(parents=True)
+            (save / "master.gsav").write_bytes(b"current saved turn")
+            run = root / "run"
+            run.mkdir()
+            # Older generated residue must not be mistaken for, or deleted as,
+            # the current working save by the observation producer.
+            old = run / "saved_world" / "TestWorld"
+            old.mkdir(parents=True)
+            (old / "sentinel").write_bytes(b"owned elsewhere")
+            with patch.object(harness, "save_dir_for_profile", return_value=save.parent), \
+                    patch.object(harness.shutil, "copytree", side_effect=AssertionError("proof copy")):
+                report = harness.describe_saved_world_state("profile", "TestWorld", run)
+                self.assertEqual(report["source_sha256"], harness.sha256_tree(save)[0])
+                self.assertEqual(report["source"], str(save.resolve()))
+                self.assertFalse(report["retained_copy"])
+                self.assertNotIn("destination", report)
+                self.assertEqual(json.loads((run / "saved_world.json").read_text()), report)
+                (save / "master.gsav").write_bytes(b"later saved turn")
+                changed = harness.describe_saved_world_state("profile", "TestWorld", run)
+                self.assertNotEqual(changed["source_sha256"], report["source_sha256"])
+                self.assertEqual((old / "sentinel").read_bytes(), b"owned elsewhere")
+                with self.assertRaises(SystemExit):
+                    harness.describe_saved_world_state("profile", "MissingWorld", run)
+
+    def test_saved_world_read_failure_does_not_publish_a_successful_reference(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "World").mkdir()
+            with patch.object(harness, "save_dir_for_profile", return_value=root), \
+                    patch.object(harness, "sha256_tree", return_value=("", "unreadable save")):
+                with self.assertRaisesRegex(OSError, "unreadable save"):
+                    harness.describe_saved_world_state("profile", "World", root)
+            self.assertFalse((root / "saved_world.json").exists())
+
+    def test_interruption_scan_transfers_files_without_copying_and_replaces_current_scan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            run = Path(raw)
+            with tempfile.TemporaryDirectory(dir=run) as scratch:
+                scan = Path(scratch)
+                (scan / "scan.png").write_bytes(b"current image")
+                (scan / "scan.peekaboo.json").write_bytes(b"current diagnostic")
+                (scan / "subdirectory").mkdir()
+                (run / "interruption_final.png").write_bytes(b"previous image")
+                with patch.object(harness.shutil, "copy2", side_effect=AssertionError("scan copy")):
+                    paths = harness.persist_interruption_scan_artifacts(scan, run, "interruption_final")
+                self.assertEqual(len(paths), 2)
+                self.assertEqual((run / "interruption_final.png").read_bytes(), b"current image")
+                self.assertFalse((scan / "scan.png").exists())
+                self.assertTrue((scan / "subdirectory").is_dir())
+            self.assertTrue(all(Path(path).is_file() for path in paths))
+
+    def test_capture_crop_keeps_one_image_and_preserves_original_on_failure(self):
+        for result in ("success", "failure", "missing", "exception"):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as raw:
+                run = Path(raw)
+
+                def capture(*args, **kwargs):
+                    (run / "shot.png").write_bytes(b"original image")
+                    return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+                def crop(source, output, request):
+                    self.assertEqual(source.read_bytes(), b"original image")
+                    if result == "exception":
+                        raise OSError("crop unavailable")
+                    if result != "missing":
+                        output.write_bytes(b"cropped image" if result == "success" else b"partial image")
+                    return {"ok": result != "failure", "stderr": "crop failed" if result == "failure" else "",
+                            "source_png_path": str(source), "output_png_path": str(output)}
+
+                with patch.object(harness, "bound_surface_identity", return_value=None), \
+                        patch.object(harness, "choose_capture_window", return_value={"window_id": 1}), \
+                        patch.object(harness, "peekaboo_command", return_value=["fixture-capture"]), \
+                        patch.object(harness.subprocess, "run", side_effect=capture), \
+                        patch.object(harness, "crop_png_with_sips", side_effect=crop), \
+                        patch.object(harness, "summarize_peekaboo_image_capture", return_value={"peekaboo_success": True}), \
+                        patch.object(harness, "load_runtime_binding", return_value=None), \
+                        patch.object(harness.shutil, "copy2", side_effect=AssertionError("capture copy")):
+                    if result == "exception":
+                        with self.assertRaisesRegex(OSError, "crop unavailable"):
+                            harness.capture_screenshot(1, run, "shot", {"width": 1, "height": 1})
+                    else:
+                        report = harness.capture_screenshot(1, run, "shot", {"width": 1, "height": 1})
+                        self.assertEqual(report["crop"]["ok"], result == "success")
+                        self.assertEqual(report["crop"]["output_png_path"], str(run / "shot.png"))
+                self.assertEqual((run / "shot.png").read_bytes(),
+                                 b"cropped image" if result == "success" else b"original image")
+                self.assertFalse((run / "shot.full.png").exists())
+                self.assertEqual(list(run.glob("capture-crop-*")), [])
+
+
 class PeekabooTransportAndCaptureReportTest(unittest.TestCase):
     def test_split_permission_contract_accepts_actual_local_input_and_bridge_capture_shapes(self) -> None:
         local_payload = {
