@@ -8218,6 +8218,33 @@ class live_bandit_homeward_motor_trace
 
 namespace
 {
+// A real owner transfer requires its receipt. The native off-bubble resume
+// producer also binds an already-abstract pair without crossing owners: its
+// fresh physical snapshot has no assembly history and no crossing receipt.
+// Callers first validate the current operation/snapshot cursor, then validate
+// the exact persistent bodies and their containers before consuming body time.
+bool live_bandit_native_body_owner_is_bound(
+    const bandit_live_world::active_outing_state &outing )
+{
+    using namespace bandit_live_world;
+    if( crossing_receipt_has_current_owner( outing ) ) {
+        return true;
+    }
+    const auto &crossing = outing.crossing;
+    const auto &snapshot = outing.local_handoff;
+    return outing.owner == simulation_owner::abstract &&
+           outing.kind == outing_kind::structural_sortie && outing.schema_version >= 10 &&
+           snapshot.is_abstract_resume() &&
+           crossing.actor_ids.empty() && crossing.run_id.empty() && crossing.activity_id.empty() &&
+           crossing.generation == 0 && crossing.handoff_epoch == -1 &&
+           crossing.prior_owner == simulation_owner::abstract &&
+           crossing.next_owner == simulation_owner::abstract &&
+           crossing.cursor_minutes == -1 && crossing.cursor_waypoint == -1 &&
+           crossing.outcome.empty() && !crossing.persistence_acknowledged &&
+           !snapshot.cohesion_assembled && !snapshot.cohesion_abort_return &&
+           snapshot.cohesion_deadline_minutes == -1 && snapshot.cohesion_reroutes_used == 0;
+}
+
 // Body time belongs to the authenticated current owner. Finish it before a
 // transfer captures HP or issues a living return receipt. A later transfer
 // failure must retain native injury/death, rather than roll physiology back.
@@ -8227,7 +8254,7 @@ bool finish_live_bandit_loaded_handoff_bodies( bandit_live_world::site_record &s
     using namespace bandit_live_world;
     const auto &outing = site.active_outing;
     const auto cursor = current_external_simulation_cursor( site );
-    if( !cursor || !site.roster().valid || !crossing_receipt_has_current_owner( outing ) ) {
+    if( !cursor || !site.roster().valid || !live_bandit_native_body_owner_is_bound( outing ) ) {
         return false;
     }
     const auto expected = outing.owner == simulation_owner::local ?
@@ -16360,7 +16387,7 @@ std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
                                       << " site=" << site.site_id << " reason=" << reason << '\n';
         };
         const auto cursor = current_external_simulation_cursor( site );
-        if( !cursor || !site.roster().valid || !crossing_receipt_has_current_owner( outing ) ||
+        if( !cursor || !site.roster().valid || !live_bandit_native_body_owner_is_bound( outing ) ||
             outing.member_ids.size() != 2 || outing.local_handoff.members.size() != 2 ||
             live_bandit_current_minutes() < outing.last_advanced_minutes ) {
             refuse( "invalid current owner or body cursor" );
@@ -16778,8 +16805,8 @@ void overmap_npc_move()
                    outing.casualty_ids.end() && site_contains_omt( site, position );
         } );
     };
-    // A retained abstract resume owns a physical pair that has already crossed a loaded
-    // boundary.  Ordinary NPC travel can move those two instances, but has no authority to
+    // A retained abstract resume owns an exact off-bubble physical pair, either from
+    // a loaded boundary crossing or a same-owner native resume.  Ordinary NPC travel can move those two instances, but has no authority to
     // update the retained handoff cursor; it therefore leaves materialization looking at the
     // old OMT forever.  Advance the complete pair and its persisted cursor as one transaction
     // until a later OMT can bind the local owner again.
