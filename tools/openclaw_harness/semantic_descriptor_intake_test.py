@@ -229,6 +229,38 @@ class DescriptorIntakeTest(unittest.TestCase):
                                       "action_id": "inventory.filter"})["ok"])
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
 
+    def test_optional_diagnostic_error_keeps_same_controller_save_choice_callable(self):
+        # Real factory/channel/receipt path; fixture transport is not a game save.
+        self.descriptor = {**self.descriptor, "kind": "world", "payload": {"turn": "5217816"},
+            "valid_actions": [{"id": "world.quicksave", "stable_id": "", "label": "Quicksave", "enabled": True}]}
+        self.trace.write_bytes(self.encode(self.descriptor))
+        mirror = self.config / "debug.log"
+        malformed = self.encode(self.descriptor).rstrip(b"\n") + b" skipped=0\n"
+        mirror.write_bytes(malformed)
+        service = self.service()
+        before = service.call({"action": "game.observe"})
+        self.assertTrue(before["ok"], before)
+        current = before["result"]["observation_id"]
+        self.assertFalse(service.call({"action": "game.act", "observation_id": "foreign", "action_id": "world.quicksave"})["ok"])
+        def native_fixture(*args, **kwargs):
+            request = json.loads((self.run / "semantic.requests.jsonl").read_text().splitlines()[-1])
+            receipt = {"event": "surface_receipt", "run_id": "fixture-run", "sequence": 3,
+                "request_id": request["request_id"], "action_id": request["action_id"],
+                "requested_run_id": "fixture-run", "requested_surface_id": request["surface_id"],
+                "requested_frame_id": request["frame_id"], "consuming_surface_id": request["surface_id"],
+                "consuming_frame_id": request["frame_id"], "accepted": True,
+                "rejection_reason": "", "resulting_frame_id": "saved-world"}
+            with self.trace.open("ab") as sink:
+                sink.write(self.encode(receipt) + self.encode({**self.descriptor, "sequence": 4, "frame_id": "saved-world"}))
+            return 1
+        with patch.object(startup, "semantic_wake_pipe_contract", return_value={"status": "bound", "path": "fixture", "contract": {"transport": "disposable-native-fixture"}}), patch.object(startup, "write_semantic_wake_pipe", side_effect=native_fixture):
+            saved = service.call({"action": "game.act", "observation_id": current, "action_id": "world.quicksave"})
+        self.assertTrue(saved["ok"], saved)
+        self.assertEqual(service.call({"action": "game.observe"})["result"]["observation_id"], "saved-world")
+        self.assertFalse(service.call({"action": "game.act", "observation_id": current, "action_id": "world.quicksave"})["ok"])
+        self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
+        self.assertEqual(mirror.read_bytes(), malformed)
+
     def test_completed_receipt_survives_partial_successor_poll_without_replaying(self):
         self.partial_delivery = True
         self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()

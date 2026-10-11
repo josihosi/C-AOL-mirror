@@ -615,12 +615,18 @@ const std::string &input_context::handle_input( const int timeout )
         // context can inspect another physical event.
         if( take_active_semantic_surface_wake() ) {
             if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
-                // The renderer-neutral request is consumed at this input
-                // boundary when it is still queued.  Whether a child already
-                // consumed it or the wake is stale, the notification is not a
-                // physical event for the restored owner: return to the native
-                // caller instead of blocking on another input read.
-                manager->consume_top_request();
+                // Rejected transport is not a native choice. Keep reading for
+                // the current owner instead of returning an error which an
+                // any-key popup or one-step editor could treat as completion.
+                // An accepted choice must return to its native caller, which
+                // may then open a child before its receipt can be settled.
+                const auto owner = manager->top();
+                const bool accepted = manager->consume_top_request();
+                if( !accepted && owner && manager->top() &&
+                    manager->top()->surface_id == owner->surface_id &&
+                    manager->top()->frame_id == owner->frame_id ) {
+                    continue;
+                }
             }
             result = &CATA_ERROR;
             break;

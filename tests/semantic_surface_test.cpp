@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cata_catch.h"
+#include "cached_options.h"
 #include "cata_scope_helpers.h"
 #include "character.h"
 #include "cursesdef.h"
@@ -14,6 +15,8 @@
 #include "imgui/imgui.h"
 #include "inventory_ui.h"
 #include "input_popup.h"
+#include "input_context.h"
+#include "sdl_renderer_recovery.h"
 #include "item.h"
 #include "popup.h"
 #include "player_helpers.h"
@@ -1785,3 +1788,164 @@ TEST_CASE( "imgui string prompt owns semantic coordinate submission and rejects 
     CHECK( rejected_stale_frame );
     CHECK( rejection_reasons == std::vector<std::string>{ "wrong_surface", "stale_frame" } );
 }
+
+TEST_CASE( "rejected transport stays inside the native input owner until a real successor",
+           "[semantic_surface][shared_input_owner_067]" )
+{
+    const bool same_poll = GENERATE( false, true );
+    const std::string rejection = GENERATE( "wrong_run", "wrong_surface", "stale_frame", "duplicate" );
+    const auto path = std::filesystem::temp_directory_path() /
+                      ( "shared-input-owner-" + std::to_string(
+                            std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+    const char *old_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous = old_path ? std::optional<std::string>( old_path ) :
+            std::nullopt;
+    on_out_of_scope cleanup( [&]() {
+        if( previous ) { setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 ); }
+        else { unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" ); }
+        std::filesystem::remove( path );
+    } );
+    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
+#if defined(TILES)
+    software_render_fixture renderer;
+    REQUIRE( renderer.available() );
+    renderer_recovery_test_support::setup_software_ui();
+#else
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    } else {
+        catacurses::refresh();
+    }
+    on_out_of_scope close_renderer( [&]() {
+        if( owns_terminal ) { catacurses::endwin(); }
+    } );
+#endif
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    semantic_surface_manager manager( "shared-input-owner" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    int native_dispatches = 0;
+    std::vector<semantic_surface_descriptor> publications;
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+        publications.push_back( descriptor );
+    } );
+    semantic_surface_scope parent( manager, "inventory", "Inventory", {},
+    { { "inventory.select", "item:1", "Select", true } },
+    [&]( const semantic_action_request & ) {
+        ++native_dispatches;
+        return semantic_action_dispatch_result{ true, "", "", true, true };
+    } );
+    const auto original = *manager.top();
+    const auto append = [&]( const std::string &run, const std::string &surface,
+                             const std::string &frame, const std::string &request ) {
+        std::ofstream stream( path, std::ios::app );
+        stream << "{\"run_id\":\"" << run << "\",\"surface_id\":\"" << surface
+               << "\",\"frame_id\":\"" << frame << "\",\"request_id\":\"" << request
+               << "\",\"action_id\":\"inventory.select\",\"stable_id\":\"item:1\"}\n";
+    };
+    if( rejection == "duplicate" ) {
+        REQUIRE( manager.submit_request( { "foreign-run", original.surface_id, original.frame_id,
+                                           "inert", "inventory.select", "item:1", {} } ) );
+        REQUIRE_FALSE( manager.consume_top_request() );
+    }
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+        if( receipt.request_id == "inert" ) {
+            CHECK_FALSE( receipt.accepted );
+            CHECK( receipt.rejection_reason == ( rejection == "duplicate" ? "wrong_run" : rejection ) );
+            REQUIRE( manager.top() );
+            CHECK( manager.top()->surface_id == original.surface_id );
+            CHECK( manager.top()->frame_id == original.frame_id );
+            if( !same_poll ) {
+                append( manager.run_id(), original.surface_id, original.frame_id, "select" );
+            }
+        }
+    } );
+    append( rejection == "wrong_run" || rejection == "duplicate" ? "foreign-run" : manager.run_id(),
+            rejection == "wrong_surface" ? "foreign-surface" : original.surface_id,
+            rejection == "stale_frame" ? "foreign-frame" : original.frame_id, "inert" );
+    if( same_poll ) {
+        append( manager.run_id(), original.surface_id, original.frame_id, "select" );
+    }
+    input_context input( "INVENTORY" );
+    input.register_action( "QUIT" );
+    input.handle_input( 100 );
+    CHECK( native_dispatches == 1 );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->surface_id == original.surface_id );
+    CHECK( manager.top()->frame_id == original.frame_id );
+    if( native_dispatches != 1 ) { return; }
+    REQUIRE( receipts.size() == 1 );
+    {
+        bool closed = false;
+        semantic_surface_scope child( manager, "prompt", "Confirmation", {},
+        { { "prompt.acknowledge", "", "Acknowledge", true } },
+        [&]( const semantic_action_request & ) {
+            closed = true;
+            return semantic_action_dispatch_result{ true, "", "" };
+        } );
+        REQUIRE( receipts.size() == 2 );
+        CHECK( receipts.back().accepted );
+        CHECK( receipts.back().request_id == "select" );
+        CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+        const auto child_frame = *manager.top();
+        REQUIRE( manager.submit_request( { manager.run_id(), child_frame.surface_id,
+                                           child_frame.frame_id, "ack", "prompt.acknowledge", std::nullopt, {} } ) );
+        manager.mark_transport_wake();
+        input.handle_input( 100 );
+        CHECK( closed );
+    }
+    REQUIRE( receipts.size() == 3 );
+    CHECK( receipts.back().request_id == "ack" );
+    CHECK( receipts.back().accepted );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->surface_id == original.surface_id );
+    CHECK( manager.top()->frame_id != original.frame_id );
+    REQUIRE( publications.size() >= 3 );
+    CHECK( publications.back().frame_id == manager.top()->frame_id );
+    REQUIRE( manager.submit_request( { manager.run_id(), original.surface_id, original.frame_id,
+                                       "old-parent", "inventory.select", "item:1", {} } ) );
+    CHECK_FALSE( parent.consume_request() );
+    CHECK( receipts.back().rejection_reason == "stale_frame" );
+    CHECK( native_dispatches == 1 );
+}
+
+#if !defined(TILES)
+extern "C" int ungetch( int );
+TEST_CASE( "shared input ownership preserves bounded ordinary keyboard reads",
+           "[semantic_surface][shared_input_owner_keyboard_067]" )
+{
+    const bool bound = GENERATE( false, true );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    } else {
+        catacurses::refresh();
+    }
+    on_out_of_scope close_owned_terminal( [&]() {
+        if( owns_terminal ) { catacurses::endwin(); }
+    } );
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    semantic_surface_manager manager( "physical-keyboard" );
+    std::optional<semantic_surface_manager_session> session;
+    std::optional<semantic_surface_scope> owner;
+    if( bound ) {
+        session.emplace( manager );
+        owner.emplace( manager, "inventory", "Native inventory" );
+    }
+    input_context input( "INVENTORY" );
+    input.register_action( "ANY_INPUT" );
+    REQUIRE( ungetch( '1' ) != -1 );
+    input.handle_input( 100 );
+    CHECK( input.get_raw_input().type == input_event_t::keyboard_char );
+    CHECK( input.get_raw_input().get_first_input() == '1' );
+    if( bound ) { CHECK( manager.top()->surface_id == owner->surface_id() ); }
+    else { CHECK( active_semantic_surface_manager() == nullptr ); }
+}
+#endif

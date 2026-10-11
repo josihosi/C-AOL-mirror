@@ -59555,5 +59555,104 @@ TEST_CASE( "authenticated same-owner abstract resumes consume body time and pair
     r067_handover_reload( world_name );
     REQUIRE( current_external_simulation_cursor( scene.site() ) );
     CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
+    // Continue the same admitted bodies through the actual periodic owner. An
+    // honest incomplete watch can return a report without gaining observation
+    // credit, and neither a deadline nor a report assertion can place it home.
+    const auto generation = scene.site().active_outing.generation;
+    const auto deadline = scene.site().active_outing.missing_deadline_minutes;
+    while( scene.site().active_outing.is_active() &&
+           to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) < deadline ) {
+        calendar::turn += 5_minutes - ( calendar::turn - calendar::turn_zero ) % 5_minutes;
+        process_overmap_npc_move_for_test();
+        if( scene.site().active_outing.is_active() ) {
+            REQUIRE( current_external_simulation_cursor( scene.site() ) );
+            CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
+        }
+        if( scene.site().active_outing.crossing.pending() ) { REQUIRE( g->save() ); }
+    }
+    for( const auto id : ids ) {
+        CHECK( scene.actor( id.get_value() ).pos_abs_omt() == scene.site().anchor );
+    }
+    REQUIRE_FALSE( scene.site().active_outing.is_active() );
+    REQUIRE( scene.site().current_scout_report.is_present() );
+    CHECK( scene.site().current_scout_report.source_generation == generation );
+    CHECK( scene.site().current_scout_report.carrier_ids == ids );
+    REQUIRE( scene.site().current_scout_report.observations.size() == original_owner.observations.size() );
+    for( std::size_t index = 0; index < original_owner.observations.size(); ++index ) {
+        auto expected = original_owner.observations[index];
+        expected.share_state = sortie_observation_share_state::reported;
+        CHECK( r067_return_record_bytes( scene.site().current_scout_report.observations[index] ) ==
+               r067_return_record_bytes( expected ) );
+    }
+    const auto report = r067_return_record_bytes( scene.site().current_scout_report );
+    REQUIRE( g->save() );
+    r067_handover_reload( world_name );
+    process_overmap_npc_move_for_test();
+    CHECK( r067_return_record_bytes( scene.site().current_scout_report ) == report );
+    CHECK( scene.site().applied_report_generation == generation );
+}
 
+TEST_CASE( "retained resident homeward edge has an admitted physical pair continuation",
+           "[bandit_live_world][resident_route_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const bool blocked = GENERATE( false, true );
+    CAPTURE( blocked );
+    r055_scene scene;
+    scene.load( false, true, false,
+                "tests/data/r067_resident_return_8099.json" );
+    map &here = get_map();
+    REQUIRE( calendar::turn == time_point::from_turn( 5237944 ) );
+    REQUIRE( here.get_abs_sub() == tripoint_abs_sm( 257, 282, 1 ) );
+    REQUIRE( scene.site().active_outing.owner == simulation_owner::local );
+    REQUIRE( current_external_simulation_cursor( scene.site() ) );
+    const auto original_owner = scene.site().active_outing;
+    const auto steps = live_bandit_homeward_boundary_steps_for_test();
+    INFO( live_bandit_homeward_boundary_discriminator_for_test() );
+    for( const int id : { 5, 6 } ) {
+        npc &actor = scene.actor( id );
+        REQUIRE( actor.is_active() );
+        REQUIRE_FALSE( actor.is_dead() );
+        REQUIRE_FALSE( actor.in_sleep_state() );
+        REQUIRE( actor.is_travelling() );
+        REQUIRE_FALSE( actor.omt_path.empty() );
+        REQUIRE( actor.omt_path.back() == tripoint_abs_omt( 129, 147, 0 ) );
+        const auto center = here.get_bub( project_to<coords::ms>( actor.omt_path.back() ) ) +
+                            point( SEEX, SEEY );
+        REQUIRE_FALSE( here.inbounds( center ) );
+        auto clipped = center;
+        here.clip_to_bounds( clipped );
+        const auto route = here.route( actor.pos_bub(), pathfinding_target::radius( clipped, 2 ),
+                                       actor.get_pathfinding_settings( false ), actor.get_path_avoid() );
+        INFO( "actor=" << id << " pos=" << actor.pos_abs() << " center=" << center
+              << " clipped=" << clipped << " route=" << route.size()
+              << " boundary steps=" << steps.size() );
+        CHECK_FALSE( route.empty() );
+    }
+    if( blocked ) {
+        // A changed loaded neighborhood may genuinely prevent every step. Keep
+        // the native bodies/ownership and exercise the same motor refusal.
+        for( const int id : { 5, 6 } ) {
+            const auto center = scene.actor( id ).pos_bub();
+            for( const auto &neighbor : here.points_in_radius( center, 1 ) ) {
+                if( neighbor != scene.actor( 5 ).pos_bub() &&
+                    neighbor != scene.actor( 6 ).pos_bub() ) {
+                    here.ter_set( neighbor, ter_id( "t_wall" ) );
+                }
+            }
+        }
+        here.invalidate_map_cache( 0 );
+    }
+    // The exact saved scene must reach a native owner, not a fixture move.
+    const auto first = scene.actor( 5 ).pos_abs();
+    const auto second = scene.actor( 6 ).pos_abs();
+    process_monsters_and_npcs_turn_for_test();
+    CHECK( ( scene.actor( 5 ).pos_abs() != first || scene.actor( 6 ).pos_abs() != second ) == !blocked );
+    CHECK( scene.site().active_outing.member_ids == original_owner.member_ids );
+    CHECK( scene.site().active_outing.handoff_epoch == original_owner.handoff_epoch );
+    CHECK( scene.site().active_outing.actor_route_waypoint == original_owner.actor_route_waypoint );
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK_FALSE( scene.site().current_scout_report.is_present() );
+    CHECK( current_external_simulation_cursor( scene.site() ).has_value() );
 }

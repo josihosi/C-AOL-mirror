@@ -1,7 +1,9 @@
 """Read-only Windows identities and the footing-proven native ConPTY primitive.
 
-No os.kill, signal delivery, process termination, or implicit HPCON teardown of
-a live child. ProcessSnapshot has the existing certification inspector shape.
+Live gameplay children require their native quit route. Explicit disposable
+fixture children have bounded wait/cancel ownership through their original kernel
+handle; this never grants teardown authority over a gameplay child. ProcessSnapshot
+has the existing certification inspector shape.
 """
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 
 
 from certification_process_lease import ProcessSnapshot
@@ -60,6 +63,7 @@ def kernel():
         'WriteFile': ([H, c.c_void_p, w.DWORD, c.POINTER(w.DWORD), c.c_void_p], w.BOOL),
         'WaitForSingleObject': ([H, w.DWORD], w.DWORD),
         'GetExitCodeProcess': ([H, c.POINTER(w.DWORD)], w.BOOL),
+        'TerminateProcess': ([H, w.UINT], w.BOOL),
         'GetProcessTimes': ([H, c.POINTER(w.FILETIME), c.POINTER(w.FILETIME), c.POINTER(w.FILETIME), c.POINTER(w.FILETIME)], w.BOOL),
         'OpenProcess': ([w.DWORD, w.BOOL, w.DWORD], H),
         'QueryFullProcessImageNameW': ([H, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)], w.BOOL),
@@ -185,7 +189,7 @@ class WindowsProcessInspector:
 
 class NativeConPTY:
     """Owns one exact native child handle, HPCON and drained VT transcript."""
-    def __init__(self, transcript_path: Path, size=(100, 30)):
+    def __init__(self, transcript_path: Path, size=(100, 30), *, disposable_test=False):
         self.k = kernel()
         self.size = tuple(size)
         self.transcript_path = Path(transcript_path)
@@ -196,6 +200,8 @@ class NativeConPTY:
         self._closed = False
         self.utf8_setup_receipt = None
         self.child_role = 'unlaunched'
+        self._disposable_test = bool(disposable_test)
+        self._test_generation = None
         try:
             checked(self.k.CreatePipe(c.byref(self.ir), c.byref(self.iw), None, 0))
             checked(self.k.CreatePipe(c.byref(self.orr), c.byref(self.ow), None, 0))
@@ -227,8 +233,54 @@ class NativeConPTY:
         if self.pi.process:
             raise RuntimeError('ConPTY already owns a child')
         self._prime_utf8(cwd)
-        self.child_role = 'game'
-        return self._launch_child(argv, cwd)
+        self.child_role = 'disposable_test' if self._disposable_test else 'game'
+        generation = self._launch_child(argv, cwd)
+        if self._disposable_test:
+            self._test_generation = dict(generation)
+        return generation
+
+    def wait_for_disposable_test(self, *, timeout: float, cancel=None) -> dict:
+        """Settle this explicitly disposable fixture; gameplay cannot use this API.
+
+        Keep the original process handle and complete transcript through a failed
+        or cancelled test. A timeout is failure, never native gameplay exit credit.
+        The caller retains the result and output before deleting its scratch tree.
+        """
+        if not self._disposable_test or self.child_role != 'disposable_test' or not self._test_generation:
+            raise RuntimeError('disposable_test_ownership_required')
+        if self._closed:
+            raise RuntimeError('disposable_test_already_settled')
+        if not 0 < timeout < float('inf'):
+            raise ValueError('finite_positive_test_timeout_required')
+        generation = dict(self._test_generation)
+        started = time.monotonic()
+        status = 'completed'
+        while self.alive():
+            if cancel is not None and cancel.is_set():
+                status = 'cancelled'
+                break
+            if time.monotonic() - started >= timeout:
+                status = 'timed_out'
+                break
+            time.sleep(min(.05, timeout))
+        if self.alive():
+            actual_birth = 'windows-filetime:' + str(handle_birth(self.k, self.pi.process))
+            if actual_birth != generation['birth_identity'] or int(self.pi.pid) != generation['pid']:
+                raise RuntimeError('disposable_test_generation_changed_child_retained')
+            # This handle belongs only to a child launched with explicit fixture
+            # disposal authority. No PID lookup, game signal or HPCON-as-quit.
+            checked(self.k.TerminateProcess(self.pi.process, 1))
+            if self.k.WaitForSingleObject(self.pi.process, 5000) != 0:
+                raise RuntimeError('disposable_test_exit_unobserved_handles_retained')
+        code = self.exit_code()
+        self.close_after_exit()
+        return {'status': status if status != 'completed' or code == 0 else 'failed',
+                'exit_code': code, 'process_generation': generation,
+                'elapsed_seconds': time.monotonic() - started,
+                'transcript_path': str(self.transcript_path),
+                'reader_error': self.reader_error, 'handles_closed': self._closed,
+                'native_gameplay_exit_credit': False}
+
 
     def _prime_utf8(self, cwd: Path):
         """Configure this private HPCON's output CP before the game exists.

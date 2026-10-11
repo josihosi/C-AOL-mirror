@@ -16159,10 +16159,12 @@ void monmove()
                     const std::function<bool( const tripoint_bub_ms & )> local_homeward_avoid =
                         allow_ordinary_homeward_local_reentry ? npc_avoid : combined_avoid;
                     bandit_live_world_probe::scoped_loaded_covert_local_path_solve path_solve_probe;
-                    std::vector<tripoint_bub_ms> preflight_path =
-                        m.inbounds( next_center ) ? m.route(
-                            guy.pos_bub(), next_target, guy.get_pathfinding_settings( false ),
-                            local_homeward_avoid ) : std::vector<tripoint_bub_ms>();
+                    // Native map::route clips an out-of-bounds waypoint to
+                    // the loaded edge. The local owner must be able to approach
+                    // that edge before a complete safe pair crossing exists.
+                    std::vector<tripoint_bub_ms> preflight_path = m.route(
+                                guy.pos_bub(), next_target, guy.get_pathfinding_settings( false ),
+                                local_homeward_avoid );
                     // The retained-edge materialization has just assigned this member a
                     // homeward OMT route.  Normalize that route in the active local-map
                     // frame before checking cohesion or consuming it: map::route includes
