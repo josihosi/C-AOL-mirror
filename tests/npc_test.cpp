@@ -264,6 +264,7 @@ static std::string get_list_of_monsters( const std::string &title )
 
 TEST_CASE( "on_load-sane-values", "[.]" )
 {
+    override_option needs_enabled( "NO_NPC_FOOD", "false" );
     SECTION( "Awake for 10 minutes, gaining hunger/thirst/sleepiness" ) {
         npc test_npc = create_model();
         const int five_min_ticks = 2;
@@ -279,12 +280,16 @@ TEST_CASE( "on_load-sane-values", "[.]" )
 
     SECTION( "Awake for 2 days, gaining hunger/thirst/sleepiness" ) {
         npc test_npc = create_model();
+        const needs_rates rates = test_npc.calc_needs_rates();
         const double five_min_ticks = 2_days / 5_minutes;
         on_load_test( test_npc, 0_turns, 5_minutes * five_min_ticks );
 
         const int margin = 20;
-        const numeric_interval<int> hunger( five_min_ticks / 4, margin, margin );
-        const numeric_interval<int> thirst( five_min_ticks / 4, margin, margin );
+        // Native stomach hunger is nonlinear: an empty stomach/gut with
+        // depleted stores reaches 300. Awake thirst uses the configured rate,
+        // rather than the historical quarter-rate NPC assumption.
+        const numeric_interval<int> hunger( 300, margin, margin );
+        const numeric_interval<int> thirst( five_min_ticks * rates.thirst, margin, margin );
         const numeric_interval<int> sleepiness( five_min_ticks, margin, margin );
 
         test_needs( test_npc, hunger, thirst, sleepiness );
@@ -349,6 +354,64 @@ TEST_CASE( "on_load-similar-to-per-turn", "[.]" )
 
         test_needs( on_load_npc, hunger, thirst, sleepiness );
     }
+}
+
+TEST_CASE( "native needs remain continuous through unloading and persisted body catchup",
+           "[npc][npc_needs_continuity_067]" )
+{
+    override_option needs_enabled( "NO_NPC_FOOD", "false" );
+    override_option thirst_rate( "PLAYER_THIRST_RATE", "1" );
+    const auto original_turn = calendar::turn;
+    on_out_of_scope restore_time( [original_turn]() { calendar::turn = original_turn; } );
+    const time_duration elapsed = GENERATE( 10_minutes, 6_hours, 2_days );
+    calendar::turn = calendar::turn_zero;
+    npc active = create_model();
+    active.setpos( get_map(), get_player_character().pos_bub() + point( 5, 5 ) );
+    active.on_unload();
+    std::ostringstream saved;
+    JsonOut output( saved );
+    active.serialize( output );
+    npc inactive;
+    JsonValue saved_body = json_loader::from_string( saved.str() );
+    inactive.deserialize( saved_body.get_object() );
+    const auto initial_id = active.getID();
+    REQUIRE( inactive.getID() == initial_id );
+
+    for( time_duration turn = 1_turns; turn <= elapsed; turn += 1_turns ) {
+        calendar::turn = calendar::turn_zero + turn;
+        active.npc_update_body();
+    }
+    inactive.on_load( &get_map() );
+    INFO( "elapsed=" << to_minutes<int>( elapsed ) << " active hunger=" << active.get_hunger()
+          << " inactive hunger=" << inactive.get_hunger() << " active thirst=" << active.get_thirst()
+          << " inactive thirst=" << inactive.get_thirst() );
+    std::cout << "R067_NEEDS elapsed=" << to_minutes<int>( elapsed )
+              << " active_hunger=" << active.get_hunger() << " inactive_hunger=" << inactive.get_hunger()
+              << " active_thirst=" << active.get_thirst() << " inactive_thirst=" << inactive.get_thirst()
+              << " active_sleepiness=" << active.get_sleepiness()
+              << " inactive_sleepiness=" << inactive.get_sleepiness() << std::endl;
+    test_needs( inactive, numeric_interval<int>( active.get_hunger(), 20, 20 ),
+                numeric_interval<int>( active.get_thirst(), 20, 20 ),
+                numeric_interval<int>( active.get_sleepiness(), 20, 20 ) );
+    CHECK( inactive.get_hp() == active.get_hp() );
+    CHECK( inactive.getID() == initial_id );
+    CHECK_FALSE( inactive.is_dead() );
+
+    const auto hunger = inactive.get_hunger();
+    const auto thirst = inactive.get_thirst();
+    const auto sleepiness = inactive.get_sleepiness();
+    saved.str( "" );
+    JsonOut repeated_output( saved );
+    inactive.serialize( repeated_output );
+    npc reloaded;
+    JsonValue repeated_body = json_loader::from_string( saved.str() );
+    reloaded.deserialize( repeated_body.get_object() );
+    reloaded.on_load( &get_map() );
+    CHECK( reloaded.get_hunger() == hunger );
+    CHECK( reloaded.get_thirst() == thirst );
+    CHECK( reloaded.get_sleepiness() == sleepiness );
+    CHECK( reloaded.getID() == initial_id );
+    CHECK( reloaded.get_hp() == inactive.get_hp() );
 }
 
 TEST_CASE( "snippet-tag-test" )
