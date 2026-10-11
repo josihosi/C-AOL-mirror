@@ -6697,6 +6697,30 @@ def cockpit_live_final_path( run_dir: Path, proof_step_label: str = "" ) -> Path
     return run_dir / f"{label}.cockpit.live.final.json"
 
 
+def read_completed_cockpit_final(
+    service: Any, final_path: Path, *, run_id: str, binding_id: str,
+) -> Mapping[str, Any]:
+    """Reuse this producer's persisted final; independent readers still verify it."""
+    status_reader = getattr(service.run_channel, "status", None)
+    status = status_reader() if callable(status_reader) else {}
+    final = status.get("final") if isinstance(status, Mapping) else None
+    if isinstance(final, Mapping):
+        if status.get("state") != "finished" or status.get("run_id") != run_id or \
+                status.get("binding_id") != binding_id or final.get("state") != "finished" or \
+                final.get("schema") != "caol-cockpit-live-final-v1" or \
+                final.get("run_id") != run_id or final.get("binding_id") != binding_id:
+            raise ValueError("owned_cockpit_final_identity_mismatch")
+        if not final_path.is_file() or final.get("final_report_ref") != final_path.name:
+            raise ValueError("owned_cockpit_final_not_persisted")
+        # The finalizer adds this retrieval handle to channel status after
+        # persisting the payload. Keep the scenario's logical report unchanged.
+        return {key: value for key, value in final.items() if key != "final_report_ref"}
+    if final_path.is_file():
+        from cockpit_report_reference import load_report
+        return load_report(final_path)[2]
+    return {}
+
+
 def finalize_cockpit_live_session(
     run_dir: Path, pid: int, report: Mapping[str, Any], *, cleanup_process: bool = True,
     final_path: Optional[Path] = None,
@@ -20761,6 +20785,18 @@ def r014_cockpit_observation_metadata(
     return {**metadata, "status": "required_state_present"}
 
 
+def reported_cockpit_outcome(final: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """Recognize an ordinary reported result, never formal proof authority."""
+    detail = final.get("stop_detail")
+    outcome = detail.get("gameplay_outcome") if isinstance(detail, Mapping) else None
+    if final.get("state") == "finished" and final.get("stop_reason") == "outcome_reported" and \
+            isinstance(outcome, Mapping) and isinstance(outcome.get("summary"), str) and \
+            outcome["summary"].strip() and outcome.get("verdict") in {"positive", "negative", "inconclusive"} and \
+            outcome.get("attribution") == "player_report" and outcome.get("proof_promotion_authority") is False:
+        return outcome
+    return None
+
+
 def r014_cockpit_live_session_metadata(
     final: Mapping[str, Any], *, artifact_path: Path, run_id: str, binding_id: str,
     live_status: int,
@@ -20778,6 +20814,15 @@ def r014_cockpit_live_session_metadata(
         return {**metadata, "status": "scanned", "reason": "immutable_final_unavailable"}
     final_run_id = str(final.get("run_id", "")).strip()
     final_binding_id = str(final.get("binding_id", "")).strip()
+    metadata.update({"final_run_id": final_run_id, "final_binding_id": final_binding_id,
+                     "state": str(final.get("state", ""))})
+    if final_run_id != str(run_id) or final_binding_id != str(binding_id):
+        return {**metadata, "status": "scanned", "reason": "wrong_run_or_binding"}
+    if metadata["state"] != "finished":
+        return {**metadata, "status": "scanned", "reason": "unfinished_session"}
+    if reported_cockpit_outcome(final) is not None:
+        return {**metadata, "status": "required_state_present", "completion_kind": "outcome_reported",
+                "action_statistics": "not_requested", "history": "retained_by_reference"}
     transcript = final.get("action_observation_sequence")
     action_count = observation_count = accepted_action_count = 0
     for entry in transcript if is_sequence(transcript) else ():
@@ -20797,10 +20842,6 @@ def r014_cockpit_live_session_metadata(
         "accepted_action_count": accepted_action_count,
         "observation_count": observation_count,
     })
-    if final_run_id != str(run_id) or final_binding_id != str(binding_id):
-        return {**metadata, "status": "scanned", "reason": "wrong_run_or_binding"}
-    if metadata["state"] != "finished":
-        return {**metadata, "status": "scanned", "reason": "unfinished_session"}
     if not accepted_action_count or observation_count < 2:
         return {**metadata, "status": "scanned", "reason": "incomplete_live_transaction"}
     return {**metadata, "status": "required_state_present"}
@@ -21766,13 +21807,14 @@ def cockpit_live_session_step_verdict(
     transcript = final.get( "action_observation_sequence" )
     observation_only = (descriptor.get("live_operations") == [] and
                         "no gameplay input" in descriptor.get("invariants", []))
-    if not is_sequence( transcript ) or (not observation_only and not any(
-            isinstance( entry, Mapping ) and entry.get( "kind" ) == "action" and
-            isinstance( entry.get( "result" ), Mapping ) and entry["result"].get( "ok" ) is True
-            for entry in transcript )) or sum(
-                isinstance( entry, Mapping ) and entry.get( "kind" ) == "observation"
-                for entry in transcript ) < (1 if observation_only else 2):
-        failures.append( "cockpit_transaction_incomplete" )
+    if reported_cockpit_outcome(final) is None:
+        if not is_sequence( transcript ) or (not observation_only and not any(
+                isinstance( entry, Mapping ) and entry.get( "kind" ) == "action" and
+                isinstance( entry.get( "result" ), Mapping ) and entry["result"].get( "ok" ) is True
+                for entry in transcript )) or sum(
+                    isinstance( entry, Mapping ) and entry.get( "kind" ) == "observation"
+                    for entry in transcript ) < (1 if observation_only else 2):
+            failures.append( "cockpit_transaction_incomplete" )
     if not isinstance( watermark, Mapping ) or str( watermark.get( "run_id", "" ) ).strip() != descriptor_run_id or \
             str( watermark.get( "step_label", "" ) ).strip() != label or watermark.get( "step_index" ) != index:
         failures.append( "cockpit_local_boundary_not_same_run" )
@@ -33798,14 +33840,10 @@ def execute_probe_steps(
                 continue
             live_status = serve_cockpit_live( service, sys.stdin, sys.stdout )
             final_path = cockpit_live_final_path( run_dir, label )
-            reference_path = final_path.with_suffix(".ref.json")
-            if reference_path.is_file():
-                wire = json.loads(reference_path.read_text(encoding="utf-8"))
-                archive_directory = service.run_channel.archive.path.parent
-                final = resolve_wire(wire, directory=archive_directory,
-                                     binding_id=str(service.run_channel._binding_id), exported_path=final_path)
-            else:
-                final = json.loads(final_path.read_text(encoding="utf-8")) if final_path.is_file() else {}
+            final = read_completed_cockpit_final(
+                service, final_path, run_id=semantic_run_id,
+                binding_id=str(service.run_channel._binding_id),
+            )
             selection_world_ready: Optional[bool] = None
             selection_world_resolution: Dict[str, Any] = {}
             if pending_selection_bootstrap is not None:
