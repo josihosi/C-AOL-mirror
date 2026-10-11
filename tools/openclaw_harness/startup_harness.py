@@ -5262,6 +5262,30 @@ def iter_complete_semantic_trace_records(
         yield event, start + marker_offset, end
 
 
+def compact_world_render_maps(observation: Mapping[str, Any]) -> Dict[str, Any]:
+    """Drop duplicate map rendering while retaining current native local facts.
+
+    Legacy frames carry structured facts; surface descriptors encode them as
+    JSON strings. Keep that representation so both public consumers continue
+    to receive the same avatar, terrain, creatures, fields, zones and messages.
+    """
+    compact = dict(observation)
+    minimap = observation.get("minimap")
+    encoded = isinstance(minimap, str)
+    if encoded:
+        try:
+            minimap = json.loads(minimap)
+        except ValueError:
+            # Preserve an invalid native value; compaction cannot repair it.
+            minimap = None
+    if isinstance(minimap, Mapping):
+        declaration = {key: minimap[key] for key in ("schema", "radius", "coordinate_system")
+                       if key in minimap}
+        compact["minimap"] = json.dumps(declaration, separators=(",", ":")) if encoded else declaration
+    compact.pop("overmap", None)
+    return compact
+
+
 def compact_semantic_step_channel_event(event: Mapping[str, Any]) -> Dict[str, Any]:
     """Keep the action-relevant native observation inside the bounded channel.
 
@@ -5276,15 +5300,7 @@ def compact_semantic_step_channel_event(event: Mapping[str, Any]) -> Dict[str, A
     observation = event.get("observation")
     if str(event.get("event", "")) != "frame" or not isinstance(observation, Mapping):
         return compact
-    compact_observation = dict(observation)
-    minimap = observation.get("minimap")
-    if isinstance(minimap, Mapping):
-        compact_observation["minimap"] = {
-            key: minimap[key] for key in ("schema", "radius", "coordinate_system")
-            if key in minimap
-        }
-    compact_observation.pop("overmap", None)
-    compact["observation"] = compact_observation
+    compact["observation"] = compact_world_render_maps(observation)
     return compact
 
 
@@ -5332,23 +5348,19 @@ def compact_historical_surface_descriptor(event: Mapping[str, Any]) -> Dict[str,
 
 
 def compact_current_surface_descriptor_payload(event: Mapping[str, Any]) -> Dict[str, Any]:
-    """Preserve the active owner and actions when native render payload is oversized.
+    """Keep current navigation facts alongside the active owner and actions.
 
-    The bounded live channel dispatches only from the descriptor's run, owner,
-    frame, and advertised actions.  World render payload belongs to the
-    immutable native trace and transaction artifact; retaining it here can
-    prevent an otherwise actionless incomplete owner from publishing its stop.
+    Large World maps duplicate render data, but its local facts are the player's
+    current observation, not superseded history. Any remaining oversized facts
+    use the existing verified payload reference rather than being erased.
     """
-    if str(event.get("event", "")) != "surface_descriptor":
+    if str(event.get("event", "")) != "surface_descriptor" or event.get("kind") != "world":
         return dict(event)
     compact = dict(event)
     payload = event.get("payload")
     if not isinstance(payload, Mapping):
         return compact
-    compact_payload = dict(payload)
-    for key in ("messages", "minimap", "overmap", "visible_local", "visible_entities", "visible_zones"):
-        compact_payload.pop(key, None)
-    compact["payload"] = compact_payload
+    compact["payload"] = compact_world_render_maps(payload)
     return compact
 
 

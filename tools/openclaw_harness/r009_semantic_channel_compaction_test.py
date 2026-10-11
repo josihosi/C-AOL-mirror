@@ -33,6 +33,109 @@ from startup_harness import (
 
 
 class R009SemanticChannelCompactionTest( unittest.TestCase ):
+    def test_oversized_current_world_keeps_public_navigation_and_visible_creatures(self):
+        """Current native facts survive the real bounded-channel/public-look route."""
+        import cockpit
+        from cockpit_evidence import decode
+        from gameplay_display import world_look
+
+        run_id = "current-navigation"
+        local = [
+            {"dx": dx, "dy": dy, "terrain": "floor", "visibility": "clear",
+             "passable": True, "fields": []}
+            for dy in range(-1, 2) for dx in range(-1, 2)
+        ]
+        entities = [{"name": "raven", "kind": "monster", "attitude": "neutral",
+                     "dx": -7, "dy": -7, "absolute_ms": [3093, 3482, 0]}]
+        payload = {
+            "avatar": json.dumps({"name": "Ada", "absolute_ms": [3100, 3489, 0]}),
+            "visible_local": json.dumps(local), "visible_entities": json.dumps(entities),
+            "visible_zones": "[]", "messages": '["You hear a noise."]',
+            "minimap": json.dumps({"schema": "caol-native-minimap-v1", "radius": 12,
+                                   "coordinate_system": "avatar_relative", "cells": local,
+                                   "render_padding": "x" * MAX_EVENT_BYTES}),
+            "overmap": json.dumps({"cells": [], "render_padding": "x" * MAX_EVENT_BYTES}),
+        }
+        world = {
+            "event": "surface_descriptor", "schema_version": 1, "run_id": run_id,
+            "surface_id": "world", "frame_id": "frame:262", "kind": "world",
+            "breadcrumbs": ["World"], "observed_turn": 5224143, "game_minutes": 7869,
+            "payload": payload, "valid_actions": [
+                {"id": "world.move.east", "stable_id": "", "label": "East", "enabled": True}],
+        }
+        child = {**world, "surface_id": "menu", "frame_id": "frame:263", "kind": "menu",
+                 "breadcrumbs": ["World", "Menu"], "payload": {"title": "Menu"},
+                 "valid_actions": []}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "native.log"
+            run_dir = root / "run"
+            run_dir.mkdir()
+            for current in (world, child):
+                with self.subTest(owner=current["kind"]):
+                    records = [world] if current is world else [world, child]
+                    source.write_text("".join(SEMANTIC_STEP_PREFIX + json.dumps(event) + "\n"
+                                              for event in records), encoding="utf-8")
+                    frame = current_semantic_step_frame(
+                        profile="navigation", run_dir=run_dir, run_id=run_id, start_offset=0,
+                        source_trace=source, history={},
+                    )
+                    reference = json.loads((run_dir / "semantic.native.full.log.ref.json").read_text())
+                    full = Path(reference["path"]).read_bytes()
+                    self.assertEqual(hashlib.sha256(full).hexdigest(), reference["sha256"])
+                    original_world = json.loads(full.splitlines()[0].split(SEMANTIC_STEP_PREFIX.encode(), 1)[1])
+                    self.assertEqual(original_world["payload"], payload)
+                    self.assertLessEqual((run_dir / "semantic.native.log").stat().st_size, MAX_EVENT_BYTES)
+                    channel = cockpit.CockpitRunChannel(lambda: frame)
+                    response = cockpit.CockpitService(run_channel=channel).call({"action": "game.observe"})
+                    self.assertTrue(response["ok"], response)
+                    observed = response["result"]
+                    self.assertEqual(observed["observation_id"], current["frame_id"])
+                    self.assertEqual(observed["surface_id"], current["surface_id"])
+                    facts = {key: decode(value) for key, value in observed["surface"]["facts"].items()}
+                    if current is child:
+                        self.assertEqual(facts, {"title": "Menu"})
+                        self.assertEqual(observed["advertised_actions"], [])
+                        continue
+                    self.assertEqual(facts["visible_local"], local)
+                    self.assertEqual(facts["visible_entities"], entities)
+                    self.assertEqual(facts["messages"], ["You hear a noise."])
+                    self.assertEqual(facts["minimap"]["radius"], 12)
+                    self.assertNotIn("cells", facts["minimap"])
+                    self.assertNotIn("overmap", facts)
+                    self.assertEqual(observed["advertised_actions"], ["world.move.east"])
+                    text = world_look({"current": {"facts": facts, "actions": []}}, show_local_map=True)
+                    self.assertIn("raven", text)
+                    self.assertNotIn("LOCAL MAP unavailable", text)
+
+    def test_oversized_navigation_facts_use_verified_payload_reference(self):
+        """A large fact set stays lossless; a corrupt reference grants no observation."""
+        run_id = "large-navigation"
+        payload = {"avatar": '{"name":"Ada"}', "visible_local": json.dumps([
+            {"dx": 1, "dy": 0, "passable": False, "terrain": "wall", "fields": ["fd_fire"],
+             "detail": "x" * MAX_EVENT_BYTES}]), "messages": "[]"}
+        descriptor = {
+            "event": "surface_descriptor", "schema_version": 1, "run_id": run_id,
+            "surface_id": "world", "frame_id": "frame:1", "kind": "world",
+            "breadcrumbs": ["World"], "payload": payload, "valid_actions": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            source = run_dir / "native.log"
+            source.write_text(SEMANTIC_STEP_PREFIX + json.dumps(descriptor) + "\n", encoding="utf-8")
+            _, owned = refresh_semantic_step_trace(
+                profile="navigation", run_dir=run_dir, run_id=run_id, start_offset=0, source_trace=source)
+            self.assertLessEqual(owned.stat().st_size, MAX_EVENT_BYTES)
+            events, status = read_semantic_step_trace(owned, run_dir, run_id)
+            self.assertEqual(status, "ok")
+            self.assertEqual(events[-1]["payload"], payload)
+            self.assertEqual(read_semantic_step_trace(owned, run_dir, "wrong-run")[1], "contamination")
+            reference = events[-1]["payload_ref"]
+            catalog = run_dir / reference["path"]
+            catalog.write_bytes(catalog.read_bytes().replace(b'wall', b'road', 1))
+            self.assertEqual(read_semantic_step_trace(owned, run_dir, run_id)[1],
+                             "invalid_surface_payload_reference")
+
     def test_retained_duration_receipt_does_not_overflow_the_bounded_channel(self) -> None:
         """One preserved correlation receipt replaces a stale suffix event."""
         run_id = "r009-duration-receipt-bound"
