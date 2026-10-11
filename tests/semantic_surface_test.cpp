@@ -2053,7 +2053,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         object.allow_omitted_members();
         const std::string kind = object.get_string( "event" );
         if( !semantic ) {
-            CHECK( kind.compare( 0, 5, "raid_" ) == 0 || kind == "turn" || diagnostic_kinds.count( kind ) );
+            CHECK( ( kind.compare( 0, 5, "raid_" ) == 0 || kind == "turn" || diagnostic_kinds.count( kind ) ) );
             raid_diagnostic = raid_diagnostic || kind.compare( 0, 5, "raid_" ) == 0;
             if( diagnostic_kinds.count( kind ) ) {
                 retained_diagnostic_kinds.insert( kind );
