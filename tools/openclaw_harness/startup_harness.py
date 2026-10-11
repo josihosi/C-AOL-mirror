@@ -5125,7 +5125,6 @@ def semantic_step_source_trace(profile: str, run_dir: Optional[Path] = None) -> 
                     debug_trace = config_dir_for_profile(resolve_profile_name(profile)) / "debug.log"
                     try:
                         native_owner = latest_semantic_source_descriptor(native_trace)
-                        mirrored_owner = latest_semantic_source_descriptor(debug_trace)
                     except ValueError as error:
                         if str(error) != "incomplete_native_semantic_record":
                             raise
@@ -5133,6 +5132,15 @@ def semantic_step_source_trace(profile: str, run_dir: Optional[Path] = None) -> 
                         # for switching to an older mirror. Receipt collection
                         # can read its complete prefix; action reads still refuse
                         # this partial owner through the strict record reader.
+                        return native_trace
+                    try:
+                        mirrored_owner = latest_semantic_source_descriptor(debug_trace)
+                    except ValueError:
+                        # debug.log is an optional, profile-shared mirror, not
+                        # the run-owned authority. Its logger can append text
+                        # to a JSON record. Keep that record invalid and leave
+                        # it available for diagnosis, but do not let its parse
+                        # failure replace or poison the canonical stream.
                         return native_trace
                     if native_owner and mirrored_owner and \
                             native_owner.get("run_id") and \

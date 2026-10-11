@@ -136,6 +136,47 @@ class DescriptorIntakeTest(unittest.TestCase):
                 self.frame()
             self.assertFalse((self.run / "semantic.requests.jsonl").exists())
 
+    def test_optional_malformed_mirror_does_not_poison_canonical_observe(self):
+        self.trace.write_bytes(self.encode(self.descriptor))
+        mirror = self.config / "debug.log"
+        mirror.write_bytes(self.encode(self.descriptor).rstrip(b"\n") + b" skipped=0\n")
+        with self.assertRaisesRegex(ValueError, "malformed_native_semantic_record"):
+            startup.latest_semantic_source_descriptor(mirror)
+        self.assertEqual(startup.semantic_step_source_trace("fixture", self.run), self.trace)
+        observed = self.service().call({"action": "game.observe"})
+        self.assertTrue(observed["ok"], observed)
+        self.assertEqual(observed["result"]["observation_id"], self.descriptor["frame_id"])
+        self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+        # The original diagnostic is neither rewritten nor accepted as JSON.
+        self.assertTrue(mirror.read_bytes().endswith(b" skipped=0\n"))
+
+    def test_canonical_corruption_and_foreign_run_still_refuse_with_valid_mirror(self):
+        mirror = self.config / "debug.log"
+        mirror.write_bytes(self.encode({**self.descriptor, "sequence": 99}))
+        for raw in (
+            self.encode(self.descriptor).rstrip(b"\n") + b" skipped=0\n",
+            self.encode(self.descriptor)[:-1],
+            self.encode({**self.descriptor, "run_id": "foreign"}),
+        ):
+            with self.subTest(raw=raw[-40:]):
+                self.trace.write_bytes(raw)
+                observed = self.service().call({"action": "game.observe"})
+                self.assertFalse(observed["ok"], observed)
+                self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+
+    def test_foreign_process_or_run_mirror_cannot_replace_current_canonical_owner(self):
+        self.trace.write_bytes(self.encode(self.descriptor))
+        for field in ("run_id", "process_instance"):
+            with self.subTest(field=field):
+                (self.config / "debug.log").write_bytes(self.encode({
+                    **self.descriptor, field: "foreign", "sequence": 99,
+                    "frame_id": "foreign-frame"}))
+                self.assertEqual(startup.semantic_step_source_trace("fixture", self.run), self.trace)
+                observed = self.service().call({"action": "game.observe"})
+                self.assertTrue(observed["ok"], observed)
+                self.assertEqual(observed["result"]["observation_id"], self.descriptor["frame_id"])
+                self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+
     def test_public_current_choice_dispatches_once_stale_and_disabled_refuse(self):
         self.publish(self.encode(self.descriptor))
         service = self.service()
