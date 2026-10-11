@@ -4323,7 +4323,7 @@ simulation_owner_transition_result transition_external_simulation_owner(
 {
     const active_outing_state *current = site.active_external_outing();
     if( current == nullptr || !current->is_active() ||
-        current->crossing.pending() ||
+        !crossing_receipt_allows_runtime_progress( *current ) ||
         !simulation_owner_state_is_consistent( *current ) ||
         current->activity_id != expected_activity_id ||
         current->generation != expected_generation || current->owner != expected_owner ||
@@ -4350,9 +4350,8 @@ simulation_owner_transition_result transition_external_simulation_owner(
     next->owner = next_owner;
     next->handoff_epoch++;
     next->last_advanced_minutes = current_minutes;
-    // Generic scout sorties use this owner transition rather than the structural
-    // pair handoff.  Keep the same save acknowledgement gate so a local-contact
-    // crossing cannot be credited until its exact actor/owner cursor is durable.
+    // Generic scouts use the same committed runtime ownership evidence as
+    // structural pairs. Durability is acknowledged only by complete publication.
     record_committed_owner_crossing( *next, expected_owner );
     if( next_owner == simulation_owner::abstract ) {
         next->local_handoff.clear();
@@ -4687,8 +4686,9 @@ local_handoff_commit_result commit_local_pair_handoff( site_record &site,
         return local_handoff_commit_result::rejected;
     }
     const active_outing_state *current = site.active_external_outing();
-    if( current == nullptr || !current->is_active() ) {
-        record_result( "rejected", "handoff has no active outing" );
+    if( current == nullptr || !current->is_active() ||
+        !crossing_receipt_allows_runtime_progress( *current ) ) {
+        record_result( "rejected", "handoff has no authenticated active owner" );
         return local_handoff_commit_result::rejected;
     }
     if( current->owner == simulation_owner::local ) {
@@ -5018,9 +5018,9 @@ local_handoff_commit_result commit_local_pair_dematerialization( site_record &si
         return record_result( local_handoff_commit_result::rejected,
                               "dematerialization has no active outing" );
     }
-    if( current->crossing.pending() ) {
+    if( !crossing_receipt_allows_runtime_progress( *current ) ) {
         return record_result( local_handoff_commit_result::rejected,
-                              "dematerialization blocked by pending crossing persistence" );
+                              "dematerialization crossing does not authenticate the current owner" );
     }
     if( current->owner == simulation_owner::abstract ) {
         const local_handoff_commit_result result =
@@ -5141,7 +5141,8 @@ bool begin_abstract_pair_homeward_resume( site_record &site,
     if( site.retired_empty_site || !outing.is_active() ||
         outing.kind != outing_kind::structural_sortie || outing.schema_version < 10 ||
         outing.owner != simulation_owner::abstract ||
-        !simulation_cursor_matches( outing, expected_cursor ) || outing.crossing.pending() ||
+        !simulation_cursor_matches( outing, expected_cursor ) ||
+        !crossing_receipt_allows_runtime_progress( outing ) ||
         !local_handoff_snapshot_is_empty( outing.local_handoff ) ||
         !scout_phase_requires_homeward_only( outing.phase ) ||
         !outing.actor_departure_observed || outing.member_ids.size() != 2 ||
@@ -5259,6 +5260,7 @@ std::optional<site_record> local_pair_abstract_resume_progress_candidate( const 
     if( site.retired_empty_site || outing.kind != outing_kind::structural_sortie ||
         outing.schema_version < 7 || outing.owner != simulation_owner::abstract ||
         !simulation_cursor_matches( outing, expected_cursor ) ||
+        !crossing_receipt_allows_runtime_progress( outing ) ||
         !scout_phase_requires_homeward_only( outing.phase ) ||
         !outing.local_handoff.is_abstract_resume() ||
         outing.member_ids.size() != 2 || outing.local_handoff.members.size() != 2 ||
@@ -6037,7 +6039,8 @@ local_handoff_commit_result commit_scout_pair_watch_arrival(
         ( local ? outing.local_handoff.members.size() == 2 &&
           outing.local_handoff.is_active() && outing.local_handoff.cohesion_assembled &&
           !outing.local_handoff.cohesion_abort_return :
-          local_handoff_snapshot_is_empty( outing.local_handoff ) && !outing.crossing.pending() &&
+          local_handoff_snapshot_is_empty( outing.local_handoff ) &&
+          crossing_receipt_allows_runtime_progress( outing ) &&
           outing.actor_departure_observed &&
           ( outing.actor_route_waypoint == destination_waypoint - 1 ||
             outing.actor_route_waypoint == destination_waypoint ) );
@@ -6168,7 +6171,7 @@ bool record_structural_member_physical_return( site_record &site,
                ( outing.actor_departure_observed && outing.actor_route_waypoint > 0 &&
                  outing.actor_route_waypoint ==
                  static_cast<int>( outing.shared_route.size() ) - 1 ) ) &&
-             !outing.crossing.pending() ) ) ||
+             crossing_receipt_allows_runtime_progress( outing ) ) ) ||
         !scout_phase_requires_homeward_only( outing.phase ) ||
         !simulation_cursor_matches( outing, expected_cursor ) || current_minutes < 0 ||
         current_minutes < outing.last_advanced_minutes || !hostile_site_contains_omt( site, returned_omt ) ||
@@ -12034,13 +12037,24 @@ void world_state::clear()
 bool crossing_receipt_has_current_owner( const active_outing_state &outing )
 {
     const auto &crossing = outing.crossing;
+    // Legacy scout dispatch has native member routes, not a shared structural
+    // route. Its operation cursor stays at zero; do not invent a waypoint.
+    const bool route_cursor_matches = outing.kind == outing_kind::scout_sortie &&
+                                      outing.shared_route.empty() ?
+                                      crossing.cursor_waypoint == 0 && outing.waypoint_index == 0 :
+                                      crossing.cursor_waypoint >= 0 &&
+                                      crossing.cursor_waypoint < static_cast<int>( outing.shared_route.size() );
     return crossing.outcome == "committed" && !crossing.run_id.empty() && !crossing.activity_id.empty() &&
            crossing.activity_id == outing.activity_id && crossing.generation == outing.generation &&
            crossing.handoff_epoch == outing.handoff_epoch && crossing.actor_ids == outing.member_ids &&
            crossing.prior_owner != crossing.next_owner && crossing.next_owner == outing.owner &&
            crossing.cursor_minutes >= 0 && crossing.cursor_minutes <= outing.last_advanced_minutes &&
-           crossing.cursor_waypoint >= 0 &&
-           crossing.cursor_waypoint < static_cast<int>( outing.shared_route.size() );
+           route_cursor_matches;
+}
+
+bool crossing_receipt_allows_runtime_progress( const active_outing_state &outing )
+{
+    return outing.crossing.empty() || crossing_receipt_has_current_owner( outing );
 }
 
 std::vector<world_state::crossing_receipt_identity> world_state::acknowledge_persisted_crossings()
@@ -25528,7 +25542,7 @@ scout_resolution_effect apply_active_scout_observations( site_record &site,
     scout_resolution_effect effect;
     const bool terminal_abstract_return = expected_cursor.owner == simulation_owner::abstract &&
             scout_phase_requires_homeward_only( site.active_outing.phase ) &&
-            !site.active_outing.crossing.pending() && std::all_of(
+            crossing_receipt_allows_runtime_progress( site.active_outing ) && std::all_of(
                 observations.begin(), observations.end(), []( const active_member_observation &read ) {
         return read.state == active_member_observation_state::home ||
                read.state == active_member_observation_state::dead ||

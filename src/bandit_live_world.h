@@ -796,8 +796,15 @@ struct active_outing_state {
         std::string outcome;
         bool persistence_acknowledged = false;
 
+        // Pending describes disk publication, not an incomplete physical transfer.
         bool pending() const {
             return !activity_id.empty() && !persistence_acknowledged;
+        }
+        bool empty() const {
+            return actor_ids.empty() && run_id.empty() && activity_id.empty() && generation == 0 &&
+                   prior_owner == simulation_owner::abstract && next_owner == simulation_owner::abstract &&
+                   handoff_epoch == -1 && cursor_minutes == -1 && cursor_waypoint == -1 &&
+                   outcome.empty() && !persistence_acknowledged;
         }
         void clear() {
             *this = crossing_receipt();
@@ -1212,6 +1219,9 @@ struct site_record {
 // A crossing is historical evidence for this exact operation/owner epoch.
 // Its clock may precede current progress, but never belong to another owner.
 bool crossing_receipt_has_current_owner( const active_outing_state &outing );
+// Runtime callers still own body/container/lease validation. A committed owner
+// may progress before saving; only the complete-save owner acknowledges durability.
+bool crossing_receipt_allows_runtime_progress( const active_outing_state &outing );
 
 struct world_state {
     struct crossing_receipt_identity {

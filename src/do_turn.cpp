@@ -515,7 +515,7 @@ bool persist_live_bandit_local_projection_leases( const bandit_live_world::site_
                                  !( prior->owner == bandit_live_world::simulation_owner::local &&
                                     next->owner == bandit_live_world::simulation_owner::abstract &&
                                     next->handoff_epoch == prior->handoff_epoch + 1 &&
-                                    next->crossing.pending() &&
+                                    bandit_live_world::crossing_receipt_has_current_owner( *next ) &&
                                     next->crossing.prior_owner == prior->owner &&
                                     next->crossing.next_owner == next->owner &&
                                     next->crossing.actor_ids == prior->member_ids &&
@@ -528,7 +528,7 @@ bool persist_live_bandit_local_projection_leases( const bandit_live_world::site_
         return false;
     }
     if( !was_local && !hostile_owner_transition && !initial_hostile_contact &&
-        ( !next->crossing.pending() ||
+        ( !bandit_live_world::crossing_receipt_has_current_owner( *next ) ||
           next->crossing.prior_owner != bandit_live_world::simulation_owner::abstract ||
           next->crossing.next_owner != bandit_live_world::simulation_owner::local ||
           next->crossing.actor_ids != next->member_ids ) ) {
@@ -7978,7 +7978,7 @@ bool handoff_live_bandit_generic_scout_returns()
             outing.kind != bandit_live_world::outing_kind::scout_sortie ||
             outing.owner != bandit_live_world::simulation_owner::local ||
             !bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ||
-            outing.crossing.pending() || outing.member_ids.size() != 2 ) {
+            !bandit_live_world::crossing_receipt_allows_runtime_progress( outing ) || outing.member_ids.size() != 2 ) {
             continue;
         }
         const std::optional<bandit_live_world::simulation_advance_cursor> cursor =
@@ -8230,17 +8230,11 @@ bool live_bandit_native_body_owner_is_bound(
     if( crossing_receipt_has_current_owner( outing ) ) {
         return true;
     }
-    const auto &crossing = outing.crossing;
     const auto &snapshot = outing.local_handoff;
     return outing.owner == simulation_owner::abstract &&
            outing.kind == outing_kind::structural_sortie && outing.schema_version >= 10 &&
            snapshot.is_abstract_resume() &&
-           crossing.actor_ids.empty() && crossing.run_id.empty() && crossing.activity_id.empty() &&
-           crossing.generation == 0 && crossing.handoff_epoch == -1 &&
-           crossing.prior_owner == simulation_owner::abstract &&
-           crossing.next_owner == simulation_owner::abstract &&
-           crossing.cursor_minutes == -1 && crossing.cursor_waypoint == -1 &&
-           crossing.outcome.empty() && !crossing.persistence_acknowledged &&
+           outing.crossing.empty() &&
            !snapshot.cohesion_assembled && !snapshot.cohesion_abort_return &&
            snapshot.cohesion_deadline_minutes == -1 && snapshot.cohesion_reroutes_used == 0;
 }
@@ -8769,7 +8763,8 @@ bool pending_abstract_scout_watch_order( const npc &member )
         outing.owner != bandit_live_world::simulation_owner::abstract || outing.schema_version < 10 ||
         bandit_live_world::structural_outing_uses_frontier_route( outing ) ||
         outing.phase != bandit_live_world::scout_phase::observing ||
-        outing.alternate_watch_reposition_pending || outing.crossing.pending() ||
+        outing.alternate_watch_reposition_pending ||
+        !bandit_live_world::crossing_receipt_allows_runtime_progress( outing ) ||
         outing.local_handoff.is_active() || outing.local_handoff.is_abstract_resume() ||
         !outing.actor_departure_observed || outing.member_ids.size() != 2 ||
         outing.member_ids[0] == outing.member_ids[1] ||
@@ -8819,7 +8814,8 @@ std::set<character_id> prepare_live_bandit_abstract_scout_travel()
         auto &outing = site.active_outing;
         if( !outing.is_active() || outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             outing.owner != bandit_live_world::simulation_owner::abstract ||
-            outing.local_handoff.is_abstract_resume() || outing.crossing.pending() ||
+            outing.local_handoff.is_abstract_resume() ||
+            !bandit_live_world::crossing_receipt_allows_runtime_progress( outing ) ||
             ( outing.schema_version < 10 &&
               !bandit_live_world::structural_outing_uses_frontier_route( outing ) ) ||
             ( outing.selected_watch_kind == bandit_live_world::structural_watch_kind::none &&
@@ -9138,7 +9134,7 @@ bool record_live_bandit_structural_member_returns()
                    ( outing.actor_departure_observed && outing.actor_route_waypoint > 0 &&
                      outing.actor_route_waypoint ==
                      static_cast<int>( outing.shared_route.size() ) - 1 ) ) &&
-                 !outing.crossing.pending() ) ) ||
+                 bandit_live_world::crossing_receipt_allows_runtime_progress( outing ) ) ) ||
             !bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ) {
             continue;
         }
@@ -15076,7 +15072,7 @@ std::set<character_id> complete_live_bandit_homeward_boundary_steps(
             // the complete pair, then use its existing generic owner transaction.
             // Leaving the bubble is not a receipt of arrival at home.
             const bool ready = outing.owner == bandit_live_world::simulation_owner::local &&
-                               !outing.crossing.pending() && crossings.size() == 2 &&
+                               bandit_live_world::crossing_receipt_allows_runtime_progress( outing ) && crossings.size() == 2 &&
                                std::all_of( crossings.begin(), crossings.end(),
             [&site, &here]( const auto &crossing ) {
                 const auto stored = overmap_buffer.find_npc( crossing.first->getID() );

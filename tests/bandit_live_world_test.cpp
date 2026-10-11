@@ -2377,6 +2377,26 @@ TEST_CASE( "crossing receipt acknowledgement is typed reversible and round trips
     first.active_outing.crossing.outcome = "committed";
     world.sites.push_back( first );
 
+    CHECK( first.active_outing.crossing.pending() );
+    CHECK( bandit_live_world::crossing_receipt_allows_runtime_progress( first.active_outing ) );
+    for( const std::string defect : { "uncommitted", "run", "activity", "generation", "epoch",
+                                    "owner", "members", "future_cursor", "route_cursor", "partial" } ) {
+        CAPTURE( defect );
+        auto refused = first.active_outing;
+        if( defect == "uncommitted" ) { refused.crossing.outcome = "failed"; }
+        if( defect == "run" ) { refused.crossing.run_id.clear(); }
+        if( defect == "activity" ) { refused.crossing.activity_id += "-foreign"; }
+        if( defect == "generation" ) { ++refused.crossing.generation; }
+        if( defect == "epoch" ) { ++refused.crossing.handoff_epoch; }
+        if( defect == "owner" ) { refused.crossing.next_owner = bandit_live_world::simulation_owner::abstract; }
+        if( defect == "members" ) { refused.crossing.actor_ids = { character_id( 2 ) }; }
+        if( defect == "future_cursor" ) { ++refused.crossing.cursor_minutes; }
+        if( defect == "route_cursor" ) { refused.crossing.cursor_waypoint = 3; }
+        if( defect == "partial" ) { refused.crossing.activity_id.clear(); }
+        CHECK_FALSE( bandit_live_world::crossing_receipt_allows_runtime_progress( refused ) );
+        refused.crossing.persistence_acknowledged = true;
+        CHECK_FALSE( bandit_live_world::crossing_receipt_allows_runtime_progress( refused ) );
+    }
     auto tokens = world.acknowledge_persisted_crossings();
     REQUIRE( tokens.size() == 1 );
     CHECK( tokens.front().site_id == first.site_id );
@@ -5333,7 +5353,14 @@ TEST_CASE( "bandit_live_world_simulation_owner_handoff_is_shared_and_token_check
                scout_site, scout_id, scout_generation, simulation_owner::abstract, 0, 11, 0, 13 ) ==
            simulation_owner_transition_result::rejected );
     CHECK( serialize_world( scout_world ) == local_scout );
-    REQUIRE( scout_world.acknowledge_persisted_crossings().size() == 1 );
+    REQUIRE( scout_site.active_outing.shared_route.empty() );
+    REQUIRE( scout_site.active_outing.crossing.pending() );
+    CHECK( bandit_live_world::crossing_receipt_allows_runtime_progress( scout_site.active_outing ) );
+    auto wrong_route_cursor = scout_site.active_outing;
+    ++wrong_route_cursor.crossing.cursor_waypoint;
+    CHECK_FALSE( bandit_live_world::crossing_receipt_allows_runtime_progress( wrong_route_cursor ) );
+    ++wrong_route_cursor.waypoint_index;
+    CHECK_FALSE( bandit_live_world::crossing_receipt_allows_runtime_progress( wrong_route_cursor ) );
 
     REQUIRE( bandit_live_world::advance_external_simulation(
                  scout_site, scout_id, scout_generation, simulation_owner::local, 1, 12, 0, 13 ) ==
@@ -5347,6 +5374,8 @@ TEST_CASE( "bandit_live_world_simulation_owner_handoff_is_shared_and_token_check
              simulation_owner_transition_result::applied );
     CHECK( scout_site.find_member( character_id( 45500 ) )->state ==
            bandit_live_world::member_state::outbound );
+    REQUIRE( scout_site.active_outing.crossing.pending() );
+    REQUIRE( scout_world.acknowledge_persisted_crossings().size() == 1 );
     const bandit_live_world::world_state loaded_scout = round_trip_world( scout_world );
     REQUIRE( loaded_scout.sites.size() == 1 );
     CHECK( loaded_scout.sites.front().active_outing.owner == simulation_owner::abstract );
@@ -29722,7 +29751,7 @@ TEST_CASE( "bandit_live_world_covert_burn_is_one_atomic_owner_transition",
                    resumed_site, second_dematerialization,
         []( const bandit_live_world::local_handoff_member_snapshot & ) { return true; },
         []( const bandit_live_world::local_handoff_member_snapshot & ) {} ) ==
-               bandit_live_world::local_handoff_commit_result::rejected );
+               bandit_live_world::local_handoff_commit_result::applied );
         CHECK( round_trip_world( world ).sites.front().active_outing.crossing.pending() );
         REQUIRE( world.acknowledge_persisted_crossings().size() == 1 );
         REQUIRE( bandit_live_world::commit_local_pair_dematerialization(
@@ -29730,7 +29759,7 @@ TEST_CASE( "bandit_live_world_covert_burn_is_one_atomic_owner_transition",
         []( const bandit_live_world::local_handoff_member_snapshot & ) {
             return true;
         }, []( const bandit_live_world::local_handoff_member_snapshot & ) {} ) ==
-                 bandit_live_world::local_handoff_commit_result::applied );
+                 bandit_live_world::local_handoff_commit_result::unchanged );
         REQUIRE( resumed_site.active_outing.local_handoff.is_abstract_resume() );
         const bandit_live_world::structural_outing_result second_abstract_tick =
             bandit_live_world::advance_structural_bounty_outings( world, 6, {} );
@@ -30931,7 +30960,7 @@ TEST_CASE( "bandit_live_world_covert_burn_is_one_atomic_owner_transition",
                        site, dematerialization,
             []( const bandit_live_world::local_handoff_member_snapshot & ) { return true; },
             []( const bandit_live_world::local_handoff_member_snapshot & ) {} ) ==
-                   bandit_live_world::local_handoff_commit_result::rejected );
+                   bandit_live_world::local_handoff_commit_result::unchanged );
             CHECK( round_trip_world( world ).sites.front().active_outing.crossing.pending() );
             REQUIRE( world.acknowledge_persisted_crossings().size() == 1 );
             CHECK( bandit_live_world::commit_local_pair_dematerialization(
@@ -53495,7 +53524,8 @@ namespace
 // durable cargo and completed-assessment time. No model chooses NPC movement.
 // CAOL_R067_ACTIONS replays a printed prefix; invalid commands have a distinct
 // fingerprint so a reducer cannot substitute a broken precondition for a bug.
-void r067_stateful_return( const std::string &scenario, bool completed_cannibal = false )
+void r067_stateful_return( const std::string &scenario, bool completed_cannibal = false,
+                           bool unsaved_crossings = false )
 {
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     const bool old_metric = trigdist;
@@ -53640,6 +53670,10 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
         if( !outing.is_active() ) { return; }
         demand( outing.generation == generation && outing.member_ids == ids, "actors.outing_identity" );
         demand( bandit_live_world::current_external_simulation_cursor( site ).has_value(), "owner.valid_cursor" );
+        if( unsaved_crossings && local_to_abstract + abstract_to_local > 0 &&
+            !outing.crossing.empty() ) {
+            demand( !outing.crossing.persistence_acknowledged, "persistence.runtime_did_not_acknowledge_save" );
+        }
         if( outing.owner != previous_owner ) {
             if( outing.owner == bandit_live_world::simulation_owner::local ) { ++abstract_to_local; }
             else { ++local_to_abstract; }
@@ -53806,9 +53840,6 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
             before_producer( "overmap_npc_move" );
             process_overmap_npc_move_for_test();
             clock_and_owner();
-            if( scene.site().active_outing.crossing.pending() ) {
-                demand( g->save(), "persistence.crossing_save" );
-            }
         }
     };
     const auto minute_tick = [&]() {
@@ -53837,7 +53868,14 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
     const auto choice = rng_sequence( 4, 0, 99, static_cast<int>( seed ) );
     std::string commands;
     if( const char *replay = std::getenv( "CAOL_R067_ACTIONS" ) ) { commands = replay; }
-    else if( scenario == "completed" ) {
+    else if( unsaved_crossings ) {
+        // Two complete bubble round trips without a save between crossings.
+        // The actual materializer, unload, scheduler and physical return own
+        // every transfer; publication and full reload happen only after home.
+        // Let the native cadence consume a physical step before re-entry;
+        // re-entering at the dematerialization timestamp is rightly refused.
+        commands = "r,o,u,m8,r,o,u,m5,h,s,l,m2,s";
+    } else if( scenario == "completed" ) {
         commands = "l,r,o,s,l,u,o,s,l,m3,r,o,s,l,d,t" + std::to_string( choice[0] % 2 + 2 ) +
                    ",e,a,s,l,h,s,l,m2,s";
     } else if( scenario == "completed_casualty" ) {
@@ -53869,6 +53907,11 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
             for( int i = 0; i < count; ++i ) {
                 executed.back() = std::string( 1, op ) + std::to_string( i + 1 );
                 if( op == 't' ) { local_tick(); } else { minute_tick(); }
+            }
+            if( unsaved_crossings && executed.size() == 4 ) {
+                demand( local_to_abstract == 1 && scene.site().active_outing.owner ==
+                        bandit_live_world::simulation_owner::abstract,
+                        "owner.first_unsaved_dematerialization" );
             }
         } else if( op == 's' ) { strict_snapshot(); }
         else if( op == 'l' ) {
@@ -58144,7 +58187,7 @@ TEST_CASE( "crossing publication failures preserve live execution and the prior 
     const bool retry = GENERATE( false, true );
     CAPTURE( boundary, retry );
     r055_scene scene;
-    scene.load( false, true, false, "tests/data/r067_pair_cohesion_5556981.json" );
+    scene.load( false, true, false, "tests/data/r067_handover_stability_8108.json" );
     const auto ids = scene.site().active_outing.member_ids;
     const auto name = world_generator->active_world->world_name;
     const auto path = world_generator->active_world->folder_path().get_unrelative_path();
@@ -58156,7 +58199,22 @@ TEST_CASE( "crossing publication failures preserve live execution and the prior 
     const auto prior_second = r067_handover_actor_key( scene.actor( ids[1].get_value() ) );
     const auto prior_point = save_continuity::prior_point( path );
     REQUIRE( prior_point );
-    // Native unloading and the production dematerializer produce this crossing.
+    // Admit a fresh local owner through the actual paired materializer. The
+    // old local component fixture has no crossing provenance and is correctly
+    // refused by native body custody; no receipt is injected to bypass that.
+    const auto origin = scene.actor( ids[0].get_value() ).pos_abs_sm() - point( 4, 4 );
+    get_map().load( tripoint_abs_sm( origin.xy(), 1 ), false );
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 48, 1 ), false );
+    get_map().ter_set( get_avatar().pos_bub(), ter_id( "t_floor" ) );
+    for( int z : { 0, 1 } ) {
+        get_map().invalidate_map_cache( z ); get_map().build_map_cache( z, true );
+    }
+    REQUIRE( materialize_live_bandit_structural_handoffs_for_test() );
+    g->reload_npcs();
+    REQUIRE( scene.site().active_outing.owner == bandit_live_world::simulation_owner::local );
+    REQUIRE( scene.site().active_outing.crossing.pending() );
+    for( const auto id : ids ) { REQUIRE( scene.actor( id.get_value() ).is_active() ); }
+    // Native unloading and dematerialization perform the second unsaved crossing.
     get_map().load( scene.actor( ids[0].get_value() ).pos_abs_sm() + point( 30, 30 ), false );
     get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 48, 0 ), false );
     g->reload_npcs();
@@ -58193,15 +58251,30 @@ TEST_CASE( "crossing publication failures preserve live execution and the prior 
     REQUIRE( save_continuity::incomplete( path ) );
     REQUIRE( save_continuity::prior_point( path ) );
     CHECK( save_continuity::prior_point( path )->turn == prior_point->turn );
+    REQUIRE( scene.site().active_outing.crossing.pending() );
+    const auto first_position = scene.actor( ids[0].get_value() ).pos_abs();
+    const auto second_position = scene.actor( ids[1].get_value() ).pos_abs();
+    calendar::turn += 5_minutes - ( calendar::turn - calendar::turn_zero ) % 5_minutes;
+    process_overmap_npc_move_for_test();
+    REQUIRE( scene.actor( ids[0].get_value() ).pos_abs() != first_position );
+    REQUIRE( scene.actor( ids[1].get_value() ).pos_abs() != second_position );
+    REQUIRE( scene.site().active_outing.crossing.pending() );
+    CHECK_FALSE( scene.site().active_outing.crossing.persistence_acknowledged );
+    const auto progressed_world = serialize_world( overmap_buffer.global_state.bandit_live_world );
+    const auto progressed_first = r067_handover_actor_key( scene.actor( ids[0].get_value() ) );
+    const auto progressed_second = r067_handover_actor_key( scene.actor( ids[1].get_value() ) );
     if( retry ) {
         REQUIRE( g->save() );
         REQUIRE( scene.site().active_outing.crossing.persistence_acknowledged );
+        auto unpublished = overmap_buffer.global_state.bandit_live_world;
+        unpublished.find_site( scene.site().site_id )->active_outing.crossing.persistence_acknowledged = false;
+        CHECK( serialize_world( unpublished ) == progressed_world );
         const auto committed = serialize_world( overmap_buffer.global_state.bandit_live_world );
         r067_handover_reload( name );
         REQUIRE( bandit_live_world::current_external_simulation_cursor( scene.site() ) );
         CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == committed );
-        CHECK( r067_handover_actor_key( scene.actor( ids[0].get_value() ) ) == pending_first );
-        CHECK( r067_handover_actor_key( scene.actor( ids[1].get_value() ) ) == pending_second );
+        CHECK( r067_handover_actor_key( scene.actor( ids[0].get_value() ) ) == progressed_first );
+        CHECK( r067_handover_actor_key( scene.actor( ids[1].get_value() ) ) == progressed_second );
     } else {
         // Explicit restore is the existing protected-generation owner; strict
         // game load then compares the complete world and both native actors.
@@ -58310,7 +58383,6 @@ TEST_CASE( "completed retained assessment reaches physical home and produces one
             CHECK( scene.site().active_outing.member_return_receipts.empty() );
             CHECK_FALSE( scene.site().current_scout_report.is_present() );
         }
-        if( scene.site().active_outing.crossing.pending() ) { REQUIRE( g->save() ); }
     }
     REQUIRE( physical_home );
     REQUIRE_FALSE( scene.site().active_outing.is_active() );
@@ -58333,6 +58405,12 @@ TEST_CASE( "completed watch survives native danger and repeated bubble crossings
            "[bandit_live_world][handover_stability_067][handover_stateful_067][handover_stateful_danger_067]" )
 {
     r067_stateful_return( "completed", GENERATE( false, true ) );
+}
+
+TEST_CASE( "committed runtime crossings reach home without an intervening save",
+           "[bandit_live_world][runtime_crossing_continuity_067]" )
+{
+    r067_stateful_return( "completed", GENERATE( false, true ), true );
 }
 
 TEST_CASE( "completed shared watch returns through its actual surviving carrier",
@@ -58497,7 +58575,6 @@ TEST_CASE( "finite native incapacity ages after the real paired unload and resum
             CHECK( scene.site().active_outing.member_return_receipts.empty() );
             CHECK_FALSE( scene.site().current_scout_report.is_present() );
         }
-        if( scene.site().active_outing.crossing.pending() ) { REQUIRE( g->save() ); }
     }
     REQUIRE( physical_home );
     REQUIRE_FALSE( scene.site().active_outing.is_active() );
@@ -59568,7 +59645,6 @@ TEST_CASE( "authenticated same-owner abstract resumes consume body time and pair
             REQUIRE( current_external_simulation_cursor( scene.site() ) );
             CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
         }
-        if( scene.site().active_outing.crossing.pending() ) { REQUIRE( g->save() ); }
     }
     for( const auto id : ids ) {
         CHECK( scene.actor( id.get_value() ).pos_abs_omt() == scene.site().anchor );
