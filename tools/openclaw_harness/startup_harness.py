@@ -6771,7 +6771,13 @@ def finalize_cockpit_live_session(
                 "reason": "the current process generation could not be authenticated for cleanup",
             },
         }
-    payload = {**dict( report ), "cleanup": cleanup}
+    from process_performance import publish_alarm_evidence
+    performance_directory = Path(os.environ.get("OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR") or run_dir)
+    alarm_evidence = publish_alarm_evidence(
+        performance_directory, run_id=str(report.get("run_id", "")),
+        binding_id=str(report.get("binding_id", "")),
+    )
+    payload = {**dict( report ), "cleanup": cleanup, "performance_evidence": alarm_evidence}
     ensure_dir( final_path.parent )
     transcript = payload.get("action_observation_sequence")
     if isinstance(transcript, ArchiveSequence):
@@ -6781,6 +6787,7 @@ def finalize_cockpit_live_session(
     return {
         "cleanup": cleanup,
         "final_report_ref": final_path.name,
+        "performance_evidence": alarm_evidence,
     }
 
 

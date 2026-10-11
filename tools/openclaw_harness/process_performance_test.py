@@ -26,6 +26,10 @@ class PerformanceTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
+        self.evidence_store = self.directory / "retained-evidence"
+        store_patch = patch("evidence_display.STORE", self.evidence_store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
 
     def recorder(self, samples):
         return perf.ProcessPerformance(self.directory, pid=73, run_id="run-a", binding_id="binding-a",
@@ -289,6 +293,199 @@ class PerformanceTest(unittest.TestCase):
                                    duration=duration, wall=turn * 60.0 + 59),
                  "waiting_generation": generation})
 
+    def test_alarm_collect_ordinary_finish_and_cleanup_keep_original_bound_evidence(self):
+        self.collect_finish_and_retrieve_alarm(early_spike=False)
+
+    def test_early_spike_phase_survives_window_trim_finish_and_cleanup(self):
+        self.collect_finish_and_retrieve_alarm(early_spike=True)
+
+    def collect_finish_and_retrieve_alarm(self, *, early_spike):
+        from cockpit import CockpitRunChannel, CockpitService
+        from cockpit_witness_test import frame
+        from play_cli import PlayerClient
+        from evidence_display import recover, encoded, bounded
+        import startup_harness
+
+        session = self.directory / "session"
+        session.mkdir()
+        self.directory = session
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        perf.write_json(session / "bridge.manifest.json", {"binding_id": "binding-a"})
+        perf.write_json(session / "status.json", {"binding_id": "binding-a", "state": "ready"})
+        perf.write_json(session / "play-client.json", {"binding_id": "binding-a", "pending": {
+            "request_id": "trade-yes-a", "request": {"action": "game.act", "action_id": "menu.confirm"},
+            "submitted_unix_seconds": 9.0,
+        }})
+        waiting = {} if early_spike else {"waiting_generation": 1}
+        start = {**self.turn_event(1, "start", sequence=1, wall=10), **waiting}
+        self.append_trace(start,
+                          {**self.turn_event(1, "begin", sequence=2, phase="input", wall=10.1),
+                           "event": "turn_phase"},
+                          {**self.turn_event(1, "end", sequence=3, wall=12), "event": "turn_phase"},
+                          {**self.turn_event(1, "end", sequence=4,
+                                            duration=3 if early_spike else .2, wall=15), **waiting})
+        if early_spike:
+            for turn in range(2, 11):
+                self.append_trace(self.turn_event(turn, "start", sequence=turn * 2 + 1),
+                                  self.turn_event(turn, "end", sequence=turn * 2 + 2, duration=.01))
+        else:
+            self.waiting_turns(2, [.2] * 99)
+        client = PlayerClient(session)
+        with patch("play_cli.Bridge.response_status", return_value={"ok": False, "error": "response_not_available_or_stale"}), \
+                patch("play_cli.Bridge.send_request") as send:
+            result = client.collect(wait_seconds=0)
+        send.assert_not_called()
+        self.assertTrue(result["performance_alarm"])
+        kind = "spike" if early_spike else "waiting_slow"
+        original = next(a for a in result["turn_assessment"]["alarms"] if a["kind"] == kind)
+        if early_spike:
+            self.assertEqual(result["turn_assessment"]["metric"]["sample_count"], 4)
+            self.assertEqual(result["turn_assessment"]["metric"]["max_seconds"], .01)
+        report_dir = session.parent / "reports"
+        report_dir.mkdir()
+        run_alive = {"pid": 73, "run_id": "run-a", "alive": True}
+        channel = CockpitRunChannel(frame, binding_id="binding-a", read_process_state=lambda: run_alive,
+            finalize_session=lambda report: startup_harness.finalize_cockpit_live_session(
+                report_dir, 73, report, cleanup_process=False))
+        service = CockpitService(run_channel=channel)
+        service.call({"action": "game.observe"})
+        run_alive["alive"] = False
+        observed = service.call({"action": "game.observe"})["result"]
+        with patch.dict(os.environ, {"OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(session)}):
+            reply = service.call({"action": "run.finish", "observation_id": observed["observation_id"],
+                                  "stop_reason": "outcome_reported", "unused_authority": "released",
+                                  "outcome": {"summary": "Paid goods home", "verdict": "positive"}})
+        self.assertTrue(reply.get("ok"), reply)
+        final = reply["result"]
+        handle = final["performance_evidence"]["evidence"]
+        self.assertLess(len(encoded(final["performance_evidence"])), 1200)
+        self.assertLess(len(encoded(bounded(reply, budget=4096, directory=self.evidence_store))), 4097)
+        self.assertEqual(client.state["pending"]["request_id"], "trade-yes-a")
+        shutil.rmtree(session)
+        cold_final = json.loads((report_dir / "cockpit.live.final.json").read_text())
+        self.assertEqual(cold_final["performance_evidence"], final["performance_evidence"])
+        index = recover(handle["sha256"], self.evidence_store)
+        handle = next(handle for handle in index["alarms"] if handle["kind"] == kind)
+        alarm = recover(handle["evidence"]["sha256"], self.evidence_store)
+        self.assertEqual(alarm["alarm"], original)
+        self.assertEqual(alarm["owner"]["run_id"], "run-a")
+        self.assertEqual(alarm["owner"]["binding_id"], "binding-a")
+        self.assertEqual(alarm["owner"]["source_binding"], {"runtime_binding_sha256": "binary-a"})
+        self.assertEqual(alarm["operation"]["request_id"], "trade-yes-a")
+        self.assertEqual(alarm["window"]["sample_count"], 1 if early_spike else 100)
+        self.assertEqual(len(alarm["measurements"]), 1 if early_spike else 100)
+        self.assertEqual(alarm["measurements"][-1]["game_turn"], 101 if early_spike else 200)
+        if early_spike:
+            self.assertEqual(alarm["measurements"][0]["simulation_seconds"], 3)
+            slow_handle = next(handle for handle in index["alarms"] if handle["kind"] == "slow_turn")
+            slow = recover(slow_handle["evidence"]["sha256"], self.evidence_store)
+            self.assertEqual(slow["measurements"], alarm["measurements"])
+            self.assertEqual(slow["window"], alarm["window"])
+            self.assertIn(slow["alarm"], result["turn_assessment"]["alarms"])
+        self.assertEqual([event["stage"] for event in alarm["measurements"][0]["phase_events"]],
+                         ["begin", "end"])
+        self.assertEqual(alarm["measurements"][0]["phase_events"][0]["phase"], "input")
+        self.assertIn("end", alarm["measurements"][-1])
+        self.assertEqual(alarm["phase_scope"], "Only native phase facts observed in this alarm window; not a complete subphase profile.")
+        self.assertEqual(final["stop_detail"]["gameplay_outcome"]["verdict"], "positive")
+        self.assertNotIn("target_predicate_receipt", final["stop_detail"])
+
+    def test_retained_alarm_is_original_across_recovery_duplicate_poll_and_foreign_publish(self):
+        from evidence_display import recover
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        self.waiting_turns(1, [.2] * 100)
+        original = perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "p1"})
+        first = perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a")
+        index = recover(first["evidence"]["sha256"], self.evidence_store)
+        before = recover(index["alarms"][0]["evidence"]["sha256"], self.evidence_store)
+        self.assertEqual(before["alarm"], original["alarms"][0])
+        self.assertEqual(before["measurements"][0]["phase_events"], [])
+        self.assertEqual(before["window"]["first"], before["measurements"][0]["measurement_id"])
+        files = set(self.evidence_store.iterdir())
+        duplicate = perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "p2"})
+        self.assertEqual(duplicate["alarms"], [])
+        self.assertEqual(perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a"), first)
+        self.assertEqual(set(self.evidence_store.iterdir()), files)
+        self.waiting_turns(101, [.001] * 100)
+        recovered = perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "p3"})
+        self.assertEqual(recovered["recoveries"][0]["kind"], "waiting_recovery")
+        self.assertEqual(perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a"), first)
+        self.assertEqual(recover(index["alarms"][0]["evidence"]["sha256"], self.evidence_store), before)
+        for run, binding in [("foreign", "binding-a"), ("run-a", "foreign")]:
+            result = perf.publish_alarm_evidence(self.directory, run_id=run, binding_id=binding)
+            self.assertEqual(result["status"], "unavailable")
+            self.assertNotIn("evidence", result)
+
+    def test_alarm_retention_failure_is_honest_and_retry_keeps_original_context(self):
+        from evidence_display import recover
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        self.waiting_turns(1, [.2] * 100)
+        with patch("evidence_display.retain", side_effect=OSError("fixture storage refused")):
+            failed = perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "p1"})
+            published = perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a")
+        self.assertEqual(failed["alarms"][0]["kind"], "waiting_slow")
+        self.assertEqual(failed["alarm_retention"]["status"], "failed")
+        self.assertEqual(published["status"], "failed")
+        self.assertNotIn("evidence", published)
+        retried = perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "p2"})
+        self.assertEqual(retried["alarms"], [])
+        self.assertEqual(retried["alarm_retention"]["status"], "retained")
+        final = perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a")
+        index = recover(final["evidence"]["sha256"], self.evidence_store)
+        record = recover(index["alarms"][0]["evidence"]["sha256"], self.evidence_store)
+        self.assertEqual(record["operation"], {"request_id": "p1"})
+        self.assertEqual(record["alarm"], failed["alarms"][0])
+        with patch("evidence_display.retain", side_effect=OSError("fixture index publication refused")):
+            self.assertEqual(perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a")["status"], "failed")
+
+    def test_one_poll_keeps_each_original_waiting_crossing_window(self):
+        from evidence_display import recover
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        self.waiting_turns(1, [.2] * 100 + [.001] * 100 + [.4] * 100)
+        result = perf.collect_turn_assessment(self.directory, "binding-a")
+        alarms = [alarm for alarm in result["alarms"] if alarm["kind"] == "waiting_slow"]
+        self.assertEqual(len(alarms), 2)
+        final = perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a")
+        index = recover(final["evidence"]["sha256"], self.evidence_store)
+        records = [recover(handle["evidence"]["sha256"], self.evidence_store)
+                   for handle in index["alarms"] if handle["kind"] == "waiting_slow"]
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertIn(record["alarm"], alarms)
+            self.assertEqual(record["window"]["sample_count"], 100)
+            self.assertAlmostEqual(sum(item["simulation_seconds"] for item in record["measurements"]) / 100,
+                                   record["alarm"]["mean_seconds"])
+        first = min(records, key=lambda record: record["measurements"][-1]["game_turn"])
+        self.assertEqual(first["measurements"][0]["game_turn"], 101)
+        self.assertEqual(first["measurements"][-1]["game_turn"], 200)
+        self.assertNotEqual(records[0]["identity"], records[1]["identity"])
+
+    def test_no_alarm_retains_no_payload_and_single_turn_alarm_has_real_window(self):
+        from evidence_display import recover
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        self.append_trace(self.turn_event(1, "start", sequence=1),
+                          self.turn_event(1, "end", sequence=2, duration=.02))
+        quiet = perf.collect_turn_assessment(self.directory, "binding-a")
+        self.assertEqual(quiet["alarm_retention"]["status"], "none_observed")
+        self.assertFalse(self.evidence_store.exists())
+        self.append_trace(self.turn_event(2, "start", sequence=3),
+                          self.turn_event(2, "end", sequence=4, duration=3))
+        result = perf.collect_turn_assessment(self.directory, "binding-a")
+        final = perf.publish_alarm_evidence(self.directory, run_id="run-a", binding_id="binding-a")
+        index = recover(final["evidence"]["sha256"], self.evidence_store)
+        self.assertEqual(len(index["alarms"]), 2)
+        for handle in index["alarms"]:
+            record = recover(handle["evidence"]["sha256"], self.evidence_store)
+            self.assertIn(record["alarm"], result["alarms"])
+            self.assertEqual(record["window"]["sample_count"], 1)
+            self.assertEqual(record["measurements"][0]["simulation_seconds"], 3)
+            self.assertEqual(record["operation"], None)
+
     def test_waiting_alarm_crossing_recovery_and_duplicate_collection(self):
         self.recorder([sample(1, 0)])
         self.turn_config()  # Four-turn generic window must not shorten waiting's 100 turns.
@@ -514,11 +711,15 @@ class PerformanceTest(unittest.TestCase):
                                      "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(self.directory)}), \
                 patch.object(startup, "pid_is_alive", return_value=True), \
                 patch.object(startup, "pid_command", return_value="owned-game"), \
+                patch.object(startup, "current_owned_process_generation", return_value={
+                    "status": "alive", "pid": 73, "expected": {
+                        "pid": 73, "birth_identity": "birth-a", "command": "owned-game"}}), \
                 patch("process_performance.ProcessPerformance", return_value=recorder), \
                 patch.object(startup, "execute_semantic_act", return_value=outcome), \
                 patch.object(startup, "finalize_cockpit_live_session", return_value={"cleaned": True}):
             service = startup.open_cockpit_game_service(profile="test", run_dir=self.directory,
                         run_id="run-a", trace_start_offset=0, pid=73, session_id="test", live_session=True)
+            self.addCleanup(service.live_channel.archive.close)
             result = service.live_channel._dispatch_advertised_action(frame, "world.pause")
             self.assertEqual(result, outcome)
             recorder.begin_action.assert_called_once_with(frame, "world.pause")
