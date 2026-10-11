@@ -14,6 +14,8 @@ import time
 from typing import Any, Mapping
 import uuid
 
+from harness_log_window import semantic_trace_identity
+
 from r009_technical_witness import sample_child_resources, complete_child_resource_interval
 
 
@@ -228,45 +230,45 @@ def _trace_path(directory: Path) -> Path | None:
     return candidate
 
 
-def _parse_turn_trace(path: Path, *, start_offset: int, run_id: str) -> tuple[list[dict], int, str | None]:
-    """Incrementally parse complete native records without treating a hot tail as corruption."""
+def _parse_turn_trace(path: Path, *, start_offset: int, run_id: str,
+                      source_state: dict | None = None) -> tuple[list[dict], int, str | None]:
+    """Read a sampled generation one complete record at a time, not the whole log."""
+    events: list[dict] = []
     try:
-        size = path.stat().st_size
-        if start_offset < 0 or start_offset > size:
-            return [], 0, "trace_rewound_or_replaced"
         with path.open("rb") as stream:
+            generation = semantic_trace_identity(stream)
+            size = os.fstat(stream.fileno()).st_size
+            replaced = source_state is not None and source_state.get("generation") not in (None, generation)
+            if source_state is not None:
+                source_state["generation"] = generation
+            if start_offset < 0 or start_offset > size or replaced:
+                return [], 0, "trace_rewound_or_replaced"
             stream.seek(start_offset)
-            data = stream.read()
+            cursor = start_offset
+            while stream.tell() < size:
+                raw = stream.readline(size - stream.tell())
+                if not raw.endswith(b"\n"):
+                    break
+                marker = raw.find(TURN_TRACE_PREFIX.encode("utf-8"))
+                if marker >= 0:
+                    try:
+                        event = json.loads(raw[marker + len(TURN_TRACE_PREFIX):])
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        return [], start_offset, "malformed_native_turn_trace"
+                    if isinstance(event, dict) and event.get("event") in {
+                            "turn", "turn_phase", "request_transport", "receipt", "surface_receipt",
+                            "surface_descriptor"}:
+                        if event.get("run_id") != run_id:
+                            return [], start_offset, "native_turn_trace_run_mismatch"
+                        event["_evidence_handle"] = {"path": str(path), "offset": cursor + marker,
+                                                     "end": cursor + len(raw), "generation": generation}
+                        event.pop("valid_actions", None)
+                        event.pop("payload", None)
+                        events.append(event)
+                cursor += len(raw)
     except OSError:
         return [], start_offset, "native_turn_trace_unavailable"
-    complete = data.rsplit(b"\n", 1)
-    if len(complete) == 1:
-        return [], start_offset, None
-    body, _partial = complete
-    cursor = start_offset
-    events: list[dict] = []
-    for raw in body.splitlines(keepends=True):
-        line = raw.rstrip(b"\r\n")
-        marker = line.find(TURN_TRACE_PREFIX.encode("utf-8"))
-        if marker >= 0:
-            try:
-                event = json.loads(line[marker + len(TURN_TRACE_PREFIX):])
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return [], start_offset, "malformed_native_turn_trace"
-            if not isinstance(event, dict) or event.get("event") not in {
-                    "turn", "turn_phase", "request_transport", "receipt", "surface_receipt",
-                    "surface_descriptor"}:
-                cursor += len(raw)
-                continue
-            if event.get("run_id") != run_id:
-                return [], start_offset, "native_turn_trace_run_mismatch"
-            event["_evidence_handle"] = {"path": str(path), "offset": cursor + marker,
-                                         "end": cursor + len(raw)}
-            events.append(event)
-        cursor += len(raw)
-    # ``body`` excludes the delimiter after its final complete record.  Advance
-    # over it as well, otherwise the next idempotent poll re-reads that record.
-    return events, start_offset + len(data) - len(_partial), None
+    return events, cursor, None
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -380,14 +382,20 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
         state = {"schema": "caol-performance-turn-state-v1", "owner": owner,
                  "trace_path": str(path), "offset": 0, "completed": [], "active": {},
                  "emitted": []}
+    source_state = {"generation": state.get("trace_generation")}
     events, next_offset, trace_error = _parse_turn_trace(path, start_offset=int(state.get("offset", 0)),
-                                                          run_id=str(owner["run_id"]))
+                                                       run_id=str(owner["run_id"]), source_state=source_state)
     if trace_error == "trace_rewound_or_replaced":
-        # A save/load or trace generation reset cannot inherit the old window.
-        state.update(offset=0, completed=[], active={}, emitted=[], waiting={},
-                     reset_reason="native_trace_rewound_or_replaced")
+        # Compaction changes physical coordinates, not the native turn identity.
+        # Retain sampled phase facts and alarm deduplication; replayed retained
+        # records below are ignored by their bounded native event identities.
+        if not source_state["generation"].get("generation"):
+            # Legacy logs have no producer compaction identity. A rewind is
+            # a new sampling window, as it was before bounded journals.
+            state.update(completed=[], active={}, emitted=[], waiting={}, source_event_ids=[])
+        state.update(offset=0, reset_reason="native_trace_rewound_or_replaced")
         events, next_offset, trace_error = _parse_turn_trace(path, start_offset=0,
-                                                              run_id=str(owner["run_id"]))
+                                                          run_id=str(owner["run_id"]), source_state=source_state)
     if trace_error:
         return {"status": "unavailable", "reason": trace_error,
                 "trace_path": str(path), "native_receipts_preserved": True}
@@ -403,7 +411,16 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
     native_process_instance = state.get("native_process_instance")
     last_source_event = state.get("last_source_event")
     last_accepted_receipt = state.get("last_accepted_receipt")
+    source_event_ids = list(state.get("source_event_ids", []))[-512:]
+    seen_source_events = set(source_event_ids)
     for event in events:
+        if event.get("event") in {"turn", "turn_phase"}:
+            event_id = ":".join(str(event.get(key, "")) for key in
+                                ("process_instance", "sequence", "event", "stage", "turn_id", "phase"))
+            if event_id in seen_source_events:
+                continue
+            seen_source_events.add(event_id)
+            source_event_ids.append(event_id)
         event_type = event.get("event")
         last_source_event = _event_summary(event)
         if event_type in {"receipt", "surface_receipt"} and event.get("accepted") is True:
@@ -632,7 +649,9 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
                                                    ("sample_count", "window_turns", "window_first", "window_last")},
                      configuration_reference=config.get("reference") if config else None,
                      configuration_provenance=config["provenance"] if config else None)
-    state.update(offset=next_offset, completed=completed, active=active, emitted=list((emitted | current_active))[-512:],
+    state.update(offset=next_offset, trace_generation=source_state["generation"],
+                 source_event_ids=source_event_ids[-512:],
+                 completed=completed, active=active, emitted=list((emitted | current_active))[-512:],
                  waiting=waiting_state,
                  active_alarm_keys=sorted(current_active), last_source_event=last_source_event,
                  pending_observation=pending_observation,

@@ -237,9 +237,37 @@ class PerformanceTest(unittest.TestCase):
         self.assertEqual(result["alarms"], [])
         self.assertAlmostEqual(result["current_incomplete_turn"]["age_seconds"], .3)
 
+    def test_journal_compaction_keeps_phase_samples_without_duplicate_alarms(self):
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        header = {"event": "trace_generation", "run_id": "run-a", "generation": "first"}
+        start = self.turn_event(1, "start", sequence=1, wall=10)
+        phase_begin = {**self.turn_event(1, "begin", sequence=2, phase="input", wall=10.1),
+                       "event": "turn_phase"}
+        self.append_trace(header, start, phase_begin)
+        first = perf.collect_turn_assessment(self.directory, "binding-a", now_unix_seconds=10.2)
+        self.assertEqual(first["metric"]["sample_count"], 0)
+        phase_end = {**self.turn_event(1, "end", sequence=3, wall=10.2), "event": "turn_phase"}
+        end = self.turn_event(1, "end", sequence=4, duration=3, wall=13.2)
+        path = self.directory / "semantic.native.events.jsonl"
+        temporary = path.with_suffix(".next")
+        # Replayed beginnings can appear before the old offset in a larger
+        # compacted file. Native sequence/identity, not physical bytes, dedupes.
+        temporary.write_text("".join(perf.TURN_TRACE_PREFIX + json.dumps(event) + "\n" for event in
+                            ({**header, "generation": "second"}, start, phase_begin, phase_end, end)))
+        temporary.replace(path)
+        result = perf.collect_turn_assessment(self.directory, "binding-a", now_unix_seconds=13.2)
+        self.assertEqual(result["metric"]["sample_count"], 1)
+        state = perf.read_json(self.directory / perf.TURN_STATE_NAME)
+        self.assertEqual(len(state["completed"][0]["phase_events"]), 2)
+        self.assertTrue(any(alarm["kind"] == "spike" for alarm in result["alarms"]))
+        repeat = perf.collect_turn_assessment(self.directory, "binding-a", now_unix_seconds=13.2)
+        self.assertEqual(repeat["metric"]["sample_count"], 1)
+        self.assertEqual(repeat["alarms"], [])
+
     def test_native_turn_producer_emits_parseable_precise_json(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "do_turn.cpp").read_text(encoding="utf-8")
-        start = source.index('stream << "openclaw_harness_semantic_step: ')
+        start = source.index('stream << "{\\"event\\":')
         end = source.index(";\n    }", start)
         chain = source[start + len("stream << "):end]
         values = {

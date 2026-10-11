@@ -226,7 +226,6 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
     if( !openclaw_harness_turn_trace_enabled() ) {
         return;
     }
-    const char *const path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" );
     const char *const run_id = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
     static const auto process_instance = std::chrono::system_clock::now().time_since_epoch().count();
     const player_activity &activity = get_avatar().activity;
@@ -235,14 +234,14 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
     static std::uint64_t sequence = 0;
     const auto wall_time = std::chrono::duration_cast<std::chrono::duration<double>>(
                                std::chrono::system_clock::now().time_since_epoch() ).count();
-    std::ofstream stream( path, std::ios::app | std::ios::binary );
-    if( stream ) {
+    std::ostringstream stream;
+    {
         // The native wall clock is used to distinguish a newly resumed
         // simulation slice from time spent at an input/save boundary.  The
         // default six significant digits would quantize epoch timestamps by
         // thousands of seconds, so retain a round-trippable double here.
         stream << std::setprecision( std::numeric_limits<double>::max_digits10 );
-        stream << "openclaw_harness_semantic_step: {\"event\":\"" << event
+        stream << "{\"event\":\"" << event
                << "\",\"stage\":\"" << stage
                << "\",\"run_id\":\"" << openclaw_harness_turn_trace_quote( run_id )
                << "\",\"process_instance\":\"" << process_instance
@@ -254,8 +253,9 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
                << ",\"simulation_seconds\":" << simulation_seconds
                << ",\"waiting_generation\":" << waiting_generation
                << ",\"phase\":\"" << phase
-               << "\",\"owner\":\"game::do_turn\"}\n";
+               << "\",\"owner\":\"game::do_turn\"}";
     }
+    write_native_semantic_event( stream.str() );
 }
 
 class openclaw_harness_turn_trace

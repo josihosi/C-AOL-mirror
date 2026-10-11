@@ -1,16 +1,170 @@
 #include "semantic_surface.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <deque>
+#include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <utility>
 
+#include "debug.h"
+#include "filesystem.h"
 #include "json.h"
 
 namespace
 {
 thread_local semantic_surface_manager *active_manager = nullptr;
+
+// Keep bounded recent diagnostics plus the current input transaction.  A large
+// action catalog is not truncated to meet a diagnostic budget.
+class native_semantic_journal
+{
+    private:
+        struct record {
+            std::size_t sequence;
+            std::string text;
+        };
+
+    public:
+        native_semantic_journal( std::string path, std::string run ) :
+            path( std::move( path ) ), run( std::move( run ) ) {}
+
+        bool append( const std::string &event ) {
+            std::istringstream input( event );
+            TextJsonIn jsin( input );
+            const TextJsonObject object = jsin.get_object();
+            object.allow_omitted_members();
+            if( object.get_string( "run_id", "" ) != run ) {
+                return false;
+            }
+            const std::string kind = object.get_string( "event", "" );
+            const std::string prefix = kind.compare( 0, 5, "raid_" ) == 0 ? "" :
+                                       "openclaw_harness_semantic_step: ";
+            auto row = std::make_shared<const record>( record { ++sequence, prefix + event + '\n' } );
+            if( kind == "surface_descriptor" ) {
+                current_frame = object.get_string( "frame_id", "" );
+                pins["surface"] = row;
+                if( current_frame == accepted_result ) {
+                    pins["accepted_successor"] = row;
+                }
+                if( current_frame == receipt_result ) {
+                    pins["receipt_successor"] = row;
+                }
+            } else if( kind == "surface_receipt" ) {
+                pins["receipt"] = row;
+                receipt_result = object.get_string( "resulting_frame_id", "" );
+                pins.erase( "receipt_successor" );
+                if( object.get_bool( "accepted", false ) ) {
+                    pins["accepted_receipt"] = row;
+                    accepted_result = receipt_result;
+                    pins.erase( "accepted_successor" );
+                    if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
+                        pins.count( "surface" ) ) {
+                        pins["accepted_successor"] = pins["surface"];
+                    }
+                }
+                if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
+                    pins.count( "surface" ) ) {
+                    pins["receipt_successor"] = pins["surface"];
+                }
+            } else if( kind == "frame" || kind == "native_save_completion" || kind == "travel" ) {
+                pins[kind] = row;
+            } else if( kind == "receipt" ) {
+                const std::string action = object.get_string( "action_id", "" );
+                pins[action.compare( 0, 5, "wait." ) == 0 ? "duration_receipt" :
+                     "movement_receipt"] = row;
+            }
+            recent.push_back( row );
+            recent_bytes += row->text.size();
+            while( recent_bytes > diagnostic_bytes || recent.size() > 256 ) {
+                recent_bytes -= recent.front()->text.size();
+                recent.pop_front();
+                ++discarded_recent_records;
+            }
+
+            std::size_t pinned_bytes = 0;
+            for( const auto &pin : pins ) {
+                pinned_bytes += pin.second->text.size();
+            }
+            // Compact before another write can grow past the live authority
+            // plus the diagnostic allowance. Initial publication also replaces
+            // any unrelated previous process's file with a fresh generation.
+            if( !published || disk_bytes + row->text.size() > diagnostic_bytes + pinned_bytes + 512 ) {
+                return compact();
+            }
+            std::ofstream output( path, std::ios::binary | std::ios::app );
+            output << row->text;
+            output.close();
+            if( !output ) {
+                return false;
+            }
+            disk_bytes += row->text.size();
+            return true;
+        }
+
+    private:
+        bool compact() {
+            std::vector<std::shared_ptr<const record>> rows;
+            for( const auto &pin : pins ) {
+                if( std::find( recent.begin(), recent.end(), pin.second ) == recent.end() &&
+                    std::find( rows.begin(), rows.end(), pin.second ) == rows.end() ) {
+                    rows.push_back( pin.second );
+                }
+            }
+            rows.insert( rows.end(), recent.begin(), recent.end() );
+            std::sort( rows.begin(), rows.end(), []( const auto &left, const auto &right ) {
+                return left->sequence < right->sequence;
+            } );
+            const std::string temporary = path + ".next";
+            std::ofstream output( temporary, std::ios::binary | std::ios::trunc );
+            // This marker makes replacement observable on filesystems whose
+            // inode identities are unavailable. It never grants native input.
+            const auto instance = std::chrono::system_clock::now().time_since_epoch().count();
+            output << "openclaw_harness_semantic_step: ";
+            JsonOut header( output );
+            header.start_object();
+            header.member( "event", "trace_generation" );
+            header.member( "run_id", run );
+            header.member( "generation", std::to_string( instance ) + '-' +
+                           std::to_string( ++generation ) );
+            header.member( "recent_records_discarded", discarded_recent_records );
+            header.member( "diagnostic_byte_limit", diagnostic_bytes );
+            header.end_object();
+            output << '\n';
+            for( const auto &row : rows ) {
+                output << row->text;
+            }
+            const auto bytes = output.tellp();
+            output.close();
+            if( bytes < 0 || !output || !rename_file( temporary, path ) ) {
+                std::error_code error;
+                std::filesystem::remove( temporary, error );
+                return false;
+            }
+            disk_bytes = static_cast<std::size_t>( bytes );
+            published = true;
+            return true;
+        }
+
+        static constexpr std::size_t diagnostic_bytes = 4 * 1024 * 1024;
+        std::string path;
+        std::string run;
+        std::string current_frame;
+        std::string accepted_result;
+        std::string receipt_result;
+        std::map<std::string, std::shared_ptr<const record>> pins;
+        std::deque<std::shared_ptr<const record>> recent;
+        std::size_t recent_bytes = 0;
+        std::size_t disk_bytes = 0;
+        std::size_t generation = 0;
+        std::size_t sequence = 0;
+        std::size_t discarded_recent_records = 0;
+        bool published = false;
+};
 
 bool same_actions( const std::vector<semantic_action_descriptor> &left,
                    const std::vector<semantic_action_descriptor> &right )
@@ -27,6 +181,40 @@ bool same_actions( const std::vector<semantic_action_descriptor> &left,
     return true;
 }
 } // namespace
+
+bool write_native_semantic_event( const std::string &event )
+{
+    const char *run = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
+    const char *bound = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+    const char *path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" );
+    if( !run || !bound || !path || !*run || !*path || std::string( run ) != bound ) {
+        return false;
+    }
+    static std::mutex mutex;
+    const std::lock_guard<std::mutex> lock( mutex );
+    static std::string identity;
+    static std::unique_ptr<native_semantic_journal> journal;
+    const std::string next_identity = std::string( run ) + '\n' + path;
+    if( identity != next_identity ) {
+        identity = next_identity;
+        journal = std::make_unique<native_semantic_journal>( path, run );
+    }
+    static bool failure_reported = false;
+    bool written = false;
+    try {
+        written = journal->append( event );
+    } catch( const std::exception & ) {
+        // A failed publication is not authority. Keep the failure diagnostic
+        // small; never mirror the discarded action catalog into debug.log.
+    }
+    if( !written && !failure_reported ) {
+        DebugLog( D_ERROR, DC_ALL ) << "Native semantic journal publication failed for run " << run;
+    } else if( written && failure_reported ) {
+        DebugLog( D_INFO, DC_ALL ) << "Native semantic journal publication resumed for run " << run;
+    }
+    failure_reported = !written;
+    return written;
+}
 
 semantic_surface_manager::semantic_surface_manager( std::string run_id ) : run_id_( std::move( run_id ) )
 {

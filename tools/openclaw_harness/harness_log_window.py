@@ -1,9 +1,9 @@
 """Bound disposable diagnostic logs without rewriting native authority.
 
 A completed bridge response can observe an activity still advancing natively.
-In-place compaction can then truncate receipts or successors appended during
-the copy.  Keep the run-owned native event stream append-only; its readers
-already bound their projections.  The profile debug log remains disposable.
+In-place bridge compaction can truncate receipts appended during the copy.
+The native producer owns its bounded journal and atomic generation changes;
+bridge cleanup never rewrites that authority. The profile debug log is disposable.
 """
 from __future__ import annotations
 
@@ -12,6 +12,38 @@ import os
 from pathlib import Path
 import stat
 from typing import Any
+
+
+def semantic_trace_identity(stream) -> dict[str, Any]:
+    """Identify the opened generation, including replacements with larger files.
+
+    The native journal's short first record identifies in-place replacement on
+    platforms where inode identity is unavailable. This is cursor metadata,
+    never an input grant; readers still validate every native record.
+    """
+    position = stream.tell()
+    info = os.fstat(stream.fileno())
+    stream.seek(0)
+    first = stream.readline(1024)
+    stream.seek(position)
+    generation = ""
+    prefix = b"openclaw_harness_semantic_step: "
+    if first.startswith(prefix) and first.endswith(b"\n"):
+        try:
+            event = json.loads(first[len(prefix):])
+            if isinstance(event, dict) and event.get("event") == "trace_generation":
+                generation = str(event.get("generation", ""))
+        except (ValueError, UnicodeError):
+            pass  # The authority reader diagnoses malformed records.
+    return {"device": int(info.st_dev), "inode": int(info.st_ino), "generation": generation}
+
+
+def semantic_trace_path_identity(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as stream:
+            return semantic_trace_identity(stream)
+    except OSError:
+        return {}  # Authoritative record reading still reports the I/O failure.
 
 
 MAX_LOG_BYTES = 24 * 1024 * 1024

@@ -743,6 +743,81 @@ struct OutputDebugStreamA : public std::ostream {
 
 namespace
 {
+// A debug log is a current diagnostic window, not an append-only archive.
+// The sink owns replacement so a bridge cannot truncate a concurrent write.
+class bounded_debug_stream : public std::ostream
+{
+    private:
+        class buffer : public std::streambuf
+        {
+            public:
+                explicit buffer( std::string path ) : path( std::move( path ) ) {
+                    std::error_code error;
+                    const auto size = std::filesystem::file_size( this->path, error );
+                    bytes = error ? 0 : size;
+                    output.open( this->path, std::ios::binary | std::ios::app );
+                }
+                int sync() override {
+                    output.flush();
+                    return output ? 0 : -1;
+                }
+                int_type overflow( int_type value ) override {
+                    if( traits_type::eq_int_type( value, traits_type::eof() ) ) {
+                        return sync() == 0 ? traits_type::not_eof( value ) : traits_type::eof();
+                    }
+                    const char character = traits_type::to_char_type( value );
+                    return xsputn( &character, 1 ) == 1 ? value : traits_type::eof();
+                }
+                std::streamsize xsputn( const char *data, std::streamsize count ) override {
+                    std::streamsize written = 0;
+                    while( written < count && output ) {
+                        if( bytes >= limit && !replace() ) {
+                            break;
+                        }
+                        const std::streamsize available = static_cast<std::streamsize>( limit - bytes );
+                        const std::streamsize part = std::min( count - written, available );
+                        output.write( data + written, part );
+                        if( !output ) {
+                            break;
+                        }
+                        written += part;
+                        bytes += static_cast<std::size_t>( part );
+                    }
+                    return written;
+                }
+            private:
+                bool replace() {
+                    const std::string temporary = path + ".next";
+                    std::ofstream replacement( temporary, std::ios::binary | std::ios::trunc );
+                    const std::string marker = "[Earlier diagnostic log window discarded]\n";
+                    replacement << marker;
+                    replacement.close();
+                    if( !replacement ) {
+                        return false;
+                    }
+                    output.close();
+                    if( !rename_file( temporary, path ) ) {
+                        std::error_code error;
+                        std::filesystem::remove( temporary, error );
+                        std::cerr << "Diagnostic log window replacement failed: " << path << '\n';
+                        return false;
+                    }
+                    output.open( path, std::ios::binary | std::ios::app );
+                    bytes = marker.size();
+                    return bool( output );
+                }
+                static constexpr std::size_t limit = 8 * 1024 * 1024;
+                std::string path;
+                std::ofstream output;
+                std::size_t bytes = 0;
+        } buffer_;
+    public:
+        explicit bounded_debug_stream( const std::string &path ) :
+            std::ostream( nullptr ), buffer_( path ) {
+            rdbuf( &buffer_ );
+        }
+};
+
 struct DebugFile {
     void init( DebugOutput, const cata_path &filename );
     void deinit();
@@ -785,24 +860,13 @@ void DebugFile::init( DebugOutput output_mode, const cata_path &filename )
     std::shared_ptr<std::ostringstream> str_buffer = std::dynamic_pointer_cast<std::ostringstream>
             ( file );
 
-    bool rename_failed = false;
-    const cata_path oldfile = filename + ".prev";
     switch( output_mode ) {
         case DebugOutput::std_err:
             file = std::shared_ptr<std::ostream>( &std::cerr, null_deleter() );
             break;
         case DebugOutput::file: {
             this->filename = filename;
-            // Continue with the old log file if it's smaller than 1 MiB
-            namespace fs = std::filesystem;
-            if( fs::exists( fs::path( filename ) )
-                && fs::file_size( fs::path( filename ) ) >= 1024 * 1024 ) {
-                std::error_code ec;
-                fs::rename( fs::path( filename ), fs::path( oldfile ), ec );
-                rename_failed = bool( ec );
-            }
-            file = std::make_shared<std::ofstream>(
-                       filename.generic_u8string(), std::ios::out | std::ios::app );
+            file = std::make_shared<bounded_debug_stream>( filename.generic_u8string() );
         }
         break;
         default:
@@ -817,13 +881,6 @@ void DebugFile::init( DebugOutput output_mode, const cata_path &filename )
     *file << "\n\n-----------------------------------------\n";
     *file << get_time() << " : Starting log.";
     DebugLog( D_INFO, D_MAIN ) << "Cataclysm DDA version " << getVersionString();
-    if( rename_failed ) {
-        DebugLog( D_ERROR, DC_ALL ) << "Moving the previous log file to "
-                                    << oldfile << " failed.\n"
-                                    << "Check the file permissions.  This "
-                                    "program will continue to use the "
-                                    "previous log file.";
-    }
     if( str_buffer && file ) {
         *file << str_buffer->str();
     }

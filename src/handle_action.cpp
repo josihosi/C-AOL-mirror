@@ -343,14 +343,7 @@ static bool openclaw_harness_semantic_step_trace_enabled()
 
 static void openclaw_harness_write_semantic_step_event( const std::string &event )
 {
-    const char *const path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" );
-    if( path == nullptr || path[0] == '\0' || event.empty() ) {
-        return;
-    }
-    std::ofstream stream( path, std::ios::app | std::ios::binary );
-    if( stream ) {
-        stream << "openclaw_harness_semantic_step: " << event << '\n';
-    }
+    write_native_semantic_event( event );
 }
 
 static std::string openclaw_harness_semantic_event_clock()
@@ -512,7 +505,6 @@ static void openclaw_harness_semantic_surface_descriptor(
               descriptor.kind == "world" ? openclaw_harness_live_hostile_operation_snapshot() : "null" )
           << ",\"valid_actions\":" << actions.str() << '}';
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
 }
 
 static void openclaw_harness_semantic_surface_receipt(
@@ -546,7 +538,6 @@ static void openclaw_harness_semantic_surface_receipt(
           << ",\"outcome\":" << openclaw_harness_quote_action_value(
                 receipt.outcome ) << '}';
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
 }
 
 // This handoff lasts for exactly one ACTION_SAVE execution.  The World
@@ -586,7 +577,6 @@ static void openclaw_harness_semantic_save_quit_completion(
           << ",\"artifact_identity\":{\"kind\":\"harness_run_directory\",\"value\":"
           << openclaw_harness_quote_action_value( artifact_identity ) << "}}";
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
 }
 
 static void openclaw_harness_semantic_request_transport(
@@ -607,7 +597,6 @@ static void openclaw_harness_semantic_request_transport(
           << ",\"queued\":" << ( transport.queued ? "true" : "false" )
           << ",\"wake_pending\":" << ( transport.wake_pending ? "true" : "false" ) << '}';
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
 }
 
 semantic_surface_manager &openclaw_harness_semantic_surface_manager()
@@ -661,7 +650,7 @@ void openclaw_harness_semantic_native_travel_event( const Character &player,
     const bool destination_cleared = !destination_present;
     const int turn = to_turns<int>( calendar::turn - calendar::turn_zero );
     std::ostringstream event;
-    event << "openclaw_harness_semantic_step: {\"event\":\"travel\",\"run_id\":"
+    event << "{\"event\":\"travel\",\"run_id\":"
           << openclaw_harness_quote_action_value( run_id )
           << ",\"travel_id\":" << openclaw_harness_quote_action_value(
               openclaw_harness_native_travel.travel_id )
@@ -686,7 +675,7 @@ void openclaw_harness_semantic_native_travel_event( const Character &player,
         event << ']';
     }
     event << '}';
-    DebugLog( D_INFO, DC_ALL ) << event.str();
+    write_native_semantic_event( event.str() );
 }
 } // namespace
 
@@ -1975,7 +1964,6 @@ static std::string openclaw_harness_semantic_step_frame(
           << ",\"visible_zones\":" << openclaw_harness_visible_zones( here, avatar_pos ) << '}'
           << ",\"valid_actions\":" << action_ids.str() << '}';
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
     return frame_id;
 }
 
@@ -2300,7 +2288,6 @@ static void openclaw_harness_semantic_step_receipt( const std::string &frame_id,
     // must retain this receipt so a live cockpit can bind the accepted wait
     // to its following activity frame.
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
 }
 
 static void openclaw_harness_semantic_movement_receipt( const std::string &frame_id,
@@ -2339,7 +2326,6 @@ static void openclaw_harness_semantic_movement_receipt( const std::string &frame
               here.ter( after_bub ).obj().id.str() )
           << ",\"observed_turn\":" << turn << '}';
     openclaw_harness_write_semantic_step_event( event.str() );
-    DebugLog( D_INFO, DC_ALL ) << "openclaw_harness_semantic_step: " << event.str();
 }
 
 static std::string openclaw_harness_semantic_movement_action_id( action_id action )

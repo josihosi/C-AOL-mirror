@@ -17,6 +17,10 @@ struct semantic_action_descriptor {
     bool enabled = true;
 };
 
+// One run-owned journal shared by native input, turn and encounter producers.
+// Diagnostic history is disposable; current input/receipt records are lossless.
+bool write_native_semantic_event( const std::string &event );
+
 struct semantic_surface_descriptor {
     int schema_version = 1;
     std::string run_id;

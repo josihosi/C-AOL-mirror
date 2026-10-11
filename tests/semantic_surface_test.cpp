@@ -3,6 +3,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <map>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -11,6 +15,9 @@
 #include "cata_scope_helpers.h"
 #include "character.h"
 #include "cursesdef.h"
+#include "debug.h"
+#include "json.h"
+#include "path_info.h"
 #include "debug_menu.h"
 #include "imgui/imgui.h"
 #include "inventory_ui.h"
@@ -21,6 +28,7 @@
 #include "popup.h"
 #include "player_helpers.h"
 #include "semantic_surface.h"
+#include "raid_decision_trace.h"
 #include "string_input_popup.h"
 #include "type_id.h"
 #include "ui_iteminfo.h"
@@ -1949,3 +1957,145 @@ TEST_CASE( "shared input ownership preserves bounded ordinary keyboard reads",
     else { CHECK( active_semantic_surface_manager() == nullptr ); }
 }
 #endif
+
+TEST_CASE( "native journal bounds diagnostics while preserving current authority",
+           "[semantic_surface][native_log_window]" )
+{
+    namespace fs = std::filesystem;
+    const fs::path directory = fs::temp_directory_path() /
+                               ( "caol-native-window-" + std::to_string(
+                                     std::chrono::steady_clock::now().time_since_epoch().count() ) );
+    fs::create_directories( directory );
+    const fs::path trace = directory / "semantic.native.events.jsonl";
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", "OPENCLAW_HARNESS_RAID_ACTOR_TRACE" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const std::string &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    on_out_of_scope cleanup( [&] {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+        fs::remove_all( directory );
+    } );
+    const std::string run = directory.filename().string();
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    setenv( keys[3].c_str(), run.c_str(), 1 );
+    raid_decision_trace::recorder diagnostic_recorder( { run, run, run, trace.string() } );
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    int dispatched = 0;
+    std::vector<semantic_action_descriptor> actions;
+    for( int index = 0; index < 200; ++index ) {
+        actions.push_back( { "inventory.pick", "item:" + std::to_string( index ),
+                             std::string( 4096, 'x' ), true } );
+    }
+    const std::string surface = manager.push( "inventory", "Inventory", {}, actions,
+    [&]( const semantic_action_request & ) {
+        ++dispatched;
+        return semantic_action_dispatch_result{ true, "", "", false, true, "picked" };
+    } );
+    on_out_of_scope pop( [&] { manager.pop( surface ); } );
+    const semantic_surface_descriptor issued = *manager.top();
+    const semantic_action_request request = { run, issued.surface_id, issued.frame_id,
+            "pick-once", "inventory.pick", "item:199", {} };
+    REQUIRE( manager.submit_request( request ) );
+    REQUIRE( manager.consume_top_request() );
+    CHECK( dispatched == 1 );
+    REQUIRE( manager.publish( surface, { { "selection", "item:199" } }, actions ) );
+    // An action catalogue is lossless, including a non-front physical item.
+    const std::string diagnostic( 96 * 1024, 'd' );
+    for( int index = 0; index < 100; ++index ) {
+        std::ostringstream event;
+        event << "{\"event\":\"turn\",\"run_id\":\"" << run
+              << "\",\"diagnostic\":\"" << diagnostic << "\"}";
+        REQUIRE( write_native_semantic_event( event.str() ) );
+        diagnostic_recorder.record( "actor", "raid_actor_action", index, "\"action\":\"Pause\",\"npc_id\":5",
+                                    std::to_string( index ) );
+    }
+    std::ifstream input( trace );
+    std::string line;
+    std::string accepted_frame;
+    bool accepted = false;
+    bool current = false;
+    bool raid_diagnostic = false;
+    std::size_t discarded = 0;
+    while( std::getline( input, line ) ) {
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        const bool semantic = line.compare( 0, prefix.size(), prefix ) == 0;
+        std::istringstream body( semantic ? line.substr( prefix.size() ) : line );
+        TextJsonIn jsin( body );
+        const TextJsonObject object = jsin.get_object();
+        object.allow_omitted_members();
+        const std::string kind = object.get_string( "event" );
+        if( !semantic ) {
+            CHECK( kind.compare( 0, 5, "raid_" ) == 0 );
+            raid_diagnostic = true;
+        } else if( kind == "trace_generation" ) {
+            discarded = object.get_int( "recent_records_discarded" );
+        } else if( kind == "surface_descriptor" ) {
+            CHECK( object.get_array( "valid_actions" ).size() == 200 );
+            current = object.get_string( "frame_id" ) == manager.top()->frame_id;
+        } else if( kind == "surface_receipt" && object.get_bool( "accepted" ) ) {
+            CHECK( object.get_string( "request_id" ) == "pick-once" );
+            CHECK( object.get_string( "action_id" ) == "inventory.pick" );
+            accepted_frame = object.get_string( "resulting_frame_id" );
+            accepted = true;
+        }
+    }
+    CHECK( discarded > 0 );
+    CHECK( raid_diagnostic );
+    CHECK( current );
+    CHECK( accepted );
+    CHECK( accepted_frame == manager.top()->frame_id );
+    CHECK( fs::file_size( trace ) < 8 * 1024 * 1024 );
+    CHECK_FALSE( fs::exists( trace.string() + ".next" ) );
+    // Replay cannot spend the same request twice after physical compaction.
+    manager.submit_request( request );
+    manager.consume_top_request();
+    CHECK( dispatched == 1 );
+    const auto before = fs::file_size( trace );
+    unsetenv( keys[1].c_str() );
+    CHECK_FALSE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
+    CHECK( fs::file_size( trace ) == before );
+}
+
+TEST_CASE( "debug file is bounded during one long running process", "[debug][native_log_window]" )
+{
+    namespace fs = std::filesystem;
+    const fs::path directory = fs::temp_directory_path() /
+                               ( "caol-debug-window-" + std::to_string(
+                                     std::chrono::steady_clock::now().time_since_epoch().count() ) );
+    fs::create_directories( directory / "config" );
+    const std::string original = PATH_INFO::user_dir();
+    on_out_of_scope cleanup( [&] {
+        deinitDebug();
+        PATH_INFO::init_user_dir( original );
+        PATH_INFO::set_standard_filenames();
+        setupDebug( DebugOutput::std_err );
+        fs::remove_all( directory );
+    } );
+    deinitDebug();
+    PATH_INFO::init_user_dir( directory.string() + "/" );
+    PATH_INFO::set_standard_filenames();
+    setupDebug( DebugOutput::file );
+    const fs::path log = fs::path( PATH_INFO::debug() );
+    for( int index = 0; index < 100; ++index ) {
+        DebugLog( D_INFO, D_MAIN ) << std::string( 100 * 1024, 'd' );
+    }
+    DebugLog( D_INFO, D_MAIN ) << "latest-current-diagnostic";
+    deinitDebug();
+    REQUIRE( fs::exists( log ) );
+    CHECK( fs::file_size( log ) <= 8 * 1024 * 1024 );
+    CHECK_FALSE( fs::exists( log.string() + ".prev" ) );
+    CHECK_FALSE( fs::exists( log.string() + ".next" ) );
+    std::ifstream input( log );
+    const std::string retained( ( std::istreambuf_iterator<char>( input ) ),
+                                std::istreambuf_iterator<char>() );
+    CHECK( retained.find( "Earlier diagnostic log window discarded" ) != std::string::npos );
+    CHECK( retained.find( "latest-current-diagnostic" ) != std::string::npos );
+}

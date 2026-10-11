@@ -47,6 +47,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Pattern, Sequence, Set, Tuple
 
+from harness_log_window import semantic_trace_identity, semantic_trace_path_identity
 from bandit_live_world_audit import load_special_placements as load_bandit_special_placements
 from scenario_registry import (
     CHECKPOINT_CHAIN_MANIFEST_VERSION,
@@ -5317,9 +5318,9 @@ def compact_historical_surface_descriptor(event: Mapping[str, Any]) -> Dict[str,
     """Keep ownership history while dropping superseded action inventories.
 
     A surface descriptor is authoritative only while it is the latest native
-    frame.  Earlier descriptors still establish the receipt succession and
-    owner stack, while their full action lists remain available in each
-    immutable game-act artifact and in the native debug trace.  Retaining
+    frame. Earlier descriptors still establish receipt succession and the
+    owner stack. Current transaction results retain their observed fields;
+    superseded action catalogues are not a permanent native-log archive. Retaining
     those repeated lists can exhaust the bounded channel before a derived
     child can be safely closed.
     """
@@ -5351,33 +5352,42 @@ def compact_current_surface_descriptor_payload(event: Mapping[str, Any]) -> Dict
     return compact
 
 
+
 def refresh_semantic_step_trace(
     *, profile: str, run_dir: Path, run_id: str, start_offset: int,
     event_filter: Optional[Set[str]] = None, source_trace: Optional[Path] = None,
-    require_complete: bool = True,
+    require_complete: bool = True, source_generation: Optional[Mapping[str, Any]] = None,
+    source_state: Optional[MutableMapping[str, Any]] = None,
 ) -> tuple[Path, Path]:
     """Copy only the current run's bounded native trace into its owned artifact."""
     run_dir = Path(run_dir).resolve()
     source = (source_trace if source_trace is not None else
               semantic_step_source_trace(profile, run_dir)).resolve()
-    size = source.stat().st_size
-    if start_offset < 0 or start_offset > size:
-        # The game can truncate debug.log after the startup readiness sample,
-        # while it is still loading the selected world.  A fresh native frame
-        # is bound by run_id when the copied trace is read below, so restart
-        # only when this new log generation actually contains semantic data.
-        with source.open("rb") as handle:
-            if not semantic_trace_has_records(handle, size):
-                raise ValueError("semantic trace start offset is stale")
-        start_offset = 0
+    sampled = source.stat()
     selected_events = deque(maxlen=SEMANTIC_STEP_MAX_EVENTS)
     latest_duration_receipt: Optional[Dict[str, Any]] = None
     latest_movement_receipt: Optional[Dict[str, Any]] = None
     latest_surface_receipt: Optional[Dict[str, Any]] = None
     latest_surface_successor: Optional[Dict[str, Any]] = None
+    latest_accepted_receipt: Optional[Dict[str, Any]] = None
+    latest_accepted_successor: Optional[Dict[str, Any]] = None
     with source.open("rb") as handle:
+        generation = semantic_trace_identity(handle)
+        opened = os.fstat(handle.fileno())
+        same_file = (getattr(sampled, "st_dev", opened.st_dev), getattr(sampled, "st_ino", opened.st_ino)) == \
+            (opened.st_dev, opened.st_ino)
+        replaced = source_generation is not None and generation != source_generation
+        size = min(sampled.st_size, opened.st_size) if same_file and not replaced else opened.st_size
+        if replaced:
+            start_offset = 0
+        if start_offset < 0 or start_offset > size:
+            if not semantic_trace_has_records(handle, size):
+                raise ValueError("semantic trace start offset is stale")
+            start_offset = 0
+        if source_state is not None:
+            source_state.update(generation=generation, offset=start_offset)
         handle.seek(start_offset)
-        # ``debug.log`` remains hot while the game renders its HUD.  Iterate
+        # The native journal remains hot while the game renders its HUD. Iterate
         # only the byte range sampled above so appended lines cannot extend
         # this refresh, while keeping one line at a time in memory instead of
         # materializing the complete history and its split-line list.
@@ -5394,6 +5404,7 @@ def refresh_semantic_step_trace(
             event["_source_offset"] = source_offset
             event["_source_end"] = source_end
             event["_source_path"] = str(source)
+            event["_source_generation"] = generation
             # Legacy duration selections publish a semantic ``receipt`` and
             # then an actionless wait_activity frame.  The bounded suffix can
             # otherwise evict that only correlation record before the adapter
@@ -5418,11 +5429,17 @@ def refresh_semantic_step_trace(
             elif event.get("event") == "surface_descriptor" and latest_surface_receipt is not None and \
                     event.get("frame_id") == latest_surface_receipt.get("resulting_frame_id"):
                 latest_surface_successor = dict(event)
+            if event.get("event") == "surface_receipt" and event.get("accepted") is True:
+                latest_accepted_receipt = dict(event)
+                latest_accepted_successor = latest_surface_successor
+            elif event.get("event") == "surface_descriptor" and latest_accepted_receipt is not None and \
+                    event.get("frame_id") == latest_accepted_receipt.get("resulting_frame_id"):
+                latest_accepted_successor = dict(event)
             # Turn boundaries remain in the exact run-owned producer journal
             # for ProcessPerformance.  They are observational and can occur
             # many times during one pending wait, so do not let them evict the
             # input-owning semantic descriptor from the compact action channel.
-            if event.get("event") in {"turn", "turn_phase"}:
+            if event.get("event") in {"turn", "turn_phase", "trace_generation"}:
                 continue
             if event_filter is not None and str(event.get("event", "")) not in event_filter:
                 continue
@@ -5435,7 +5452,7 @@ def refresh_semantic_step_trace(
                    ).encode("utf-8") for event in events
                )
 
-    # The immutable native trace retains the complete current-run history.
+    # The native journal retains current authority plus bounded diagnostics.
     # The file bridge needs only a bounded suffix ending in the active owner;
     # the deque above applies that event bound while parsing, before a long
     # trace can accumulate parsed event dictionaries in memory.
@@ -5461,9 +5478,11 @@ def refresh_semantic_step_trace(
     correlation_events = [event for event in (
         latest_duration_receipt, latest_movement_receipt,
         latest_surface_successor, latest_surface_receipt,
+        latest_accepted_successor, latest_accepted_receipt,
     ) if event is not None]
     correlation_offsets = {event["_source_offset"] for event in correlation_events}
-    for event in (latest_movement_receipt, latest_surface_successor, latest_surface_receipt):
+    for event in (latest_movement_receipt, latest_surface_successor, latest_surface_receipt,
+                  latest_accepted_successor, latest_accepted_receipt):
         if event is None:
             continue
         if not any(
@@ -5494,7 +5513,7 @@ def refresh_semantic_step_trace(
         # Preserve the newest complete World descriptor—the only one that can
         # receive the next native request—and compact render-only data from
         # older World observations.  Their full native records remain in
-        # debug.log and in their immutable game-act transaction artifact.
+        # the native journal and their game-act transaction artifact.
         latest_descriptor_index = max(
             (index for index, event in enumerate(selected_events)
              if event.get("event") == "surface_descriptor"),
@@ -5509,7 +5528,7 @@ def refresh_semantic_step_trace(
         # descriptor.  Once a child menu has become the active owner, keeping
         # the prior World's full render payload merely crowds that child out
         # of the bounded channel.  Its immutable native record remains in the
-        # debug trace and transaction artifact.
+        # native journal and transaction artifact.
         if latest_world_index != latest_descriptor_index:
             latest_world_index = -1
         selected_events = [
@@ -5615,10 +5634,15 @@ def refresh_semantic_step_trace(
     return source, owned
 
 
-def semantic_step_effective_source_offset(source: Path, start_offset: int) -> int:
+def semantic_step_effective_source_offset(
+    source: Path, start_offset: int, generation: Optional[Mapping[str, Any]] = None,
+) -> int:
     """Use the current native log generation's coordinate system."""
     try:
-        size = source.stat().st_size
+        with source.open("rb") as handle:
+            if generation is not None and semantic_trace_identity(handle) != generation:
+                return 0
+            size = os.fstat(handle.fileno()).st_size
     except OSError:
         return start_offset
     return start_offset if 0 <= start_offset <= size else 0
@@ -5679,11 +5703,18 @@ def current_semantic_step_frame(
     source_trace: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Return the newest native wait or activity-query frame for adaptive play."""
+    source_state: Dict[str, Any] = {}
     source, owned = refresh_semantic_step_trace(
         profile=profile, run_dir=run_dir, run_id=run_id, start_offset=start_offset,
-        source_trace=source_trace,
+        source_trace=source_trace, source_state=source_state,
+        source_generation=history.get("generation") if isinstance(history, Mapping) else None,
     )
-    effective_source_offset = semantic_step_effective_source_offset(source, start_offset)
+    effective_source_offset = source_state.get("offset", semantic_step_effective_source_offset(source, start_offset))
+    start_offset = effective_source_offset
+    if isinstance(history, MutableMapping) and "generation" in source_state:
+        if history.get("generation") != source_state["generation"]:
+            history.clear()
+        history["generation"] = source_state["generation"]
     events, status = read_semantic_step_trace(owned, Path(run_dir), run_id)
     if status != "ok":
         raise ValueError(f"semantic step trace is unavailable: {status}")
@@ -6103,7 +6134,7 @@ def open_cockpit_game_service(
     # frame and only its unconsumed successors, rather than re-materializing
     # the whole current-run history on every observation.  The existing cap
     # still rejects an overfull unconsumed window.
-    semantic_cursor = {"offset": trace_start_offset, "source": None}
+    semantic_cursor = {"offset": trace_start_offset, "source": None, "generation": None}
     semantic_history: Dict[str, Any] = {}
     latest_frame: Dict[str, Mapping[str, Any]] = {}
     performance = None
@@ -6112,11 +6143,17 @@ def open_cockpit_game_service(
     def read_frame() -> Mapping[str, Any]:
         source = semantic_step_source_trace(profile, run_dir)
         source_identity = str(source.resolve())
-        if semantic_cursor["source"] not in {None, source_identity}:
+        generation = semantic_trace_path_identity(source)
+        if semantic_cursor["source"] not in {None, source_identity} or (
+                semantic_cursor["generation"] is not None and
+                semantic_cursor["generation"] != generation):
             # Byte cursors belong to one physical producer file. The mirrored
             # descriptor keeps its native identity, never the other file's offset.
             semantic_cursor["offset"] = 0
+            semantic_history.clear()
+            latest_frame.clear()
         semantic_cursor["source"] = source_identity
+        semantic_cursor["generation"] = generation
         cursor = semantic_step_effective_source_offset(
             source, int(semantic_cursor["offset"]),
         )
@@ -6131,9 +6168,13 @@ def open_cockpit_game_service(
             # successor, the current frame remains the only authoritative
             # state; do not invent a missing-frame failure from that no-op
             # re-observation.
-            if str(exc) == "the current run has not emitted a semantic frame" and latest_frame:
+            if str(exc) == "the current run has not emitted a semantic frame" and latest_frame and \
+                    semantic_history.get("generation") == generation:
                 return dict(latest_frame["value"])
             raise
+        if semantic_history.get("generation") != semantic_cursor["generation"]:
+            latest_frame.clear()
+        semantic_cursor["generation"] = semantic_history.get("generation")
         # A stale activity trace may be more recent in debug.log than the
         # descriptor that already authorized the last finite world action.
         # It is useful as observation context, but it must not erase that
@@ -6960,6 +7001,7 @@ def execute_semantic_act(
     # transaction rather than replaying the run from its launch cursor.
     transaction_cursor: Dict[str, Any] = {
         "offset": trace_start_offset,
+        "generation": observed_frame.get("_source_generation") if observed_frame is not None else None,
         "source": (observed_frame.get("_source_path") if observed_frame is not None else None)
         or (str(trace_source.resolve()) if trace_source is not None else None),
     }
@@ -6967,9 +7009,16 @@ def execute_semantic_act(
     def transaction_source() -> Path:
         source = semantic_step_source_trace(profile, run_dir).resolve()
         identity = str(source)
-        if transaction_cursor["source"] != identity:
+        generation = semantic_trace_path_identity(source)
+        if transaction_cursor["source"] not in {None, identity} or (
+                transaction_cursor["generation"] is not None and
+                transaction_cursor["generation"] != generation):
             transaction_cursor["offset"] = 0
+            transaction_history.clear()
+            transaction_events.clear()
+            latest_frame.clear()
         transaction_cursor["source"] = identity
+        transaction_cursor["generation"] = generation
         return source
     transaction_history: Dict[str, Any] = {}
     transaction_events: deque[Dict[str, Any]] = deque(maxlen=SEMANTIC_STEP_MAX_EVENTS)
@@ -6977,17 +7026,24 @@ def execute_semantic_act(
     def consume_transaction_trace() -> tuple[Path, list[Dict[str, Any]], str]:
         source = transaction_source()
         cursor = semantic_step_effective_source_offset(source, transaction_cursor["offset"])
+        source_state: Dict[str, Any] = {}
         source, owned = refresh_semantic_step_trace(
             profile=profile, run_dir=run_dir, run_id=run_id, start_offset=cursor,
             source_trace=source, require_complete=False,
+            source_generation=transaction_cursor["generation"], source_state=source_state,
         )
+        if "generation" in source_state and source_state["generation"] != transaction_cursor["generation"]:
+            transaction_events.clear()
+            transaction_history.clear()
+            latest_frame.clear()
+            transaction_cursor.update(offset=0, generation=source_state["generation"])
         delta, status = read_semantic_step_trace(owned, run_dir, run_id)
         if status != "ok":
             return source, [], status
         # Compaction can serialize a receipt before its earlier named
         # descriptor. Compare every row against the starting cursor, then
         # advance once; serialization order must not discard that successor.
-        prior_cursor = transaction_cursor["offset"]
+        prior_cursor = source_state.get("offset", transaction_cursor["offset"])
         next_cursor = prior_cursor
         delta.sort(key=lambda event: event.get("_source_offset", event.get("_event_offset", 0)))
         for event in delta:
@@ -7022,9 +7078,16 @@ def execute_semantic_act(
             # its successor.  Preserve the already observed native frame
             # while await_transition polls for that fresh successor; do not
             # tear down the live bridge on this transient trace gap.
-            if str(exc) == "the current run has not emitted a semantic frame" and latest_frame:
+            if str(exc) == "the current run has not emitted a semantic frame" and latest_frame and \
+                    transaction_history.get("generation") == transaction_cursor["generation"]:
                 return dict(latest_frame["value"])
             raise
+        generation = transaction_history.get("generation", transaction_cursor["generation"])
+        if generation != transaction_cursor["generation"]:
+            latest_frame.clear()
+            transaction_events.clear()
+            transaction_cursor["offset"] = 0
+        transaction_cursor["generation"] = generation
         frame_end = frame.get("_source_end")
         if frame.get("_source_path") == str(source) and isinstance(frame_end, int) and \
                 frame_end > transaction_cursor["offset"]:

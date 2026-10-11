@@ -65,6 +65,39 @@ class DescriptorIntakeTest(unittest.TestCase):
         return startup.current_semantic_step_frame(
             profile="fixture", run_dir=self.run, run_id=self.descriptor["run_id"], start_offset=0)
 
+    def test_replaced_larger_journal_changes_public_owner_not_cached_authority(self):
+        for replace_inode in (True, False):
+            with self.subTest(replace_inode=replace_inode):
+                first_header = self.encode({"event": "trace_generation", "run_id": "fixture-run",
+                                            "generation": "first"})
+                self.publish(first_header + self.encode(self.descriptor))
+                service = self.service()
+                observed = service.call({"action": "game.observe"})
+                self.assertTrue(observed["ok"], observed)
+                newer = {**self.descriptor, "surface_id": "new-owner", "frame_id": "new-frame",
+                         "sequence": 3, "payload": {"facts": "x" * 10000}}
+                replacement = self.encode({"event": "trace_generation", "run_id": "fixture-run",
+                                           "generation": "second"}) + self.encode(newer)
+                if replace_inode:
+                    temporary = self.trace.with_suffix(".next")
+                    temporary.write_bytes(replacement)
+                    temporary.replace(self.trace)
+                else:
+                    self.trace.write_bytes(replacement)
+                current = service.call({"action": "game.observe"})
+                self.assertTrue(current["ok"], current)
+                self.assertEqual(current["result"]["observation_id"], "new-frame")
+                rejected = service.call({"action": "game.act", "observation_id": "fixture-frame",
+                                         "action_id": "inventory.filter"})
+                self.assertFalse(rejected["ok"])
+                # A stale observation never earns acceptance or a new input grant.
+                # A replaced file without a valid new owner must never borrow
+                # the previous generation's cached descriptor.
+                self.trace.write_bytes(self.encode({"event": "trace_generation", "run_id": "fixture-run",
+                                                    "generation": "third"}) +
+                                       self.encode({**newer, "run_id": "foreign-run"}))
+                self.assertFalse(service.call({"action": "game.observe"})["ok"])
+
     def test_large_action_and_payload_catalogs_are_lossless_not_item_capped(self):
         original = {**self.descriptor, "payload": {"title": "Inventory", "facts": "x" * 600000},
                     "valid_actions": [
@@ -257,6 +290,21 @@ class DescriptorIntakeTest(unittest.TestCase):
                        "consuming_frame_id": request["frame_id"], "accepted": True,
                        "rejection_reason": "", "resulting_frame_id": "next-frame"}
             successor_bytes = self.encode(successor)
+            if getattr(self, "replace_during_dispatch", False):
+                temporary = self.trace.with_suffix(".next")
+                header = {"event": "trace_generation", "run_id": "fixture-run", "generation": "dispatch"}
+                successor["payload"] = {"facts": "x" * 600000}
+                refused = {**receipt, "request_id": "unrelated-refusal", "accepted": False,
+                           "rejection_reason": "wrong_surface", "resulting_frame_id": ""}
+                diagnostics = b"".join(self.encode({"event": "request_transport",
+                    "run_id": "fixture-run", "sequence": index + 10, "stage": "idle",
+                    "request_id": "", "offset_before": 0, "offset_after": 0, "transport_end": 0,
+                    "queued": False, "wake_pending": False})
+                    for index in range(startup.SEMANTIC_STEP_MAX_EVENTS + 10))
+                temporary.write_bytes(self.encode(header) + self.encode(receipt) + self.encode(successor)
+                                      + self.encode(refused) + diagnostics)
+                temporary.replace(self.trace)
+                return 1
             with self.trace.open("ab") as stream:
                 stream.write(self.encode(receipt))
                 if getattr(self, "partial_delivery", False):
@@ -282,7 +330,9 @@ class DescriptorIntakeTest(unittest.TestCase):
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
         self.assertFalse(service.call({"action": "game.act", "observation_id": current,
                                       "action_id": "inventory.filter"})["ok"])
-        after = service.call({"action": "game.observe"})["result"]["observation_id"]
+        observed_after = service.call({"action": "game.observe"})
+        self.assertTrue(observed_after["ok"], observed_after)
+        after = observed_after["result"]["observation_id"]
         self.assertEqual(after, "next-frame")
         self.assertFalse(service.call({"action": "game.act", "observation_id": after,
                                       "action_id": "inventory.filter"})["ok"])
@@ -319,6 +369,10 @@ class DescriptorIntakeTest(unittest.TestCase):
         self.assertFalse(service.call({"action": "game.act", "observation_id": current, "action_id": "world.quicksave"})["ok"])
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
         self.assertEqual(mirror.read_bytes(), malformed)
+
+    def test_journal_replacement_during_dispatch_keeps_receipt_and_successor_once(self):
+        self.replace_during_dispatch = True
+        self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()
 
     def test_completed_receipt_survives_partial_successor_poll_without_replaying(self):
         self.partial_delivery = True

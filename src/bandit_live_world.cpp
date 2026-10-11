@@ -1,4 +1,5 @@
 #include "bandit_live_world.h"
+#include "semantic_surface.h"
 #include "scout_observation.h"
 
 #include <algorithm>
@@ -21843,14 +21844,9 @@ void record_local_gate_semantic_event( const site_record &site,
     if( run_id.empty() || path == nullptr || path[0] == '\0' ) {
         return;
     }
-    std::ofstream stream( path, std::ios::app | std::ios::binary );
-    if( stream ) {
-        stream << "openclaw_harness_semantic_step: "
-               << render_local_gate_semantic_event( site, input, decision, run_id,
-                       to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ),
-                       to_turns<int>( calendar::turn - calendar::turn_zero ) )
-               << '\n';
-    }
+    write_native_semantic_event( render_local_gate_semantic_event( site, input, decision, run_id,
+                                 to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ),
+                                 to_turns<int>( calendar::turn - calendar::turn_zero ) ) );
 }
 
 sight_avoid_decision choose_sight_avoid_reposition( const tripoint_abs_ms &current_tile,

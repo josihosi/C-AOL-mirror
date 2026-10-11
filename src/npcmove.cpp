@@ -29,6 +29,7 @@
 #include "active_item_cache.h"
 #include "activity_actor_definitions.h"
 #include "avatar.h"
+#include "semantic_surface.h"
 #include "bandit_live_world.h"
 #include "bandit_live_world_probe.h"
 #include "basecamp.h"
@@ -308,16 +309,31 @@ void recorder::write( const std::string &row, const bool critical )
     if( critical ? critical_truncated : normal_truncated ) {
         return;
     }
+    const auto publish = [&]( const std::string &event ) {
+        const binding native = environment_binding();
+        if( native.valid() && native.path == source.path && native.run_id == source.run_id ) {
+            // The diagnostic recorder shares the native journal in a harness
+            // run. Keep its raw-JSON format and existing row/edge policy, but
+            // let the owning producer bound bytes and replace generations.
+            return write_native_semantic_event( event );
+        }
+        // Explicit stand-alone diagnostic scopes retain their existing bound
+        // row policy. They do not publish native input authority.
+        std::ofstream out( source.path, std::ios::app | std::ios::binary );
+        out << event << '\n';
+        out.close();
+        return bool( out );
+    };
     const std::size_t reserved = row_budget >= 16 ? std::min<std::size_t>( 256, row_budget / 4 ) : 0;
     const bool exhausted = critical ? tally.written_rows >= row_budget :
                            normal_rows >= row_budget - reserved;
     if( exhausted ) {
-        std::ofstream out( source.path, std::ios::app | std::ios::binary );
-        if( out ) {
-            out << "{\"event\":\"raid_trace_truncated\",\"run_id\":" << quote( source.run_id )
-                << ",\"row_budget\":" << row_budget << ",\"decisions\":" << tally.decisions
-                << ",\"written_rows\":" << tally.written_rows << ",\"scope\":"
-                << quote( critical ? "critical" : "action" ) << "}\n";
+        std::ostringstream marker;
+        marker << "{\"event\":\"raid_trace_truncated\",\"run_id\":" << quote( source.run_id )
+               << ",\"row_budget\":" << row_budget << ",\"decisions\":" << tally.decisions
+               << ",\"written_rows\":" << tally.written_rows << ",\"scope\":"
+               << quote( critical ? "critical" : "action" ) << "}";
+        if( publish( marker.str() ) ) {
             ++tally.written_rows;
         }
         tally.truncated = true;
@@ -328,9 +344,7 @@ void recorder::write( const std::string &row, const bool critical )
         }
         return;
     }
-    std::ofstream out( source.path, std::ios::app | std::ios::binary );
-    if( out ) {
-        out << row << '\n';
+    if( publish( row ) ) {
         ++tally.written_rows;
         if( !critical ) {
             ++normal_rows;
