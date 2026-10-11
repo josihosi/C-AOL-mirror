@@ -6170,8 +6170,8 @@ bool record_structural_member_physical_return( site_record &site,
              ( outing.local_handoff.is_abstract_resume() ||
                ( outing.actor_departure_observed && outing.actor_route_waypoint > 0 &&
                  outing.actor_route_waypoint ==
-                 static_cast<int>( outing.shared_route.size() ) - 1 ) ) &&
-             crossing_receipt_allows_runtime_progress( outing ) ) ) ||
+                 static_cast<int>( outing.shared_route.size() ) - 1 ) ) ) ) ||
+        !crossing_receipt_allows_runtime_progress( outing ) ||
         !scout_phase_requires_homeward_only( outing.phase ) ||
         !simulation_cursor_matches( outing, expected_cursor ) || current_minutes < 0 ||
         current_minutes < outing.last_advanced_minutes || !hostile_site_contains_omt( site, returned_omt ) ||
@@ -6225,6 +6225,10 @@ bool record_structural_member_physical_return( site_record &site,
         if( next.owner == simulation_owner::local ) {
             next.owner = simulation_owner::abstract;
             next.handoff_epoch++;
+            // This is a real terminal ownership transfer, not an abstract
+            // travel resume. Replace the incoming crossing with this epoch's
+            // committed custody; only complete save publication acknowledges it.
+            record_committed_owner_crossing( next, simulation_owner::local );
         }
         // Every physical participant is now terminal: retain the receipt on the
         // outing, but release the local cursor instead of advertising a resume

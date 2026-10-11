@@ -58421,7 +58421,8 @@ TEST_CASE( "completed shared watch returns through its actual surviving carrier"
 
 namespace
 {
-void r067_finite_loaded_scene( r055_scene &scene, const bool cannibal )
+void r067_finite_loaded_scene( r055_scene &scene, const bool cannibal,
+                               const bool publish_local = true )
 {
     scene.load( cannibal, true, false, "tests/data/r067_handover_stability_8108.json" );
     while( g->assign_npc_id().get_value() <= 20 ) {}
@@ -58450,7 +58451,9 @@ void r067_finite_loaded_scene( r055_scene &scene, const bool cannibal )
     }
     REQUIRE( ( scene.site().active_outing.local_handoff.cohesion_assembled ||
                scene.site().active_outing.local_handoff.cohesion_abort_return ) );
-    REQUIRE( g->save() );
+    if( publish_local ) {
+        REQUIRE( g->save() );
+    }
 }
 
 auto r067_finite_body_key( const npc &actor )
@@ -58884,16 +58887,21 @@ std::pair<int, int> r067_loaded_corpse_custody( const tripoint_abs_ms &position,
 } // namespace
 
 TEST_CASE( "loaded physical return settles native body death before carrier receipts",
-           "[bandit_live_world][handover_stability_067][handover_loaded_body_067]" )
+           "[bandit_live_world][handover_stability_067][handover_loaded_body_067][terminal_return_crossing_067]" )
 {
     using namespace bandit_live_world;
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     const bool cannibal = GENERATE( false, true );
-    const std::string condition = GENERATE( "survivor", "both_dead", "foreign", "healing", "rollback", "wrong_owner", "missing" );
+    const std::string condition = GENERATE( "healthy", "survivor", "both_dead", "foreign", "healing", "rollback", "wrong_owner", "missing" );
     CAPTURE( cannibal, condition );
     override_option healing( "NPC_HEALING_RATE", condition == "healing" ? "0.02" : "0.0001" );
     r055_scene scene;
-    r067_finite_loaded_scene( scene, cannibal );
+    // Keep the actual materializer's Local crossing unpublished through home.
+    // Saving only after report maintenance clears the outing misses this edge.
+    r067_finite_loaded_scene( scene, cannibal, false );
+    REQUIRE( scene.site().active_outing.crossing.pending() );
+    const auto local_crossing = scene.site().active_outing.crossing;
+    const bool living_pair = condition == "healing" || condition == "healthy";
     const auto ids = scene.site().active_outing.member_ids;
     const auto generation = scene.site().active_outing.generation;
     const auto world_name = world_generator->active_world->world_name;
@@ -58944,7 +58952,7 @@ TEST_CASE( "loaded physical return settles native body death before carrier rece
             actors.back()->set_part_hp_cur( part, 30 );
         }
         actors.back()->set_mutation( trait_id( "REGEN" ) );
-    } else {
+    } else if( condition != "healthy" ) {
         actors.back()->set_stim( 251 );
     }
     const int hp_before = actors.back()->get_hp();
@@ -58980,8 +58988,39 @@ TEST_CASE( "loaded physical return settles native body death before carrier rece
         actors.back()->set_bandit_live_world_projection_lease( lease );
         if( condition == "missing" ) { overmap_buffer.insert_npc( actors.back() ); }
     }
+    if( condition == "healthy" ) {
+        const auto &source = scene.site();
+        for( const std::string defect : { "epoch", "activity", "members", "future_cursor", "empty_run" } ) {
+            CAPTURE( defect );
+            auto candidate = source;
+            auto &crossing = candidate.active_outing.crossing;
+            if( defect == "epoch" ) { ++crossing.handoff_epoch; }
+            if( defect == "activity" ) { crossing.activity_id += "-foreign"; }
+            if( defect == "members" ) { crossing.actor_ids.back() = crossing.actor_ids.front(); }
+            if( defect == "future_cursor" ) { crossing.cursor_minutes = candidate.active_outing.last_advanced_minutes + 1; }
+            if( defect == "empty_run" ) { crossing.run_id.clear(); }
+            const auto before = r067_return_record_bytes( candidate );
+            CHECK_FALSE( record_structural_member_physical_return( candidate,
+                         require_current_simulation_cursor( candidate ), ids.front(),
+                         actors.front()->pos_abs_omt(),
+                         to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) ) );
+            CHECK( r067_return_record_bytes( candidate ) == before );
+        }
+        // A valid partial receipt advances the member, not the pair's owner or
+        // crossing. The production recorder below owns the complete body commit.
+        auto partial = source;
+        REQUIRE( record_structural_member_physical_return( partial,
+                     require_current_simulation_cursor( partial ), ids.front(),
+                     actors.front()->pos_abs_omt(),
+                     to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) ) );
+        CHECK( partial.active_outing.owner == simulation_owner::local );
+        CHECK( partial.active_outing.handoff_epoch == source.active_outing.handoff_epoch );
+        CHECK( r067_return_record_bytes( partial.active_outing.crossing ) ==
+               r067_return_record_bytes( local_crossing ) );
+        CHECK( partial.active_outing.member_return_receipts.size() == 1 );
+    }
     REQUIRE( record_live_bandit_structural_member_returns_for_test() );
-    CHECK( actors.back()->is_dead() == ( condition != "healing" ) );
+    CHECK( actors.back()->is_dead() == !living_pair );
     if( condition == "healing" ) {
         CHECK( actors.back()->get_hp() > hp_before );
         CHECK( actors.back()->hp_percentage() <= 50 );
@@ -58989,11 +59028,11 @@ TEST_CASE( "loaded physical return settles native body death before carrier rece
     }
     CHECK( actors.back()->get_last_updated() == calendar::turn );
     const auto &returned = scene.site().active_outing;
-    const std::vector<character_id> dead_ids = condition == "healing" ? std::vector<character_id>{} :
+    const std::vector<character_id> dead_ids = living_pair ? std::vector<character_id>{} :
             condition == "both_dead" ? ids : std::vector<character_id>{ ids.back() };
     CHECK( returned.casualty_ids == dead_ids );
     CHECK( returned.member_return_receipts.size() ==
-           ( condition == "healing" ? 2 : condition == "both_dead" || condition == "rollback" ? 0 : 1 ) );
+           ( living_pair ? 2 : condition == "both_dead" || condition == "rollback" ? 0 : 1 ) );
     for( const auto id : dead_ids ) {
         CHECK( scene.site().find_member( id )->state == member_state::dead );
         CHECK( returned.member_is_resolved( id ) );
@@ -59032,8 +59071,37 @@ TEST_CASE( "loaded physical return settles native body death before carrier rece
     const auto committed = serialize_world( overmap_buffer.global_state.bandit_live_world );
     CHECK_FALSE( record_live_bandit_structural_member_returns_for_test() );
     CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == committed );
+    if( returned.owner == simulation_owner::abstract ) {
+        CHECK( crossing_receipt_has_current_owner( returned ) );
+        CHECK( returned.crossing.prior_owner == simulation_owner::local );
+        CHECK( returned.crossing.handoff_epoch == local_crossing.handoff_epoch + 1 );
+        CHECK( returned.crossing.pending() );
+        CHECK_FALSE( returned.crossing.persistence_acknowledged );
+    }
+    if( condition == "healthy" ) {
+        REQUIRE_FALSE( scene.site().current_scout_report.is_present() );
+        const auto world_path = world_generator->active_world->folder_path().get_unrelative_path();
+        const auto obstruction = std::filesystem::u8path( PATH_INFO::savedir() ) /
+                                 ".save-continuity" / world_path.filename() / "publication-base.pending";
+        REQUIRE_FALSE( std::filesystem::exists( obstruction ) );
+        REQUIRE( std::filesystem::create_directory( obstruction ) );
+        {
+            on_out_of_scope unblock( [&]() { std::filesystem::remove_all( obstruction ); } );
+            REQUIRE_FALSE( g->save() );
+        }
+        // Failed publication withdraws durability only: home receipts, bodies
+        // and the genuine terminal owner remain available for the ordinary retry.
+        CHECK( scene.site().active_outing.crossing.pending() );
+        CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == committed );
+        REQUIRE_FALSE( scene.site().current_scout_report.is_present() );
+    }
     REQUIRE( g->save() );
+    CHECK( scene.site().active_outing.crossing.persistence_acknowledged );
+    const auto saved_return = r067_return_record_bytes( scene.site().active_outing );
     r067_handover_reload( world_name );
+    CHECK( r067_return_record_bytes( scene.site().active_outing ) == saved_return );
+    r067_handover_reload( world_name );
+    CHECK( r067_return_record_bytes( scene.site().active_outing ) == saved_return );
     custody();
     CHECK_FALSE( record_live_bandit_structural_member_returns_for_test() );
     if( condition == "rollback" ) {
@@ -59052,7 +59120,7 @@ TEST_CASE( "loaded physical return settles native body death before carrier rece
         REQUIRE( scene.site().current_scout_report.is_present() );
         CHECK( scene.site().current_scout_report.source_generation == generation );
         CHECK( scene.site().current_scout_report.carrier_ids ==
-               ( condition == "healing" ? ids : std::vector<character_id>{ ids.front() } ) );
+               ( living_pair ? ids : std::vector<character_id>{ ids.front() } ) );
         CHECK( scene.site().applied_report_generation == generation );
     }
     const auto report = r067_return_record_bytes( scene.site().current_scout_report );
