@@ -18713,11 +18713,17 @@ def capture_screenshot(
     crop_request = normalize_capture_crop(crop)
     crop_report: Optional[Dict[str, Any]] = None
     if capture_ok and crop_request:
-        full_png_path = run_dir / f"{label}.full.png"
-        shutil.copy2(png_path, full_png_path)
-        crop_report = crop_png_with_sips(full_png_path, png_path, crop_request)
-        if not crop_report.get("ok"):
-            shutil.copy2(full_png_path, png_path)
+        # Keep the original on failure, and only the requested image on success.
+        # Cropping into scratch avoids both destructive partial output and a
+        # permanent second capture retained for proof packaging.
+        with tempfile.TemporaryDirectory(prefix="capture-crop-", dir=str(run_dir)) as scratch:
+            cropped = Path(scratch) / "cropped.png"
+            crop_report = crop_png_with_sips(png_path, cropped, crop_request)
+            if crop_report.get("ok") and cropped.is_file():
+                cropped.replace(png_path)
+            elif crop_report.get("ok"):
+                crop_report.update(ok=False, stderr="crop produced no image")
+            crop_report["output_png_path"] = str(png_path)
     if fallback_report and fallback_report.get("ok"):
         screen_summary = summarize_screencapture_image_capture(
             png_path,
@@ -19427,7 +19433,9 @@ def persist_interruption_scan_artifacts(
             continue
         suffix = source.name[len("scan"):] if source.name.startswith("scan") else f".{source.name}"
         destination = run_dir / f"{evidence_label}{suffix}"
-        shutil.copy2(source, destination)
+        # The scan is disposable scratch beneath run_dir and is no longer
+        # read after classification. Transfer its files rather than copy them.
+        source.replace(destination)
         artifacts.append(str(destination))
     return artifacts
 
@@ -40666,25 +40674,30 @@ def run_startup_in_process(cmd: List[str], *, live_session: bool = False) -> Tup
     return returncode, payload, stdout, stderr
 
 
-def snapshot_world_state(profile: str, world_name: str, run_dir: Path, label: str = "saved_world") -> Dict[str, Any]:
+def describe_saved_world_state(profile: str, world_name: str, run_dir: Path, label: str = "saved_world") -> Dict[str, Any]:
+    """Bind the current on-disk save without making a proof copy.
+
+    This reference is valid for the current operation, not an immutable
+    checkpoint or a claim about unsaved game state. The save owner determines
+    when the working save can be removed.
+    """
     world_name = str(world_name or "").strip()
     if not world_name:
-        raise SystemExit("World snapshot requested without a world name")
+        raise SystemExit("Saved-world observation requested without a world name")
     source_world = save_dir_for_profile(profile) / world_name
-    if not source_world.exists():
-        raise SystemExit(f"World snapshot source not found: {source_world}")
-    snapshot_root = run_dir / label
-    if snapshot_root.exists():
-        shutil.rmtree(snapshot_root)
-    ensure_dir(snapshot_root.parent)
-    destination = snapshot_root / world_name
-    shutil.copytree(source_world, destination)
+    if not source_world.is_dir():
+        raise SystemExit(f"Saved-world source not found: {source_world}")
+    digest, error = sha256_tree(source_world)
+    if error:
+        raise OSError(error)
     snapshot = {
+        "status": "current_saved_world_reference",
         "label": label,
         "profile": profile,
         "world": world_name,
-        "source": str(source_world),
-        "destination": str(destination),
+        "source": str(source_world.resolve()),
+        "source_sha256": digest,
+        "retained_copy": False,
     }
     write_json(run_dir / f"{label}.json", snapshot)
     return snapshot
@@ -43272,7 +43285,7 @@ def _run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
     world_snapshot_report: Dict[str, Any] = {}
     if capture_world_after:
         try:
-            world_snapshot_report = snapshot_world_state(profile, world, run_dir)
+            world_snapshot_report = describe_saved_world_state(profile, world, run_dir)
         except Exception as exc:
             world_snapshot_report = {
                 "status": "failed",
