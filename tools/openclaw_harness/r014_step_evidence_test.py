@@ -575,13 +575,13 @@ class SavedInputOwnerBootstrapTest(unittest.TestCase):
                 self.assertFalse(public)
                 self.assertFalse(envelopes)
 
-    def test_newer_same_process_mirror_uses_its_own_source_offsets(self):
+    def test_newer_mirror_does_not_replace_native_bootstrap_owner(self):
         action = {"id": "prompt.choose", "stable_id": "prompt-option:2", "label": "NO", "enabled": True}
         native = self.owner(204, "activity_distraction", [action])
         mirror = self.owner(205, "prompt", [action])
         reports, public, envelopes, _ = self.pipeline([native], mirror=[mirror])
-        self.assertEqual(reports[0]["metadata"]["frame_state"], "prompt")
-        self.assertEqual(public[0]["result"]["sequence"], 205)
+        self.assertEqual(reports[0]["metadata"]["frame_state"], "activity_distraction")
+        self.assertEqual(public[0]["result"]["sequence"], 204)
         self.assertEqual(len(envelopes), 1)
         foreign = {**mirror, "process_instance": "other-process"}
         reports, public, envelopes, _ = self.pipeline([native], mirror=[foreign])

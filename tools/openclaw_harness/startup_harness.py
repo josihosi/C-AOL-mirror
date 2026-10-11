@@ -5118,42 +5118,13 @@ def semantic_step_source_trace(profile: str, run_dir: Optional[Path] = None) -> 
                         stream.seek(0)
                         has_records = semantic_trace_has_records(stream, size)
                 if has_records:
-                    # The same producer mirrors descriptors to debug.log. A
-                    # historical live roll could erase its current successor
-                    # from the primary stream. Prefer that exact newer mirror,
-                    # never another run/process or an older observational frame.
-                    debug_trace = config_dir_for_profile(resolve_profile_name(profile)) / "debug.log"
-                    try:
-                        native_owner = latest_semantic_source_descriptor(native_trace)
-                    except ValueError as error:
-                        if str(error) != "incomplete_native_semantic_record":
-                            raise
-                        # A sampled write is not a missing primary or evidence
-                        # for switching to an older mirror. Receipt collection
-                        # can read its complete prefix; action reads still refuse
-                        # this partial owner through the strict record reader.
-                        return native_trace
-                    try:
-                        mirrored_owner = latest_semantic_source_descriptor(debug_trace)
-                    except ValueError:
-                        # debug.log is an optional, profile-shared mirror, not
-                        # the run-owned authority. Its logger can append text
-                        # to a JSON record. Keep that record invalid and leave
-                        # it available for diagnosis, but do not let its parse
-                        # failure replace or poison the canonical stream.
-                        return native_trace
-                    if native_owner and mirrored_owner and \
-                            native_owner.get("run_id") and \
-                            native_owner.get("run_id") == mirrored_owner.get("run_id") and \
-                            native_owner.get("process_instance") and \
-                            native_owner.get("process_instance") == mirrored_owner.get("process_instance"):
-                        try:
-                            newer = int(mirrored_owner["sequence"]) > int(native_owner["sequence"]) and \
-                                int(mirrored_owner["game_turn"]) >= int(native_owner["game_turn"])
-                        except (KeyError, TypeError, ValueError):
-                            newer = False
-                        if newer:
-                            return debug_trace
+                    # This run-owned stream is the input/receipt authority.
+                    # A later-sampled debug mirror can appear newer during
+                    # publication, but its shared logger is not a transaction
+                    # source: switching also resets byte cursors and can read
+                    # malformed historical diagnostics after input was taken.
+                    # Keep canonical parsing strict in the record reader and
+                    # leave the mirror available for independent diagnosis.
                     return native_trace
             except OSError:
                 pass
@@ -7666,11 +7637,21 @@ def execute_semantic_act(
                                                  if event.get("event") == "receipt" and
                                                  event.get("action_id") == action_id and
                                                  event.get("coordinate_space") == "absolute_ms"), None)
-                        # Do not publish a successful world movement before
-                        # its coordinate-bearing native completion arrives.
-                        # The successor world frame can be drawn between the
-                        # semantic acknowledgement and this receipt.
-                        if action_id.startswith("world.move.") and movement_receipt is None:
+                        # Movement can open a native decision before it can
+                        # complete (for example, entering fire). Return that
+                        # exact receipted child so the player can answer it;
+                        # its input acceptance is not displacement evidence.
+                        # A World successor still needs coordinate completion.
+                        movement_child = action_id.startswith("world.move.") and \
+                            next_frame.get("event") == "surface_descriptor" and \
+                            next_frame.get("kind") != "world" and \
+                            next_frame.get("frame_id") == resulting_frame_id and \
+                            bool(next_frame.get("surface_id")) and \
+                            next_frame.get("surface_id") != before.get("surface_id") and \
+                            any(isinstance(action, Mapping) and action.get("enabled") is True
+                                for action in next_frame.get("valid_actions", []))
+                        if action_id.startswith("world.move.") and \
+                                movement_receipt is None and not movement_child:
                             cancelled = cancelled_dispatch()
                             if cancelled is not None:
                                 return cancelled
@@ -7695,7 +7676,8 @@ def execute_semantic_act(
                             "action_id": action_id,
                             "declared_action_id": declared_action_id or action_id,
                             "accepted": True,
-                            "reason": "native_surface_transition_accepted",
+                            "reason": "native_surface_child_accepted" if movement_child and
+                                      movement_receipt is None else "native_surface_transition_accepted",
                             "current_frame": {
                                 key: value for key, value in before.items()
                                 if not str(key).startswith("_")

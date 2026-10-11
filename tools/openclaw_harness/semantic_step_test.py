@@ -2194,7 +2194,7 @@ class SemanticStepChannelTest(unittest.TestCase):
 
 
 class SemanticSourceMirrorTest(unittest.TestCase):
-    def test_same_observer_keeps_identity_when_source_cursor_changes(self):
+    def test_same_observer_keeps_identity_when_canonical_stream_appears(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory)
             config = run / "config"
@@ -2210,9 +2210,8 @@ class SemanticSourceMirrorTest(unittest.TestCase):
                         "valid_actions": [{"id": "activity.pause" if kind == "activity_wait" else "world.wait",
                                            "stable_id": "", "label": "action", "enabled": True}]}
             encode = lambda row: ("openclaw_harness_semantic_step: " + json.dumps(row) + "\n").encode()
-            native.write_bytes(encode({"event": "turn", "run_id": "run"}) +
-                               b"noise\n" * 25000 + encode(descriptor(10, "activity_wait")))
-            debug.write_bytes(b"")
+            native.write_bytes(b"noise\n" * 25000)
+            debug.write_bytes(encode(descriptor(10, "activity_wait")) + b"noise\n" * 25000)
             with patch.object(startup_harness, "config_dir_for_profile", return_value=config), \
                     patch.object(startup_harness, "resolve_profile_name", return_value="owned"):
                 service = startup_harness.open_cockpit_game_service(
@@ -2220,9 +2219,11 @@ class SemanticSourceMirrorTest(unittest.TestCase):
                     live_session=False, cleanup_on_finish=False)
                 channel = service.live_channel
                 before = service.call({"action": "game.observe"})["result"]
-                # The fresh mirror lies below the old file's byte cursor, but
-                # its file is larger: an EOF-only cursor reset cannot recover it.
-                debug.write_bytes(encode(descriptor(11, "world")) + b"noise\n" * 35000)
+                # The first canonical descriptor uses a different byte space.
+                # It supersedes the legacy-only source, even when that mirror
+                # subsequently claims a newer owner.
+                native.write_bytes(encode(descriptor(11, "world")))
+                debug.write_bytes(encode(descriptor(12, "world")) + b"noise\n" * 35000)
                 after = service.call({"action": "game.observe"})["result"]
                 self.assertIs(service.live_channel, channel)
                 self.assertEqual(before["observation_id"], "run:frame:10")
@@ -2245,9 +2246,9 @@ class SemanticSourceMirrorTest(unittest.TestCase):
     def source_line(row):
         return (startup_harness.SEMANTIC_STEP_PREFIX + json.dumps(row) + "\n").encode()
 
-    def test_factory_real_selector_interleaving_preserves_successor(self):
-        for interleaving, provenance in ((False, True), (True, True), (True, False)):
-            with self.subTest(interleaving=interleaving, provenance=provenance), tempfile.TemporaryDirectory() as directory:
+    def test_factory_preserves_canonical_successor_with_or_without_source_provenance(self):
+        for provenance in (True, False):
+            with self.subTest(provenance=provenance), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve()
                 run, config = root / "run", root / "config"
                 run.mkdir()
@@ -2264,18 +2265,7 @@ class SemanticSourceMirrorTest(unittest.TestCase):
                 full_debug = mirror_prefix + activity + intermediate + world + raw
                 native.write_bytes(native_prefix + activity)
                 debug.write_bytes(mirror_prefix + activity)
-                armed = False
-                reader = startup_harness.latest_semantic_source_descriptor
-                def sample(path):
-                    nonlocal armed
-                    result = reader(path)
-                    if armed and path == native:
-                        armed = False
-                        native.write_bytes(full_native)
-                        debug.write_bytes(full_debug)
-                    return result
                 with patch.object(startup_harness, "config_dir_for_profile", return_value=config), \
-                        patch.object(startup_harness, "latest_semantic_source_descriptor", side_effect=sample), \
                         patch.object(startup_harness, "current_owned_process_generation", return_value={}):
                     service = startup_harness.open_cockpit_game_service(
                         profile="owned", run_dir=run, run_id="run", trace_start_offset=0,
@@ -2285,7 +2275,6 @@ class SemanticSourceMirrorTest(unittest.TestCase):
                     self.assertEqual(first["_source_path"], str(native))
                     native.write_bytes(native_prefix + activity + intermediate)
                     debug.write_bytes(mirror_prefix + activity + intermediate)
-                    armed = interleaving
                     successor = dict(first)
                     if not provenance:
                         successor.pop("_source_path")
@@ -2294,14 +2283,13 @@ class SemanticSourceMirrorTest(unittest.TestCase):
                     with patch.object(startup_harness, "execute_semantic_act", return_value={
                             "accepted": True, "next_frame": successor}):
                         channel._dispatch_advertised_action(first, "wait.1m")
-                    if not interleaving:
-                        native.write_bytes(full_native)
-                        debug.write_bytes(full_debug)
+                    native.write_bytes(full_native)
+                    debug.write_bytes(full_debug)
                     after = channel._read_native_frame()
                     self.assertEqual(after["sequence"], 509)
                     self.assertTrue(startup_harness.is_native_wait_completion_successor(
                         after, activity_frame_id=first["frame_id"]))
-                    self.assertEqual(after["_source_path"], str(debug if interleaving else native))
+                    self.assertEqual(after["_source_path"], str(native))
                     self.assertEqual(channel._read_native_frame()["sequence"], 509)
 
     def test_selected_source_and_split_successor(self):
@@ -2320,8 +2308,12 @@ class SemanticSourceMirrorTest(unittest.TestCase):
             successor = self.source_line({**row, "sequence": 11, "frame_id": "run:frame:11"})
             with native.open("ab") as stream:
                 stream.write(successor[:-1])
+            with self.assertRaisesRegex(ValueError, "incomplete_native_semantic_record"):
+                startup_harness.refresh_semantic_step_trace(
+                    profile="owned", run_dir=run, run_id="run", start_offset=0, source_trace=native)
             _, owned = startup_harness.refresh_semantic_step_trace(
-                profile="owned", run_dir=run, run_id="run", start_offset=0, source_trace=native)
+                profile="owned", run_dir=run, run_id="run", start_offset=0, source_trace=native,
+                require_complete=False)
             events, status = startup_harness.read_semantic_step_trace(owned, run, "run")
             self.assertEqual(status, "ok")
             self.assertEqual([r["sequence"] for r in events], [10])
@@ -2332,7 +2324,7 @@ class SemanticSourceMirrorTest(unittest.TestCase):
                 source_trace=native)
             self.assertEqual(after["sequence"], 11)
 
-    def test_newer_same_process_native_mirror_and_refusal_controls(self):
+    def test_canonical_native_owner_is_not_replaced_by_optional_mirror(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run = root / "run"
@@ -2346,7 +2338,7 @@ class SemanticSourceMirrorTest(unittest.TestCase):
             encode = lambda row: ("openclaw_harness_semantic_step: " + json.dumps(row) + "\n").encode()
             native.write_bytes(encode(owner))
             cases = [
-                ({"sequence": 11, "game_turn": 101}, debug),
+                ({"sequence": 11, "game_turn": 101}, native),
                 ({"sequence": 9}, native),
                 ({"sequence": 11, "run_id": "other"}, native),
                 ({"sequence": 11, "process_instance": "other"}, native),

@@ -57,7 +57,8 @@ class DescriptorIntakeTest(unittest.TestCase):
             profile="fixture", run_dir=self.run, run_id=self.descriptor["run_id"], trace_start_offset=0,
             pid=os.getpid(),
             session_id="disposable-fixture", cleanup_on_finish=False,
-            transition_timeout_seconds=3, observe_interval_seconds=.001,
+            transition_timeout_seconds=getattr(self, "transition_timeout", 3),
+            observe_interval_seconds=.001,
         )
 
     def frame(self):
@@ -149,6 +150,64 @@ class DescriptorIntakeTest(unittest.TestCase):
         self.assertFalse((self.run / "semantic.requests.jsonl").exists())
         # The original diagnostic is neither rewritten nor accepted as JSON.
         self.assertTrue(mirror.read_bytes().endswith(b" skipped=0\n"))
+
+    def test_newer_mirror_cannot_replace_canonical_owner_or_break_settlement(self):
+        # The original diagnostic joined an activity owner and a movement
+        # receipt on one line. Later valid mirror records hide that damage
+        # outside the selector's suffix probe, but not a source-switch read.
+        self.trace.write_bytes(self.encode(self.descriptor))
+        mirror = self.config / "debug.log"
+        joined = self.encode(self.descriptor).rstrip(b"\n") + \
+            b'12:05:30.415 INFO : ' + self.encode({
+                "event": "receipt", "run_id": "fixture-run", "accepted": True})
+        newer = {**self.descriptor, "sequence": 99, "frame_id": "mirror-only-frame"}
+        mirror_bytes = joined + b"diagnostic padding " + \
+            b"x" * (startup.SEMANTIC_STEP_MAX_BYTES * 16 + 1) + b"\n" + self.encode(newer)
+        mirror.write_bytes(mirror_bytes.replace(b'"sequence": 99', b'"sequence": 1'))
+        self.assertEqual(startup.latest_semantic_source_descriptor(mirror)["frame_id"],
+                         "mirror-only-frame")
+        with mirror.open("rb") as stream:
+            with self.assertRaisesRegex(ValueError, "malformed_native_semantic_record"):
+                list(startup.iter_complete_semantic_trace_records(stream, mirror.stat().st_size))
+        service = self.service()
+        observed = service.call({"action": "game.observe"})
+        self.assertTrue(observed["ok"], observed)
+        current = observed["result"]["observation_id"]
+        self.assertEqual(current, self.descriptor["frame_id"])
+        self.assertFalse(service.call({"action": "game.act", "observation_id": "mirror-only-frame",
+                                      "action_id": "inventory.filter"})["ok"])
+        self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+
+        def native_fixture(*args, **kwargs):
+            request = json.loads((self.run / "semantic.requests.jsonl").read_text().splitlines()[-1])
+            successor = {**self.descriptor, "sequence": 4, "frame_id": "canonical-successor"}
+            receipt = {"event": "surface_receipt", "run_id": "fixture-run", "sequence": 3,
+                "request_id": request["request_id"], "action_id": request["action_id"],
+                "requested_run_id": "fixture-run", "requested_surface_id": request["surface_id"],
+                "requested_frame_id": request["frame_id"], "consuming_surface_id": request["surface_id"],
+                "consuming_frame_id": request["frame_id"], "accepted": True,
+                "rejection_reason": "", "resulting_frame_id": successor["frame_id"]}
+            with self.trace.open("ab") as stream:
+                stream.write(self.encode(receipt) + self.encode(successor))
+            # The optional suffix is sampled after native publication. A
+            # later-looking mirror must not change this transaction's source
+            # or discard the canonical receipt already emitted for its input.
+            mirror.write_bytes(mirror_bytes)
+            return 1
+
+        with patch.object(startup, "semantic_wake_pipe_contract", return_value={
+                "status": "bound", "path": "fixture", "contract": {"transport": "fixture"}}), \
+                patch.object(startup, "write_semantic_wake_pipe", side_effect=native_fixture):
+            acted = service.call({"action": "game.act", "observation_id": current,
+                                  "action_id": "inventory.filter"})
+        self.assertTrue(acted["ok"], acted)
+        self.assertEqual(acted["observation"]["observation_id"], "canonical-successor")
+        self.assertEqual(service.call({"action": "game.observe"})["result"]["observation_id"],
+                         "canonical-successor")
+        self.assertFalse(service.call({"action": "game.act", "observation_id": current,
+                                      "action_id": "inventory.filter"})["ok"])
+        self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
+        self.assertEqual(mirror.read_bytes(), mirror_bytes)
 
     def test_canonical_corruption_and_foreign_run_still_refuse_with_valid_mirror(self):
         mirror = self.config / "debug.log"
@@ -264,6 +323,106 @@ class DescriptorIntakeTest(unittest.TestCase):
     def test_completed_receipt_survives_partial_successor_poll_without_replaying(self):
         self.partial_delivery = True
         self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()
+
+    def test_movement_child_choice_returns_before_coordinate_completion(self):
+        self.transition_timeout = .05
+        self.descriptor = {**self.descriptor, "kind": "world", "valid_actions": [
+            {"id": "world.move.east", "stable_id": "", "label": "East", "enabled": True}]}
+        self.trace.write_bytes(self.encode(self.descriptor))
+        service = self.service()
+        world = service.call({"action": "game.observe"})["result"]["observation_id"]
+        prompt = {**self.descriptor, "sequence": 3, "surface_id": "fire-prompt",
+            "frame_id": "fire-choice", "kind": "prompt", "payload": {
+                "title": "YESNO", "text": "Really step into small fire? (Case Sensitive)"},
+            "valid_actions": [{"id": "prompt.choose", "stable_id": "prompt-option:21",
+                               "label": "NO", "enabled": True}]}
+        after = {**self.descriptor, "sequence": 5, "surface_id": "returned-world",
+                 "frame_id": "after-no"}
+
+        def native_fixture(*args, **kwargs):
+            request = json.loads((self.run / "semantic.requests.jsonl").read_text().splitlines()[-1])
+            successor = prompt if request["action_id"] == "world.move.east" else after
+            receipt = {"event": "surface_receipt", "run_id": "fixture-run",
+                "sequence": successor["sequence"] + 1, "request_id": request["request_id"],
+                "action_id": request["action_id"], "requested_run_id": "fixture-run",
+                "requested_surface_id": request["surface_id"], "requested_frame_id": request["frame_id"],
+                "consuming_surface_id": request["surface_id"], "consuming_frame_id": request["frame_id"],
+                "accepted": True, "rejection_reason": "", "resulting_frame_id": successor["frame_id"]}
+            with self.trace.open("ab") as stream:
+                # Real native manager ordering: publish child, then receipt.
+                stream.write(self.encode(successor) + self.encode(receipt))
+            return 1
+
+        with patch.object(startup, "semantic_wake_pipe_contract", return_value={
+                "status": "bound", "path": "fixture", "contract": {"transport": "fixture"}}), \
+                patch.object(startup, "write_semantic_wake_pipe", side_effect=native_fixture):
+            opened = service.call({"action": "game.act", "observation_id": world,
+                                   "action_id": "world.move.east"})
+            self.assertTrue(opened["ok"], opened)
+            self.assertEqual(opened["observation"]["observation_id"], "fire-choice")
+            self.assertEqual(json.loads((self.run / "semantic.steps.jsonl").read_text().splitlines()[-1])["reason"],
+                             "native_surface_child_accepted")
+            self.assertNotIn("coordinate_space", opened["receipt"]["native_receipt"])
+            self.assertFalse(service.call({"action": "game.act", "observation_id": world,
+                                          "action_id": "world.move.east"})["ok"])
+            closed = service.call({"action": "game.act", "observation_id": "fire-choice",
+                                   "action_id": "prompt.choose", "stable_id": "prompt-option:21"})
+            self.assertTrue(closed["ok"], closed)
+            self.assertEqual(closed["observation"]["observation_id"], "after-no")
+        requests = [json.loads(line) for line in (self.run / "semantic.requests.jsonl").read_text().splitlines()]
+        self.assertEqual([row["action_id"] for row in requests], ["world.move.east", "prompt.choose"])
+        self.assertEqual(service.call({"action": "game.observe"})["result"]["observation_id"], "after-no")
+
+    def test_movement_completion_and_child_identity_refusals(self):
+        self.transition_timeout = .03
+        world = {**self.descriptor, "kind": "world", "valid_actions": [
+            {"id": "world.move.east", "stable_id": "", "label": "East", "enabled": True}]}
+        for mode in ("completed_world", "unproved_world", "unnamed_child", "same_owner_child", "actionless_child"):
+            with self.subTest(mode=mode):
+                self.descriptor = world
+                self.trace.write_bytes(self.encode(world))
+                request_path = self.run / "semantic.requests.jsonl"
+                request_path.unlink(missing_ok=True)
+                service = self.service()
+                current = service.call({"action": "game.observe"})["result"]["observation_id"]
+                successor = {**world, "sequence": 3, "frame_id": "next-frame", "surface_id": "child-owner"}
+                if mode.endswith("child"):
+                    successor.update(kind="prompt", valid_actions=[
+                        {"id": "prompt.choose", "stable_id": "NO", "label": "NO", "enabled": True}])
+                if mode == "same_owner_child":
+                    successor["surface_id"] = world["surface_id"]
+                if mode == "actionless_child":
+                    successor["valid_actions"] = []
+
+                def native_fixture(*args, **kwargs):
+                    request = json.loads(request_path.read_text().splitlines()[-1])
+                    receipt = {"event": "surface_receipt", "run_id": "fixture-run", "sequence": 4,
+                        "request_id": request["request_id"], "action_id": request["action_id"],
+                        "requested_run_id": "fixture-run", "requested_surface_id": request["surface_id"],
+                        "requested_frame_id": request["frame_id"], "consuming_surface_id": request["surface_id"],
+                        "consuming_frame_id": request["frame_id"], "accepted": True, "rejection_reason": "",
+                        "resulting_frame_id": "another-child" if mode == "unnamed_child" else "next-frame"}
+                    with self.trace.open("ab") as stream:
+                        stream.write(self.encode(successor) + self.encode(receipt))
+                        if mode == "completed_world":
+                            stream.write(self.encode({"event": "receipt", "run_id": "fixture-run",
+                                "action_id": "world.move.east", "frame_id": "fixture-run:100:1",
+                                "accepted": True, "coordinate_space": "absolute_ms", "outcome": "moved",
+                                "before_absolute_ms": [10, 20, 0], "expected_absolute_ms": [11, 20, 0],
+                                "after_absolute_ms": [11, 20, 0]}))
+                    return 1
+
+                with patch.object(startup, "semantic_wake_pipe_contract", return_value={
+                        "status": "bound", "path": "fixture", "contract": {"transport": "fixture"}}), \
+                        patch.object(startup, "write_semantic_wake_pipe", side_effect=native_fixture):
+                    result = service.call({"action": "game.act", "observation_id": current,
+                                           "action_id": "world.move.east"})
+                self.assertEqual(result["ok"], mode == "completed_world", result)
+                if mode == "completed_world":
+                    self.assertEqual(result["receipt"]["native_receipt"]["after_absolute_ms"], [11, 20, 0])
+                else:
+                    self.assertEqual(result["error"], "native_surface_successor_timeout", result)
+                self.assertEqual(len(request_path.read_text().splitlines()), 1)
 
     def test_following_valid_record_after_oversized_nonsemantic_line_is_current(self):
         self.publish(b"unrelated native output " + b"x" * 5000000 + b"\n" + self.encode(self.descriptor))
