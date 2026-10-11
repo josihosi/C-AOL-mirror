@@ -111,6 +111,94 @@ class PlayerCliTest(unittest.TestCase):
         self.assertIn("display", state)
         self.assertNotIn("display_sha256", state)
 
+    def test_world_cache_keeps_gameplay_once_and_diagnostics_in_exact_response(self):
+        facts = {
+            "avatar": {"name": "Survivor", "absolute_ms": [100, 100, 0]},
+            "visible_local": [{"dx": 1, "dy": 0, "visibility": "clear",
+                               "terrain": "floor", "passable": True, "fields": ["fd_acid"]}],
+            "visible_entities": [{"id": 7, "name": "zombie", "attitude": "hostile",
+                                  "dx": -1, "dy": 0, "absolute_ms": [99, 100, 0]}],
+            "visible_zones": [{"id": "fuel", "name": "Firewood"}],
+            "messages": [{"time": "12:00", "text": "The zombie hits you for 5 damage."}],
+            "minimap": {"radius": 1, "cells": [{"dx": 1, "dy": 0, "visibility": "clear",
+                                                 "terrain": "floor", "fields": ["fd_acid"]}]},
+        }
+        diagnostics = {key: {"activity_id": "internal-operation", "source_sha256": "a" * 64,
+                             "history": "internal state " * 60} for key in (
+            "structural_outing_owner", "site_outing_owners", "structural_signal_dispatch",
+            "staffed_camp_signal_leads")}
+        pending = self.cli("look")
+        self.reply(pending["request_id"], {"ok": True, "result": {
+            "run_id": "run-a", "observation_id": "world-1", "surface": {
+                "kind": "world", "facts": {k: json.dumps(v) for k, v in (facts | diagnostics).items()},
+                "actions": [{"id": "world.pickup", "enabled": True}]}}})
+        collected = self.cli("collect")
+        state = json.loads((self.session / "play-client.json").read_text())
+        self.assertNotIn("world", state["display"])
+        self.assertEqual(state["display"]["current"]["facts"], facts)
+        self.assertTrue(diagnostics.keys().isdisjoint(collected["response"]["facts_changed"]))
+        self.assertNotIn("internal state", (self.session / "play-client.json").read_text())
+        self.assertEqual(self.cli("inspect", "surface.facts.structural_outing_owner")["slice"],
+                         diagnostics["structural_outing_owner"])
+        plain = subprocess.run([sys.executable, str(CLI), "--session", str(self.session), "collect"],
+                               capture_output=True, text=True)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        for text in ("fd_acid", "zombie", "hostile"):
+            self.assertIn(text, plain.stdout)
+        from gameplay_display import plain_player_output
+        self.assertIn("5 damage", plain_player_output(
+            collected, snapshot=PlayerClient(self.session).display_snapshot(), full_look=False))
+        self.assertNotIn("internal-operation", plain.stdout)
+        self.assertNotIn("a" * 64, plain.stdout)
+
+        # A native child owner retains the preceding World only while needed.
+        action = self.cli("act", "world.pickup")
+        self.reply(action["request_id"], {"ok": True, "observation": {
+            "run_id": "run-a", "observation_id": "pickup-2", "surface": {
+                "kind": "pickup", "facts": {"title": "Pickup"},
+                "actions": [{"id": "inventory.cancel", "enabled": True}]}}})
+        self.cli("collect")
+        modal = json.loads((self.session / "play-client.json").read_text())["display"]
+        self.assertEqual(modal["world"]["facts"], facts)
+        self.assertEqual(modal["current"]["observation_id"], "pickup-2")
+        # A read-only refresh inside the modal must not erase same-run World
+        # history or make old damage messages appear newly observed on return.
+        looked = self.cli("look")
+        self.reply(looked["request_id"], {"ok": True, "result": {
+            "run_id": "run-a", "observation_id": "pickup-look-2", "surface": {
+                "kind": "pickup", "facts": {"title": "Pickup"},
+                "actions": [{"id": "inventory.cancel", "enabled": True}]}}})
+        self.cli("collect")
+        modal = json.loads((self.session / "play-client.json").read_text())["display"]
+        self.assertEqual(modal.get("world", {}).get("facts"), facts)
+        cancelled = self.cli("act", "inventory.cancel")
+        request = next(r for r in self.requests() if r["request_id"] == cancelled["request_id"])
+        self.assertEqual(request["request"]["observation_id"], "pickup-look-2")
+        self.reply(cancelled["request_id"], {"ok": True, "observation": {
+            "run_id": "run-a", "observation_id": "world-3", "surface": {
+                "kind": "world", "facts": {k: json.dumps(v) for k, v in (facts | diagnostics).items()},
+                "actions": [{"id": "world.pickup", "enabled": True}]}}})
+        returned = self.cli("collect")
+        self.assertEqual(returned["response"]["facts_changed"], {})
+        final = json.loads((self.session / "play-client.json").read_text())
+        self.assertNotIn("world", final["display"])
+        self.assertEqual(final["observation_id"], "world-3")
+        self.assertEqual(len(self.requests()), 4)
+
+    def test_modal_refresh_discards_world_history_on_changed_run(self):
+        from gameplay_display import display
+        def response(run, kind, facts):
+            return {"ok": True, "result": {"run_id": run, "observation_id": run + kind,
+                    "surface": {"kind": kind, "facts": facts, "actions": []}}}
+        _, world = display(response("a", "world", {"terrain": "floor"}))
+        _, modal = display(response("a", "pickup", {"title": "Pickup"}), world)
+        _, refreshed = display(response("a", "pickup", {"title": "Pickup"}), modal, refresh=True)
+        self.assertEqual(refreshed["world"]["facts"], {"terrain": "floor"})
+        _, different = display(response("b", "pickup", {"title": "Pickup"}), refreshed, refresh=True)
+        self.assertNotIn("world", different)
+        returned, _ = display(response("b", "world", {"terrain": "floor"}), different)
+        self.assertEqual(returned["facts_changed"], {"terrain": "floor"})
+
     def test_world_menu_only_explains_macros_allowed_in_this_session(self):
         from gameplay_display import world_look
         snapshot = {"current": {"facts": {}, "actions": [

@@ -7,6 +7,15 @@ import shlex
 from cockpit_evidence import action_catalog, compact, decode, gameplay_fact
 
 
+# Native owner/scheduler diagnostics remain in the authenticated response for
+# explicit inspection. They are not player-visible World facts and need no
+# second decoded copy in the presentation cache or ordinary display deltas.
+_WORLD_DIAGNOSTIC_FACTS = frozenset({
+    "structural_outing_owner", "site_outing_owners", "structural_signal_dispatch",
+    "staffed_camp_signal_leads",
+})
+
+
 def local_text_map(facts, *, game_turn=None):
     """Draw only the current avatar-visible native cells around the player."""
     avatar = facts.get("avatar", {})
@@ -1647,12 +1656,18 @@ def display(response, previous=None, refresh=False):
     fact_prefix = observation_path(response) + ".surface.facts."
     surface = observed["surface"]
     owner = surface.get("kind")
-    facts = {k: decode(v) for k, v in surface.get("facts", {}).items()}
+    facts = {k: decode(v) for k, v in surface.get("facts", {}).items()
+             if owner != "world" or k not in _WORLD_DIAGNOSTIC_FACTS}
     actions = surface.get("actions", [])
     identity = {k: observed.get(k) for k in ("run_id", "surface_id", "observation_id")}
     previous = previous or {}
-    reset = refresh or previous.get("run_id") != observed.get("run_id")
-    old = {} if reset else previous.get("world" if owner == "world" else "current", {})
+    run_changed = previous.get("run_id") != observed.get("run_id")
+    reset = refresh or run_changed
+    # Keep one World snapshot. A modal needs the preceding World for its return
+    # delta; while World itself owns input, ``current`` already is that snapshot.
+    prior_world = (previous.get("current", {}) if previous.get("owner") == "world"
+                   else previous.get("world", {}))
+    old = {} if reset else (prior_world if owner == "world" else previous.get("current", {}))
     transition = reset or previous.get("owner") != owner
     old_facts = old.get("facts", {})
     removed = []
@@ -1735,5 +1750,9 @@ def display(response, previous=None, refresh=False):
     state = {**previous, "run_id": observed.get("run_id"), "owner": owner,
              "current": snapshot, **{k: observed[k] for k in ("game_minutes", "game_turn", "avatar_moves", "game_time", "turn") if k in observed}}
     if owner == "world":
-        state["world"] = snapshot
+        state.pop("world", None)
+    elif not run_changed and prior_world:
+        state["world"] = prior_world
+    else:
+        state.pop("world", None)
     return view, state
