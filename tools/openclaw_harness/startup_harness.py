@@ -5459,47 +5459,26 @@ def refresh_semantic_step_trace(
     # The file bridge needs only a bounded suffix ending in the active owner;
     # the deque above applies that event bound while parsing, before a long
     # trace can accumulate parsed event dictionaries in memory.
-    selected_events = list(selected_events)
-    preserved_events: list[Dict[str, Any]] = []
-    if latest_duration_receipt is not None and not any(
-            event.get("event") == "receipt" and
-            event.get("frame_id") == latest_duration_receipt.get("frame_id") and
-            event.get("action_id") == latest_duration_receipt.get("action_id")
-            for event in selected_events):
-        preserved_events.append(compact_semantic_step_channel_event(latest_duration_receipt))
-    # A long native wait can generate more than one bounded suffix of render
-    # events before its file-bridge poll resumes.  Keep the exact latest
-    # semantic request receipt and its named successor together; otherwise
-    # the input was accepted but the bridge incorrectly reports a receipt
-    # timeout solely because the short correlation cluster fell off the tail.
-    # Movement completion is a separate native fact from surface acceptance.
-    # Keep only the coordinate receipt for the latest surface action, alongside
-    # its named successor.  A later redraw remains the active authority.
+    # Reserve current authority and receipt correlation before allocating any
+    # diagnostic slots. A pin already present in the suffix still needs its
+    # slot: trimming diagnostics later must never evict that authority.
     if latest_surface_receipt is not None and latest_movement_receipt is not None and \
             latest_movement_receipt.get("action_id") != latest_surface_receipt.get("action_id"):
         latest_movement_receipt = None
-    authority_events = [event for event in (
-        latest_duration_receipt, latest_movement_receipt,
-        latest_surface_successor, latest_surface_receipt,
-        latest_accepted_successor, latest_accepted_receipt, latest_surface_descriptor,
-    ) if event is not None]
-    authority_offsets = {event["_source_offset"] for event in authority_events}
-    for event in authority_events:
-        if event is None:
-            continue
-        if not any(
-                candidate.get("event") == event.get("event") and
-                candidate.get("_source_offset") == event.get("_source_offset")
-                for candidate in [*preserved_events, *selected_events]):
-            preserved_events.append(compact_semantic_step_channel_event(event))
-    if preserved_events:
-        # Preserve the newest active suffix as well as the correlation
-        # cluster, always respecting the reader's hard cardinality ceiling.
-        retained_capacity = max(0, SEMANTIC_STEP_MAX_EVENTS - len(preserved_events))
-        selected_events = list(selected_events)[-retained_capacity:] if retained_capacity else []
-        selected_events = [*preserved_events, *selected_events]
-    # Current authority is independent of receipt correlation. Restore native
-    # order after pinning so an older named successor cannot become current.
+    authority_by_offset = {
+        event["_source_offset"]: compact_semantic_step_channel_event(event)
+        for event in (latest_duration_receipt, latest_movement_receipt,
+                      latest_surface_successor, latest_surface_receipt,
+                      latest_accepted_successor, latest_accepted_receipt, latest_surface_descriptor)
+        if event is not None and (event_filter is None or event["event"] in event_filter)
+    }
+    authority_offsets = set(authority_by_offset)
+    diagnostics = [event for event in selected_events
+                   if event["_source_offset"] not in authority_offsets]
+    capacity = max(0, SEMANTIC_STEP_MAX_EVENTS - len(authority_by_offset))
+    selected_events = [*authority_by_offset.values(), *(diagnostics[-capacity:] if capacity else [])]
+    # Receipt successors can be older than the current redraw. Source order,
+    # rather than pin insertion order, determines the current native owner.
     selected_events.sort(key=lambda event: event["_source_offset"])
     selected = encode(selected_events)
     if len(selected) > SEMANTIC_STEP_MAX_BYTES:

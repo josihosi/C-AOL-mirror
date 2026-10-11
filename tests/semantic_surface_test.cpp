@@ -6,6 +6,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -2009,6 +2010,14 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     REQUIRE( manager.publish( surface, { { "selection", "item:199" } }, actions ) );
     // An action catalogue is lossless, including a non-front physical item.
     const std::string diagnostic( 96 * 1024, 'd' );
+    for( const std::string state : { "active", "progress", "completed_cleared" } ) {
+        REQUIRE( write_native_semantic_event( "{\"event\":\"travel\",\"run_id\":\"" + run +
+                                             "\",\"travel_id\":\"trip-1\",\"receipt_id\":\"trip-1:" + state +
+                                             "\",\"state\":\"" + state + "\",\"destination\":[129,149,0]," +
+                                             "\"destination_present\":" + ( state == "completed_cleared" ? "false" : "true" ) +
+                                             ",\"destination_cleared\":" + ( state == "completed_cleared" ? "true" : "false" ) + "}" ) );
+    }
+    std::set<std::string> travel_states;
     for( int index = 0; index < 100; ++index ) {
         std::ostringstream event;
         event << "{\"event\":\"turn\",\"run_id\":\"" << run
@@ -2037,6 +2046,9 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
             raid_diagnostic = true;
         } else if( kind == "trace_generation" ) {
             discarded = object.get_int( "recent_records_discarded" );
+        } else if( kind == "travel" ) {
+            CHECK( object.get_string( "travel_id" ) == "trip-1" );
+            travel_states.insert( object.get_string( "state" ) );
         } else if( kind == "surface_descriptor" ) {
             CHECK( object.get_array( "valid_actions" ).size() == 200 );
             current = object.get_string( "frame_id" ) == manager.top()->frame_id;
@@ -2048,6 +2060,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         }
     }
     CHECK( discarded > 0 );
+    CHECK( travel_states == std::set<std::string>{ "active", "progress", "completed_cleared" } );
     CHECK( raid_diagnostic );
     CHECK( current );
     CHECK( accepted );
@@ -2058,6 +2071,10 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     // successor named by the accepted receipt after that row leaves recent.
     REQUIRE( manager.publish( surface, { { "selection", "redrawn" } }, actions ) );
     CHECK( manager.top()->frame_id != accepted_frame );
+    REQUIRE( write_native_semantic_event( "{\"event\":\"travel\",\"run_id\":\"" + run +
+                                         "\",\"travel_id\":\"trip-2\",\"receipt_id\":\"trip-2:active\"," +
+                                         "\"state\":\"active\",\"destination\":[130,149,0]," +
+                                         "\"destination_present\":true,\"destination_cleared\":false}" ) );
     manager.submit_request( request );
     manager.consume_top_request();
     CHECK( dispatched == 1 );
@@ -2080,6 +2097,9 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
             const std::string frame = object.get_string( "frame_id" );
             named_successor = named_successor || frame == accepted_frame;
             current = current || frame == manager.top()->frame_id;
+        } else if( object.get_string( "event" ) == "travel" ) {
+            CHECK( object.get_string( "travel_id" ) == "trip-2" );
+            CHECK( object.get_string( "state" ) == "active" );
         }
     }
     CHECK( named_successor );

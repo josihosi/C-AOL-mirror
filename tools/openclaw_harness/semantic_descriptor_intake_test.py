@@ -300,7 +300,7 @@ class DescriptorIntakeTest(unittest.TestCase):
                     "run_id": "fixture-run", "sequence": index + 10, "stage": "idle",
                     "request_id": "", "offset_before": 0, "offset_after": 0, "transport_end": 0,
                     "queued": False, "wake_pending": False})
-                    for index in range(startup.SEMANTIC_STEP_MAX_EVENTS + 10))
+                    for index in range(getattr(self, "transport_count", startup.SEMANTIC_STEP_MAX_EVENTS + 10)))
                 redraw = ({**successor, "sequence": 5, "frame_id": "current-redraw"}
                           if getattr(self, "redraw_after_receipt", False) else None)
                 temporary.write_bytes(self.encode(header) + self.encode(receipt) + self.encode(successor)
@@ -339,6 +339,12 @@ class DescriptorIntakeTest(unittest.TestCase):
         after = observed_after["result"]["observation_id"]
         self.assertEqual(after, "current-redraw" if getattr(self, "redraw_after_receipt", False)
                          else "next-frame")
+        if getattr(self, "cold_after_receipt", False):
+            # Cold/current-generation reconstruction must agree with the hot
+            # adapter, whose cursor can already lie after the old successor.
+            cold = self.service().call({"action": "game.observe"})
+            self.assertTrue(cold["ok"], cold)
+            self.assertEqual(cold["result"]["observation_id"], after)
         self.assertFalse(service.call({"action": "game.act", "observation_id": after,
                                       "action_id": "inventory.filter"})["ok"])
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
@@ -383,6 +389,31 @@ class DescriptorIntakeTest(unittest.TestCase):
         self.replace_during_dispatch = True
         self.redraw_after_receipt = True
         self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()
+
+    def test_current_owner_keeps_its_slot_when_receipt_pins_shrink_the_suffix(self):
+        self.replace_during_dispatch = True
+        self.redraw_after_receipt = True
+        # Current redraw + refusal + diagnostics just fit the initial deque.
+        # Adding the older receipt/successor must not trim the redraw away.
+        self.transport_count = startup.SEMANTIC_STEP_MAX_EVENTS - 2
+        self.cold_after_receipt = True
+        self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()
+
+    def test_travel_only_reader_keeps_trip_facts_without_large_action_authority(self):
+        current = {**self.descriptor, "payload": {"facts": "x" * 600000}}
+        trip = {"event": "travel", "run_id": "fixture-run", "travel_id": "trip-1",
+                "destination": [129, 149, 0], "avatar_omt": [129, 149, 0]}
+        records = [{**trip, "receipt_id": "trip-1:" + state, "state": state,
+                    "destination_present": state != "completed_cleared",
+                    "destination_cleared": state == "completed_cleared"}
+                   for state in ("active", "progress", "completed_cleared")]
+        self.publish(self.encode(current) + b"".join(self.encode(event) for event in records))
+        result = startup.evaluate_native_travel_completion_boundary(
+            profile="fixture", run_dir=self.run, run_id="fixture-run", trace_start_offset=0,
+            expected_destination=[129, 149, 0])
+        self.assertEqual(result["status"], "green", result)
+        self.assertEqual(result["event_count"], 3)
+        self.assertLess(Path(result["source"]).stat().st_size, startup.SEMANTIC_STEP_MAX_BYTES)
 
     def test_completed_receipt_survives_partial_successor_poll_without_replaying(self):
         self.partial_delivery = True

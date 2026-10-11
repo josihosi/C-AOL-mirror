@@ -79,7 +79,21 @@ class native_semantic_journal
                     pins.count( "surface" ) ) {
                     pins["receipt_successor"] = pins["surface"];
                 }
-            } else if( kind == "frame" || kind == "native_save_completion" || kind == "travel" ) {
+            } else if( kind == "travel" ) {
+                const std::string trip = object.get_string( "travel_id", "" );
+                if( current_trip != trip ) {
+                    pins.erase( "travel_active" );
+                    pins.erase( "travel_progress" );
+                    current_trip = trip;
+                }
+                // The existing travel consumer requires the start and latest
+                // progress of this trip alongside its terminal receipt.
+                const std::string state = object.get_string( "state", "" );
+                if( state == "active" || state == "progress" ) {
+                    pins["travel_" + state] = row;
+                }
+                pins["travel"] = row;
+            } else if( kind == "frame" || kind == "native_save_completion" ) {
                 pins[kind] = row;
             } else if( kind == "receipt" ) {
                 const std::string action = object.get_string( "action_id", "" );
@@ -168,6 +182,7 @@ class native_semantic_journal
         std::string current_frame;
         std::string accepted_result;
         std::string receipt_result;
+        std::string current_trip;
         std::map<std::string, std::shared_ptr<const record>> pins;
         std::deque<std::shared_ptr<const record>> recent;
         std::size_t recent_bytes = 0;
