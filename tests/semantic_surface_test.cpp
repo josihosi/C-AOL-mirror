@@ -2022,10 +2022,21 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         std::ostringstream event;
         event << "{\"event\":\"turn\",\"run_id\":\"" << run
               << "\",\"diagnostic\":\"" << diagnostic << "\"}";
-        REQUIRE( write_native_semantic_event( event.str() ) );
+        REQUIRE( write_native_diagnostic_event( event.str() ) );
         diagnostic_recorder.record( "actor", "raid_actor_action", index, "\"action\":\"Pause\",\"npc_id\":5",
                                     std::to_string( index ) );
     }
+    // These all use the same real recorder, including names without raid_.
+    // A diagnostic resembling authority must not replace the current owner.
+    const std::set<std::string> diagnostic_kinds = {
+        "bandit_shakedown_emission", "bandit_shakedown_delivery", "bandit_shakedown_contact",
+        "bandit_shakedown_fight_reply", "npc_alarm", "npc_attack_callback",
+        "scout_perceived_threat", "scout_alarm_response", "surface_descriptor"
+    };
+    for( const std::string &kind : diagnostic_kinds ) {
+        diagnostic_recorder.record_edge( kind, 100, "\"frame_id\":\"diagnostic-not-input\"" );
+    }
+    std::set<std::string> retained_diagnostic_kinds;
     std::ifstream input( trace );
     std::string line;
     std::string accepted_frame;
@@ -2042,8 +2053,11 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         object.allow_omitted_members();
         const std::string kind = object.get_string( "event" );
         if( !semantic ) {
-            CHECK( kind.compare( 0, 5, "raid_" ) == 0 );
-            raid_diagnostic = true;
+            CHECK( kind.compare( 0, 5, "raid_" ) == 0 || kind == "turn" || diagnostic_kinds.count( kind ) );
+            raid_diagnostic = raid_diagnostic || kind.compare( 0, 5, "raid_" ) == 0;
+            if( diagnostic_kinds.count( kind ) ) {
+                retained_diagnostic_kinds.insert( kind );
+            }
         } else if( kind == "trace_generation" ) {
             discarded = object.get_int( "recent_records_discarded" );
         } else if( kind == "travel" ) {
@@ -2062,6 +2076,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     CHECK( discarded > 0 );
     CHECK( travel_states == std::set<std::string>{ "active", "hostile_boundary", "progress", "completed_cleared" } );
     CHECK( raid_diagnostic );
+    CHECK( retained_diagnostic_kinds == diagnostic_kinds );
     CHECK( current );
     CHECK( accepted );
     CHECK( accepted_frame == manager.top()->frame_id );
@@ -2080,7 +2095,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     CHECK( dispatched == 1 );
     input.close();
     for( int index = 0; index < 100; ++index ) {
-        REQUIRE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run +
+        REQUIRE( write_native_diagnostic_event( "{\"event\":\"turn\",\"run_id\":\"" + run +
                                              "\",\"diagnostic\":\"" + diagnostic + "\"}" ) );
     }
     std::ifstream replayed( trace );
@@ -2111,7 +2126,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     fs::remove( trace );
     fs::create_directory( trace );
     const bool previous_error = debug_has_error_been_observed();
-    CHECK_FALSE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
+    CHECK_FALSE( write_native_diagnostic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
     CHECK( debug_has_error_been_observed() );
     if( !previous_error ) {
         debug_reset_error_observed();
@@ -2121,7 +2136,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         std::ofstream broken( trace );
         broken << "openclaw_harness_semantic_step: {";
     }
-    REQUIRE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
+    REQUIRE( write_native_diagnostic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
     std::ifstream recovered( trace );
     current = accepted = false;
     while( std::getline( recovered, line ) ) {
@@ -2142,8 +2157,15 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     CHECK( accepted );
     CHECK( dispatched == 1 );
     const auto before = fs::file_size( trace );
+    const bool prior_identity_error = debug_has_error_been_observed();
+    CHECK_FALSE( write_native_diagnostic_event( "{\"event\":\"npc_alarm\",\"run_id\":\"foreign-run\"}" ) );
+    CHECK( fs::file_size( trace ) == before );
+    if( !prior_identity_error ) {
+        debug_reset_error_observed();
+    }
     unsetenv( keys[1].c_str() );
     CHECK_FALSE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
+    CHECK_FALSE( write_native_diagnostic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
     CHECK( fs::file_size( trace ) == before );
 }
 

@@ -315,7 +315,7 @@ void recorder::write( const std::string &row, const bool critical )
             // The diagnostic recorder shares the native journal in a harness
             // run. Keep its raw-JSON format and existing row/edge policy, but
             // let the owning producer bound bytes and replace generations.
-            return write_native_semantic_event( event );
+            return write_native_diagnostic_event( event );
         }
         // Explicit stand-alone diagnostic scopes retain their existing bound
         // row policy. They do not publish native input authority.

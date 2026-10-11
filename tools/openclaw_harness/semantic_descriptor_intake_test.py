@@ -349,6 +349,73 @@ class DescriptorIntakeTest(unittest.TestCase):
                                       "action_id": "inventory.filter"})["ok"])
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
 
+    def test_wait_demand_choice_receipt_with_raw_diagnostics_and_generation_replacement(self):
+        self.descriptor = {**self.descriptor, "kind": "world", "valid_actions": [
+            {"id": "world.wait", "stable_id": "", "label": "Wait", "enabled": True}]}
+        self.publish(self.encode(self.descriptor))
+        service = self.service()
+        stages = [
+            ("world.wait", "duration", "menu", "wait.5m", "", "5 minutes"),
+            ("wait.5m", "demand", "menu", "menu.choose", "option:10", "Pay"),
+            ("menu.choose", "returned-world", "world", "world.wait", "", "Wait"),
+        ]
+        diagnostics = ["bandit_shakedown_emission", "bandit_shakedown_delivery",
+                       "bandit_shakedown_contact", "bandit_shakedown_fight_reply", "npc_alarm",
+                       "npc_attack_callback", "scout_perceived_threat", "scout_alarm_response"]
+        dispatched = []
+
+        def native_fixture(*args, **kwargs):
+            request = json.loads((self.run / "semantic.requests.jsonl").read_text().splitlines()[-1])
+            action, frame, kind, next_action, stable, label = stages[len(dispatched)]
+            self.assertEqual(request["action_id"], action)
+            dispatched.append(request["request_id"])
+            successor = {**self.descriptor, "surface_id": frame, "frame_id": frame, "kind": kind,
+                "sequence": 10 + len(dispatched), "payload": {"title": "Robbery" if frame == "demand" else label},
+                "valid_actions": [{"id": next_action, "stable_id": stable, "label": label, "enabled": True}]}
+            receipt = {"event": "surface_receipt", "run_id": "fixture-run",
+                "request_id": request["request_id"], "action_id": action,
+                "requested_run_id": request["run_id"], "requested_surface_id": request["surface_id"],
+                "requested_frame_id": request["frame_id"], "consuming_surface_id": request["surface_id"],
+                "consuming_frame_id": request["frame_id"], "accepted": True, "rejection_reason": "",
+                "resulting_frame_id": frame}
+            raw = b"".join((json.dumps({"event": event, "run_id": "fixture-run", "game_turn": 500,
+                "site_id": "camp", "operation_id": "camp#hostile:2", "generation": 2}) + "\n").encode()
+                for event in diagnostics)
+            # Model the shared native writer's atomic compact generation, not a game payment.
+            header = {"event": "trace_generation", "run_id": "fixture-run", "generation": frame}
+            temporary = self.trace.with_suffix(".next")
+            temporary.write_bytes(self.encode(header) + raw + self.encode(successor)
+                                  + self.encode(receipt) + raw)
+            temporary.replace(self.trace)
+            return 1
+
+        with patch.object(startup, "semantic_wake_pipe_contract", return_value={
+                "status": "bound", "path": "fixture", "contract": {"transport": "fixture"}}), \
+                patch.object(startup, "write_semantic_wake_pipe", side_effect=native_fixture):
+            for index, (action, expected_frame, *_) in enumerate(stages):
+                observed = service.call({"action": "game.observe"})
+                self.assertTrue(observed["ok"], observed)
+                old = observed["result"]["observation_id"]
+                request = {"action": "game.act", "observation_id": old, "action_id": action}
+                if action == "menu.choose":
+                    request["stable_id"] = "option:10"
+                result = service.call(request)
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["receipt"]["native_receipt"]["resulting_frame_id"], expected_frame)
+                self.assertEqual(service.call({"action": "game.observe"})["result"]["observation_id"], expected_frame)
+                self.assertFalse(service.call(request)["ok"])
+                self.assertEqual(len(dispatched), index + 1)
+        self.assertEqual(len(set(dispatched)), 3)
+        self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 3)
+
+    def test_unknown_prefixed_semantic_record_still_refuses_current_owner(self):
+        # A diagnostic-looking name in the semantic channel is not silently ignored.
+        self.publish(self.encode(self.descriptor) + self.encode({
+            "event": "bandit_shakedown_emission", "run_id": "fixture-run", "game_turn": 500}))
+        result = self.service().call({"action": "game.observe"})
+        self.assertFalse(result["ok"], result)
+        self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+
     def test_optional_diagnostic_error_keeps_same_controller_save_choice_callable(self):
         # Real factory/channel/receipt path; fixture transport is not a game save.
         self.descriptor = {**self.descriptor, "kind": "world", "payload": {"turn": "5217816"},

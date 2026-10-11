@@ -19,6 +19,11 @@ namespace
 {
 thread_local semantic_surface_manager *active_manager = nullptr;
 
+enum class native_record_format {
+    semantic,
+    diagnostic
+};
+
 // Keep bounded recent diagnostics plus the current input transaction.  A large
 // action catalog is not truncated to meet a diagnostic budget.
 class native_semantic_journal
@@ -33,7 +38,7 @@ class native_semantic_journal
         native_semantic_journal( std::string path, std::string run ) :
             path( std::move( path ) ), run( std::move( run ) ) {}
 
-        bool append( const std::string &event ) {
+        bool append( const std::string &event, native_record_format format ) {
             std::istringstream input( event );
             TextJsonIn jsin( input );
             const TextJsonObject object = jsin.get_object();
@@ -42,72 +47,76 @@ class native_semantic_journal
                 return false;
             }
             const std::string kind = object.get_string( "event", "" );
-            const std::string prefix = kind.compare( 0, 5, "raid_" ) == 0 ? "" :
-                                       "openclaw_harness_semantic_step: ";
+            const std::string prefix = format == native_record_format::semantic ?
+                                       "openclaw_harness_semantic_step: " : "";
             auto row = std::make_shared<const record>( record { ++sequence, prefix + event + '\n' } );
-            if( kind == "surface_descriptor" ) {
-                current_frame = object.get_string( "frame_id", "" );
-                pins["surface"] = row;
-                if( current_frame == accepted_result ) {
-                    pins["accepted_successor"] = row;
-                }
-                if( current_frame == receipt_result ) {
-                    pins["receipt_successor"] = row;
-                }
-            } else if( kind == "surface_receipt" ) {
-                pins["receipt"] = row;
-                const std::string result = object.get_string( "resulting_frame_id", "" );
-                // Cached receipt replay can occur after a newer redraw. Its
-                // immutable result still names the previous successor, which
-                // may now exist only in these pins, not the recent window.
-                if( receipt_result != result ) {
-                    pins.erase( "receipt_successor" );
-                }
-                receipt_result = result;
-                if( object.get_bool( "accepted", false ) ) {
-                    pins["accepted_receipt"] = row;
-                    if( accepted_result != result ) {
-                        pins.erase( "accepted_successor" );
+            // Diagnostic callers share retention, never semantic framing or
+            // current input pins, even if their event names resemble authority.
+            if( format == native_record_format::semantic ) {
+                if( kind == "surface_descriptor" ) {
+                    current_frame = object.get_string( "frame_id", "" );
+                    pins["surface"] = row;
+                    if( current_frame == accepted_result ) {
+                        pins["accepted_successor"] = row;
                     }
-                    accepted_result = result;
+                    if( current_frame == receipt_result ) {
+                        pins["receipt_successor"] = row;
+                    }
+                } else if( kind == "surface_receipt" ) {
+                    pins["receipt"] = row;
+                    const std::string result = object.get_string( "resulting_frame_id", "" );
+                    // Cached receipt replay can occur after a newer redraw. Its
+                    // immutable result still names the previous successor, which
+                    // may now exist only in these pins, not the recent window.
+                    if( receipt_result != result ) {
+                        pins.erase( "receipt_successor" );
+                    }
+                    receipt_result = result;
+                    if( object.get_bool( "accepted", false ) ) {
+                        pins["accepted_receipt"] = row;
+                        if( accepted_result != result ) {
+                            pins.erase( "accepted_successor" );
+                        }
+                        accepted_result = result;
+                        if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
+                            pins.count( "surface" ) ) {
+                            pins["accepted_successor"] = pins["surface"];
+                        }
+                    }
                     if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
                         pins.count( "surface" ) ) {
-                        pins["accepted_successor"] = pins["surface"];
+                        pins["receipt_successor"] = pins["surface"];
                     }
+                } else if( kind == "travel" ) {
+                    const std::string trip = object.get_string( "travel_id", "" );
+                    if( current_trip != trip ) {
+                        pins.erase( "travel_active" );
+                        pins.erase( "travel_progress" );
+                        pins.erase( "travel_hostile_boundary" );
+                        pins.erase( "travel_refusal" );
+                        current_trip = trip;
+                    }
+                    // The existing travel consumer requires the start and latest
+                    // progress of this trip alongside its terminal receipt. Earlier
+                    // adverse boundaries remain evidence even after travel resumes.
+                    const std::string state = object.get_string( "state", "" );
+                    if( state == "active" || state == "progress" ) {
+                        pins["travel_" + state] = row;
+                    }
+                    if( state == "hostile_boundary" && !pins.count( "travel_hostile_boundary" ) ) {
+                        pins["travel_hostile_boundary"] = row;
+                    }
+                    if( ( state == "blocked" || state == "interrupted" ) && !pins.count( "travel_refusal" ) ) {
+                        pins["travel_refusal"] = row;
+                    }
+                    pins["travel"] = row;
+                } else if( kind == "frame" || kind == "native_save_completion" ) {
+                    pins[kind] = row;
+                } else if( kind == "receipt" ) {
+                    const std::string action = object.get_string( "action_id", "" );
+                    pins[action.compare( 0, 5, "wait." ) == 0 ? "duration_receipt" :
+                         "movement_receipt"] = row;
                 }
-                if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
-                    pins.count( "surface" ) ) {
-                    pins["receipt_successor"] = pins["surface"];
-                }
-            } else if( kind == "travel" ) {
-                const std::string trip = object.get_string( "travel_id", "" );
-                if( current_trip != trip ) {
-                    pins.erase( "travel_active" );
-                    pins.erase( "travel_progress" );
-                    pins.erase( "travel_hostile_boundary" );
-                    pins.erase( "travel_refusal" );
-                    current_trip = trip;
-                }
-                // The existing travel consumer requires the start and latest
-                // progress of this trip alongside its terminal receipt. Earlier
-                // adverse boundaries remain evidence even after travel resumes.
-                const std::string state = object.get_string( "state", "" );
-                if( state == "active" || state == "progress" ) {
-                    pins["travel_" + state] = row;
-                }
-                if( state == "hostile_boundary" && !pins.count( "travel_hostile_boundary" ) ) {
-                    pins["travel_hostile_boundary"] = row;
-                }
-                if( ( state == "blocked" || state == "interrupted" ) && !pins.count( "travel_refusal" ) ) {
-                    pins["travel_refusal"] = row;
-                }
-                pins["travel"] = row;
-            } else if( kind == "frame" || kind == "native_save_completion" ) {
-                pins[kind] = row;
-            } else if( kind == "receipt" ) {
-                const std::string action = object.get_string( "action_id", "" );
-                pins[action.compare( 0, 5, "wait." ) == 0 ? "duration_receipt" :
-                     "movement_receipt"] = row;
             }
             recent.push_back( row );
             recent_bytes += row->text.size();
@@ -216,9 +225,7 @@ bool same_actions( const std::vector<semantic_action_descriptor> &left,
     }
     return true;
 }
-} // namespace
-
-bool write_native_semantic_event( const std::string &event )
+bool write_native_event( const std::string &event, native_record_format format )
 {
     const char *run = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
     const char *bound = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
@@ -238,7 +245,7 @@ bool write_native_semantic_event( const std::string &event )
     static bool failure_reported = false;
     bool written = false;
     try {
-        written = journal->append( event );
+        written = journal->append( event, format );
     } catch( const std::exception & ) {
         // A failed publication is not authority. Keep the failure diagnostic
         // small; never mirror the discarded action catalog into debug.log.
@@ -250,6 +257,18 @@ bool write_native_semantic_event( const std::string &event )
     }
     failure_reported = !written;
     return written;
+}
+
+} // namespace
+
+bool write_native_semantic_event( const std::string &event )
+{
+    return write_native_event( event, native_record_format::semantic );
+}
+
+bool write_native_diagnostic_event( const std::string &event )
+{
+    return write_native_event( event, native_record_format::diagnostic );
 }
 
 semantic_surface_manager::semantic_surface_manager( std::string run_id ) : run_id_( std::move( run_id ) )
