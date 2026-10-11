@@ -100,6 +100,9 @@ class native_semantic_journal
             output << row->text;
             output.close();
             if( !output ) {
+                // A partial append cannot be followed by another JSON row.
+                // Rebuild the remembered complete records on the next write.
+                published = false;
                 return false;
             }
             disk_bytes += row->text.size();
@@ -143,6 +146,7 @@ class native_semantic_journal
             if( bytes < 0 || !output || !rename_file( temporary, path ) ) {
                 std::error_code error;
                 std::filesystem::remove( temporary, error );
+                published = false;
                 return false;
             }
             disk_bytes = static_cast<std::size_t>( bytes );

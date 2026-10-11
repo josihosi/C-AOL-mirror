@@ -2058,6 +2058,42 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     manager.submit_request( request );
     manager.consume_top_request();
     CHECK( dispatched == 1 );
+    input.close();
+    // Actual output failure must recover through a complete replacement, not
+    // append behind an incomplete record left by a failed write.
+    fs::remove( trace );
+    fs::create_directory( trace );
+    const bool previous_error = debug_has_error_been_observed();
+    CHECK_FALSE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
+    CHECK( debug_has_error_been_observed() );
+    if( !previous_error ) {
+        debug_reset_error_observed();
+    }
+    fs::remove( trace );
+    {
+        std::ofstream broken( trace );
+        broken << "openclaw_harness_semantic_step: {";
+    }
+    REQUIRE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
+    std::ifstream recovered( trace );
+    current = accepted = false;
+    while( std::getline( recovered, line ) ) {
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        std::istringstream body( line.compare( 0, prefix.size(), prefix ) == 0 ?
+                                 line.substr( prefix.size() ) : line );
+        TextJsonIn jsin( body );
+        const TextJsonObject object = jsin.get_object();
+        object.allow_omitted_members();
+        if( object.get_string( "event" ) == "surface_descriptor" ) {
+            CHECK( object.get_array( "valid_actions" ).size() == 200 );
+            current = object.get_string( "frame_id" ) == manager.top()->frame_id;
+        } else if( object.get_string( "event" ) == "surface_receipt" && object.get_bool( "accepted" ) ) {
+            accepted = object.get_string( "request_id" ) == request.request_id;
+        }
+    }
+    CHECK( current );
+    CHECK( accepted );
+    CHECK( dispatched == 1 );
     const auto before = fs::file_size( trace );
     unsetenv( keys[1].c_str() );
     CHECK_FALSE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
