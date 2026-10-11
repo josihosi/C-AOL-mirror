@@ -415,6 +415,41 @@ class DescriptorIntakeTest(unittest.TestCase):
         self.assertEqual(result["event_count"], 3)
         self.assertLess(Path(result["source"]).stat().st_size, startup.SEMANTIC_STEP_MAX_BYTES)
 
+    def test_travel_verdict_preserves_early_boundary_after_projection_overflow(self):
+        trip = {"event": "travel", "run_id": "fixture-run", "travel_id": "trip-1",
+                "destination": [129, 149, 0], "avatar_omt": [129, 148, 0]}
+        for boundary in (None, "hostile_boundary", "interrupted"):
+            with self.subTest(boundary=boundary):
+                states = ["active"] + ([boundary, "resumed"] if boundary else [])
+                states += ["progress"] * (startup.SEMANTIC_STEP_MAX_EVENTS + 5)
+                states += ["completed_cleared"]
+                records = [{**trip, "receipt_id": f"trip-1:{index}:{state}", "state": state,
+                            "destination_present": state != "completed_cleared",
+                            "destination_cleared": state == "completed_cleared"}
+                           for index, state in enumerate(states)]
+                self.publish(b"".join(self.encode(event) for event in records))
+                result = startup.evaluate_native_travel_completion_boundary(
+                    profile="fixture", run_dir=self.run, run_id="fixture-run", trace_start_offset=0,
+                    expected_destination=[129, 149, 0])
+                self.assertEqual(result["reason"], {
+                    None: "native_travel_completed_and_destination_cleared",
+                    "hostile_boundary": "post_hostile_boundary_travel",
+                    "interrupted": "interrupted"}[boundary], result)
+                if boundary == "hostile_boundary":
+                    handled = startup.evaluate_native_travel_completion_boundary(
+                        profile="fixture", run_dir=self.run, run_id="fixture-run", trace_start_offset=0,
+                        expected_destination=[129, 149, 0], allow_handled_hostile_boundaries=True)
+                    self.assertEqual(handled["status"], "green", handled)
+                    self.assertEqual(len(handled["handled_hostile_boundaries"]), 1)
+                    next_trip = [{**event, "travel_id": "trip-2", "receipt_id": "trip-2:" + event["state"]}
+                                 for event in (records[0], records[-2], records[-1])]
+                    self.publish(b"".join(self.encode(event) for event in [*records, *next_trip]))
+                    fresh = startup.evaluate_native_travel_completion_boundary(
+                        profile="fixture", run_dir=self.run, run_id="fixture-run", trace_start_offset=0,
+                        expected_destination=[129, 149, 0])
+                    self.assertEqual(fresh["status"], "green", fresh)
+                    self.assertEqual(fresh["travel_id"], "trip-2")
+
     def test_completed_receipt_survives_partial_successor_poll_without_replaying(self):
         self.partial_delivery = True
         self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()

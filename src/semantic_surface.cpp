@@ -84,13 +84,22 @@ class native_semantic_journal
                 if( current_trip != trip ) {
                     pins.erase( "travel_active" );
                     pins.erase( "travel_progress" );
+                    pins.erase( "travel_hostile_boundary" );
+                    pins.erase( "travel_refusal" );
                     current_trip = trip;
                 }
                 // The existing travel consumer requires the start and latest
-                // progress of this trip alongside its terminal receipt.
+                // progress of this trip alongside its terminal receipt. Earlier
+                // adverse boundaries remain evidence even after travel resumes.
                 const std::string state = object.get_string( "state", "" );
                 if( state == "active" || state == "progress" ) {
                     pins["travel_" + state] = row;
+                }
+                if( state == "hostile_boundary" && !pins.count( "travel_hostile_boundary" ) ) {
+                    pins["travel_hostile_boundary"] = row;
+                }
+                if( ( state == "blocked" || state == "interrupted" ) && !pins.count( "travel_refusal" ) ) {
+                    pins["travel_refusal"] = row;
                 }
                 pins["travel"] = row;
             } else if( kind == "frame" || kind == "native_save_completion" ) {

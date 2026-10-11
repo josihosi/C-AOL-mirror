@@ -2010,7 +2010,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     REQUIRE( manager.publish( surface, { { "selection", "item:199" } }, actions ) );
     // An action catalogue is lossless, including a non-front physical item.
     const std::string diagnostic( 96 * 1024, 'd' );
-    for( const std::string state : { "active", "progress", "completed_cleared" } ) {
+    for( const std::string state : { "active", "hostile_boundary", "resumed", "progress", "completed_cleared" } ) {
         REQUIRE( write_native_semantic_event( "{\"event\":\"travel\",\"run_id\":\"" + run +
                                              "\",\"travel_id\":\"trip-1\",\"receipt_id\":\"trip-1:" + state +
                                              "\",\"state\":\"" + state + "\",\"destination\":[129,149,0]," +
@@ -2060,7 +2060,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         }
     }
     CHECK( discarded > 0 );
-    CHECK( travel_states == std::set<std::string>{ "active", "progress", "completed_cleared" } );
+    CHECK( travel_states == std::set<std::string>{ "active", "hostile_boundary", "progress", "completed_cleared" } );
     CHECK( raid_diagnostic );
     CHECK( current );
     CHECK( accepted );

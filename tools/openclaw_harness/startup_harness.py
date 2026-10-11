@@ -5372,6 +5372,8 @@ def refresh_semantic_step_trace(
     latest_surface_successor: Optional[Dict[str, Any]] = None
     latest_accepted_receipt: Optional[Dict[str, Any]] = None
     latest_accepted_successor: Optional[Dict[str, Any]] = None
+    current_trip: str = ""
+    travel_facts: Dict[str, Dict[str, Any]] = {}
     with source.open("rb") as handle:
         generation = semantic_trace_identity(handle)
         opened = os.fstat(handle.fileno())
@@ -5438,6 +5440,19 @@ def refresh_semantic_step_trace(
             elif event.get("event") == "surface_descriptor" and latest_accepted_receipt is not None and \
                     event.get("frame_id") == latest_accepted_receipt.get("resulting_frame_id"):
                 latest_accepted_successor = dict(event)
+            if event.get("event") == "travel":
+                trip = str(event.get("travel_id", ""))
+                if trip != current_trip:
+                    travel_facts.clear()
+                    current_trip = trip
+                state = str(event.get("state", ""))
+                if state in {"active", "progress"}:
+                    travel_facts[state] = dict(event)
+                elif state == "hostile_boundary":
+                    travel_facts.setdefault("hostile_boundary", dict(event))
+                elif state in {"blocked", "interrupted"}:
+                    travel_facts.setdefault("refusal", dict(event))
+                travel_facts["latest"] = dict(event)
             # Turn boundaries remain in the exact run-owned producer journal
             # for ProcessPerformance.  They are observational and can occur
             # many times during one pending wait, so do not let them evict the
@@ -5469,7 +5484,8 @@ def refresh_semantic_step_trace(
         event["_source_offset"]: compact_semantic_step_channel_event(event)
         for event in (latest_duration_receipt, latest_movement_receipt,
                       latest_surface_successor, latest_surface_receipt,
-                      latest_accepted_successor, latest_accepted_receipt, latest_surface_descriptor)
+                      latest_accepted_successor, latest_accepted_receipt, latest_surface_descriptor,
+                      *travel_facts.values())
         if event is not None and (event_filter is None or event["event"] in event_filter)
     }
     authority_offsets = set(authority_by_offset)
