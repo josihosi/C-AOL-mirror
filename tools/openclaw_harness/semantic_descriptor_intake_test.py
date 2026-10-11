@@ -301,7 +301,10 @@ class DescriptorIntakeTest(unittest.TestCase):
                     "request_id": "", "offset_before": 0, "offset_after": 0, "transport_end": 0,
                     "queued": False, "wake_pending": False})
                     for index in range(startup.SEMANTIC_STEP_MAX_EVENTS + 10))
+                redraw = ({**successor, "sequence": 5, "frame_id": "current-redraw"}
+                          if getattr(self, "redraw_after_receipt", False) else None)
                 temporary.write_bytes(self.encode(header) + self.encode(receipt) + self.encode(successor)
+                                      + (self.encode(redraw) if redraw else b"")
                                       + self.encode(refused) + diagnostics)
                 temporary.replace(self.trace)
                 return 1
@@ -327,13 +330,15 @@ class DescriptorIntakeTest(unittest.TestCase):
             acted = service.call({"action": "game.act", "observation_id": current,
                                   "action_id": "inventory.filter", "parameters": {"filter": "M240"}})
         self.assertTrue(acted["ok"], acted)
+        self.assertEqual(acted["receipt"]["native_receipt"]["resulting_frame_id"], "next-frame")
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
         self.assertFalse(service.call({"action": "game.act", "observation_id": current,
                                       "action_id": "inventory.filter"})["ok"])
         observed_after = service.call({"action": "game.observe"})
         self.assertTrue(observed_after["ok"], observed_after)
         after = observed_after["result"]["observation_id"]
-        self.assertEqual(after, "next-frame")
+        self.assertEqual(after, "current-redraw" if getattr(self, "redraw_after_receipt", False)
+                         else "next-frame")
         self.assertFalse(service.call({"action": "game.act", "observation_id": after,
                                       "action_id": "inventory.filter"})["ok"])
         self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
@@ -372,6 +377,11 @@ class DescriptorIntakeTest(unittest.TestCase):
 
     def test_journal_replacement_during_dispatch_keeps_receipt_and_successor_once(self):
         self.replace_during_dispatch = True
+        self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()
+
+    def test_current_owner_survives_replacement_and_receipt_suffix_overflow(self):
+        self.replace_during_dispatch = True
+        self.redraw_after_receipt = True
         self.test_public_current_choice_dispatches_once_stale_and_disabled_refuse()
 
     def test_completed_receipt_survives_partial_successor_poll_without_replaying(self):

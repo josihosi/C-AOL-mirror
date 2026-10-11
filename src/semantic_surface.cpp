@@ -56,12 +56,20 @@ class native_semantic_journal
                 }
             } else if( kind == "surface_receipt" ) {
                 pins["receipt"] = row;
-                receipt_result = object.get_string( "resulting_frame_id", "" );
-                pins.erase( "receipt_successor" );
+                const std::string result = object.get_string( "resulting_frame_id", "" );
+                // Cached receipt replay can occur after a newer redraw. Its
+                // immutable result still names the previous successor, which
+                // may now exist only in these pins, not the recent window.
+                if( receipt_result != result ) {
+                    pins.erase( "receipt_successor" );
+                }
+                receipt_result = result;
                 if( object.get_bool( "accepted", false ) ) {
                     pins["accepted_receipt"] = row;
-                    accepted_result = receipt_result;
-                    pins.erase( "accepted_successor" );
+                    if( accepted_result != result ) {
+                        pins.erase( "accepted_successor" );
+                    }
+                    accepted_result = result;
                     if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
                         pins.count( "surface" ) ) {
                         pins["accepted_successor"] = pins["surface"];

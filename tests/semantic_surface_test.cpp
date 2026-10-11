@@ -2054,11 +2054,38 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     CHECK( accepted_frame == manager.top()->frame_id );
     CHECK( fs::file_size( trace ) < 8 * 1024 * 1024 );
     CHECK_FALSE( fs::exists( trace.string() + ".next" ) );
-    // Replay cannot spend the same request twice after physical compaction.
+    // A later redraw is current authority; replay must still retain the old
+    // successor named by the accepted receipt after that row leaves recent.
+    REQUIRE( manager.publish( surface, { { "selection", "redrawn" } }, actions ) );
+    CHECK( manager.top()->frame_id != accepted_frame );
     manager.submit_request( request );
     manager.consume_top_request();
     CHECK( dispatched == 1 );
     input.close();
+    for( int index = 0; index < 100; ++index ) {
+        REQUIRE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run +
+                                             "\",\"diagnostic\":\"" + diagnostic + "\"}" ) );
+    }
+    std::ifstream replayed( trace );
+    bool named_successor = false;
+    current = false;
+    while( std::getline( replayed, line ) ) {
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        std::istringstream body( line.compare( 0, prefix.size(), prefix ) == 0 ?
+                                 line.substr( prefix.size() ) : line );
+        TextJsonIn jsin( body );
+        const TextJsonObject object = jsin.get_object();
+        object.allow_omitted_members();
+        if( object.get_string( "event" ) == "surface_descriptor" ) {
+            const std::string frame = object.get_string( "frame_id" );
+            named_successor = named_successor || frame == accepted_frame;
+            current = current || frame == manager.top()->frame_id;
+        }
+    }
+    CHECK( named_successor );
+    CHECK( current );
+    CHECK( fs::file_size( trace ) < 8 * 1024 * 1024 );
+    replayed.close();
     // Actual output failure must recover through a complete replacement, not
     // append behind an incomplete record left by a failed write.
     fs::remove( trace );
