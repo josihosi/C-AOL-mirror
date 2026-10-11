@@ -247,6 +247,82 @@ class TerminalModeIsolationTest(unittest.TestCase):
                 self.assertFalse(harness.terminal_native_startup_identity(42, Path('/bin/game'), {}, expected)['ok'])
             self.assertTrue(harness.terminal_native_startup_identity(42, Path('/bin/game'), {}, observed)['ok'])
 
+    def test_startup_identity_uses_one_birth_bound_snapshot_not_auxiliary_command(self):
+        executable = Path(sys.executable).resolve()
+        observed = {'pid': 42, 'alive': True, 'birth_identity': 'actual',
+                    'command': f'{executable} --world TestSetup00', 'executable_path': str(executable)}
+        with patch.object(harness, 'process_generation_snapshot', return_value=observed) as snapshot, \
+             patch.object(harness, 'pid_command', return_value='') as auxiliary, \
+             patch.object(harness, 'pid_is_alive', return_value=True), \
+             patch.object(harness, 'compare_runtime_binding', return_value={'status': 'matched'}):
+            identity = harness.terminal_native_startup_identity(42, executable, {}, observed)
+            self.assertTrue(identity['ok'], identity)
+            self.assertEqual(identity['observed_command'], observed['command'])
+            snapshot.assert_called_once_with(42)
+            auxiliary.assert_not_called()
+
+    def test_startup_identity_refuses_incomplete_changed_dead_wrong_executable_and_binding(self):
+        executable = Path(sys.executable).resolve()
+        expected = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': str(executable)}
+        cases = (
+            ({**expected, 'command': ''}, expected, 'matched',
+             'terminal_native_process_command_unavailable'),
+            ({**expected, 'birth_identity': 'reused'}, expected, 'matched',
+             'terminal_native_process_generation_unproven'),
+            ({**expected, 'alive': False}, expected, 'matched',
+             'terminal_native_process_not_alive'),
+            ({**expected, 'command': '/bin/wrong'}, {**expected, 'command': '/bin/wrong'}, 'matched',
+             'terminal_native_process_command_mismatch'),
+            (expected, expected, 'mismatched', 'terminal_native_runtime_binding_unproven'),
+            (expected, None, 'matched', 'terminal_native_process_generation_unproven'),
+        )
+        for observed, recorded, binding, error in cases:
+            with self.subTest(error=error), \
+                 patch.object(harness, 'process_generation_snapshot', return_value=observed), \
+                 patch.object(harness, 'pid_command', return_value=str(executable)) as auxiliary, \
+                 patch.object(harness, 'pid_is_alive', return_value=True), \
+                 patch.object(harness, 'compare_runtime_binding', return_value={'status': binding}):
+                identity = harness.terminal_native_startup_identity(42, executable, {}, recorded)
+                self.assertFalse(identity['ok'])
+                self.assertEqual(identity['error'], error)
+                auxiliary.assert_not_called()
+
+    def test_startup_identity_result_drives_actual_bridge_descriptor_admission(self):
+        import io
+        from types import SimpleNamespace
+        from cockpit_file_bridge import FileBackedCockpitBridge
+        executable = Path(sys.executable).resolve()
+        expected = {'pid': 42, 'alive': True, 'birth_identity': 'actual', 'command': str(executable)}
+        for current_command in (str(executable), ''):
+            with self.subTest(current_command=current_command), tempfile.TemporaryDirectory() as raw, \
+                 patch.object(harness, 'process_generation_snapshot',
+                              return_value={**expected, 'command': current_command}), \
+                 patch.object(harness, 'pid_command', return_value=''), \
+                 patch.object(harness, 'pid_is_alive', return_value=True), \
+                 patch.object(harness, 'compare_runtime_binding', return_value={'status': 'matched'}):
+                identity = harness.terminal_native_startup_identity(42, executable, {}, expected)
+                descriptor = {'schema': 'caol-cockpit-live-session-v1',
+                              'entry_mode': 'cockpit_live_session', 'run_id': 'run-a',
+                              'binding_id': 'native-a', 'bridge_binding_id': 'bound-a'}
+                envelope = ({'cockpit_live_session': descriptor} if identity['ok'] else
+                            {'ok': False, 'startup': {'reason': 'terminal_native_identity_unproven',
+                                                      'focus': identity}})
+                bridge = FileBackedCockpitBridge(Path(raw) / 'session', [sys.executable, '-c', 'pass'],
+                                                binding_id='bound-a',
+                                                require_session_ready=True)
+                bridge.prepare()
+                bridge._child = SimpleNamespace(stdout=io.StringIO(), poll=lambda: None)
+                with patch.object(bridge, '_read_complete_response', return_value=json.dumps(envelope)):
+                    if current_command:
+                        self.assertEqual(bridge._await_session_descriptor(), descriptor)
+                        self.assertFalse(bridge._startup_failure)
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'terminal_native_identity_unproven'):
+                            bridge._await_session_descriptor()
+                        self.assertEqual(bridge._startup_failure['reason'],
+                                         'terminal_native_identity_unproven')
+                self.assertTrue((bridge.session_dir / 'child.startup.stdout.jsonl').is_file())
+
     @unittest.skipUnless(os.name == 'posix', 'POSIX adapter')
     def test_actual_launch_pair_retains_lease_and_routes_only_its_input(self):
         code = 'import os,sys,tty; assert os.environ["TERM"] == "xterm-256color"; tty.setraw(0);\nwhile True:\n c=os.read(0,1); os.write(1,b"echo:"+c);\n if c==b"q": break\n'

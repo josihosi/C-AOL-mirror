@@ -24118,7 +24118,11 @@ def terminal_native_startup_identity(
 ) -> Dict[str, Any]:
     """Authenticate a PTY child without inventing a GUI window requirement."""
     expected_executable = str(Path(executable).resolve())
-    command = pid_command(pid)
+    # The inspector brackets command retrieval with the native generation.
+    # A separate CIM/ps query can fail independently or observe another PID
+    # generation; it must not override this authenticated snapshot.
+    observed_generation = process_generation_snapshot(pid)
+    command = str(observed_generation.get("command", "")).strip()
     binding = compare_runtime_binding(dict(runtime_binding))
     result: Dict[str, Any] = {
         "pid": pid,
@@ -24128,13 +24132,16 @@ def terminal_native_startup_identity(
         "runtime_binding": binding,
         "ok": False,
     }
-    observed_generation = process_generation_snapshot(pid)
     result["process_generation"] = observed_generation
-    if not process_generation or not process_generation_matches(process_generation, observed_generation):
+    if not process_generation:
         result["error"] = "terminal_native_process_generation_unproven"
-    elif not pid_is_alive(pid):
+    elif observed_generation.get("alive") is not True:
         result["error"] = "terminal_native_process_not_alive"
-    elif not command or expected_executable not in command:
+    elif not command:
+        result["error"] = "terminal_native_process_command_unavailable"
+    elif not process_generation_matches(process_generation, observed_generation):
+        result["error"] = "terminal_native_process_generation_unproven"
+    elif expected_executable not in command:
         result["error"] = "terminal_native_process_command_mismatch"
     elif binding.get("status") != "matched":
         result["error"] = "terminal_native_runtime_binding_unproven"
