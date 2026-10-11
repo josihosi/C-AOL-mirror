@@ -1240,20 +1240,37 @@ void debug_console::execute()
         }
     } };
 
-    // The console is intentionally not semantically operable yet.  Its
-    // actionless scope must live for the complete native owner lifetime,
-    // rather than for one five-millisecond input timeout, so automation never
-    // observes a World fallback until this owner actually yields.
+    // Only the console's native close is automated. Keep its actual owner
+    // across polling and nested editors; none of its debug mutations are
+    // implied by this recovery action.
+    std::optional<semantic_surface_manager_session> semantic_session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    std::string semantic_action;
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *const semantic_manager = active_semantic_surface_manager() ) {
-        semantic_scope.emplace( *semantic_manager, "unsupported",
-                                "Unsupported input owner: DEBUG_CONSOLE", std::map<std::string, std::string> {
-            { "owner", "DEBUG_CONSOLE" },
-            { "reason", "unclassified_native_input_owner" }
+        semantic_scope.emplace( *semantic_manager, "debug_console", "Debug console",
+        std::map<std::string, std::string>{ { "native_owner", "DEBUG_CONSOLE" } },
+        std::vector<semantic_action_descriptor>{
+            { "debug_console.close", "", _( "Close debug console" ), true }
+        }, [&semantic_action]( const semantic_action_request &request ) {
+            if( request.action_id != "debug_console.close" || request.stable_id ||
+                !request.parameters.empty() ) {
+                return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+            }
+            semantic_action = "QUIT";
+            return semantic_action_dispatch_result{ true, "", "" };
         } );
     }
 
     while( is_open ) {
+        if( semantic_scope ) {
+            semantic_scope->consume_request();
+        }
+        if( semantic_action == "QUIT" ) {
+            break;
+        }
         // Force a full viewport repaint each frame: otherwise ImGui tooltips
         // smear the tiles layer and play/step state never updates live.
         g->invalidate_main_ui_adaptor();
@@ -1351,13 +1368,19 @@ void debug_console::execute()
         } else {
             action = ctxt.handle_input( 5 );
         }
+        // Input can wake with a semantic request while blocked. An explicit
+        // native close is not an editor keystroke and must not be swallowed.
+        const bool semantic_input = !semantic_action.empty();
+        if( semantic_input ) {
+            action = std::exchange( semantic_action, std::string() );
+        }
 
         // Only swallow keybinds while typing / dragging / in a popup, so plain
         // TAB still reaches the input_context tab switch.
         const bool imgui_owns_keys = io.WantTextInput || ImGui::IsAnyItemActive() ||
                                      ImGui::IsPopupOpen( nullptr,
                                              ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel );
-        if( imgui_owns_keys ) {
+        if( imgui_owns_keys && !semantic_input ) {
             continue;
         }
 

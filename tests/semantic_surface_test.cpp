@@ -20,6 +20,8 @@
 #include "json.h"
 #include "path_info.h"
 #include "debug_menu.h"
+#include "debug_console.h"
+#include "game.h"
 #include "imgui/imgui.h"
 #include "inventory_ui.h"
 #include "input_popup.h"
@@ -123,6 +125,197 @@ class test_inventory_selector : public inventory_selector
 };
 
 } // namespace
+
+TEST_CASE( "DebugConsole advertises native close and restores its input parent once",
+           "[semantic_surface][debug_console_close_067]" )
+{
+    scoped_imgui_context imgui;
+    // A semantic close is an explicit owner command, including when the
+    // console's editor currently owns ordinary keyboard text input.
+    restore_on_out_of_scope<bool> typing( ImGui::GetIO().WantTextInput );
+    ImGui::GetIO().WantTextInput = true;
+    semantic_surface_manager manager( "console-run" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    const auto before = *manager.top();
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+    } );
+    bool opened = false;
+    semantic_action_request close;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+        if( descriptor.kind == "world" || opened ) { return; }
+        opened = true;
+        REQUIRE( descriptor.payload.at( "native_owner" ) == "DEBUG_CONSOLE" );
+        REQUIRE( descriptor.valid_actions.size() == 1 );
+        REQUIRE( descriptor.valid_actions.front().id == "debug_console.close" );
+        close = { descriptor.run_id, descriptor.surface_id, descriptor.frame_id,
+                  "close-console", "debug_console.close", std::nullopt, {} };
+        auto wrong = close;
+        wrong.request_id = "wrong-console";
+        wrong.surface_id = before.surface_id;
+        REQUIRE( manager.submit_request( wrong ) );
+        CHECK_FALSE( manager.consume_top_request() );
+        CHECK( manager.top()->surface_id == descriptor.surface_id );
+        {
+            semantic_surface_scope child( manager, "string_prompt", "Console editor" );
+            auto parent_request = close;
+            parent_request.request_id = "parent-while-editor-open";
+            REQUIRE( manager.submit_request( parent_request ) );
+            CHECK_FALSE( manager.consume_top_request() );
+            CHECK( manager.top()->kind == "string_prompt" );
+        }
+        auto stale = close;
+        stale.request_id = "old-console-frame";
+        REQUIRE( manager.submit_request( stale ) );
+        CHECK_FALSE( manager.consume_top_request() );
+        close.frame_id = manager.top()->frame_id;
+        REQUIRE( manager.submit_request( close ) );
+    } );
+    debug_menu::open_console();
+    REQUIRE( opened );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->surface_id == before.surface_id );
+    CHECK( manager.top()->frame_id != before.frame_id );
+    REQUIRE( receipts.size() == 4 );
+    CHECK_FALSE( receipts.front().accepted );
+    CHECK( receipts.front().rejection_reason == "wrong_surface" );
+    CHECK( receipts[1].rejection_reason == "wrong_surface" );
+    CHECK( receipts[2].rejection_reason == "stale_frame" );
+    CHECK( receipts.back().accepted );
+    CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+    CHECK_FALSE( manager.submit_request( close ) );
+    CHECK_FALSE( manager.consume_top_request() );
+    CHECK( manager.top()->kind == "world" );
+    CHECK( receipts.size() == 5 );
+    CHECK( receipts.back().accepted ); // Immutable receipt replay, no new close.
+    CHECK( receipts.back().resulting_frame_id == receipts[3].resulting_frame_id );
+}
+
+TEST_CASE( "native compatibility observations do not duplicate input-owner render maps",
+           "[semantic_surface][lean_native_observation_067]" )
+{
+    namespace fs = std::filesystem;
+    const fs::path directory = fs::temp_directory_path() /
+                               ( "lean-native-observation-" + std::to_string(
+                                     std::chrono::steady_clock::now().time_since_epoch().count() ) );
+    fs::create_directories( directory );
+    const fs::path trace = directory / "native.jsonl";
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    on_out_of_scope cleanup( [&] {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+        fs::remove_all( directory );
+    } );
+    const auto run = directory.filename().string();
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    const auto context = get_default_mode_input_context();
+    openclaw_harness_semantic_initial_world_frame_if_ready( &context, true, true, true );
+    auto &manager = openclaw_harness_semantic_surface_manager();
+    // Publish the actual native HUD maps once through the input-owning
+    // descriptor. The callback is a controlled transaction, not gameplay.
+    std::map<std::string, std::string> payload;
+    {
+        std::ifstream initial( trace );
+        std::string row;
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        while( std::getline( initial, row ) ) {
+            std::istringstream body( row.substr( prefix.size() ) );
+            TextJsonIn jsin( body );
+            const auto object = jsin.get_object();
+            object.allow_omitted_members();
+            if( object.get_string( "event" ) == "frame" ) {
+                const auto observation = object.get_object( "observation" );
+                observation.allow_omitted_members();
+                payload["minimap"] = observation.get_object( "minimap" ).str();
+                payload["overmap"] = observation.get_object( "overmap" ).str();
+                payload["visible_local"] = observation.get_array( "visible_local" ).str();
+                payload["messages"] = "[]";
+            }
+        }
+    }
+    REQUIRE( payload.size() == 4 );
+    int actions = 0;
+    semantic_surface_scope world( manager, "world", "World", payload,
+    { { "world.pause", "", "Pause", true } }, [&]( const semantic_action_request & ) {
+        ++actions;
+        return semantic_action_dispatch_result{ true, "", "", false, false };
+    } );
+    const auto issued = *manager.top();
+    REQUIRE( manager.submit_request( { issued.run_id, issued.surface_id,
+                                       issued.frame_id, "pause", "world.pause", std::nullopt, {} } ) );
+    REQUIRE( world.consume_request() );
+    CHECK( actions == 1 );
+    for( int index = 0; index < 3; ++index ) {
+        openclaw_harness_semantic_activity_distraction();
+        openclaw_harness_semantic_world_after_activity_distraction();
+        openclaw_harness_semantic_wait_activity_complete();
+    }
+    std::ifstream input( trace );
+    const std::string prefix = "openclaw_harness_semantic_step: ";
+    std::string line;
+    int startup = 0;
+    int activity = 0;
+    int receipts = 0;
+    int descriptors = 0;
+    std::size_t startup_bytes = 0;
+    std::size_t activity_bytes = 0;
+    while( std::getline( input, line ) ) {
+        REQUIRE( line.compare( 0, prefix.size(), prefix ) == 0 );
+        std::istringstream body( line.substr( prefix.size() ) );
+        TextJsonIn jsin( body );
+        const auto object = jsin.get_object();
+        object.allow_omitted_members();
+        if( object.get_string( "event" ) == "surface_receipt" ) {
+            CHECK( object.get_bool( "accepted" ) );
+            CHECK( object.get_string( "request_id" ) == "pause" );
+            ++receipts;
+        }
+        if( object.get_string( "event" ) == "surface_descriptor" ) {
+            const auto published = object.get_object( "payload" );
+            published.allow_omitted_members();
+            CHECK( published.get_string( "minimap" ) == payload.at( "minimap" ) );
+            CHECK( published.get_string( "overmap" ) == payload.at( "overmap" ) );
+            CHECK( object.get_string( "frame_id" ) == issued.frame_id );
+            ++descriptors;
+        }
+        if( object.get_string( "event" ) != "frame" ) { continue; }
+        const auto observation = object.get_object( "observation" );
+        observation.allow_omitted_members();
+        CHECK( observation.has_member( "visible_local" ) );
+        CHECK( observation.has_member( "visible_entities" ) );
+        CHECK( observation.has_member( "visible_zones" ) );
+        if( object.get_string( "producer", "" ) == "hud_world_ready" ) {
+            ++startup;
+            startup_bytes += line.size() + 1;
+            CHECK( observation.has_member( "minimap" ) );
+            CHECK( observation.has_member( "overmap" ) );
+        } else {
+            ++activity;
+            activity_bytes += line.size() + 1;
+            CHECK_FALSE( observation.has_member( "minimap" ) );
+            CHECK_FALSE( observation.has_member( "overmap" ) );
+        }
+    }
+    CHECK( startup == 1 );
+    CHECK( activity == 9 );
+    CHECK( receipts == 1 );
+    CHECK( descriptors == 1 );
+    std::cout << "R067_NATIVE_OBSERVATION startup_bytes=" << startup_bytes
+              << " activity_records=" << activity << " activity_bytes=" << activity_bytes
+              << " persisted_bytes=" << fs::file_size( trace ) << std::endl;
+}
 
 TEST_CASE( "semantic surface scopes hide parent actions and republish after pop",
            "[semantic_surface]" )

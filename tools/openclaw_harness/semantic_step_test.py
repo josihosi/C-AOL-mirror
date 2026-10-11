@@ -749,48 +749,58 @@ class SemanticStepChannelTest(unittest.TestCase):
 
     def test_legacy_wait_receipt_uses_transaction_activity_without_rereading_empty_delta(self) -> None:
         """A duration receipt and its raw activity share one consumed delta."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            duration = {
-                "event": "surface_descriptor", "schema_version": 1, "run_id": self.run_id,
-                "surface_id": "duration", "frame_id": "menu:34", "game_turn": 5234989,
-                "kind": "menu", "breadcrumbs": ["World", "Wait duration"], "payload": {},
-                "valid_actions": [{"id": "wait.5m", "stable_id": "", "enabled": True}],
-            }
-            legacy_receipt = {
-                "event": "receipt", "run_id": self.run_id,
-                "frame_id": f"{self.run_id}:5234989:140", "action_id": "wait.5m",
-                "accepted": True,
-            }
-            activity = {
-                "event": "frame", "run_id": self.run_id,
-                "frame_id": f"{self.run_id}:5234989:141", "state": "wait_activity",
-                "observed_turn": 5234989, "game_minutes": 8049,
-                "valid_actions": [], "action_inputs": {},
-            }
-            trace = root / "semantic.native.log"
-            trace.write_text("\n".join(
-                "openclaw_harness_semantic_step: " + json.dumps(event)
-                for event in (legacy_receipt, activity)
-            ) + "\n", encoding="utf-8")
-            with patch.object(startup_harness, "semantic_wake_pipe_contract", return_value={
-                "status": "bound", "path": "pipe-contract",
-                "contract": {"transport": "anonymous_pipe"},
-            }), patch.object(startup_harness, "write_semantic_wake_pipe", return_value=1), \
-                    patch.object(startup_harness, "semantic_step_source_trace", return_value=trace), \
-                    patch.object(startup_harness, "current_semantic_step_frame",
-                                 side_effect=ValueError("the current run has not emitted a semantic frame")):
-                result = execute_semantic_act(
-                    run_dir=root, profile="ignored", run_id=self.run_id,
-                    trace_start_offset=0, pid=17, session_id="worker-atomic",
-                    frame_id="menu:34", action_id="wait.5m",
-                    transition_timeout_seconds=0.02, observe_interval_seconds=0,
-                    observed_frame=duration,
-                )
-        self.assertTrue(result["accepted"], result)
-        self.assertEqual(result["next_frame"]["state"], "wait_activity")
-        self.assertEqual(result["next_frame"]["frame_id"], f"{self.run_id}:5234989:141")
-        self.assertEqual(result["native_receipt"]["frame_id"], "menu:34")
+        absent_clock = object()
+        for sequence in (absent_clock, 42, True, False, "bad", "10", None, -1):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                duration = {
+                    "event": "surface_descriptor", "schema_version": 1, "run_id": self.run_id,
+                    "surface_id": "duration", "frame_id": "menu:34", "game_turn": 5234989,
+                    "kind": "menu", "breadcrumbs": ["World", "Wait duration"], "payload": {},
+                    "valid_actions": [{"id": "wait.5m", "stable_id": "", "enabled": True}],
+                }
+                legacy_receipt = {
+                    "event": "receipt", "run_id": self.run_id,
+                    "frame_id": f"{self.run_id}:5234989:140", "action_id": "wait.5m",
+                    "accepted": True,
+                }
+                if sequence is not absent_clock:
+                    legacy_receipt.update(sequence=sequence, process_instance="native-clock", game_turn=5234989, game_minutes=8049)
+                activity = {
+                    "event": "frame", "run_id": self.run_id,
+                    "frame_id": f"{self.run_id}:5234989:141", "state": "wait_activity",
+                    "observed_turn": 5234989, "game_minutes": 8049,
+                    "valid_actions": [], "action_inputs": {},
+                }
+                trace = root / "semantic.native.log"
+                trace.write_text("\n".join(
+                    "openclaw_harness_semantic_step: " + json.dumps(event)
+                    for event in (legacy_receipt, activity)
+                ) + "\n", encoding="utf-8")
+                with patch.object(startup_harness, "semantic_wake_pipe_contract", return_value={
+                    "status": "bound", "path": "pipe-contract",
+                    "contract": {"transport": "anonymous_pipe"},
+                }), patch.object(startup_harness, "write_semantic_wake_pipe", return_value=1), \
+                        patch.object(startup_harness, "semantic_step_source_trace", return_value=trace), \
+                        patch.object(startup_harness, "current_semantic_step_frame",
+                                     side_effect=ValueError("the current run has not emitted a semantic frame")):
+                    result = execute_semantic_act(
+                        run_dir=root, profile="ignored", run_id=self.run_id,
+                        trace_start_offset=0, pid=17, session_id="worker-atomic",
+                        frame_id="menu:34", action_id="wait.5m",
+                        transition_timeout_seconds=0.02, observe_interval_seconds=0,
+                        observed_frame=duration,
+                    )
+            self.assertTrue(result["accepted"], result)
+            self.assertEqual(result["next_frame"]["state"], "wait_activity")
+            self.assertEqual(result["next_frame"]["frame_id"], f"{self.run_id}:5234989:141")
+            self.assertEqual(result["native_receipt"]["frame_id"], "menu:34")
+            if sequence is not absent_clock:
+                self.assertEqual(result["native_receipt"]["sequence"], sequence)
+                self.assertIs(type(result["native_receipt"]["sequence"]), type(sequence))
+                self.assertEqual(result["native_receipt"]["process_instance"],"native-clock")
+            else:
+                self.assertNotIn("sequence",result["native_receipt"])
 
     def test_single_focus_activity_chord_uses_hotkey_without_refocus(self) -> None:
         with patch.object(startup_harness, "peekaboo_focus_pid", return_value={"ok": True}), \

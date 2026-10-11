@@ -7356,6 +7356,9 @@ def execute_semantic_act(
                                 "descriptor_game_turn": descriptor_turn,
                                 "legacy_native_frame_id": legacy_frame,
                                 "provenance": "native_wait_duration_legacy_receipt",
+                                **{key: legacy_receipt[key] for key in
+                                   ("sequence", "process_instance", "game_turn", "game_minutes")
+                                   if key in legacy_receipt},
                             },
                         }
                         SemanticStepChannel(run_id=run_id, session_id=session_id,

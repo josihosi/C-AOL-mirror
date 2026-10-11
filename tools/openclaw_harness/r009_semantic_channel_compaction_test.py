@@ -33,6 +33,84 @@ from startup_harness import (
 
 
 class R009SemanticChannelCompactionTest( unittest.TestCase ):
+    def test_lean_compatibility_frames_preserve_current_world_maps_and_modal_authority(self):
+        import cockpit
+        from cockpit_evidence import decode
+        from gameplay_display import world_look
+        run="lean-compatibility"
+        local=[{"dx":1,"dy":0,"terrain":"wall","passable":False,
+                "visibility":"clear","fields":["fd_fire"]}]
+        entities=[{"id":7,"name":"zombie","attitude":"hostile","dx":-1,"dy":0}]
+        payload={"avatar":json.dumps({"name":"Survivor","absolute_ms":[100,100,0]}),
+                 "visible_local":json.dumps(local),"visible_entities":json.dumps(entities),
+                 "messages":json.dumps([{"time":"12:00","text":"The zombie hits you."}]),
+                 "minimap":json.dumps({"radius":12,"cells":local}),
+                 "overmap":json.dumps({"radius":3,"cells":[{"dx":0,"dy":0,"terrain":"shelter"}]})}
+        descriptor={"event":"surface_descriptor","schema_version":1,"run_id":run,
+                    "surface_id":"world","frame_id":"world:1","kind":"world",
+                    "process_instance":"native","sequence":2,"game_turn":100,"game_minutes":10,
+                    "breadcrumbs":["World"],"payload":payload,
+                    "valid_actions":[{"id":"world.move.east","stable_id":"","label":"East","enabled":True}]}
+        raw={"event":"frame","run_id":run,"frame_id":"raw:1","state":"world",
+             "producer":"post_step","observed_turn":100,"game_minutes":10,"valid_actions":[],
+             "keep_watch_safety":{"classification":"clear"},
+             "observation":{"avatar":{"name":"Survivor","absolute_ms":[100,100,0]},
+                            "visible_local":local,"visible_entities":entities,"visible_zones":[]}}
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            source=root/"native.log"
+            source.write_text("".join(SEMANTIC_STEP_PREFIX+json.dumps(e)+"\n" for e in (descriptor,raw)))
+            history={}
+            frame=current_semantic_step_frame(profile="lean",run_dir=root,run_id=run,
+                                             start_offset=0,source_trace=source,history=history)
+            dispatched=[]
+            def dispatch(issuing, action, stable_id=None):
+                nonlocal frame
+                self.assertEqual(action,"debug_console.close")
+                dispatched.append(action)
+                successor={**descriptor,"frame_id":"world:2","sequence":4}
+                with source.open("a") as out:out.write(SEMANTIC_STEP_PREFIX+json.dumps(successor)+"\n")
+                frame=current_semantic_step_frame(profile="lean",run_dir=root,run_id=run,
+                                                 start_offset=0,source_trace=source,history=history)
+                receipt={"run_id":run,"requested_run_id":run,"action_id":action,"accepted":True,
+                         "frame_id":issuing["frame_id"],"requested_frame_id":issuing["frame_id"],
+                         "consuming_frame_id":issuing["frame_id"],"requested_surface_id":issuing["surface_id"],
+                         "consuming_surface_id":issuing["surface_id"],"resulting_frame_id":"world:2",
+                         "process_instance":"native","sequence":5,"game_turn":100,"game_minutes":10}
+                return {"native_receipt":receipt,"next_frame":frame}
+            service=cockpit.CockpitService(run_channel=cockpit.CockpitRunChannel(lambda:frame,dispatch))
+            response=service.call({"action":"game.observe"})
+            self.assertTrue(response["ok"],response)
+            observed=response["result"]
+            self.assertEqual(observed["observation_id"],descriptor["frame_id"])
+            facts={k:decode(v) for k,v in observed["surface"]["facts"].items()}
+            self.assertEqual(facts["minimap"]["cells"],local)
+            self.assertEqual(facts["overmap"],json.loads(payload["overmap"]))
+            self.assertEqual(facts["visible_entities"],entities)
+            text=world_look({"current":{"facts":facts,"actions":observed["surface"]["actions"]}},show_local_map=True)
+            for useful in ("zombie","fd_fire","wall","LOCAL MAP"):
+                self.assertIn(useful,text)
+            child={**descriptor,"surface_id":"console","frame_id":"console:1",
+                   "sequence":3,"kind":"debug_console","breadcrumbs":["World","Debug console"],
+                   "payload":{"native_owner":"DEBUG_CONSOLE"},
+                   "valid_actions":[{"id":"debug_console.close","stable_id":"","label":"Close debug console","enabled":True}]}
+            with source.open("a") as out:out.write(SEMANTIC_STEP_PREFIX+json.dumps(child)+"\n")
+            frame=current_semantic_step_frame(profile="lean",run_dir=root,run_id=run,
+                                             start_offset=0,source_trace=source,history=history)
+            current=service.call({"action":"game.observe"})["result"]
+            self.assertEqual(current["surface"]["kind"],"debug_console")
+            self.assertEqual(current["advertised_actions"],["debug_console.close"])
+            self.assertNotIn("visible_local",current["surface"]["facts"])
+            request={"action":"game.act","observation_id":current["observation_id"],
+                     "action_id":"debug_console.close"}
+            closed=service.call(request)
+            self.assertTrue(closed["ok"],closed)
+            self.assertEqual(closed["observation"]["surface"]["kind"],"world")
+            self.assertEqual(closed["observation"]["observation_id"],"world:2")
+            self.assertEqual(decode(closed["observation"]["surface"]["facts"]["minimap"])["cells"],local)
+            self.assertFalse(service.call(request)["ok"])
+            self.assertEqual(dispatched,["debug_console.close"])
+
     def test_oversized_current_world_keeps_public_navigation_and_visible_creatures(self):
         """Current native facts survive the real bounded-channel/public-look route."""
         import cockpit

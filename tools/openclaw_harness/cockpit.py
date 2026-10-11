@@ -165,6 +165,41 @@ class CockpitRunChannel:
                    and a.get("stable_id") == request.get("stable_id")]
         payload = prompt.get("payload", {})
         run, process = operation["run_id"], prompt.get("process_instance")
+        accepted = operation.get("accepted_receipt", {})
+        accepted_sequence = accepted.get("sequence")
+        if "sequence" not in accepted:
+            # Legacy duration code emits an acceptance at its internal turn
+            # frame, without the semantic manager's event clock. Its adapter
+            # proves acceptance for the exact issuing descriptor. Order from
+            # that native owner only when the clock field is absent. Supplied
+            # malformed clocks fail the common clock check below. Never use
+            # an unrelated log's row number.
+            owner = operation.get("accepted_owner", {})
+            native_frame = str(accepted.get("legacy_native_frame_id", "")).rsplit(":", 2)
+            if (accepted.get("provenance") != "native_wait_duration_legacy_receipt"
+                    or accepted.get("accepted") is not True
+                    or owner.get("provenance") != "native_surface_descriptor"
+                    or not isinstance(owner.get("frame_id"), str) or not owner["frame_id"]
+                    or not isinstance(owner.get("surface_id"), str) or not owner["surface_id"]
+                    or not isinstance(owner.get("game_turn"), int) or isinstance(owner["game_turn"], bool)
+                    or accepted.get("action_id") != operation.get("request_identity", {}).get("action_id")
+                    or owner.get("run_id") != run or owner.get("process_instance") != process
+                    or accepted.get("requested_run_id") != run or accepted.get("run_id") != run
+                    or accepted.get("requested_frame_id") != owner.get("frame_id")
+                    or accepted.get("consuming_frame_id") != owner.get("frame_id")
+                    or accepted.get("requested_surface_id") != owner.get("surface_id")
+                    or accepted.get("consuming_surface_id") != owner.get("surface_id")
+                    or len(native_frame) != 3 or native_frame[0] != run
+                    or native_frame[1] != str(owner.get("game_turn"))
+                    or not native_frame[2].isdecimal()
+                    or accepted.get("descriptor_game_turn") != owner.get("game_turn")):
+                raise ValueError("wait_stop_owner_or_receipt_unproved")
+            accepted_sequence = owner.get("sequence")
+        clocks = (accepted_sequence, prompt.get("sequence"),
+                  successor.get("sequence"), receipt.get("sequence"))
+        if (not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in clocks)
+                or accepted.get("process_instance", process) != process):
+            raise ValueError("wait_stop_owner_or_receipt_unproved")
         if (request.get("action") != "game.act" or request.get("action_id") != "prompt.choose"
                 or prompt.get("kind") != "prompt" or payload.get("title") != "CANCEL_ACTIVITY_OR_IGNORE_QUERY"
                 or len(options) != 1 or options[0].get("enabled") is not True or options[0].get("label") != "YES"
@@ -179,7 +214,7 @@ class CockpitRunChannel:
                 or receipt.get("consuming_frame_id") != prompt.get("frame_id")
                 or receipt.get("resulting_frame_id") != successor.get("frame_id")
                 or successor.get("kind") != "world"
-                or prompt.get("sequence", -1) <= operation["accepted_receipt"]["sequence"]
+                or prompt.get("sequence", -1) <= accepted_sequence
                 or successor.get("sequence", -1) <= prompt.get("sequence", -1)
                 or receipt.get("sequence", -1) <= prompt.get("sequence", -1)
                 or successor.get("game_minutes") != receipt.get("game_minutes")
@@ -231,7 +266,8 @@ class CockpitRunChannel:
         return result
 
     def _accept_wait_operation(self, *, observed: Mapping[str, Any], action_id: str,
-                               native_receipt: Mapping[str, Any], next_frame: Mapping[str, Any]) -> None:
+                               native_receipt: Mapping[str, Any], next_frame: Mapping[str, Any],
+                               issuing_frame: Mapping[str, Any]) -> None:
         """Record one native acceptance; a later collection must never replay it."""
         duration = self._duration_from_action(action_id)
         legacy_activity = str(next_frame.get("state", "")) == "wait_activity" or \
@@ -267,6 +303,11 @@ class CockpitRunChannel:
                 "action_id": action_id,
             },
             "accepted_receipt": self._public_action_receipt(native_receipt),
+            "accepted_owner": {
+                **{key: issuing_frame.get(key) for key in
+                   ("run_id", "process_instance", "sequence", "surface_id", "frame_id", "game_turn")},
+                "provenance": "native_surface_descriptor" if issuing_frame.get("event") == "surface_descriptor" else None,
+            },
             "start_game_minutes": start,
             "requested_duration_game_minutes": duration,
             "requested_target_game_minutes": (
@@ -3220,7 +3261,7 @@ class CockpitRunChannel:
         if isinstance(next_frame, Mapping):
             self._accept_wait_operation(
                 observed=observed["public_state"], action_id=str(action_id),
-                native_receipt=native, next_frame=next_frame,
+                native_receipt=native, next_frame=next_frame, issuing_frame=issuing_raw,
             )
         issuing_prompt_payload = issuing_raw.get("payload", {})
         selected_prompt_label = next((str(candidate.get("label", "")) for candidate in

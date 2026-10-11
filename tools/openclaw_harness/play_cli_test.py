@@ -18,6 +18,42 @@ CLI = Path(__file__).with_name("play_cli.py")
 
 
 class PlayerCliTest(unittest.TestCase):
+    def test_ordinary_stopped_wait_reports_gameplay_without_receipt_dump(self):
+        operation = {"schema":"caol-native-operation-v1", "kind":"wait", "state":"cancelled",
+            "run_id":"run-a", "binding_id":"bound-a", "completed_progress_game_minutes":0,
+            "requested_duration_game_minutes":1, "start_game_minutes":7920,
+            "request_identity":{"request_id":"opaque-original-request","observation_id":"native-menu"},
+            "accepted_owner":{"process_instance":"opaque-process", "sequence":21,
+                              "frame_id":"native-menu"},
+            "accepted_receipt":{"action_id":"wait.1m", "accepted":True,
+                "provenance":"native_wait_duration_legacy_receipt", "legacy_native_frame_id":"opaque-legacy-frame"},
+            "termination":{"reason":"native_activity_stopped", "duration_fulfilled":False,
+                "receipt":{"process_instance":"opaque-process", "sequence":28, "accepted":True}}}
+        pending=self.cli("look")
+        self.reply(pending["request_id"], {"ok":True, "operation":operation,
+            "observation":{"run_id":"run-a", "observation_id":"current-world",
+                "surface":{"kind":"world", "facts":{
+                    "avatar":json.dumps({"name":"Survivor","absolute_ms":[100,100,0]}),
+                    "visible_local":json.dumps([{"dx":1,"dy":0,"visibility":"clear",
+                        "terrain":"floor","passable":True,"fields":["fd_fire"]}]),
+                    "visible_entities":json.dumps([{"name":"zombie","attitude":"hostile","dx":-1,"dy":0}])},
+                    "actions":[{"id":"world.move.east","stable_id":"","enabled":True}]}}})
+        output=subprocess.run([sys.executable,str(CLI),"--session",str(self.session),"collect"],
+                              capture_output=True,text=True)
+        self.assertEqual(output.returncode,0,output.stderr)
+        print("R067_NORMAL_WAIT_OUTPUT bytes="+str(len(output.stdout.encode())))
+        self.assertIn("stopped",output.stdout.lower())
+        self.assertIn("0 game minutes",output.stdout)
+        self.assertIn("zombie",output.stdout)
+        self.assertIn("fd_fire",output.stdout)
+        self.assertIn("world.move.<direction>",output.stdout)
+        self.assertIn("east",output.stdout)
+        for secretless_internal in ("opaque-legacy-frame","opaque-process","opaque-original-request",
+                                    "Sequence:","Accepted receipt:","Accepted owner:"):
+            self.assertNotIn(secretless_internal,output.stdout)
+        inspected=self.cli("inspect","operation.accepted_receipt")
+        self.assertEqual(inspected["slice"],operation["accepted_receipt"])
+
     def test_optional_look_map_survives_pending_collect_without_extra_native_request(self):
         pending = subprocess.run([sys.executable, str(CLI), "--session", str(self.session),
                                   "--wait-seconds", "0", "look", "--map"],

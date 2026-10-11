@@ -1325,16 +1325,24 @@ def plain_player_output(result, *, snapshot=None, full_look=True, startup_error=
                 if key == "accepted" and item is True:
                     continue
                 if key == "operation" and isinstance(item, dict):
-                    if item.get("state") == "completed":
+                    state = item.get("state")
+                    if state == "completed":
                         continue
                     progress = item.get("completed_progress_game_minutes")
-                    if progress is not None:
-                        lines.append("Elapsed: " + str(progress) + " game minutes.")
-                    item = {field: content for field, content in item.items() if field not in {
-                        "kind", "start_game_minutes", "requested_duration_game_minutes",
-                        "requested_target_game_minutes", "completed_progress_game_minutes"}
-                        and not (field == "state" and content == "awaiting_decision")
-                        and not (field == "blocker" and content == "native_authority_required")}
+                    if item.get("kind") == "wait":
+                        elapsed = f" after {progress:g} game minutes" if isinstance(progress, (int, float)) else ""
+                        termination = item.get("termination", {})
+                        if state == "cancelled" and termination.get("reason") == "native_activity_stopped":
+                            lines.append("Wait stopped" + elapsed + ".")
+                        elif state == "awaiting_decision":
+                            lines.append("Wait interrupted" + elapsed + ". Choose from the current prompt.")
+                        elif state == "outcome_unknown":
+                            lines.append("Wait outcome unknown: " + str(item.get("blocker", "unresolved")))
+                        else:
+                            lines.append("Wait " + str(state or "status unknown").replace("_", " ") + elapsed + ".")
+                        # Original receipts, clocks and request identities stay
+                        # losslessly inspectable; ordinary play needs the result.
+                        continue
                 if key == "outcome" and item in ("no_progress", "blocked"):
                     lines.append("Position unchanged." if item == "no_progress" else "Movement blocked.")
                     continue

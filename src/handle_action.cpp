@@ -1905,7 +1905,10 @@ static std::string openclaw_harness_semantic_step_frame(
     const int turn = to_turns<int>( calendar::turn - calendar::turn_zero );
     const int game_minutes = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
     const std::string frame_id = string_format( "%s:%d:%zu", run_id, turn, ++sequence );
-    const bool include_minimap = state == "world";
+    // The first HUD observation precedes its input owner. Thereafter the
+    // World descriptor is the complete map source; compatibility/activity
+    // frames retain local facts and safety, without repeating render maps.
+    const bool include_minimap = state == "world" && producer == "hud_world_ready";
     const map &here = get_map();
     avatar &player = get_avatar();
     const tripoint_bub_ms avatar_pos = player.pos_bub( here );
@@ -1929,12 +1932,14 @@ static std::string openclaw_harness_semantic_step_frame(
     // radius; the cockpit must not choose a larger, invented world window.
     const int overmap_radius = MINIMAP_WIDTH / 2;
     std::ostringstream overmap;
-    overmap << ",\"overmap\":{\"schema\":\"caol-avatar-overmap-v1\",\"coordinate_system\":"
-            << "\"avatar_relative_omt\",\"radius\":" << overmap_radius
-            << ",\"bound_source\":\"native_hud_minimap_width\",\"center_absolute_omt\":["
-            << player.pos_abs_omt().x() << ',' << player.pos_abs_omt().y() << ','
-            << player.pos_abs_omt().z() << "],\"cells\":"
-            << openclaw_harness_overmap_facts( player, overmap_radius, turn ) << '}';
+    if( include_minimap ) {
+        overmap << ",\"overmap\":{\"schema\":\"caol-avatar-overmap-v1\",\"coordinate_system\":"
+                << "\"avatar_relative_omt\",\"radius\":" << overmap_radius
+                << ",\"bound_source\":\"native_hud_minimap_width\",\"center_absolute_omt\":["
+                << player.pos_abs_omt().x() << ',' << player.pos_abs_omt().y() << ','
+                << player.pos_abs_omt().z() << "],\"cells\":"
+                << openclaw_harness_overmap_facts( player, overmap_radius, turn ) << '}';
+    }
 
     std::ostringstream event;
     event << "{\"event\":\"frame\",\"run_id\":"
@@ -2279,6 +2284,7 @@ static void openclaw_harness_semantic_step_receipt( const std::string &frame_id,
     std::ostringstream event;
     event << "{\"event\":\"receipt\",\"run_id\":"
           << openclaw_harness_quote_action_value( run_id )
+          << openclaw_harness_semantic_event_clock()
           << ",\"frame_id\":" << openclaw_harness_quote_action_value( frame_id )
           << ",\"action_id\":" << openclaw_harness_quote_action_value( action_id )
           << ",\"accepted\":" << ( accepted ? "true" : "false" )
