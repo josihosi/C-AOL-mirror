@@ -49,6 +49,7 @@
 #include "calendar.h"
 #include "damage.h"
 #include "creature_tracker.h"
+#include "current_map.h"
 #include "event_bus.h"
 #include "avatar.h"
 #include "activity_actor_definitions.h"
@@ -1554,8 +1555,10 @@ TEST_CASE( "selected NPC decision trace preserves one same seed native choice",
     }
     CHECK( saw_actor );
 }
-bool live_bandit_retained_homeward_resume_blocks_generic_travel(
-    const bandit_live_world::active_outing_state &outing, bool materialization_has_pair_slots );
+
+bandit_live_world::abstract_threat_read live_bandit_structural_abstract_threat_read_for_test(
+    const bandit_live_world::site_record &site,
+    const bandit_live_world::structural_threat_observer_request &request );
 
 TEST_CASE( "loaded local projection leases reconcile or reject as one index",
            "[bandit_live_world][projection_lease][nogame]" )
@@ -13248,7 +13251,7 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
            "[bandit][live_world][structural_bounty][local_handoff][save]" )
 {
     const auto make_world = []( const bool cannibal, const bool watch_assessment = false,
-                               const bool alternate = false ) {
+                               const bool alternate = false, const bool home_side_watch = false ) {
         bandit_live_world::world_state world;
         const int id_base = cannibal ? 14580 : 14560;
         for( int index = 0; index < 3; ++index ) {
@@ -13274,7 +13277,7 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
             bandit_live_world::plan_structural_bounty_outing( site, *lead, 100 );
         REQUIRE( plan.valid );
         if( watch_assessment ) {
-            const auto watch = target + point( 0, 3 );
+            const auto watch = target + ( home_side_watch ? point( -3, 1 ) : point( 0, 3 ) );
             const auto approach = watch + point( -1, 0 );
             bandit_live_world::structural_route_read route;
             route.reachable = true;
@@ -13581,26 +13584,6 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
             REQUIRE( actor );
             CHECK( actor->pos_abs_omt() == live_site.anchor );
         }
-    }
-    SECTION( "retained homeward resume releases an unstageable edge to paired overmap travel" ) {
-        bandit_live_world::world_state world = make_world( false );
-        bandit_live_world::site_record &site = world.sites.front();
-        site.active_outing.phase = bandit_live_world::scout_phase::returning_home;
-        const std::optional<bandit_live_world::simulation_advance_cursor> cursor =
-            bandit_live_world::current_external_simulation_cursor( site );
-        REQUIRE( cursor );
-        const bandit_live_world::local_handoff_plan handoff =
-            bandit_live_world::plan_local_pair_handoff( site, *cursor, 100, make_reads( site ) );
-        REQUIRE( handoff.valid );
-        site.active_outing.local_handoff = handoff.snapshot;
-        site.active_outing.local_handoff.handoff_epoch++;
-        site.active_outing.local_handoff.route_position = tripoint_abs_omt(
-                    handoff.snapshot.route_position.x() - 1,
-                    handoff.snapshot.route_position.y(), handoff.snapshot.route_position.z() );
-        CHECK( live_bandit_retained_homeward_resume_blocks_generic_travel(
-                   site.active_outing, true ) );
-        CHECK_FALSE( live_bandit_retained_homeward_resume_blocks_generic_travel(
-                         site.active_outing, false ) );
     }
     SECTION( "released retained resume advances both physical actors and its cursor together" ) {
         bandit_live_world::world_state world = make_world( false );
@@ -17244,6 +17227,222 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
                 CHECK_FALSE( materialize_live_bandit_structural_handoffs_for_test() );
                 CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == committed );
             }
+        }
+    }
+
+    SECTION( "unfinished native watch retains safety across an off-bubble maintenance cadence" ) {
+        using namespace bandit_live_world;
+        const bool cannibal = GENERATE( false, true );
+        const std::string condition = GENERATE( "incapacity", "flight", "foreign", "healthy" );
+        CAPTURE( cannibal, condition );
+        auto prepared = make_world( cannibal, true, false, true );
+        auto &site = prepared.sites.front();
+        auto &outing = site.active_outing;
+        const auto ids = outing.member_ids;
+        const auto watch = outing.selected_watch_omt;
+        const auto origin = project_to<coords::ms>( watch );
+        advance_structural_bounty_outings( prepared, 200, {} );
+        REQUIRE( outing.phase == scout_phase::observing );
+        auto handoff = plan_local_pair_handoff( site, require_current_simulation_cursor( site ),
+                                               200, make_reads( site ) );
+        REQUIRE( handoff.valid );
+        REQUIRE( commit_local_pair_handoff( site, handoff, []( const auto & ) { return true; },
+                 []( const auto & ) {} ) == local_handoff_commit_result::applied );
+        assemble_pair( site, 200 );
+        std::vector<local_route_arrival_member_read> arrivals;
+        for( std::size_t i = 0; i < ids.size(); ++i ) {
+            arrivals.push_back( { ids[i], true, false, true, 100, origin + point( 10 + i, 10 ) } );
+        }
+        REQUIRE( commit_scout_pair_watch_arrival( site, require_current_simulation_cursor( site ),
+                 200, arrivals ) == local_handoff_commit_result::applied );
+        REQUIRE( outing.assessment.observation_started_minutes == 200 );
+        REQUIRE( outing.observations.empty() );
+        REQUIRE_FALSE( outing.assessment.readiness_latched );
+        std::vector<local_dematerialization_member_read> exits;
+        for( const auto &snapshot : outing.local_handoff.members ) {
+            exits.push_back( { snapshot.npc_id, true, false, false, snapshot.hp_percent,
+                               snapshot.exit_position } );
+        }
+        const auto unload = plan_local_pair_dematerialization( site,
+                            require_current_simulation_cursor( site ), 202, exits, outing.cargo );
+        REQUIRE( unload.valid );
+        REQUIRE( commit_local_pair_dematerialization( site, unload, []( const auto & ) { return true; },
+                 []( const auto & ) {} ) == local_handoff_commit_result::applied );
+        const auto previous_turn = calendar::turn;
+        const auto previous_player = get_avatar().pos_abs_omt();
+        auto previous_world = std::move( overmap_buffer.global_state.bandit_live_world );
+        on_out_of_scope restore( [&]() {
+            overmap_buffer.global_state.bandit_live_world.clear();
+            for( const auto id : ids ) { g->remove_npc( id ); overmap_buffer.remove_npc( id ); }
+            clear_creatures();
+            overmap_buffer.global_state.bandit_live_world = std::move( previous_world );
+            calendar::turn = previous_turn;
+            g->place_player_overmap( previous_player );
+        } );
+        override_option food( "NO_NPC_FOOD", "true" );
+        override_option llm( "LLM_INTENT_ENABLE", "false" );
+        calendar::turn = calendar::start_of_cataclysm + 203_minutes;
+        clear_vehicles();
+        g->place_player_overmap( watch );
+        clear_creatures();
+        clear_map();
+        get_avatar().setpos( origin + tripoint( 20, 20, 1 ), false );
+        for( const auto &tile : get_map().points_on_zlevel( 1 ) ) {
+            get_map().ter_set( tile, ter_id( "t_floor" ) );
+        }
+        for( int z : { 0, 1 } ) {
+            get_map().invalidate_map_cache( z ); get_map().build_map_cache( z );
+        }
+        std::vector<shared_ptr_fast<npc>> actors;
+        for( std::size_t i = 0; i < ids.size(); ++i ) {
+            auto actor = make_shared_fast<npc>();
+            actor->normalize(); actor->load_npc_template( npc_template_test_talker );
+            actor->setID( ids[i], true ); actor->set_attitude( NPCATT_NULL );
+            actor->spawn_at_precise( arrivals[i].current_position );
+            overmap_buffer.insert_npc( actor ); actors.push_back( actor );
+        }
+        add_bandit_work_camp_member( prepared, 0, 14600 );
+        const auto independent_id = prepared.sites.back().site_id;
+        prepared.sites.back().supply_last_update_minutes = 200;
+        overmap_buffer.global_state.bandit_live_world = std::move( prepared );
+        auto &world = overmap_buffer.global_state.bandit_live_world;
+        auto &live_site = world.sites.front();
+        std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
+        for( int y = live_site.anchor.y() - 1; y <= watch.y() + 1; ++y ) {
+            for( int x = live_site.anchor.x() - 1; x <= live_site.active_outing.target_omt.x() + 1; ++x ) {
+                const tripoint_abs_omt cell( x, y, 0 );
+                terrain.emplace_back( cell, overmap_buffer.ter( cell ) );
+                overmap_buffer.ter_set( cell, oter_id( cell == live_site.active_outing.target_omt ? "shelter_north" : "field" ) );
+            }
+        }
+        on_out_of_scope restore_terrain( [&]() {
+            for( const auto &entry : terrain ) { overmap_buffer.ter_set( entry.first, entry.second ); }
+        } );
+        REQUIRE( materialize_live_bandit_structural_handoffs_for_test() );
+        REQUIRE( live_site.active_outing.owner == simulation_owner::local );
+        for( const auto &actor : actors ) { REQUIRE( actor->is_active() ); }
+        // Readmission selects real entry/staging positions. Let the existing
+        // physical owner reach and assemble them before unloading a watcher.
+        for( int step = 0; step < 64 &&
+             !live_site.active_outing.local_handoff.cohesion_assembled; ++step ) {
+            for( const auto &actor : actors ) { actor->set_moves( 100 ); }
+            process_monsters_and_npcs_turn_for_test();
+            maintain_live_bandit_local_pair_cohesion_for_test();
+        }
+        REQUIRE( live_site.active_outing.local_handoff.cohesion_assembled );
+        calendar::turn += 1_minutes;
+        advance_live_bandit_local_scout_assessments_for_test();
+        REQUIRE( live_site.active_outing.phase == scout_phase::observing );
+        REQUIRE( live_site.active_outing.observations.empty() );
+        if( condition == "incapacity" || condition == "flight" ) {
+            if( condition == "incapacity" ) {
+                actors.back()->add_effect( efftype_id( "narcosis" ), 4_hours );
+                actors.back()->add_effect( efftype_id( "sleep" ), 4_hours );
+                REQUIRE( actors.back()->duty_incapacitated() );
+            } else {
+                actors.back()->add_effect( efftype_id( "npc_run_away" ), 4_hours );
+            }
+            calendar::turn += 1_minutes;
+            advance_live_bandit_local_scout_assessments_for_test();
+            REQUIRE( live_site.active_outing.assessment.interruption );
+            REQUIRE( live_site.active_outing.assessment.interruption->pending() );
+        }
+        g->place_player_overmap( watch + point( 30, 30 ) );
+        calendar::turn += 1_minutes;
+        REQUIRE( dematerialize_live_bandit_structural_handoffs_for_test() );
+        REQUIRE( live_site.active_outing.owner == simulation_owner::abstract );
+        REQUIRE( live_site.active_outing.local_handoff.is_abstract_resume() );
+        REQUIRE_FALSE( live_site.active_outing.crossing.persistence_acknowledged );
+        for( const auto &actor : actors ) { actor->set_moves( 0 ); }
+        const auto started = live_site.active_outing.assessment.observation_started_minutes;
+        const auto progress = live_site.active_outing.assessment.last_progress_minutes;
+        const auto activity = live_site.active_outing.activity_id;
+        const auto generation = live_site.active_outing.generation;
+        const auto epoch = live_site.active_outing.handoff_epoch;
+        const auto position = actors.back()->pos_abs();
+        const auto clean_lease = actors.back()->get_bandit_live_world_projection_lease();
+        if( condition == "foreign" ) {
+            auto lease = clean_lease; lease.present = true; lease.site_id = "other-watch";
+            actors.back()->set_bandit_live_world_projection_lease( lease );
+        }
+        calendar::turn = calendar::start_of_cataclysm + 360_minutes;
+        process_overmap_npc_move_for_test();
+        REQUIRE( world.find_site( independent_id ) );
+        CHECK( world.find_site( independent_id )->supply_last_update_minutes == 360 );
+        std::cout << "R067_OFFBUBBLE_WATCH condition=" << condition << " faction=" << cannibal
+                  << " phase=" << to_string( live_site.active_outing.phase )
+                  << " pending=" << ( live_site.active_outing.assessment.interruption &&
+                                        live_site.active_outing.assessment.interruption->pending() )
+                  << " started=" << live_site.active_outing.assessment.observation_started_minutes
+                  << " body_incapacitated=" << actors.back()->duty_incapacitated()
+                  << " current_cursor=" << current_external_simulation_cursor( live_site ).has_value()
+                  << " target_revision=" << live_site.active_outing.target_lead_revision
+                  << " pin=" << live_site.active_outing.assessment.pinned_target_revision
+                  << " wp=" << live_site.active_outing.waypoint_index
+                  << " actor_wp=" << live_site.active_outing.actor_route_waypoint << std::endl;
+        if( condition != "healthy" ) {
+            REQUIRE( live_site.active_outing.phase == scout_phase::observing );
+            REQUIRE( live_site.active_outing.assessment.interruption );
+            CHECK( live_site.active_outing.assessment.interruption->pending() );
+            CHECK( live_site.active_outing.assessment.observation_started_minutes == started );
+            CHECK( live_site.active_outing.assessment.last_progress_minutes == progress );
+            CHECK( actors.back()->pos_abs() == position );
+            CHECK( live_site.active_outing.activity_id == activity );
+            CHECK( live_site.active_outing.generation == generation );
+            CHECK( live_site.active_outing.handoff_epoch == epoch );
+            auto refused_world = world;
+            int fresh_signal_callbacks = 0;
+            advance_structural_bounty_outings( refused_world, 360, {},
+            []( const auto &read_site, const auto &, const auto &request ) {
+                return live_bandit_structural_abstract_threat_read_for_test( read_site, request );
+            }, [&]( const auto &, const auto &, const auto & ) {
+                ++fresh_signal_callbacks;
+                return std::vector<structural_signal_read>{};
+            } );
+            CHECK( fresh_signal_callbacks == 0 );
+            CHECK( live_site.active_outing.observations.empty() );
+            CHECK_FALSE( live_site.active_outing.assessment.readiness_latched );
+            CHECK( serialize_world( round_trip_world( world ) ) == serialize_world( world ) );
+            if( condition == "foreign" ) { actors.back()->set_bandit_live_world_projection_lease( clean_lease ); }
+            calendar::turn = calendar::start_of_cataclysm + 480_minutes;
+            process_overmap_npc_move_for_test();
+            CHECK_FALSE( actors.back()->duty_incapacitated() );
+            CHECK_FALSE( actors.back()->has_effect( efftype_id( "npc_run_away" ) ) );
+            REQUIRE( live_site.active_outing.phase == scout_phase::observing );
+            REQUIRE( live_site.active_outing.assessment.interruption );
+            CHECK_FALSE( live_site.active_outing.assessment.interruption->pending() );
+            CHECK( live_site.active_outing.assessment.observation_started_minutes == 480 );
+            CHECK( live_site.active_outing.assessment.last_progress_minutes == 480 );
+            CHECK( live_site.active_outing.activity_id == activity );
+            CHECK( live_site.active_outing.generation == generation );
+            CHECK( serialize_world( round_trip_world( world ) ) == serialize_world( world ) );
+            // The new eligible segment earns its own ordinary duration. Keep
+            // the player away and let the same paired executor return/report.
+            calendar::turn = calendar::start_of_cataclysm + 600_minutes;
+            process_overmap_npc_move_for_test();
+            REQUIRE( live_site.active_outing.phase != scout_phase::observing );
+            for( int minute = 605; minute <= 840 && live_site.active_outing.is_active(); minute += 5 ) {
+                calendar::turn = calendar::start_of_cataclysm + time_duration::from_minutes( minute );
+                process_overmap_npc_move_for_test();
+            }
+            CHECK_FALSE( live_site.active_outing.is_active() );
+            REQUIRE( live_site.current_scout_report.is_present() );
+            CHECK( live_site.current_scout_report.carrier_ids == ids );
+            CHECK_FALSE( live_site.current_scout_report.assessment.readiness_latched );
+            CHECK( live_site.current_scout_report.assessment.observation_started_minutes == 480 );
+            for( const auto &actor : actors ) {
+                CHECK( actor->pos_abs_omt() == live_site.anchor );
+                CHECK( actor->getID() == live_site.find_member( actor->getID() )->npc_id );
+            }
+            const auto finished = serialize_world( world );
+            process_overmap_npc_move_for_test();
+            CHECK( serialize_world( world ) == finished );
+            CHECK( serialize_world( round_trip_world( world ) ) == finished );
+        } else {
+            CHECK( live_site.active_outing.phase != scout_phase::observing );
+            CHECK( live_site.active_outing.assessment.exit_reason ==
+                   "selected watch made no assessment progress and no alternate was available" );
+            CHECK_FALSE( live_site.active_outing.assessment.readiness_latched );
         }
     }
 
@@ -53935,7 +54134,7 @@ namespace
 // CAOL_R067_ACTIONS replays a printed prefix; invalid commands have a distinct
 // fingerprint so a reducer cannot substitute a broken precondition for a bug.
 void r067_stateful_return( const std::string &scenario, bool completed_cannibal = false,
-                           bool unsaved_crossings = false )
+                           bool unsaved_crossings = false, bool partial_crossings = false )
 {
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     const bool old_metric = trigdist;
@@ -54227,6 +54426,24 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
             demand( false, "persistence.strict_json_rejected" );
         }
     };
+    const auto prepare_partial_observation_perch = [&]() {
+        // A single floor tile plus object-LOS checks did not establish a
+        // physically hidden observer for assess_danger's tile-LOS query.
+        // Keep the ground scout route untouched and make the declared upper
+        // observation platform solid before any native perception callback.
+        demand( get_avatar().pos_abs().z() == 1, "invalid.partial_perch_height" );
+        for( const auto &tile : get_map().points_on_zlevel( 1 ) ) {
+            get_map().ter_set( tile, ter_id( "t_floor" ) );
+        }
+        for( const auto &tile : get_map().points_in_radius( get_avatar().pos_bub(), 1 ) ) {
+            if( tile != get_avatar().pos_bub() ) { get_map().ter_set( tile, ter_id( "t_wall" ) ); }
+        }
+        for( int z : { 0, 1 } ) {
+            get_map().invalidate_map_cache( z );
+            get_map().build_map_cache( z );
+        }
+    };
+    std::set<character_id> reported_alarms;
     const auto local_tick = [&]() {
         for( npc &actor : g->all_npcs() ) { sounds::process_sound_markers( &actor ); }
         sounds::reset_sounds();
@@ -54236,6 +54453,27 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
             before_producer( "monmove" );
             scene.step();
             snapshot = trace.result();
+        }
+        if( partial_crossings ) {
+            // Capture the first actual alarm operand once, rather than infer
+            // its origin from later response/zero-danger summary booleans.
+            for( const auto id : ids ) {
+                const auto &actor = scene.actor( id.get_value() );
+                if( actor.faction_alarm && reported_alarms.insert( id ).second ) {
+                    const auto &alarm = *actor.faction_alarm;
+                    const auto source = overmap_buffer.find_npc( alarm.source_id );
+                    std::cout << "R067_FIRST_ALARM id=" << id.get_value()
+                              << " minute=" << to_minutes<int>( calendar::turn - calendar::start_of_cataclysm )
+                              << " source=" << alarm.source_id.get_value()
+                              << " incident=" << alarm.incident
+                              << " received_attack=" << alarm.received_attack.value_or( false )
+                              << " source_loaded=" << ( source && source->is_active() )
+                              << " source_position=" << ( source ? source->pos_abs().to_string() : "unavailable" )
+                              << " source_tile_los=" << ( source && source->sees( get_map(), get_avatar().pos_bub() ) )
+                              << " source_sees_avatar=" << ( source && source->sees( get_map(), get_avatar() ) )
+                              << " response=" << actor.faction_alarm_requires_response() << std::endl;
+                }
+            }
         }
         for( const auto &event : snapshot.transition_events ) {
             if( event.transition != "scout_homeward_motor" || !event.scout_homeward ) { continue; }
@@ -54278,6 +54516,9 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
     const auto choice = rng_sequence( 4, 0, 99, static_cast<int>( seed ) );
     std::string commands;
     if( const char *replay = std::getenv( "CAOL_R067_ACTIONS" ) ) { commands = replay; }
+    else if( partial_crossings ) {
+        commands = "r,o,p,m1,r,o,u,m8,r,o,u,m5,h,s,l,m2,s";
+    }
     else if( unsaved_crossings ) {
         // Two complete bubble round trips without a save between crossings.
         // The actual materializer, unload, scheduler and physical return own
@@ -54318,7 +54559,7 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
                 executed.back() = std::string( 1, op ) + std::to_string( i + 1 );
                 if( op == 't' ) { local_tick(); } else { minute_tick(); }
             }
-            if( unsaved_crossings && executed.size() == 4 ) {
+            if( unsaved_crossings && !partial_crossings && executed.size() == 4 ) {
                 demand( local_to_abstract == 1 && scene.site().active_outing.owner ==
                         bandit_live_world::simulation_owner::abstract,
                         "owner.first_unsaved_dematerialization" );
@@ -54377,6 +54618,59 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
                 demand( loaded_items == possessions[i], "persistence.all_possessions_continuity" );
             }
             ++reloads;
+        } else if( op == 'p' ) {
+            demand( !encounter && dead.empty(), "invalid.partial_crossing_during_interruption" );
+            // Wait for native movement to straddle a submap edge. The player
+            // then moves only the bubble; neither scout is repositioned.
+            for( int tick = 0; tick < 180 &&
+                 scene.actor( ids[0].get_value() ).pos_abs_sm().xy() ==
+                 scene.actor( ids[1].get_value() ).pos_abs_sm().xy(); ++tick ) {
+                local_tick();
+            }
+            const auto first = scene.actor( ids[0].get_value() ).pos_abs();
+            const auto second = scene.actor( ids[1].get_value() ).pos_abs();
+            const auto first_sm = scene.actor( ids[0].get_value() ).pos_abs_sm();
+            const auto second_sm = scene.actor( ids[1].get_value() ).pos_abs_sm();
+            demand( first_sm.xy() != second_sm.xy(), "invalid.no_native_partial_edge" );
+            const auto origin = first_sm.x() != second_sm.x() ?
+                                tripoint_abs_sm( std::min( first_sm.x(), second_sm.x() ) + 1,
+                                        second_sm.y() - 4, 1 ) :
+                                tripoint_abs_sm( second_sm.x() - 4,
+                                        std::min( first_sm.y(), second_sm.y() ) + 1, 1 );
+            get_map().load( origin, false );
+            get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 48, 1 ), false );
+            prepare_partial_observation_perch();
+            g->reload_npcs();
+            for( character_id id : ids ) {
+                demand( !scene.actor( id.get_value() ).sees( get_map(), get_avatar().pos_bub() ),
+                        "invalid.partial_edge_avatar_tile_is_visible" );
+                demand( !scene.actor( id.get_value() ).sees( get_map(), get_avatar() ),
+                        "invalid.partial_edge_avatar_is_an_extra_hostile" );
+                demand( scene.actor( id.get_value() ).get_last_updated() == calendar::turn,
+                        "persistence.partial_edge_body_handover_clock" );
+            }
+            demand( scene.actor( ids[0].get_value() ).is_active() !=
+                    scene.actor( ids[1].get_value() ).is_active(), "invalid.partial_edge_not_loaded" );
+            demand( scene.actor( ids[0].get_value() ).pos_abs() == first &&
+                    scene.actor( ids[1].get_value() ).pos_abs() == second,
+                    "actors.bubble_shift_preserves_positions" );
+            // Persistent find_npc is not a loaded-custody predicate. Even
+            // this real mixed representation remains Local: abstract threat
+            // resolution must not borrow either body's ordinary native turn.
+            auto &world = overmap_buffer.global_state.bandit_live_world;
+            demand( scene.site().active_outing.owner == bandit_live_world::simulation_owner::local,
+                    "owner.partial_edge_still_local" );
+            const auto partial = serialize_world( world );
+            int threat_callbacks = 0;
+            bandit_live_world::advance_structural_bounty_outings( world,
+                    to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) + 1, {},
+            [&]( const auto &, const auto &, const auto & ) {
+                ++threat_callbacks;
+                return bandit_live_world::abstract_threat_read();
+            } );
+            demand( threat_callbacks == 0, "owner.partial_edge_no_abstract_threat_executor" );
+            demand( serialize_world( world ) == partial,
+                    "owner.partial_edge_preserves_assessment_and_encounter" );
         } else if( op == 'u' ) {
             // Only the bubble moves. The scheduler owns representation transfer.
             const auto survivor = std::find_if( ids.begin(), ids.end(), [&]( character_id id ) { return !dead.count( id ); } );
@@ -54395,8 +54689,12 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
             // Keep the observation perch and that map anchor on the same z.
             get_map().load( tripoint_abs_sm( origin.xy(), 1 ), false );
             get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 48, 1 ), false );
-            for( const auto &tile : get_map().points_in_radius( get_avatar().pos_bub(), 1 ) ) {
-                if( tile != get_avatar().pos_bub() ) { get_map().ter_set( tile, ter_id( "t_wall" ) ); }
+            if( partial_crossings ) {
+                prepare_partial_observation_perch();
+            } else {
+                for( const auto &tile : get_map().points_in_radius( get_avatar().pos_bub(), 1 ) ) {
+                    if( tile != get_avatar().pos_bub() ) { get_map().ter_set( tile, ter_id( "t_wall" ) ); }
+                }
             }
             g->reload_npcs();
             const bool pair_at_home = std::all_of( ids.begin(), ids.end(), [&]( character_id id ) {
@@ -54416,7 +54714,8 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
                 // permanent visible hostile character from the open sky.
                 get_map().invalidate_map_cache( 0 ); get_map().build_map_cache( 0, true );
                 for( character_id id : ids ) {
-                    std::cout << "R067_REENTRY_AVATAR_VISIBLE_BEFORE_FLOOR id=" << id.get_value()
+                    std::cout << ( partial_crossings ? "R067_REENTRY_AVATAR_VISIBLE_AFTER_PLATFORM id=" :
+                                   "R067_REENTRY_AVATAR_VISIBLE_BEFORE_FLOOR id=" ) << id.get_value()
                               << " visible=" << scene.actor( id.get_value() ).sees( get_map(), get_avatar() ) << std::endl;
                 }
                 get_map().ter_set( get_avatar().pos_bub(), ter_id( "t_floor" ) );
@@ -54429,6 +54728,10 @@ void r067_stateful_return( const std::string &scenario, bool completed_cannibal 
                 if( completed_watch ) {
                     demand( scene.actor( id.get_value() ).get_last_updated() == calendar::turn,
                             "persistence.native_reentry_consumed_body_clock" );
+                    if( partial_crossings ) {
+                        demand( !scene.actor( id.get_value() ).sees( get_map(), get_avatar().pos_bub() ),
+                                "invalid.reentry_avatar_tile_is_visible" );
+                    }
                     demand( !scene.actor( id.get_value() ).sees( get_map(), get_avatar() ),
                             "invalid.reentry_avatar_is_an_extra_hostile" );
                 }
@@ -58361,7 +58664,6 @@ TEST_CASE( "retained8108 abort-return pair has permitted routes through the real
     REQUIRE( before.local_handoff.is_abstract_resume() );
     REQUIRE( before.local_handoff.cohesion_abort_return );
     REQUIRE( before.local_handoff.route_position == tripoint_abs_omt( 128, 146, 0 ) );
-    REQUIRE_FALSE( live_bandit_retained_homeward_resume_blocks_generic_travel( before, false ) );
     std::ostringstream materialization_log;
     std::ostream &log_output = DebugLog( D_INFO, DC_ALL );
     auto *previous_log = log_output.rdbuf( materialization_log.rdbuf() );
@@ -58896,6 +59198,87 @@ std::pair<int, int> r067_finite_corpse_custody( const tripoint_abs_ms &position,
     return counts;
 }
 } // namespace
+
+TEST_CASE( "refused paired admission retains its authenticated abstract executor",
+           "[bandit_live_world][bubble_continuity_067][refused_admission_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const bool cannibal = GENERATE( false, true );
+    r055_scene scene;
+    r067_finite_loaded_scene( scene, cannibal, false );
+    const auto ids = scene.site().active_outing.member_ids;
+    const auto assessment = r067_return_record_bytes( scene.site().active_outing.assessment );
+    const auto origin = scene.actor( ids.front().get_value() ).pos_abs_sm() + point( 30, 30 );
+    get_map().load( origin, false );
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 48, 0 ), false );
+    g->reload_npcs();
+    calendar::turn += 1_minutes;
+    REQUIRE( dematerialize_live_bandit_structural_handoffs_for_test() );
+    const auto &outing = scene.site().active_outing;
+    REQUIRE( outing.owner == simulation_owner::abstract );
+    REQUIRE( outing.local_handoff.is_abstract_resume() );
+    REQUIRE_FALSE( outing.crossing.persistence_acknowledged );
+    const auto resume = outing.local_handoff.route_position;
+    // The receiving map contains only this OMT. Walling the entire ordinary
+    // bubble also trapped unrelated native camp NPCs during generic loading.
+    // Reuse the native scoped-map API instead: their home cells remain intact
+    // and out of this admission, while these exact bodies stay where they are.
+    REQUIRE( outing.local_handoff.cohesion_assembled );
+    tinymap receiving;
+    receiving.load( resume, false );
+    swap_map receiving_scope( *receiving.cast_to_map() );
+    const auto saved_avatar = get_avatar().pos_abs();
+    on_out_of_scope restore_avatar( [&]() { get_avatar().setpos( saved_avatar, false ); } );
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 12, 12, 1 ), false );
+    for( const auto &tile : get_map().points_on_zlevel( resume.z() ) ) {
+        get_map().ter_set( tile, ter_id( "t_wall" ) );
+    }
+    const auto entry = scene.actor( ids[0].get_value() ).pos_abs();
+    const auto second_entry = scene.actor( ids[1].get_value() ).pos_abs();
+    REQUIRE( entry != second_entry );
+    REQUIRE( rl_dist( entry, second_entry ) <= 1 );
+    for( const auto &tile : { entry, second_entry } ) {
+        REQUIRE( get_map().inbounds( tile ) );
+        get_map().ter_set( get_map().get_bub( tile ), ter_id( "t_floor" ) );
+        REQUIRE( get_map().passable( get_map().get_bub( tile ) ) );
+        REQUIRE( g->is_empty( get_map().get_bub( tile ) ) );
+    }
+    get_map().ter_set( get_avatar().pos_bub(), ter_id( "t_floor" ) );
+    for( int z : { 0, 1 } ) {
+        get_map().invalidate_map_cache( z );
+        get_map().build_map_cache( z, true );
+    }
+    g->reload_npcs();
+    for( const auto id : ids ) { REQUIRE_FALSE( scene.actor( id.get_value() ).is_active() ); }
+    structural_threat_observer_request read;
+    read.current_omt = resume;
+    read.party_power = 100;
+    REQUIRE( get_map().inbounds( resume ) );
+    CHECK_FALSE( live_bandit_structural_abstract_threat_read_for_test( scene.site(), read ).local_reality );
+    const auto before = serialize_world( overmap_buffer.global_state.bandit_live_world );
+    REQUIRE_FALSE( materialize_live_bandit_structural_handoffs_for_test() );
+    CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == before );
+    const auto first_before = scene.actor( ids[0].get_value() ).pos_abs();
+    const auto second_before = scene.actor( ids[1].get_value() ).pos_abs();
+    calendar::turn += 5_minutes;
+    process_overmap_npc_move_for_test();
+    CHECK( scene.site().active_outing.owner == simulation_owner::abstract );
+    REQUIRE( scene.site().active_outing.local_handoff.route_position != resume );
+    CHECK( scene.actor( ids[0].get_value() ).pos_abs() != first_before );
+    CHECK( scene.actor( ids[1].get_value() ).pos_abs() != second_before );
+    CHECK( scene.actor( ids[0].get_value() ).pos_abs_omt() ==
+           scene.actor( ids[1].get_value() ).pos_abs_omt() );
+    CHECK( scene.site().active_outing.local_handoff.route_position ==
+           scene.actor( ids[0].get_value() ).pos_abs_omt() );
+    CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK_FALSE( scene.site().current_scout_report.is_present() );
+    CHECK_FALSE( scene.site().active_outing.crossing.persistence_acknowledged );
+    const auto progressed = serialize_world( overmap_buffer.global_state.bandit_live_world );
+    process_overmap_npc_move_for_test();
+    CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == progressed );
+}
 
 TEST_CASE( "finite native incapacity ages after the real paired unload and resumes its same bodies",
            "[bandit_live_world][handover_stability_067][handover_finite_incapacity_067]" )
@@ -60209,4 +60592,55 @@ TEST_CASE( "retained resident homeward edge has an admitted physical pair contin
     CHECK( scene.site().active_outing.member_return_receipts.empty() );
     CHECK_FALSE( scene.site().current_scout_report.is_present() );
     CHECK( current_external_simulation_cursor( scene.site() ).has_value() );
+}
+
+
+TEST_CASE( "new camp deferral preserves maintenance of an established outing",
+           "[bandit_live_world][bubble_continuity_067][bootstrap_isolation_067]" )
+{
+    using namespace bandit_live_world;
+    const bool cannibal = GENERATE( false, true );
+    world_state world;
+    add_scheduler_test_site( world, 0, cannibal, 690000 );
+    const auto forest = classify_structural_bounty_terrain( "forest" );
+    REQUIRE( upsert_structural_bounty_lead( world.sites.front(),
+                 world.sites.front().anchor + point( 4, 0 ), forest, 0 ) );
+    const auto no_terrain = []( const tripoint_abs_omt & ) -> std::optional<std::string> {
+        return std::nullopt;
+    };
+    const auto no_threat = []( const site_record &, const camp_map_lead & ) {
+        return structural_threat_read{};
+    };
+    REQUIRE( advance_structural_bounty_maintenance( world, 0, 0, 2,
+             no_terrain, no_threat ).dispatches_applied == 1 );
+    const auto generation = world.sites.front().active_outing.generation;
+    const auto members = world.sites.front().active_outing.member_ids;
+    add_scheduler_test_site( world, 1, cannibal, 690000 );
+    REQUIRE( upsert_structural_bounty_lead( world.sites.back(),
+                 world.sites.back().anchor + point( 4, 0 ), forest, 0 ) );
+    const std::set<std::string> newly_registered = { world.sites.back().site_id };
+    const auto result = advance_structural_bounty_maintenance( world, 60, 4, 2,
+                        no_terrain, no_threat, {}, {}, {}, {}, {}, {}, {}, {}, {}, newly_registered );
+    CHECK( result.outing.active_outings_considered == 1 );
+    CHECK( world.sites.front().active_outing.last_advanced_minutes == 60 );
+    CHECK( world.sites.front().active_outing.generation == generation );
+    CHECK( world.sites.front().active_outing.member_ids == members );
+    CHECK_FALSE( world.sites.back().active_outing.is_active() );
+    CHECK( world.sites.back().routine_no_candidate_streak == 0 );
+    CHECK( world.sites.back().next_routine_dispatch_eligible_minutes == -1 );
+    const auto once = serialize_world( world );
+    CHECK( advance_structural_bounty_maintenance( world, 60, 4, 2,
+           no_terrain, no_threat ).scheduler_replay_suppressed );
+    CHECK( serialize_world( world ) == once );
+    REQUIRE( advance_structural_bounty_maintenance( world, 120, 0, 2,
+             no_terrain, no_threat ).dispatches_applied == 1 );
+    CHECK( world.sites.back().active_outing.member_ids.size() == 2 );
+    CHECK( world.sites.back().active_outing.started_minutes == 120 );
+}
+
+TEST_CASE( "mobile player partial edge and reversal preserve unsaved scout return",
+           "[bandit_live_world][bubble_continuity_067][mobile_bubble_067]" )
+{
+    SECTION( "bandit" ) { r067_stateful_return( "completed", false, true, true ); }
+    SECTION( "cannibal" ) { r067_stateful_return( "completed", true, true, true ); }
 }

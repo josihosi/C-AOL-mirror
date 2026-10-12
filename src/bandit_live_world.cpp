@@ -15134,6 +15134,9 @@ void add_structural_observer_retained_track( const site_record &site,
 bool structural_abstract_threat_read_is_valid( const tripoint_abs_omt &current_omt,
         const abstract_threat_read &read )
 {
+    if( !read.observer_refusal.empty() ) {
+        return false; // Refusal is consumed by the observer caller, never combat.
+    }
     if( !read.observed ) {
         return !read.overlap && read.stable_threat_ids.empty() && read.detours.empty() &&
                read.danger_low == 0 && read.danger_high == 0;
@@ -18126,6 +18129,24 @@ structural_outing_result advance_structural_bounty_outings( world_state &state, 
             abstract_threat_read abstract_read;
             if( abstract_threat_lookup ) {
                 abstract_read = abstract_threat_lookup( candidate, pre_advance_outing, request );
+                if( !abstract_read.observer_refusal.empty() ) {
+                    // Keep the original cursor and earned knowledge. Disabled
+                    // time owns neither fresh records nor an assessment segment.
+                    // A subsequent eligible read resumes the existing interruption.
+                    site_record interrupted = site;
+                    if( abstract_read.observer_refusal.size() <= max_sortie_summary_length &&
+                        remember_scout_watch_interruption( interrupted, *expected_cursor,
+                                abstract_read.observer_refusal, now_minutes ) &&
+                        ( !projection_commit || projection_commit( site, interrupted ) ) ) {
+                        site = std::move( interrupted );
+                    }
+                    continue;
+                }
+                if( pre_advance_outing.assessment.interruption &&
+                    pre_advance_outing.assessment.interruption->pending() ) {
+                    request.observation_window_start_minutes = now_minutes;
+                    request.signal_window_start_minutes = now_minutes;
+                }
                 bool threat_omt_is_permitted = !abstract_read.observed;
                 if( abstract_read.observed ) {
                     threat_omt_is_permitted = abstract_read.threat_omt == request.current_omt ||
@@ -18692,7 +18713,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         const site_record & )> &hostile_route_lookup,
         const std::function<bool( site_record &, const authorized_hostile_operation_plan & )>
         &hostile_operation_apply,
-        const std::function<bool( const site_record &, const site_record & )> &projection_commit )
+        const std::function<bool( const site_record &, const site_record & )> &projection_commit,
+        const std::set<std::string> &deferred_dispatch_site_ids )
 {
     bandit_live_world_probe::scoped_section probe_section(
         bandit_live_world_probe::section::structural_maintenance );
@@ -18735,7 +18757,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
     for( std::size_t index = 0; index < state.sites.size(); ++index ) {
         const site_record &site = state.sites[index];
         if( supports_routine_camp_ecology( effective_profile( site ) ) &&
-            !site.retired_empty_site ) {
+            !site.retired_empty_site && deferred_dispatch_site_ids.count( site.site_id ) == 0 ) {
             routine_site_indices.push_back( index );
         }
     }
@@ -23180,6 +23202,10 @@ scout_assessment_result advance_structural_scout_assessment(
 
     site_record candidate = site;
     active_outing_state &next = candidate.active_outing;
+    // The upstream observer may already consume this cadence's cursor. Keep
+    // resumption/initialization in change detection rather than discarding it
+    // as an unchanged, record-free assessment at that same clock.
+    const scout_assessment_state before = next.assessment;
     const bool clock_advanced = next.last_advanced_minutes < current_minutes;
     const bool interrupted = next.assessment.interruption && next.assessment.interruption->pending();
     if( interrupted && next.alternate_watch_reposition_pending ) {
@@ -23197,7 +23223,7 @@ scout_assessment_result advance_structural_scout_assessment(
         return scout_assessment_result::alternate_watch_reposition_required;
     }
     if( interrupted && !different_watch_available ) {
-        // The loaded caller has just rechecked the current watchers' safety.
+        // The owning native caller has just rechecked the current watchers' safety.
         // Old observations stay reportable, but this segment starts now.
         resume_interrupted_watch( next, current_minutes );
     }
@@ -23214,7 +23240,6 @@ scout_assessment_result advance_structural_scout_assessment(
         return scout_assessment_result::rejected;
     }
 
-    const scout_assessment_state before = next.assessment;
     const auto trace_confidence = [&]() {
         if( !bandit_live_world_probe::transition_events_enabled() ) {
             return;

@@ -1517,6 +1517,9 @@ bool structural_observer_retained_threat_matches(
     const std::vector<std::string> &stable_threat_ids );
 
 struct abstract_threat_read {
+    // A native observer refusal is not an empty threat read. It preempts fresh
+    // acquisition and assessment while the existing body owner still recovers.
+    std::string observer_refusal;
     bool observed = false;
     bool overlap = false;
     bool local_reality = false;
@@ -2034,7 +2037,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         const site_record & )> &hostile_route_lookup = {},
         const std::function<bool( site_record &, const authorized_hostile_operation_plan & )>
         &hostile_operation_apply = {},
-        const std::function<bool( const site_record &, const site_record & )> &projection_commit = {} );
+        const std::function<bool( const site_record &, const site_record & )> &projection_commit = {},
+        const std::set<std::string> &deferred_dispatch_site_ids = {} );
 std::string render_structural_bounty_maintenance_report(
     const structural_bounty_maintenance_result &result );
 std::string render_evidence_debug_report( const world_state &state, int current_minutes );
