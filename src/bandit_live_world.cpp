@@ -6271,10 +6271,15 @@ bool reconcile_local_pair_casualties( site_record &site,
                                       const int current_minutes )
 {
     const active_outing_state &outing = site.active_outing;
+    const bool initial_abstract_pair = outing.owner == simulation_owner::abstract &&
+                                       outing.schema_version >= 10 && outing.handoff_epoch == 0 &&
+                                       outing.crossing.empty() && outing.local_handoff.members.empty() &&
+                                       !outing.local_handoff.is_active() && !outing.local_handoff.is_abstract_resume();
     if( !outing.is_active() || outing.kind != outing_kind::structural_sortie ||
         outing.schema_version < 7 ||
         !( ( outing.owner == simulation_owner::local && outing.local_handoff.is_active() ) ||
-           ( outing.owner == simulation_owner::abstract && outing.local_handoff.is_abstract_resume() ) ) ||
+           ( outing.owner == simulation_owner::abstract && outing.local_handoff.is_abstract_resume() ) ||
+           initial_abstract_pair ) ||
         !simulation_cursor_matches( outing, expected_cursor ) ||
         reads.empty() || current_minutes < 0 ||
         current_minutes < outing.last_advanced_minutes ) {
@@ -6290,7 +6295,9 @@ bool reconcile_local_pair_casualties( site_record &site,
         } );
         if( ( read.state != member_state::dead && read.state != member_state::missing ) ||
             std::find( read_ids.begin(), read_ids.end(), read.npc_id ) != read_ids.end() ||
-            snapshot_iter == outing.local_handoff.members.end() || snapshot_iter->dead ||
+            std::find( outing.member_ids.begin(), outing.member_ids.end(), read.npc_id ) == outing.member_ids.end() ||
+            !site.find_member( read.npc_id ) ||
+            ( !initial_abstract_pair && ( snapshot_iter == outing.local_handoff.members.end() || snapshot_iter->dead ) ) ||
             outing.member_is_resolved( read.npc_id ) ||
             std::find( outing.casualty_ids.begin(), outing.casualty_ids.end(), read.npc_id ) !=
             outing.casualty_ids.end() ||
@@ -6321,32 +6328,37 @@ bool reconcile_local_pair_casualties( site_record &site,
     }
     for( const local_pair_casualty_read &read : reads ) {
         const std::string summary = read.state == member_state::dead ?
-                                    "local handoff member died under physical simulation" :
+                                    ( initial_abstract_pair ? "abstract scout died during native body catch-up" :
+                                      "local handoff member died under physical simulation" ) :
                                     "local handoff member missing beyond persisted grace";
         if( !update_member_state( candidate, read.npc_id, read.state, summary ) ) {
             return false;
         }
         next.casualty_ids.push_back( read.npc_id );
         next.resolved_member_ids.push_back( read.npc_id );
-        auto death_snapshot = std::find_if( next.local_handoff.members.begin(),
-        next.local_handoff.members.end(), [&read]( const local_handoff_member_snapshot & member ) {
-            return member.npc_id == read.npc_id;
-        } );
-        if( death_snapshot == next.local_handoff.members.end() ) {
-            return false;
+        if( !initial_abstract_pair ) {
+            auto death_snapshot = std::find_if( next.local_handoff.members.begin(),
+            next.local_handoff.members.end(), [&read]( const local_handoff_member_snapshot & member ) {
+                return member.npc_id == read.npc_id;
+            } );
+            if( death_snapshot == next.local_handoff.members.end() ) {
+                return false;
+            }
+            death_snapshot->exit_position = read.last_position;
+            death_snapshot->hp_percent = 0;
+            death_snapshot->dead = true;
         }
-        death_snapshot->exit_position = read.last_position;
-        death_snapshot->hp_percent = 0;
-        death_snapshot->dead = true;
     }
     // Evaluate the incoming leg before casualty handling can change its phase.
     if( !structural_assessment_owns_homeward_clock( outing ) ) {
         next.last_progress_minutes = std::max( next.last_progress_minutes, current_minutes );
     }
     next.last_advanced_minutes = current_minutes;
-    next.local_handoff.cargo = next.cargo;
-    next.local_handoff.casualty_ids = next.casualty_ids;
-    next.local_handoff.committed_minutes = current_minutes;
+    if( !initial_abstract_pair ) {
+        next.local_handoff.cargo = next.cargo;
+        next.local_handoff.casualty_ids = next.casualty_ids;
+        next.local_handoff.committed_minutes = current_minutes;
+    }
     if( std::find( read_ids.begin(), read_ids.end(), next.leader_id ) != read_ids.end() ) {
         const auto replacement = std::find_if( next.member_ids.begin(), next.member_ids.end(),
         [&next]( const character_id candidate_id ) {
@@ -6355,12 +6367,23 @@ bool reconcile_local_pair_casualties( site_record &site,
         } );
         if( replacement != next.member_ids.end() ) {
             next.leader_id = *replacement;
-            next.local_handoff.cohesion_leader_id = *replacement;
+            if( !initial_abstract_pair ) {
+                next.local_handoff.cohesion_leader_id = *replacement;
+            }
         }
+    }
+    // Match the ordinary initial-dispatch casualty outcome, but resolve the
+    // entire observed set against one cursor before publishing either death.
+    if( initial_abstract_pair && next.actor_route_waypoint >= 0 &&
+        !scout_phase_requires_homeward_only( next.phase ) ) {
+        next.phase = scout_phase::returning_home;
+        next.expected_return_minutes = structural_expected_return_for_state( next, candidate );
     }
     if( next.casualty_ids.size() == next.member_ids.size() ) {
         next.phase = scout_phase::lost;
-        next.local_handoff.phase = scout_phase::lost;
+        if( !initial_abstract_pair ) {
+            next.local_handoff.phase = scout_phase::lost;
+        }
         if( next.owner == simulation_owner::abstract ) {
             // As for record_matching_external_outing_casualty, an abstract
             // terminal party no longer owns a resumable physical route. The

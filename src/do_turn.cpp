@@ -16516,7 +16516,7 @@ bandit_live_world::camp_signal_observation_result record_live_light_staffed_obse
 
 namespace
 {
-// A retained physical pair remains native bodies while the operation owns its
+// Every assigned physical pair remains native bodies while the operation owns its
 // abstract route. Consume the ordinary NPC body clock before either admission
 // or travel; an inability to walk must not also prevent recovery from that state.
 std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
@@ -16527,8 +16527,8 @@ std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
     for( auto &site : world.sites ) {
         const auto &outing = site.active_outing;
         if( site.retired_empty_site || !outing.is_active() ||
-            outing.owner != simulation_owner::abstract ||
-            !outing.local_handoff.is_abstract_resume() ) {
+            outing.kind != outing_kind::structural_sortie ||
+            outing.owner != simulation_owner::abstract ) {
             continue;
         }
         const auto refuse = [&]( const char *reason ) {
@@ -16537,8 +16537,19 @@ std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
                                       << " site=" << site.site_id << " reason=" << reason << '\n';
         };
         const auto cursor = current_external_simulation_cursor( site );
-        if( !cursor || !site.roster().valid || !live_bandit_native_body_owner_is_bound( outing ) ||
-            outing.member_ids.size() != 2 || outing.local_handoff.members.size() != 2 ||
+        const bool retained = outing.local_handoff.is_abstract_resume();
+        // A new dispatch already owns concrete persistent bodies. It has no
+        // physical crossing or Local snapshot until it actually enters a bubble.
+        const bool initial = outing.schema_version >= 10 && outing.handoff_epoch == 0 &&
+                             outing.crossing.empty() && outing.local_handoff.members.empty() &&
+                             !outing.local_handoff.is_active();
+        if( !retained && !initial ) {
+            continue;
+        }
+        if( !cursor || !site.roster().valid ||
+            !( retained ? live_bandit_native_body_owner_is_bound( outing ) : initial ) ||
+            outing.member_ids.size() != 2 ||
+            ( retained && outing.local_handoff.members.size() != 2 ) ||
             live_bandit_current_minutes() < outing.last_advanced_minutes ) {
             refuse( "invalid current owner or body cursor" );
             continue;
@@ -16546,24 +16557,31 @@ std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
         std::vector<shared_ptr_fast<npc>> members;
         const auto persistent = overmap_buffer.get_overmap_npcs();
         bool coherent = true;
-        for( const auto &snapshot : outing.local_handoff.members ) {
-            const auto *record = site.find_member( snapshot.npc_id );
+        for( const auto id : outing.member_ids ) {
+            const auto *record = site.find_member( id );
+            const auto snapshot = std::find_if( outing.local_handoff.members.begin(),
+                                  outing.local_handoff.members.end(), [&]( const auto &read ) {
+                return read.npc_id == id;
+            } );
             const bool casualty = std::find( outing.casualty_ids.begin(), outing.casualty_ids.end(),
-                                           snapshot.npc_id ) != outing.casualty_ids.end();
-            if( snapshot.dead ) {
+                                            id ) != outing.casualty_ids.end();
+            if( outing.member_is_resolved( id ) ) {
                 coherent &= record && record->state == member_state::dead && casualty &&
-                            outing.member_is_resolved( snapshot.npc_id );
+                            ( !retained || ( snapshot != outing.local_handoff.members.end() && snapshot->dead ) );
                 continue;
             }
-            const auto member = overmap_buffer.find_npc( snapshot.npc_id );
-            if( !record || casualty || outing.member_is_resolved( snapshot.npc_id ) ||
-                !member || member->is_active() || member->is_dead() ||
-                member->pos_abs() != snapshot.exit_position ||
-                member->hp_percentage() != snapshot.hp_percent ||
+            const auto member = overmap_buffer.find_npc( id );
+            const overmap *container = member ? overmap_buffer.get_existing(
+                                          project_to<coords::om>( member->pos_abs_omt().xy() ) ) : nullptr;
+            if( !record || casualty || !member || member->is_active() || member->is_dead() ||
                 member->get_last_updated() > calendar::turn ||
-                active_operation_duty_site_for( world, snapshot.npc_id ) != &site ||
+                active_operation_duty_site_for( world, id ) != &site ||
+                !container || container->find_npc( id ).get() != member.get() ||
+                ( retained && ( snapshot == outing.local_handoff.members.end() || snapshot->dead ||
+                                member->pos_abs() != snapshot->exit_position ||
+                                member->hp_percentage() != snapshot->hp_percent ) ) ||
                 std::count_if( persistent.begin(), persistent.end(), [&]( const auto &copy ) {
-                    return copy && copy->getID() == snapshot.npc_id;
+                    return copy && copy->getID() == id;
                 } ) != 1 ) {
                 coherent = false;
                 break;
@@ -16594,8 +16612,9 @@ std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
                     casualties.push_back( { member->getID(), member_state::dead, member->pos_abs() } );
                 }
             }
-            if( !casualties.empty() && !reconcile_local_pair_casualties(
-                    candidate, *cursor, casualties, live_bandit_current_minutes() ) ) {
+            if( !casualties.empty() &&
+                !reconcile_local_pair_casualties( candidate, *cursor, casualties,
+                                                 live_bandit_current_minutes() ) ) {
                 return std::nullopt;
             }
             for( auto &snapshot : candidate.active_outing.local_handoff.members ) {
@@ -16610,29 +16629,41 @@ std::set<character_id> catch_up_live_bandit_abstract_pair_bodies()
                 }
                 snapshot.hp_percent = ( *actor )->hp_percentage();
             }
-            return current_external_simulation_cursor( candidate ) ?
+            // A successfully reconciled all-dead party has no live executor
+            // cursor. It still publishes the terminal roster/corpse outcome.
+            const auto &next = candidate.active_outing;
+            const bool terminal_deaths = !casualties.empty() && next.phase == scout_phase::lost &&
+                                         next.casualty_ids.size() == next.member_ids.size() &&
+                                         candidate.roster().valid;
+            return current_external_simulation_cursor( candidate ) || terminal_deaths ?
                    std::optional<site_record>( std::move( candidate ) ) : std::nullopt;
         };
-        const auto catch_up = [&]( map &body_map ) {
-            for( const auto &member : members ) {
-                member->catch_up_body();
-                if( !member->is_dead() &&
-                    ( body_map.dangerous_field_at( member->pos_bub( body_map ) ) ||
-                      live_bandit_local_step_has_known_dangerous_trap(
-                          *member, body_map, member->pos_bub( body_map ) ) ) ) {
-                    blocked.insert( member->getID() );
-                }
+        const auto catch_up = [&]( const shared_ptr_fast<npc> &member, map &body_map ) {
+            member->catch_up_body();
+            if( !member->is_dead() &&
+                ( body_map.dangerous_field_at( member->pos_bub( body_map ) ) ||
+                  live_bandit_local_step_has_known_dangerous_trap(
+                      *member, body_map, member->pos_bub( body_map ) ) ) ) {
+                blocked.insert( member->getID() );
             }
         };
-        if( std::all_of( members.begin(), members.end(), []( const auto &member ) {
-            return get_map().inbounds( member->pos_abs() );
-        } ) ) {
-            catch_up( get_map() );
-        } else {
+        // Initial travel can temporarily straddle OMTs. Body physiology reads
+        // each exact physical location, never a guessed route-center map.
+        std::map<tripoint_abs_omt, std::vector<shared_ptr_fast<npc>>> remote_members;
+        for( const auto &member : members ) {
+            if( get_map().inbounds( member->pos_abs() ) ) {
+                catch_up( member, get_map() );
+            } else {
+                remote_members[member->pos_abs_omt()].push_back( member );
+            }
+        }
+        for( const auto &group : remote_members ) {
             tinymap body_map;
-            body_map.load( outing.local_handoff.route_position, false );
+            body_map.load( group.first, false );
             swap_map current( *body_map.cast_to_map() );
-            catch_up( *body_map.cast_to_map() );
+            for( const auto &member : group.second ) {
+                catch_up( member, *body_map.cast_to_map() );
+            }
             body_map.save();
         }
         auto candidate = body_candidate();
