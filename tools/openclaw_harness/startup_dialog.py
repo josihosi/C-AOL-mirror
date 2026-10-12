@@ -306,12 +306,17 @@ def _terminal_permission(context: Mapping[str, Any]) -> dict[str, Any]:
         declaration = json.loads(raw)
         contract = declaration["runtime_contract"]
         permitted = contract["permitted_input"]
+        forbidden = contract.get("forbidden_input", [])
+        # The transport has already been authenticated by _terminal_context.
+        # Older declarations repeat it; semantic-only declarations need not.
+        # Preserve explicit contradictory selectors and raw-input prohibitions.
+        raw_inputs = {"keyboard", "raw input"}
         if (declaration.get("name") != preflight.get("scenario")
-                or "debug:ignore" in contract.get("forbidden_input", [])
-                or "keyboard" not in contract.get("forbidden_input", [])
-                or "keyboard" in permitted or contract.get("setup_only_debug") is not True
-                or contract.get("playtest_mode") != "terminal"
-                or contract.get("terminal_transport") != "pty"):
+                or "debug:ignore" in forbidden
+                or not raw_inputs.intersection(forbidden)
+                or raw_inputs.intersection(permitted) or contract.get("setup_only_debug") is not True
+                or contract.get("playtest_mode", "terminal") != "terminal"
+                or contract.get("terminal_transport", "pty") != "pty"):
             raise ValueError("startup_debug_ignore_not_permitted")
         digest = sha256(raw).hexdigest()
         if digest != source["sha256"]:

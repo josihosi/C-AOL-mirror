@@ -833,6 +833,52 @@ class TerminalStartupDialogTest(unittest.TestCase):
                 self.assertEqual(result["reason"], "startup_debug_ignore_permission_unavailable")
                 send.assert_not_called()
 
+    def test_selected_semantic_contract_without_duplicate_transport_selectors(self):
+        from hashlib import sha256
+        declaration = json.loads(self.declaration.read_text())
+        declaration["runtime_contract"] = {
+            "permitted_input": ["currently advertised frame-bound native actions", "cockpit:game.act"],
+            "forbidden_input": ["raw input", "guessed-key", "direct-save-edit"],
+            "setup_only_debug": True,
+        }
+        selected = (json.dumps(declaration, indent=2) + "\n").encode()
+        self.declaration.write_bytes(selected)
+        preflight = json.loads((self.run / "contract.preflight.json").read_text())
+        preflight["scenario_source"]["sha256"] = sha256(selected).hexdigest()
+        (self.run / "contract.preflight.json").write_text(json.dumps(preflight))
+        capture = self._observe()["capture_sha256"]
+        with patch("curses_terminal_transport.dispatch_input", side_effect=self._receipt) as send:
+            result = self._recover(capture)
+        self.assertTrue(result["ok"], result)
+        send.assert_called_once()
+        self.assertEqual(result["authorization"]["selected_declaration_sha256"], sha256(selected).hexdigest())
+
+    def test_semantic_contract_recovery_still_refuses_raw_input_and_contradictions(self):
+        from hashlib import sha256
+        capture = self._observe()["capture_sha256"]
+        for mutation in ("raw_allowed", "raw_not_forbidden", "ignore_banned", "wrong_transport", "wrong_mode"):
+            with self.subTest(mutation=mutation):
+                declaration = json.loads(self.declaration.read_text())
+                contract = {
+                    "permitted_input": ["currently advertised frame-bound native actions"],
+                    "forbidden_input": ["raw input"], "setup_only_debug": True,
+                }
+                declaration["runtime_contract"] = contract
+                if mutation == "raw_allowed": contract["permitted_input"].append("raw input")
+                elif mutation == "raw_not_forbidden": contract["forbidden_input"] = []
+                elif mutation == "ignore_banned": contract["forbidden_input"].append("debug:ignore")
+                elif mutation == "wrong_transport": contract["terminal_transport"] = "other"
+                else: contract["playtest_mode"] = "tiles"
+                selected = (json.dumps(declaration, indent=2) + "\n").encode()
+                self.declaration.write_bytes(selected)
+                preflight = json.loads((self.run / "contract.preflight.json").read_text())
+                preflight["scenario_source"]["sha256"] = sha256(selected).hexdigest()
+                (self.run / "contract.preflight.json").write_text(json.dumps(preflight))
+                with patch("curses_terminal_transport.dispatch_input") as send:
+                    result = self._recover(capture)
+                self.assertEqual(result["reason"], "startup_debug_ignore_permission_unavailable")
+                send.assert_not_called()
+
     def test_stale_owner_wrong_run_and_private_mismatch_refuse(self):
         original = dict(self.terminal)
         for update in [{"run_id": "other-run"}, {"game_pid": 123},
