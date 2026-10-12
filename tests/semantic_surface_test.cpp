@@ -24,6 +24,7 @@
 #include "map_helpers.h"
 #include "do_turn.h"
 #include "messages.h"
+#include "move_mode.h"
 #include <iostream>
 #include "npc.h"
 #include "monster.h"
@@ -3256,3 +3257,178 @@ TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination stat
     }
     clear_npcs();
 }
+
+#if !defined(TILES)
+TEST_CASE( "World movement mode opens its native choices and restores ordinary input",
+           "[semantic_surface][movement_mode_067]" )
+{
+    const std::string choice = GENERATE( "walk", "run", "crouch", "prone", "cycle", "cancel" );
+    const bool enclosing = GENERATE( false, true );
+    CAPTURE( choice, enclosing );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const auto world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    u.set_walk_mode_desired();
+    const auto position = u.pos_abs();
+    input_context unregistered( "movement-mode-unregistered" );
+    const auto unavailable = openclaw_harness_world_actions( unregistered );
+    CHECK( std::none_of( unavailable.begin(), unavailable.end(), []( const auto & a ) {
+        return a.first == "world.movement_mode";
+    } ) );
+    const auto available = openclaw_harness_world_actions( get_default_mode_input_context() );
+    CHECK( std::count_if( available.begin(), available.end(), []( const auto & a ) {
+        return a.first == "world.movement_mode" && a.second == "open_movement";
+    } ) == 1 );
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID",
+                                            "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                            "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH"
+                                          };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    const std::string run = "movement-mode-" +
+                            std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    unsetenv( keys[2].c_str() );
+    on_out_of_scope restore_environment( [&]() {
+        for( const auto &entry : previous ) {
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
+        }
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    std::optional<semantic_surface_manager_session> session;
+    if( enclosing ) {
+        session.emplace( manager );
+    }
+    std::vector<semantic_action_receipt> receipts;
+    std::optional<semantic_surface_descriptor> original_world;
+    semantic_action_request selected;
+    int worlds = 0;
+    int menus = 0;
+    manager.set_receipt_observer( [&]( const auto & r ) {
+        receipts.push_back( r );
+    } );
+    on_out_of_scope remove_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & d ) {
+        if( d.kind == "world" ) {
+            ++worlds;
+            const std::string action_id = worlds == 1 ? "world.movement_mode" : "world.pause";
+            const auto action = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
+            [&]( const auto & a ) {
+                return a.id == action_id;
+            } );
+            REQUIRE( action != d.valid_actions.end() );
+            REQUIRE( action->enabled );
+            if( worlds == 1 ) {
+                original_world = d;
+            } else {
+                CHECK( d.surface_id != original_world->surface_id );
+            }
+            REQUIRE( manager.submit_request( { run, d.surface_id, d.frame_id,
+                                               "mode-world-" + std::to_string( worlds ), action->id,
+                                               action->stable_id, {} } ) );
+        } else if( d.kind == "menu" ) {
+            ++menus;
+            CHECK( active_semantic_surface_manager() == &manager );
+            CHECK( d.payload.at( "text" ) == "Change to which movement mode?" );
+            REQUIRE( original_world );
+            // Retired World authority cannot become another movement request
+            // while the real native uilist owns input.
+            REQUIRE( manager.submit_request( { run, original_world->surface_id,
+                                               original_world->frame_id, "stale-mode-world",
+                                               "world.movement_mode", "", {} } ) );
+            for( const auto &mode : move_modes_by_speed() ) {
+                const auto entry = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
+                [&]( const auto & a ) {
+                    return a.id == "menu.choose" && a.label.find( mode->name() ) == 0;
+                } );
+                REQUIRE( entry != d.valid_actions.end() );
+                CHECK( entry->enabled == u.can_switch_to( mode ) );
+            }
+            const std::string label = choice == "cycle" ? "Cycle move mode" :
+                                      choice == "cancel" ? "" : move_mode_id( choice )->name();
+            const auto entry = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
+            [&]( const auto & a ) {
+                return choice == "cancel" ? a.id == "menu.cancel" :
+                       a.id == "menu.choose" && a.label.find( label ) == 0;
+            } );
+            REQUIRE( entry != d.valid_actions.end() );
+            REQUIRE( entry->enabled );
+            selected = { run, d.surface_id, d.frame_id, "mode-choice", entry->id,
+                         entry->stable_id, {}
+                       };
+            REQUIRE( manager.submit_request( selected ) );
+        }
+    } );
+    u.set_moves( 100 );
+    CHECK_FALSE( g->do_turn() );
+    u.set_moves( 100 );
+    CHECK_FALSE( g->do_turn() );
+    REQUIRE( menus == 1 );
+    CHECK( worlds >= 2 );
+    CHECK( u.pos_abs() == position );
+    CHECK_FALSE( u.activity );
+    CHECK_FALSE( u.has_destination() );
+    if( choice == "cycle" ) {
+        CHECK( u.get_desired_move_mode() != move_mode_id( "walk" ) );
+    } else {
+        CHECK( u.get_desired_move_mode() == move_mode_id( choice == "cancel" ? "walk" : choice ) );
+    }
+    CHECK( u.current_movement_mode() == u.get_desired_move_mode() );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return r.accepted && r.request_id == "mode-world-1";
+    } ) == 1 );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return r.accepted && r.request_id == "mode-choice";
+    } ) == 1 );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return !r.accepted && r.request_id == "stale-mode-world";
+    } ) == 1 );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return r.accepted && r.request_id == "mode-world-2";
+    } ) == 1 );
+    CHECK_FALSE( manager.submit_request( selected ) );
+    CHECK( menus == 1 );
+    CHECK( active_semantic_surface_manager() == ( enclosing ? &manager : nullptr ) );
+    flushinp();
+}
+#endif

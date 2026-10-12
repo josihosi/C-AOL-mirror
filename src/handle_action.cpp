@@ -1993,6 +1993,7 @@ std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
         { "world.fire", "fire" },
         { "world.reload", "reload_wielded" },
         { "world.toggle_safemode", "safemode" },
+        { "world.movement_mode", "open_movement" },
         { "world.debug_menu", "debug" },
         { "world.move.north", "UP" },
         { "world.move.south", "DOWN" },
@@ -2192,6 +2193,7 @@ static std::vector<semantic_action_descriptor> semantic_surface_actions(
             { "world.fire", _( "Fire wielded weapon" ) },
             { "world.reload", _( "Reload wielded weapon" ) },
             { "world.toggle_safemode", _( "Toggle safe mode" ) },
+            { "world.movement_mode", _( "Choose movement mode" ) },
             { "world.look", _( "Look around and inspect a visible creature" ) },
             { "world.move.north", _( "Move north (interact or attack if occupied)" ) },
             { "world.move.south", _( "Move south (interact or attack if occupied)" ) },
@@ -5911,6 +5913,8 @@ bool game::handle_action()
                         act = ACTION_RELOAD_WIELDED;
                     } else if( request.action_id == "world.toggle_safemode" ) {
                         act = ACTION_TOGGLE_SAFEMODE;
+                    } else if( request.action_id == "world.movement_mode" ) {
+                        act = ACTION_OPEN_MOVEMENT;
                     } else if( request.action_id == "world.debug_menu" ) {
                         act = ACTION_DEBUG;
                     } else if( request.action_id == "world.move.north" ) {
@@ -5943,6 +5947,7 @@ bool game::handle_action()
                     semantic_manager.withhold_parent_authority_until_recreated( request.surface_id );
                     return semantic_action_dispatch_result{ true, "", "",
                                                             act == ACTION_INVENTORY || act == ACTION_MAP ||
+                                                            act == ACTION_OPEN_MOVEMENT ||
                                                             act == ACTION_FIRE || act == ACTION_CHAT ||
                                                             act == ACTION_PICKUP ||
                                                             act == ACTION_LOOK ||
