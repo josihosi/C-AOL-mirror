@@ -16,6 +16,19 @@
 
 #include "cata_catch.h"
 #include "cached_options.h"
+#include "avatar.h"
+#include "activity_actor_definitions.h"
+#include "player_activity.h"
+#include "map.h"
+#include "map_helpers_tests.h"
+#include "map_helpers.h"
+#include "do_turn.h"
+#include "messages.h"
+#include <iostream>
+#include "npc.h"
+#include "monster.h"
+#include "effect.h"
+#include "coordinates.h"
 #include "cata_scope_helpers.h"
 #include "character.h"
 #include "cursesdef.h"
@@ -2852,4 +2865,257 @@ TEST_CASE( "debug file is bounded during one long running process", "[debug][nat
                                 std::istreambuf_iterator<char>() );
     CHECK( retained.find( "Earlier diagnostic log window discarded" ) != std::string::npos );
     CHECK( retained.find( "latest-current-diagnostic" ) != std::string::npos );
+}
+
+
+extern "C" int flushinp();
+void process_avatar_activity_turn( avatar &u );
+void handle_key_blocking_activity();
+
+#if !defined(TILES)
+TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
+           "[semantic_surface][activity_driver_lifetime_067]" )
+{
+    const bool enclosing = GENERATE( false, true );
+    const int choice = GENERATE( 1, 2, 3 );
+    CAPTURE( enclosing, choice );
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    u.set_stamina( u.get_stamina_max() / 4 );
+    u.set_moves( 100 );
+    const auto current = u.pos_abs_omt();
+    u.omt_path = { current + point::east, current };
+    u.assign_activity( player_activity( activity_id( "ACT_TRAVELLING" ) ) );
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    const std::string run = "activity-driver-" +
+                            std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    unsetenv( keys[2].c_str() );
+    on_out_of_scope restore( [&]() {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+        u.cancel_activity();
+        u.clear_destination();
+        u.omt_path.clear();
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) { catacurses::init_interface(); catacurses::resizeterm(); }
+    on_out_of_scope close_terminal( [&]() { if( owns_terminal ) { catacurses::endwin(); } } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor fixture_root;
+    fixture_root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw(); // native IMTUI frame/fonts before uilist::calc_data
+    semantic_surface_manager nested( run );
+    semantic_surface_manager &manager = enclosing ? nested : openclaw_harness_semantic_surface_manager();
+    std::optional<semantic_surface_manager_session> session;
+    if( enclosing ) { session.emplace( manager ); }
+    std::vector<semantic_action_receipt> receipts;
+    int menus = 0;
+    semantic_action_request selected;
+    std::optional<semantic_surface_descriptor> successor;
+    semantic_surface_descriptor old_overmap;
+    {
+        // The native action owner has already returned before either activity
+        // driver executes. Its old close is never consent to the new decision.
+        semantic_surface_scope overmap( manager, "overmap", "Overmap", {},
+                                        { { "overmap.close", "", "Close", true } } );
+        old_overmap = *manager.top();
+    }
+    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    on_out_of_scope remove_observers( [&]() {
+        manager.set_descriptor_observer( {} ); manager.set_receipt_observer( {} );
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &d ) {
+        if( d.kind == "activity_wait" ) { successor = d; }
+        if( d.kind != "menu" ) { return; }
+        ++menus;
+        CHECK( active_semantic_surface_manager() == &manager );
+        CHECK( d.payload.at( "text" ).find( "You struggle to continue" ) != std::string::npos );
+        CHECK( d.frame_id != old_overmap.frame_id );
+        REQUIRE( manager.submit_request( { run, old_overmap.surface_id, old_overmap.frame_id,
+                                           "stale-close", "overmap.close", "", {} } ) );
+        const std::string label = choice == 1 ? "Continue after a break." :
+                                  choice == 2 ? "Maybe later." : "Finish it.";
+        const auto action = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
+        [&]( const auto &a ) { return a.id == "menu.choose" && a.label == label; } );
+        REQUIRE( action != d.valid_actions.end() );
+        CHECK( action->enabled );
+        selected = { run, d.surface_id, d.frame_id, "tired-choice", action->id, action->stable_id, {} };
+        REQUIRE( manager.submit_request( selected ) );
+    } );
+    // Disposable curses fixture only: makes the pre-fix missing-menu control
+    // terminate honestly, rather than hanging. Semantic dispatch takes priority.
+    REQUIRE( ungetch( 'm' ) != -1 );
+    process_avatar_activity_turn( u ); // shared by pre-input and post-action loops
+    flushinp();
+    CHECK( active_semantic_surface_manager() == ( enclosing ? &manager : nullptr ) );
+    CHECK( menus == 1 );
+    if( choice == 1 ) { CHECK( u.activity.id() == activity_id( "ACT_WAIT_STAMINA" ) ); }
+    else { CHECK_FALSE( u.activity ); }
+    CHECK( u.has_destination() );
+    if( menus == 0 ) { return; } // Preserve failure without manufacturing a choice.
+    REQUIRE( receipts.size() == 2 );
+    CHECK_FALSE( receipts.front().accepted );
+    CHECK( receipts.front().request_id == "stale-close" );
+    CHECK( receipts.back().accepted );
+    CHECK( receipts.back().request_id == "tired-choice" );
+    CHECK( receipts.back().consuming_frame_id == selected.frame_id );
+    // An ordinary terminal uilist receipts its completed choice on pop. The
+    // next real polling owner then advertises the resulting native activity.
+    // Neither a fabricated World nor a rewritten receipt is needed.
+    handle_key_blocking_activity();
+    REQUIRE( receipts.size() == 2 );
+    REQUIRE( successor );
+    CHECK( successor->kind == "activity_wait" );
+    CHECK( successor->frame_id != selected.frame_id );
+    const auto activity_after = u.activity.id();
+    const auto route_after = u.omt_path;
+    CHECK_FALSE( manager.submit_request( selected ) );
+    CHECK( receipts.size() == 3 ); // cached receipt, not a second native choice
+    CHECK( u.activity.id() == activity_after );
+    CHECK( u.omt_path == route_after );
+    CHECK( menus == 1 );
+}
+
+TEST_CASE( "avatar activity driver leaves harness-off input unbound",
+           "[semantic_surface][activity_driver_lifetime_067]" )
+{
+    clear_avatar(); clear_map();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    u.set_stamina( u.get_stamina_max() / 4 ); u.set_moves( 100 );
+    u.omt_path = { u.pos_abs_omt() + point::east, u.pos_abs_omt() };
+    u.assign_activity( player_activity( activity_id( "ACT_TRAVELLING" ) ) );
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+        unsetenv( key.c_str() );
+    }
+    on_out_of_scope restore( [&]() {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+        }
+        u.cancel_activity(); u.clear_destination(); u.omt_path.clear();
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) { catacurses::init_interface(); catacurses::resizeterm(); }
+    on_out_of_scope close_terminal( [&]() { if( owns_terminal ) { catacurses::endwin(); } } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode ); test_mode = false;
+    ui_adaptor fixture_root;
+    fixture_root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    CHECK( active_semantic_surface_manager() == nullptr );
+    REQUIRE( ungetch( 'm' ) != -1 );
+    process_avatar_activity_turn( u );
+    CHECK( active_semantic_surface_manager() == nullptr );
+    CHECK_FALSE( u.activity );
+    flushinp();
+}
+#endif
+
+TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination states",
+           "[npc][pulp_destination_diagnosis_067]" )
+{
+    const std::string mode = GENERATE( "corpse", "empty", "reachable_destination", "blocked_destination",
+                                       "danger", "high_backlog" );
+    CAPTURE( mode );
+    clear_avatar(); clear_map(); clear_npcs();
+    set_time_to_day();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    npc &actor = spawn_npc( { 61, 60 }, "test_talker" );
+    clear_character( actor );
+    actor.set_attitude( NPCATT_FOLLOW );
+    actor.rules.set_flag( ally_rule::allow_pulp );
+    actor.set_stamina( actor.get_stamina_max() );
+    const auto corpse_pos = actor.pos_bub();
+    actor.pulp_location = actor.pos_abs(); // ordinary remembered corpse target
+    if( mode != "empty" ) {
+        get_map().add_item_or_charges( corpse_pos, item::make_corpse( mtype_id( "mon_zombie" ) ) );
+    }
+    // Discover and execute through npc::move, not a direct activity/execute_action call.
+    actor.set_moves( 100 ); actor.move();
+    CAPTURE( actor.activity.id().str(), actor.get_moves() );
+    if( mode == "reachable_destination" || mode == "blocked_destination" ) {
+        const auto destination = corpse_pos + point( 3, 0 );
+        if( mode == "blocked_destination" ) { get_map().ter_set( destination, ter_id( "t_rock" ) ); }
+        actor.set_destination( { destination } );
+        actor.update_path( destination );
+        const bool viable = !actor.path.empty();
+        std::cout << "pulp_destination mode=" << mode << " route_viable=" << viable << '\n';
+        CHECK( viable == ( mode == "reachable_destination" ) );
+    }
+    if( mode == "danger" ) { spawn_test_monster( "mon_zombie", corpse_pos + point::south ); }
+    restore_on_out_of_scope<bool> restore_debug( debug_mode ); debug_mode = true;
+    int zero_move_calls = 0;
+    const auto initial_turn = calendar::turn;
+    for( int iteration = 0; iteration < 12; ++iteration ) {
+        // A same-pass no-op retains its move budget and clock. Real expenditure
+        // starts the next turn; this distinguishes pulping work from guard spins.
+        if( iteration == 0 || actor.get_moves() < 100 ) {
+            actor.set_moves( mode == "high_backlog" ? 6000 : 100 );
+            calendar::turn += 1_turns;
+        }
+        const int before = actor.get_moves();
+        const auto activity_before = actor.activity.id().str();
+        const auto left_before = actor.activity.moves_left;
+        Messages::clear_messages();
+        actor.move();
+        if( actor.get_moves() == before ) { ++zero_move_calls; }
+        std::cout << "pulp_control mode=" << mode << " iteration=" << iteration
+                  << " turn=" << to_turns<int>( calendar::turn - initial_turn )
+                  << " moves=" << before << "->" << actor.get_moves()
+                  << " activity=" << activity_before << "->" << actor.activity.id().str()
+                  << " moves_left=" << left_before << "->" << actor.activity.moves_left
+                  << " destination=" << actor.has_destination()
+                  << " destination_activity=" << actor.has_destination_activity()
+                  << " path_size=" << actor.path.size() << " can_pulp=" << actor.can_do_pulp() << '\n';
+        for( const auto &message : Messages::recent_messages( 40 ) ) {
+            if( message.second.find( "NPC didn't use its moves." ) != std::string::npos ||
+                message.second.find( "address_needs " ) != std::string::npos ) {
+                std::cout << "pulp_selection " << message.second << '\n';
+            }
+        }
+    }
+    CAPTURE( zero_move_calls, actor.activity.id().str(), actor.has_destination(), actor.get_ai_danger() );
+    const bool residual_destination = mode == "blocked_destination" || mode == "reachable_destination";
+    if( residual_destination ) {
+        // Reproduces the existing defect; this passing mechanism control is
+        // explicitly not a gameplay fix or historical Casey attribution.
+        CHECK( zero_move_calls == 12 );
+        CHECK( actor.activity.id() == activity_id( "ACT_PULP" ) );
+        CHECK( actor.has_destination() );
+    } else { CHECK( zero_move_calls < 9 ); }
+    const std::string warning = capture_debugmsg_during( [&]() {
+        process_monsters_and_npcs_turn_for_test();
+    } );
+    std::cout << "pulp_guard mode=" << mode << " warning=" << warning
+              << " suspended=" << actor.has_effect( efftype_id( "npc_suspend" ) ) << '\n';
+    if( residual_destination ) {
+        CHECK( actor.has_effect( efftype_id( "npc_suspend" ) ) );
+        CHECK( warning.find( "entered infinite loop" ) != std::string::npos );
+        CHECK( warning.find( "ACT_PULP" ) != std::string::npos );
+    } else {
+        CHECK_FALSE( actor.has_effect( efftype_id( "npc_suspend" ) ) );
+        CHECK( warning.empty() );
+    }
+    clear_npcs();
 }

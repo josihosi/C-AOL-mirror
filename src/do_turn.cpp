@@ -18227,6 +18227,17 @@ void game::handle_progress_ui()
     }
 }
 
+// Both avatar activity drivers use this boundary after any action-owned
+// semantic session has returned.  Activity UI retains the same native manager.
+void process_avatar_activity_turn( avatar &u )
+{
+    std::optional<semantic_surface_manager_session> semantic_session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    u.activity.do_turn( u );
+}
+
 bool game::do_turn()
 {
     if( is_game_over() ) {
@@ -18337,7 +18348,7 @@ bool game::do_turn()
     // process avatar activities (ignoring user input)
     while( u.get_moves() > 0 && u.activity ) {
         openclaw_harness_trace_activity_driver( "pre_input_activity_do_turn_enter", u );
-        u.activity.do_turn( u );
+        process_avatar_activity_turn( u );
         openclaw_harness_trace_activity_driver( "pre_input_activity_do_turn_exit", u );
     }
 
@@ -18417,7 +18428,7 @@ bool game::do_turn()
                 // avatar processes moves for activities started by handle_action()
                 while( u.get_moves() > 0 && u.activity ) {
                     openclaw_harness_trace_activity_driver( "post_handle_action_activity_do_turn_enter", u );
-                    u.activity.do_turn( u );
+                    process_avatar_activity_turn( u );
                     openclaw_harness_trace_activity_driver( "post_handle_action_activity_do_turn_exit", u );
                 }
             }
