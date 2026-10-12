@@ -1,0 +1,50 @@
+name: Mirror dev
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-dev
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository == 'josihosi/Cataclysm-AOL'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Read the current dev frontier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mirror dev and verify the remote commit
+        env:
+          MIRROR_DEV_SSH_KEY: ${{ secrets.MIRROR_DEV_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MIRROR_DEV_SSH_KEY"
+          umask 077
+          key="$RUNNER_TEMP/caol-mirror-dev-key"
+          known_hosts="$RUNNER_TEMP/caol-mirror-known-hosts"
+          trap 'rm -f -- "$key" "$known_hosts"' EXIT
+          printf '%s\n' "$MIRROR_DEV_SSH_KEY" > "$key"
+          unset MIRROR_DEV_SSH_KEY
+          curl --fail --silent --show-error --retry 3 https://api.github.com/meta |
+            python3 -c 'import json,sys; print("\n".join("github.com " + key for key in json.load(sys.stdin)["ssh_keys"]))' > "$known_hosts"
+          export GIT_SSH_COMMAND="ssh -i \"$key\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$known_hosts\""
+          target=git@github.com:josihosi/C-AOL-mirror.git
+          expected=$(git ls-remote --heads "$target" refs/heads/dev | cut -f1)
+          source=$(git rev-parse HEAD)
+          git push --porcelain --force-with-lease="refs/heads/dev:$expected" "$target" HEAD:refs/heads/dev
+          actual=$(git ls-remote --heads "$target" refs/heads/dev | cut -f1)
+          test "$actual" = "$source"
+          printf 'Mirrored dev at %s\n' "$actual"

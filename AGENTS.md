@@ -28,7 +28,10 @@ further publication. Keep useful independent work moving while resolving the sha
 Do not discard remote commits, force-push over them, or create review/integration branches as
 a substitute for reconciliation. Allowed remote branches are `master`, `dev`, `dev_w`,
 `port/*` and purposeful `backup/*`; retire obsolete branches after preserving useful history.
-The mirror replicates CAOL; it is not another development frontier or DE67 checkpoint target.
+GitHub's `.github/workflows/mirror-dev.yml` replicates `dev` to `C-AOL-mirror/dev` after
+origin pushes. Agents publish to origin only; the mirror is not another development frontier
+or DE67 checkpoint target. Check a failed mirror Actions run through GitHub rather than
+adding a second local push target.
 
 ## Storage
 
