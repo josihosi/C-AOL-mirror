@@ -22,8 +22,11 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: dev
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Fetch only dev history
+        run: git fetch --unshallow --no-tags origin dev
 
       - name: Mirror dev and verify the remote commit
         env:
