@@ -41,6 +41,7 @@
 #include "output.h"
 #include "path_info.h"
 #include "point.h"
+#include "semantic_surface.h"
 #include "translations.h"
 #include "type_id.h"
 #include "ui_manager.h"
@@ -379,48 +380,90 @@ static void debug_error_prompt(
                                      );
     std::string message = error_message + instructions;
 
-    // Create a special debug message UI that does various things to ensure
-    // the graphics are correct when the debug message is displayed during a
-    // redraw callback.
-    ui_adaptor ui( ui_adaptor::debug_message_ui{} );
-    const auto init_window = []( ui_adaptor & ui ) {
-        ui.position_from_window( catacurses::stdscr );
-    };
-    init_window( ui );
-    ui.on_screen_resize( init_window );
+    // Drawing can discover an error between native input owners, while the
+    // previous action is still awaiting its real successor. Reuse its manager
+    // without treating this diagnostic as that successor or ignoring errors.
+    std::optional<semantic_surface_manager_session> semantic_session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    bool continue_requested = false;
+    std::optional<semantic_surface_scope> semantic_scope;
+    if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
+        semantic_scope.emplace( *manager, "prompt", "Debug error",
+        std::map<std::string, std::string>{
+            { "native_owner", "DEBUG_MSG" }, { "title", "DEBUG_MSG" },
+            { "text", error_message }, { "source_file", filename }, { "source_line", line }
+        }, std::vector<semantic_action_descriptor>{
+            { "prompt.acknowledge", "", _( "Continue" ), true }
+        }, [&continue_requested]( const semantic_action_request &request ) {
+            if( request.action_id != "prompt.acknowledge" || request.stable_id ||
+                !request.parameters.empty() ) {
+                return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+            }
+            continue_requested = true;
+            return semantic_action_dispatch_result{ true, "", "", false, false,
+                                                    "debug_error_continued" };
+        }, true );
+    }
 
-    ui.on_redraw( [&]( const ui_adaptor & ) {
-        catacurses::erase();
-        fold_and_print( catacurses::stdscr, point::zero, getmaxx( catacurses::stdscr ), c_light_red,
-                        "%s", message );
-        wnoutrefresh( catacurses::stdscr );
-    } );
+    {
+        // Create a special debug message UI that does various things to ensure
+        // the graphics are correct when the debug message is displayed during a
+        // redraw callback.
+        ui_adaptor ui( ui_adaptor::debug_message_ui{} );
+        const auto init_window = []( ui_adaptor & ui ) {
+            ui.position_from_window( catacurses::stdscr );
+        };
+        init_window( ui );
+        ui.on_screen_resize( init_window );
+
+        ui.on_redraw( [&]( const ui_adaptor & ) {
+            catacurses::erase();
+            fold_and_print( catacurses::stdscr, point::zero, getmaxx( catacurses::stdscr ), c_light_red,
+                            "%s", message );
+            wnoutrefresh( catacurses::stdscr );
+        } );
 
 #if defined(__ANDROID__)
-    input_context ctxt( "DEBUG_MSG", keyboard_mode::keycode );
-    ctxt.register_manual_key( 'C' );
-    ctxt.register_manual_key( 'I' );
-    ctxt.register_manual_key( ' ' );
+        input_context ctxt( "DEBUG_MSG", keyboard_mode::keycode );
+        ctxt.register_manual_key( 'C' );
+        ctxt.register_manual_key( 'I' );
+        ctxt.register_manual_key( ' ' );
 #endif
-    for( bool stop = false; !stop; ) {
-        ui_manager::redraw();
-        switch( inp_mngr.get_input_event().get_first_input() ) {
+        for( bool stop = false; !stop; ) {
+            ui_manager::redraw();
+            if( semantic_scope ) {
+                semantic_surface_manager *manager = active_semantic_surface_manager();
+                manager->poll_request_transport();
+                if( manager->has_pending_request() ) {
+                    semantic_scope->consume_request();
+                    if( !continue_requested ) {
+                        continue;
+                    }
+                }
+            }
+            switch( continue_requested ? ' ' : inp_mngr.get_input_event().get_first_input() ) {
 #if defined(TILES)
-            case 'c':
-            case 'C':
-                SetClipboardText( formatted_report );
-                break;
+                case 'c':
+                case 'C':
+                    SetClipboardText( formatted_report );
+                    break;
 #endif // TILES
-            case 'i':
-            case 'I':
-                ignored_messages.insert( msg_key );
-                [[fallthrough]];
-            case ' ':
-                stop = true;
-                message = error_message;
-                ui_manager::redraw();
-                break;
+                case 'i':
+                case 'I':
+                    ignored_messages.insert( msg_key );
+                    [[fallthrough]];
+                case ' ':
+                    stop = true;
+                    message = error_message;
+                    ui_manager::redraw();
+                    break;
+            }
         }
+    }
+    if( semantic_scope ) {
+        semantic_scope->close();
     }
 }
 

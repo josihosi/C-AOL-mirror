@@ -144,6 +144,14 @@ class semantic_surface_manager
             std::function<void( const semantic_request_transport_event & )> observer );
 
     private:
+        friend class semantic_surface_scope;
+        struct interrupted_action {
+            std::optional<semantic_action_receipt> receipt;
+            std::optional<std::string> child_source_surface_id;
+            std::set<std::string> withheld_parent_surface_ids;
+            bool suppress_parent_republish = false;
+            std::size_t stack_depth = 0;
+        };
         struct surface_state {
             semantic_surface_descriptor descriptor;
             semantic_action_consumer consumer;
@@ -217,7 +225,12 @@ class semantic_surface_scope
                                 const std::string &breadcrumb,
                                 std::map<std::string, std::string> payload = {},
                                 std::vector<semantic_action_descriptor> valid_actions = {},
-                                semantic_action_consumer consumer = {} );
+                                semantic_action_consumer consumer = {},
+                                // A diagnostic interrupts execution, not its
+                                // successor. Its own acknowledgement must use
+                                // an immediate receipt, leaving the interrupted
+                                // action for its actual native successor.
+                                bool interrupt_pending_action = false );
         ~semantic_surface_scope();
 
         semantic_surface_scope( const semantic_surface_scope & ) = delete;
@@ -226,15 +239,21 @@ class semantic_surface_scope
         semantic_surface_scope &operator=( semantic_surface_scope &&other ) noexcept;
 
         const std::string &surface_id() const;
+        // Normal diagnostic exit publishes the restored native owner here,
+        // where observer failure can propagate. Unwinding only abandons the
+        // diagnostic, restores the pending action and withholds publication.
+        bool close();
         bool publish( std::map<std::string, std::string> payload,
                       std::vector<semantic_action_descriptor> valid_actions );
         bool consume_request();
 
     private:
         void release();
+        void abort_interruption() noexcept;
 
         semantic_surface_manager *manager_ = nullptr;
         std::string surface_id_;
+        std::optional<semantic_surface_manager::interrupted_action> interrupted_action_;
 };
 
 #endif // CATA_SRC_SEMANTIC_SURFACE_H

@@ -341,7 +341,7 @@ bool semantic_surface_manager::publish( const std::string &surface_id,
     if( !is_top( surface_id ) ) {
         return false;
     }
-    if( stack_.back().descriptor.payload == payload &&
+    if( top_ && stack_.back().descriptor.payload == payload &&
         same_actions( stack_.back().descriptor.valid_actions, valid_actions ) ) {
         return true;
     }
@@ -550,7 +550,7 @@ bool semantic_surface_manager::take_native_intent( const std::string &intent )
 
 bool semantic_surface_manager::consume_top_request()
 {
-    if( pending_requests_.empty() || stack_.empty() ) {
+    if( pending_requests_.empty() || stack_.empty() || !top_ ) {
         return false;
     }
 
@@ -782,10 +782,27 @@ semantic_surface_scope::semantic_surface_scope( semantic_surface_manager &manage
         const std::string &kind, const std::string &breadcrumb,
         std::map<std::string, std::string> payload,
         std::vector<semantic_action_descriptor> valid_actions,
-        semantic_action_consumer consumer ) :
-    manager_( &manager ), surface_id_( manager.push( kind, breadcrumb, std::move( payload ),
-                                      std::move( valid_actions ), std::move( consumer ) ) )
+        semantic_action_consumer consumer, bool interrupt_pending_action ) :
+    manager_( &manager )
 {
+    if( interrupt_pending_action ) {
+        interrupted_action_.emplace();
+        auto &state = *interrupted_action_;
+        // Finish allocating the snapshot before moving any live action state.
+        state.withheld_parent_surface_ids = manager.withheld_parent_surface_ids_;
+        state.suppress_parent_republish = manager.suppress_parent_republish_;
+        state.stack_depth = manager.stack_.size();
+        state.receipt.swap( manager.pending_accepted_receipt_ );
+        state.child_source_surface_id.swap( manager.pending_receipt_child_source_surface_id_ );
+        manager.suppress_parent_republish_ = false;
+    }
+    try {
+        surface_id_ = manager.push( kind, breadcrumb, std::move( payload ),
+                                   std::move( valid_actions ), std::move( consumer ) );
+    } catch( ... ) {
+        if( interrupted_action_ ) { abort_interruption(); }
+        throw;
+    }
 }
 
 semantic_surface_scope::~semantic_surface_scope()
@@ -794,7 +811,8 @@ semantic_surface_scope::~semantic_surface_scope()
 }
 
 semantic_surface_scope::semantic_surface_scope( semantic_surface_scope &&other ) noexcept :
-    manager_( other.manager_ ), surface_id_( std::move( other.surface_id_ ) )
+    manager_( other.manager_ ), surface_id_( std::move( other.surface_id_ ) ),
+    interrupted_action_( std::move( other.interrupted_action_ ) )
 {
     other.manager_ = nullptr;
 }
@@ -805,6 +823,7 @@ semantic_surface_scope &semantic_surface_scope::operator=( semantic_surface_scop
         release();
         manager_ = other.manager_;
         surface_id_ = std::move( other.surface_id_ );
+        interrupted_action_ = std::move( other.interrupted_action_ );
         other.manager_ = nullptr;
     }
     return *this;
@@ -813,6 +832,36 @@ semantic_surface_scope &semantic_surface_scope::operator=( semantic_surface_scop
 const std::string &semantic_surface_scope::surface_id() const
 {
     return surface_id_;
+}
+
+bool semantic_surface_scope::close()
+{
+    if( !manager_ ) {
+        return true;
+    }
+    if( !manager_->is_top( surface_id_ ) ) {
+        return false;
+    }
+    if( !interrupted_action_ ) {
+        release();
+        return true;
+    }
+    try {
+        // Retain the snapshot until publication succeeds: pop can remove its
+        // frame and then throw from the restored parent's descriptor observer.
+        manager_->withheld_parent_surface_ids_ = interrupted_action_->withheld_parent_surface_ids;
+        manager_->suppress_parent_republish_ = interrupted_action_->suppress_parent_republish;
+        manager_->pop( surface_id_ );
+    } catch( ... ) {
+        abort_interruption();
+        throw;
+    }
+    manager_->pending_accepted_receipt_.swap( interrupted_action_->receipt );
+    manager_->pending_receipt_child_source_surface_id_.swap(
+        interrupted_action_->child_source_surface_id );
+    interrupted_action_.reset();
+    manager_ = nullptr;
+    return true;
 }
 
 bool semantic_surface_scope::publish( std::map<std::string, std::string> payload,
@@ -828,8 +877,34 @@ bool semantic_surface_scope::consume_request()
 
 void semantic_surface_scope::release()
 {
+    if( interrupted_action_ ) {
+        // No external observers in a destructor, including exception unwind.
+        abort_interruption();
+        return;
+    }
     if( manager_ ) {
         manager_->pop( surface_id_ );
         manager_ = nullptr;
+    }
+}
+
+void semantic_surface_scope::abort_interruption() noexcept
+{
+    if( manager_ && interrupted_action_ ) {
+        auto &state = *interrupted_action_;
+        // push may have installed the diagnostic before an observer threw;
+        // pop may already have removed it. Neither path may leave an orphan.
+        while( manager_->stack_.size() > state.stack_depth ) {
+            manager_->stack_.pop_back();
+        }
+        // A failed/abandoned publication is not input authority. The existing
+        // native owner can explicitly publish again, even with unchanged facts.
+        manager_->top_.reset();
+        manager_->pending_accepted_receipt_.swap( state.receipt );
+        manager_->pending_receipt_child_source_surface_id_.swap( state.child_source_surface_id );
+        manager_->withheld_parent_surface_ids_.swap( state.withheld_parent_surface_ids );
+        manager_->suppress_parent_republish_ = state.suppress_parent_republish;
+        manager_ = nullptr;
+        interrupted_action_.reset();
     }
 }

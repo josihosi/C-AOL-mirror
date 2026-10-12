@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -8,6 +10,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -36,6 +39,232 @@
 #include "type_id.h"
 #include "ui_iteminfo.h"
 #include "uilist.h"
+#include "ui_manager.h"
+
+TEST_CASE( "redraw debug errors interrupt input without completing its pending action",
+           "[semantic_surface][debug_error_prompt_067]" )
+{
+    const bool enclosing_session = GENERATE( false, true );
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const std::string &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    on_out_of_scope restore_environment( [&]() {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+    } );
+    const std::string run = std::string( enclosing_session ? "redraw-enclosed-" : "redraw-between-owners-" ) +
+                            std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    unsetenv( keys[2].c_str() );
+#if defined(TILES)
+    software_render_fixture renderer;
+    REQUIRE( renderer.available() );
+    renderer_recovery_test_support::setup_software_ui();
+#else
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_renderer( [&]() {
+        if( owns_terminal ) { catacurses::endwin(); }
+    } );
+#endif
+    semantic_surface_manager local_manager( run );
+    semantic_surface_manager &manager = enclosing_session ? local_manager :
+                                       openclaw_harness_semantic_surface_manager();
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    std::optional<semantic_surface_manager_session> session;
+    if( enclosing_session ) { session.emplace( manager ); }
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+    } );
+    int original_dispatches = 0;
+    {
+        semantic_surface_scope world( manager, "world", "World", {},
+        { { "world.move.north", "", "North", true } },
+        [&]( const semantic_action_request &request ) {
+            ++original_dispatches;
+            REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
+            return semantic_action_dispatch_result{ true, "", "" };
+        } );
+        const auto owner = *manager.top();
+        REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                           "north", "world.move.north", std::nullopt, {} } ) );
+        REQUIRE( world.consume_request() );
+    }
+    REQUIRE_FALSE( manager.top() );
+    REQUIRE( receipts.empty() );
+    std::vector<semantic_surface_descriptor> prompts;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.payload.count( "native_owner" ) == 0 ||
+            owner.payload.at( "native_owner" ) != "DEBUG_MSG" ) { return; }
+        prompts.push_back( owner );
+        CHECK( active_semantic_surface_manager() == &manager );
+        CHECK( std::none_of( receipts.begin(), receipts.end(), []( const auto &receipt ) {
+            return receipt.request_id == "north";
+        } ) );
+        CHECK( owner.payload.at( "text" ).find( "controlled redraw error" ) != std::string::npos );
+        CHECK( owner.valid_actions.size() == 1 );
+        const auto suffix = std::to_string( prompts.size() );
+        REQUIRE( manager.submit_request( { "foreign-run", owner.surface_id, owner.frame_id,
+                                           "foreign-continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
+        REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                           "parameter-continue" + suffix, "prompt.acknowledge", std::nullopt,
+                                           { { "ignore_future_errors", "true" } } } ) );
+        REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, "stale-frame",
+                                           "stale-continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
+        REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                           "continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
+        // Once a real semantic owner exists, exercise its native redraw too.
+        test_mode = false;
+    } );
+
+    // The public buffer producer lets the actual redraw-safe prompt run under
+    // the test input guard: old raw-only code fails instead of waiting on keys.
+    {
+        restore_on_out_of_scope<catacurses::window> restore_screen( catacurses::stdscr );
+        restore_on_out_of_scope<bool> restore_mode( test_mode );
+        catacurses::stdscr = catacurses::window();
+        test_mode = false;
+        for( int repeat = 0; repeat < 2; ++repeat ) {
+            CHECK( capture_debugmsg_during( [&]() {
+                realDebugmsg( "redraw-control.cpp", "1", "redraw_control", "controlled redraw error" );
+            } ) == "controlled redraw error" );
+        }
+    }
+    bool invoked = false;
+    ui_adaptor drawing;
+    drawing.position_from_window( catacurses::stdscr );
+    drawing.on_redraw( [&]( const ui_adaptor & ) {
+        if( !invoked ) {
+            invoked = true;
+            restore_on_out_of_scope<bool> input_guard( test_mode );
+            test_mode = true;
+            replay_buffered_debugmsg_prompts();
+        }
+    } );
+    restore_on_out_of_scope<bool> restore_mode( test_mode );
+    test_mode = false;
+    REQUIRE_NOTHROW( ui_manager::redraw() );
+    REQUIRE( invoked );
+    // Continue never grants future Ignore: the second identical error still
+    // needs its own current prompt and acknowledgement.
+    REQUIRE( prompts.size() == 2 );
+    REQUIRE( receipts.size() == 8 );
+    for( std::size_t offset : { 0, 4 } ) {
+        CHECK_FALSE( receipts[offset].accepted );
+        CHECK( receipts[offset].rejection_reason == "wrong_run" );
+        CHECK_FALSE( receipts[offset + 1].accepted );
+        CHECK( receipts[offset + 1].rejection_reason == "unadvertised_action" );
+        CHECK_FALSE( receipts[offset + 2].accepted );
+        CHECK( receipts[offset + 2].rejection_reason == "stale_frame" );
+        CHECK( receipts[offset + 3].accepted );
+        CHECK( receipts[offset + 3].outcome == "debug_error_continued" );
+        CHECK( receipts[offset + 3].resulting_frame_id.empty() );
+    }
+    REQUIRE_FALSE( manager.top() );
+    CHECK( active_semantic_surface_manager() == ( enclosing_session ? &manager : nullptr ) );
+    {
+        semantic_surface_scope successor( manager, "world", "World after redraw" );
+        REQUIRE( receipts.size() == 9 );
+        CHECK( receipts.back().request_id == "north" );
+        CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+        CHECK( receipts.back().resulting_frame_id != prompts[0].frame_id );
+        CHECK( original_dispatches == 1 );
+        const auto original_receipt = manager.reject_request( { manager.run_id(), "", "",
+                                      "north", "world.move.north", std::nullopt, {} } );
+        CHECK( original_receipt.resulting_frame_id == receipts.back().resulting_frame_id );
+        REQUIRE( manager.submit_request( { manager.run_id(), prompts.back().surface_id,
+                                           prompts.back().frame_id, "retired-prompt", "prompt.acknowledge", std::nullopt, {} } ) );
+        CHECK_FALSE( successor.consume_request() );
+        CHECK( receipts.back().rejection_reason == "wrong_surface" );
+        CHECK( original_dispatches == 1 );
+    }
+}
+
+TEST_CASE( "diagnostic scopes preserve pending child ownership across nested owners",
+           "[semantic_surface][debug_error_prompt_067]" )
+{
+    const bool withheld = GENERATE( false, true );
+    semantic_surface_manager manager( "interrupted-child" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    int parent_dispatches = 0;
+    int acknowledgements = 0;
+    semantic_surface_scope parent( manager, "inventory", "Inventory", {},
+    { { "inventory.select", "item:1", "Select", true } },
+    [&]( const semantic_action_request &request ) {
+        ++parent_dispatches;
+        if( withheld ) { REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) ); }
+        return semantic_action_dispatch_result{ true, "", "", true };
+    } );
+    const auto parent_owner = *manager.top();
+    REQUIRE( manager.submit_request( { manager.run_id(), parent_owner.surface_id, parent_owner.frame_id,
+                                       "select", "inventory.select", "item:1", {} } ) );
+    REQUIRE( parent.consume_request() );
+    REQUIRE( receipts.empty() );
+    {
+        semantic_surface_scope diagnostic( manager, "prompt", "Debug error", {},
+        { { "prompt.acknowledge", "", "Continue", true } },
+        [&]( const semantic_action_request & ) {
+            ++acknowledgements;
+            return semantic_action_dispatch_result{ true, "", "", false, false };
+        }, true );
+        REQUIRE( receipts.empty() );
+        const auto diagnostic_owner = *manager.top();
+        {
+            semantic_surface_scope child( manager, "menu", "Nested owner" );
+            const auto child_owner = *manager.top();
+            CHECK_FALSE( diagnostic.close() );
+            REQUIRE( manager.top() );
+            CHECK( manager.top()->surface_id == child_owner.surface_id );
+            CHECK( manager.top()->frame_id == child_owner.frame_id );
+            REQUIRE( manager.submit_request( { manager.run_id(), diagnostic_owner.surface_id,
+                                               diagnostic_owner.frame_id, "parent-while-child", "prompt.acknowledge", std::nullopt, {} } ) );
+            CHECK_FALSE( diagnostic.consume_request() );
+            CHECK_FALSE( child.consume_request() );
+            CHECK( receipts.back().rejection_reason == "wrong_surface" );
+        }
+        const auto fresh_diagnostic = *manager.top();
+        REQUIRE( manager.submit_request( { manager.run_id(), fresh_diagnostic.surface_id,
+                                           fresh_diagnostic.frame_id, "ack", "prompt.acknowledge", std::nullopt, {} } ) );
+        REQUIRE( diagnostic.consume_request() );
+        CHECK( acknowledgements == 1 );
+        CHECK( receipts.size() == 2 );
+        // Move ownership once; the moved-from scope must not restore twice.
+        semantic_surface_scope moved( std::move( diagnostic ) );
+        REQUIRE( moved.close() );
+    }
+    CHECK( receipts.size() == 2 );
+    if( withheld ) {
+        REQUIRE_FALSE( manager.top() );
+    } else {
+        REQUIRE( manager.top() );
+        CHECK( manager.top()->frame_id == parent_owner.frame_id );
+        CHECK( parent.publish( { { "redraw", "true" } },
+                              { { "inventory.select", "item:1", "Select", true } } ) );
+        CHECK( receipts.size() == 2 );
+    }
+    {
+        semantic_surface_scope real_successor( manager, "menu", "Actual selection child" );
+        REQUIRE( receipts.size() == 3 );
+        CHECK( receipts.back().request_id == "select" );
+        CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+        CHECK( parent_dispatches == 1 );
+    }
+}
 
 TEST_CASE( "activity input survives polling but not a different owner",
            "[semantic_surface][activity_poll]" )
@@ -84,6 +313,195 @@ TEST_CASE( "activity input survives polling but not a different owner",
                                        "stale-pause", "activity.pause", std::nullopt, {} } ) );
     CHECK_FALSE( manager.consume_top_request() );
     CHECK( pauses == 1 );
+}
+
+TEST_CASE( "failed diagnostic construction restores the pending action and native stack",
+           "[semantic_surface][diagnostic_constructor_exception_067]" )
+{
+    semantic_surface_manager manager( "failed-diagnostic" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    int dispatches = 0;
+    {
+        semantic_surface_scope world( manager, "world", "World", {},
+        { { "world.move.north", "", "North", true } },
+        [&]( const semantic_action_request &request ) {
+            ++dispatches;
+            REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
+            return semantic_action_dispatch_result{ true, "", "" };
+        } );
+        const auto owner = *manager.top();
+        REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                           "north", "world.move.north", std::nullopt, {} } ) );
+        REQUIRE( world.consume_request() );
+    }
+    manager.set_descriptor_observer( []( const auto & ) {
+        throw std::runtime_error( "descriptor publication failed" );
+    } );
+    CHECK_THROWS_WITH( semantic_surface_scope( manager, "prompt", "Debug error", {}, {}, {}, true ),
+                       "descriptor publication failed" );
+    CHECK( manager.stack().empty() );
+    CHECK_FALSE( manager.top() );
+    CHECK( receipts.empty() );
+    manager.set_descriptor_observer( {} );
+    {
+        semantic_surface_scope successor( manager, "world", "Actual successor" );
+        CHECK( receipts.size() == 1 );
+        if( !receipts.empty() ) {
+            CHECK( receipts.back().request_id == "north" );
+            CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+        }
+        CHECK( dispatches == 1 );
+    }
+    // Also clean the original implementation's partially pushed orphan after
+    // recording the failed assertions, so the negative control stays bounded.
+    while( !manager.stack().empty() ) {
+        const auto owners = manager.stack();
+        REQUIRE( manager.pop( owners.back().surface_id ) );
+    }
+}
+
+TEST_CASE( "diagnostic unwinding never publishes or throws from its destructor",
+           "[semantic_surface][diagnostic_destructor_exception_067]" )
+{
+    const bool unwinding = GENERATE( false, true );
+    semantic_surface_manager manager( "diagnostic-unwind" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    semantic_surface_scope parent( manager, "world", "World", {},
+    { { "world.move.north", "", "North", true } }, []( const auto & ) {
+        return semantic_action_dispatch_result{ true, "", "" };
+    } );
+    const auto owner = *manager.top();
+    REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                       "north", "world.move.north", std::nullopt, {} } ) );
+    REQUIRE( parent.consume_request() );
+    // The broken noexcept destructor would terminate the negative runner.
+    // Keep that a truthful failed exit without producing a core/crash archive.
+    const auto previous_terminate = std::set_terminate( []() {
+        std::fputs( "FAILED: diagnostic destructor propagated observer exception\n", stderr );
+        std::fflush( stderr );
+        std::_Exit( 86 );
+    } );
+    on_out_of_scope restore_terminate( [&]() { std::set_terminate( previous_terminate ); } );
+    const auto native_body = [&]() {
+        semantic_surface_scope diagnostic( manager, "prompt", "Debug error", {}, {}, {}, true );
+        manager.set_descriptor_observer( []( const auto & ) {
+            throw std::runtime_error( "parent publication failed" );
+        } );
+        // The caller is unwinding its native input/render operation. Cleanup
+        // must not run another potentially throwing external observer.
+        if( unwinding ) {
+            throw std::runtime_error( "native input interrupted" );
+        }
+    };
+    if( unwinding ) {
+        CHECK_THROWS_WITH( native_body(), "native input interrupted" );
+    } else {
+        native_body();
+    }
+    manager.set_descriptor_observer( {} );
+    CHECK( manager.stack().size() == 1 );
+    CHECK_FALSE( manager.top() );
+    CHECK( receipts.empty() );
+    {
+        semantic_surface_scope successor( manager, "world", "Actual successor" );
+        REQUIRE( receipts.size() == 1 );
+        CHECK( receipts.back().request_id == "north" );
+        CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+    }
+}
+
+TEST_CASE( "failed diagnostic close restores custody before the native owner retries publication",
+           "[semantic_surface][diagnostic_close_exception_067]" )
+{
+    semantic_surface_manager manager( "failed-close" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    int dispatches = 0;
+    semantic_surface_scope parent( manager, "inventory", "Inventory", {},
+    { { "inventory.select", "item:1", "Select", true } }, [&]( const auto & ) {
+        ++dispatches;
+        return semantic_action_dispatch_result{ true, "", "", dispatches == 1 };
+    } );
+    const auto owner = *manager.top();
+    REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                       "select", "inventory.select", "item:1", {} } ) );
+    REQUIRE( parent.consume_request() );
+    std::optional<semantic_surface_descriptor> failed_owner;
+    manager.set_descriptor_observer( [&]( const auto &descriptor ) {
+        failed_owner = descriptor;
+        throw std::runtime_error( "construction observer failed" );
+    } );
+    CHECK_THROWS_WITH( semantic_surface_scope( manager, "prompt", "Debug error", {}, {}, {}, true ),
+                       "construction observer failed" );
+    REQUIRE( failed_owner );
+    REQUIRE( manager.stack().size() == 1 );
+    CHECK( manager.stack().front().surface_id == owner.surface_id );
+    REQUIRE_FALSE( manager.top() );
+    REQUIRE( manager.submit_request( { manager.run_id(), failed_owner->surface_id, failed_owner->frame_id,
+                                       "failed-prompt", "prompt.acknowledge", std::nullopt, {} } ) );
+    CHECK_FALSE( parent.consume_request() );
+    CHECK( receipts.empty() );
+    manager.set_descriptor_observer( {} );
+    REQUIRE( parent.publish( {}, owner.valid_actions ) );
+    CHECK_FALSE( parent.consume_request() );
+    CHECK( receipts.back().rejection_reason == "wrong_surface" );
+    CHECK( dispatches == 1 );
+    {
+        semantic_surface_scope child( manager, "menu", "Actual first selection child" );
+        REQUIRE( receipts.back().request_id == "select" );
+        CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+    }
+    // Complete the awaited child before exercising an ordinary in-place
+    // action. Await-child suppression must not be waived just to throw.
+    const std::map<std::string, std::string> current_facts = { { "stage", "after-child" } };
+    REQUIRE( parent.publish( current_facts, owner.valid_actions ) );
+    const auto ready_parent = *manager.top();
+    REQUIRE( manager.submit_request( { manager.run_id(), ready_parent.surface_id, ready_parent.frame_id,
+                                       "second-select", "inventory.select", "item:1", {} } ) );
+    REQUIRE( parent.consume_request() );
+    CHECK( dispatches == 2 );
+    {
+        semantic_surface_scope diagnostic( manager, "prompt", "Debug error", {},
+        { { "prompt.acknowledge", "", "Continue", true } }, []( const auto & ) {
+            return semantic_action_dispatch_result{ true, "", "", false, false };
+        }, true );
+        const auto prompt = *manager.top();
+        REQUIRE( manager.submit_request( { manager.run_id(), prompt.surface_id, prompt.frame_id,
+                                           "continue", "prompt.acknowledge", std::nullopt, {} } ) );
+        REQUIRE( diagnostic.consume_request() );
+        manager.set_descriptor_observer( [&]( const auto &descriptor ) {
+            failed_owner = descriptor;
+            throw std::runtime_error( "parent observer failed" );
+        } );
+        CHECK_THROWS_WITH( diagnostic.close(), "parent observer failed" );
+        REQUIRE( manager.stack().size() == 1 );
+        CHECK( manager.stack().front().surface_id == owner.surface_id );
+        REQUIRE_FALSE( manager.top() );
+        CHECK( diagnostic.close() );
+    }
+    REQUIRE( failed_owner );
+    REQUIRE( manager.submit_request( { manager.run_id(), failed_owner->surface_id, failed_owner->frame_id,
+                                       "failed-parent", "inventory.select", "item:1", {} } ) );
+    CHECK_FALSE( parent.consume_request() );
+    manager.set_descriptor_observer( {} );
+    // Even identical native facts need a fresh descriptor after failed output.
+    REQUIRE( parent.publish( current_facts, owner.valid_actions ) );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->frame_id != failed_owner->frame_id );
+    CHECK_FALSE( parent.consume_request() );
+    CHECK( receipts.back().rejection_reason == "stale_frame" );
+    CHECK( dispatches == 2 );
+    for( const auto &request_id : { "select", "second-select" } ) {
+        CHECK( std::count_if( receipts.begin(), receipts.end(), [&]( const auto &receipt ) {
+            return receipt.request_id == request_id;
+        } ) == 1 );
+    }
+    const auto completed = manager.reject_request( { manager.run_id(), ready_parent.surface_id,
+                           ready_parent.frame_id, "second-select", "inventory.select", "item:1", {} } );
+    CHECK( completed.resulting_frame_id == manager.top()->frame_id );
+    CHECK( dispatches == 2 );
 }
 
 namespace
@@ -2118,6 +2536,44 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
 
 #if !defined(TILES)
 extern "C" int ungetch( int );
+
+TEST_CASE( "debug prompt retains native keyboard continuation outside semantic mode",
+           "[semantic_surface][debug_error_prompt_067]" )
+{
+    REQUIRE( active_semantic_surface_manager() == nullptr );
+    const char *old_run = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+    const std::optional<std::string> previous = old_run ? std::optional<std::string>( old_run ) :
+            std::nullopt;
+    unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+    on_out_of_scope restore_environment( [&]() {
+        if( previous ) { setenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", previous->c_str(), 1 ); }
+        else { unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" ); }
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_renderer( [&]() {
+        if( owns_terminal ) { catacurses::endwin(); }
+    } );
+    restore_on_out_of_scope<bool> restore_mode( test_mode );
+    test_mode = false;
+    {
+        restore_on_out_of_scope<catacurses::window> restore_screen( catacurses::stdscr );
+        catacurses::stdscr = catacurses::window();
+        CHECK( capture_debugmsg_during( [&]() {
+            realDebugmsg( "off-mode-control.cpp", "1", "keyboard_control", "native keyboard error" );
+        } ) == "native keyboard error" );
+    }
+    REQUIRE_FALSE( openclaw_harness_semantic_session_active() );
+    // Queue at the raw debug prompt's intended read, after renderer setup;
+    // no inventory editor/setup loop consumes or resets this native input.
+    REQUIRE( ungetch( ' ' ) != -1 );
+    REQUIRE_NOTHROW( replay_buffered_debugmsg_prompts() );
+    CHECK( active_semantic_surface_manager() == nullptr );
+}
+
 TEST_CASE( "shared input ownership preserves bounded ordinary keyboard reads",
            "[semantic_surface][shared_input_owner_keyboard_067]" )
 {
