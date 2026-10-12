@@ -2,9 +2,9 @@ Current model direction, 2026-09-30: only GPT-6.1 Sol, GPT-6 Luna and GPT-6 Astr
 
 # Workspace command and evidence habits
 
-Apply the global contract/deletion test here. Select evidence from the current question; these
-query patterns are aids, not an investigation sequence. Retain complete artifacts while returning
-only the facts needed for the next decision.
+Select evidence from the current question; these
+query patterns are aids, not an investigation sequence. Record decisive findings and reproduction steps concisely; temporary evidence is for the
+current operation, not indefinite retention or copied handoff archives.
 
 ## Harness playtesting model
 
@@ -13,6 +13,37 @@ workers must delegate that work to a GPT-6 Luna subagent, even when the parent o
 task. Give Luna the test outcome and relevant setup, and use its transcript and findings for
 analysis. Code changes, builds, automated tests and reading existing evidence remain with the
 appropriate worker. See `.agents/skills/caol-harness/SKILL.md` for playtest guidance.
+
+## Shared development and publication
+
+`origin/dev` is the shared development frontier and the sole DE67 checkpoint target.
+`dev_w` is for parallel Windows work: integrate its useful changes into `dev` promptly,
+then bring both branches to the same HEAD. Coordinate one owner for Git index, refs and
+publication; preserve other workers' uncommitted files and active build/source bindings.
+
+Publish coherent, reviewed checkpoints to `origin/dev` during delivery. Inspect the actual
+push result and remote SHA: a local commit or successful hook wrapper does not prove publication.
+On a rejected push, reconcile the remote and local content/history with their owners before
+further publication. Keep useful independent work moving while resolving the shared frontier.
+Do not discard remote commits, force-push over them, or create review/integration branches as
+a substitute for reconciliation. Allowed remote branches are `master`, `dev`, `dev_w`,
+`port/*` and purposeful `backup/*`; retire obsolete branches after preserving useful history.
+The mirror replicates CAOL; it is not another development frontier or DE67 checkpoint target.
+
+## Storage
+
+Keep only dev and dev_w, usually on the same development HEAD. No Git worktrees, per-task
+checkouts, or full source/build/data clones. Coordinate exclusive work in these existing locations.
+Keep only the current necessary build and reusable cache. Playtest saves, logs, captures and proof
+archives are disposable working files, not durable history: remove them when the active operation
+ends. Record the commit, run identity, concise outcome and reproduction recipe in existing task context; Git keeps source
+history. Cleanup is part of delivery, not optional follow-up. Do not create cleanup backups or
+inventories of every artifact. Check space before large allocations and reuse existing outputs.
+Protect user data, unrelated files and active owner operations; arrange their handoff before cleanup.
+The chaperone closes completed or abandoned games and their owned brokers/helpers, verifies
+process exit, then removes their generated run residue. Worker return or a hidden window is not
+process closure. During long runs, watch free space and log growth and correct runaway output
+at its producer. Keep concise results, not growing raw journals or duplicate proof directories.
 
 ## Commands
 
