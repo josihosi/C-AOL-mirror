@@ -12550,7 +12550,11 @@ int advance_live_bandit_local_scout_assessments()
         }
         bool unsafe = false;
         std::string cause;
+        std::vector<npc *> watchers;
         for( const character_id id : outing.member_ids ) {
+            if( outing.member_is_resolved( id ) ) {
+                continue;
+            }
             npc *member = g->find_npc( id );
             if( member == nullptr || member->is_dead() || member->duty_incapacitated() ||
                 member->in_sleep_state() || member->has_flag( json_flag_CANNOT_MOVE ) ) {
@@ -12568,6 +12572,7 @@ int advance_live_bandit_local_scout_assessments()
                 cause = "current danger, received warning or flight";
                 break;
             }
+            watchers.push_back( member );
         }
         if( unsafe ) {
             if( const auto cursor = bandit_live_world::current_external_simulation_cursor( site ) ) {
@@ -12578,8 +12583,20 @@ int advance_live_bandit_local_scout_assessments()
             }
             continue;
         }
+        if( watchers.empty() ) {
+            continue;
+        }
+        // A casualty's historical slots/identity remain owned, but only current
+        // living watchers can resume observation. A survivor stays at the already
+        // assigned lookout; alternate-watch relocation still requires the pair.
         if( outing.assessment.interruption && outing.assessment.interruption->pending() &&
-            !outing.alternate_watch_reposition_pending ) {
+            watchers.size() == 1 &&
+            ( outing.local_handoff.route_position != outing.selected_watch_omt ||
+              watchers.front()->pos_abs_omt() != outing.selected_watch_omt ) ) {
+            continue;
+        }
+        if( outing.assessment.interruption && outing.assessment.interruption->pending() &&
+            !outing.alternate_watch_reposition_pending && watchers.size() == 2 ) {
             bandit_live_world::structural_outing_plan plan;
             plan.lead_id = outing.target_lead_id;
             plan.target_omt = outing.target_omt;

@@ -3351,6 +3351,12 @@ std::vector<tripoint_abs_omt> canonical_structural_target_footprint(
 
 bool scout_alternate_attempt_available( const bandit_live_world::active_outing_state &outing )
 {
+    // The existing alternate-route executor owns a complete physical pair.
+    // A confirmed survivor can observe/recover at the current lookout, but
+    // cannot advertise a relocation that the pair-only executor will refuse.
+    if( !outing.casualty_ids.empty() || !outing.resolved_member_ids.empty() ) {
+        return false;
+    }
     // The ordinary no-progress limit is outing-wide; a new, known interruption
     // is a different recovery episode and may use a currently qualified route.
     return !outing.alternate_watch_attempted ||
@@ -21369,7 +21375,8 @@ bool remember_scout_watch_interruption( site_record &site,
         lead == nullptr || !structural_watch_lead_is_current( site, outing, *lead ) ||
         outing.selected_watch_omt.is_invalid() || cause.empty() ||
         cause.size() > max_sortie_summary_length || current_minutes < outing.last_advanced_minutes ||
-        current_minutes < 0 || !outing.casualty_ids.empty() || !outing.resolved_member_ids.empty() ) {
+        current_minutes < 0 || std::all_of( outing.member_ids.begin(), outing.member_ids.end(),
+    [&outing]( const character_id id ) { return outing.member_is_resolved( id ); } ) ) {
         return false;
     }
     remember_current_scout_interruption( outing, cause, current_minutes );
@@ -23190,7 +23197,7 @@ scout_assessment_result advance_structural_scout_assessment(
         return scout_assessment_result::alternate_watch_reposition_required;
     }
     if( interrupted && !different_watch_available ) {
-        // The loaded caller has just rechecked both actors' current safety.
+        // The loaded caller has just rechecked the current watchers' safety.
         // Old observations stay reportable, but this segment starts now.
         resume_interrupted_watch( next, current_minutes );
     }
@@ -23380,8 +23387,9 @@ scout_assessment_result advance_structural_scout_assessment(
         return scout_assessment_result::inconclusive;
     }
     const bool no_alternate_watch_available =
-        next.alternate_watch_kind == structural_watch_kind::none &&
-        next.alternate_watch_shared_route.empty();
+        !scout_alternate_attempt_available( next ) ||
+        ( next.alternate_watch_kind == structural_watch_kind::none &&
+          next.alternate_watch_shared_route.empty() );
     if( no_progress_window_elapsed && !next.alternate_watch_attempted &&
         no_alternate_watch_available ) {
         next.assessment.readiness_latched = false;
