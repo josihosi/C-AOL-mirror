@@ -20775,7 +20775,7 @@ def recoverable_native_selection_owner(
     metadata: Mapping[str, Any], *, run_id: str,
     matching_initial_world_frames: int, foreign_initial_world_frames: int,
 ) -> bool:
-    """Recognize a live same-run menu owner that can finish saved-world selection.
+    """Recognize a live same-run startup owner the following cockpit can answer.
 
     This is a transport handoff only.  It does not satisfy the initial World
     checkpoint: the exact HUD/world-ready producer is still required after the
@@ -20785,14 +20785,16 @@ def recoverable_native_selection_owner(
             metadata.get("startup_owner") != "nonworld_native_input_owner" or \
             metadata.get("frame_run_id") != str(run_id) or \
             metadata.get("frame_event") != "surface_descriptor" or \
-            metadata.get("frame_state") not in {"main_menu", "menu"} or \
-            not isinstance(metadata.get("frame_trace_offset"), int) or \
+            metadata.get("frame_state") not in {"main_menu", "menu", "prompt"} or \
+            type(metadata.get("frame_trace_offset")) is not int or \
             metadata.get("frame_trace_offset", -1) < 0 or \
             matching_initial_world_frames != 0 or foreign_initial_world_frames != 0:
         return False
     actions = metadata.get("advertised_actions", [])
     if not isinstance(actions, list):
         return False
+    if metadata.get("frame_state") == "prompt":
+        return any(str(action).startswith("prompt.") for action in actions)
     if metadata.get("frame_state") == "main_menu":
         return any(str(action).startswith("main_menu.") for action in actions)
     menu_context = " ".join([
@@ -33633,11 +33635,10 @@ def execute_probe_steps(
                     report["stop_after_step"] = True
                     reports.append(report)
                     return reports
-            # A saved-world launch can legitimately stop at the native main
-            # menu or character chooser before emitting its first World HUD
-            # frame.  If this checkpoint explicitly permits that recovery and
-            # the next non-wait step owns a live cockpit, keep the same
-            # launcher/controller alive long enough to finish selection.
+            # Startup can stop at an authentic prompt or character chooser
+            # before the first World HUD. Hand its advertised actions to the
+            # following live cockpit, retaining the strict World checkpoint
+            # as pending. No input or World credit is supplied here.
             # Scenario `wait` steps here are wall-clock settling only; they do
             # not send gameplay input or advance the game.  Any other
             # intervening step keeps the original strict bootstrap behavior.
@@ -33646,7 +33647,7 @@ def execute_probe_steps(
             step_position = index - (1 + step_index_offset)
             next_step = recoverable_selection_handoff_live_step(steps, step_position)
             selection_handoff_declared = (
-                checkpoint.get("allow_recoverable_native_selection_handoff") is True and
+                checkpoint.get("allow_recoverable_native_selection_handoff") is not False and
                 str(next_step.get("kind", "")).strip().lower() == "cockpit_live_session" and
                 next_step.get("bootstrap_only") is not True and
                 (checkpoint.get("require_declared_startup_overlay_dismissal") is not True or
@@ -39047,10 +39048,8 @@ def startup_proof_classification(
     if ok:
         gate = "startup_clean"
         if native_semantic_startup_ready:
-            # The semantic bootstrap validates trace freshness and the run ID.
-            # Recheck the exact bound World when diagnostics are being recovered:
-            # a prompt owner can be usable but cannot prove that an error modal
-            # has been cleared back to World.
+            # Bootstrap authenticates the current input owner. A diagnostic
+            # prompt is actionable recovery, never proof of reaching World.
             if expected_run_id and (
                 native_metadata.get("status") != "required_state_present"
                 or native_metadata.get("run_id") != expected_run_id
@@ -39064,6 +39063,14 @@ def startup_proof_classification(
                 gate = "native_process_identity_mismatch"
             elif screen_summary.get("surface_identity_status") == "mismatch":
                 gate = "runtime_identity_mismatch"
+            elif native_metadata.get("startup_owner") == "nonworld_native_input_owner" and \
+                    native_metadata.get("status") == "required_state_present" and \
+                    native_metadata.get("frame_event") == "surface_descriptor" and \
+                    native_metadata.get("frame_state") != "world" and \
+                    native_metadata.get("advertised_actions") and \
+                    type(native_metadata.get("frame_trace_offset")) is int and \
+                    native_metadata["frame_trace_offset"] >= 0:
+                gate = "startup_native_owner_pending_world"
             elif screen_probe.get("visible_error_popup"):
                 gate = "visible_error_popup"
             elif screen_probe.get("blocking_overlay_present"):
@@ -39094,7 +39101,9 @@ def startup_proof_classification(
                 gate = "gameplay_hud_absent"
         if gate == "startup_clean" and diagnostics_recorded:
             gate = "startup_diagnostics_recorded"
-        if gate in {"startup_clean", "startup_diagnostics_recorded"}:
+        if gate == "startup_native_owner_pending_world":
+            status = "yellow"
+        elif gate in {"startup_clean", "startup_diagnostics_recorded"}:
             status = "green" if gate == "startup_clean" else "yellow"
         elif gate in {
             "visible_error_popup", "native_run_identity_mismatch", "native_process_identity_mismatch",
@@ -39105,8 +39114,10 @@ def startup_proof_classification(
         else:
             status = "yellow"
 
-    ready_for_actions = bool(ok and gate in {"startup_clean", "startup_diagnostics_recorded"})
-    clean_load = bool(ready_for_actions and not diagnostics_recorded)
+    ready_for_actions = bool(ok and gate in {
+        "startup_clean", "startup_diagnostics_recorded", "startup_native_owner_pending_world"})
+    clean_load = bool(ready_for_actions and not diagnostics_recorded and
+                      gate != "startup_native_owner_pending_world")
     return {
         "evidence_class": "startup/load",
         "status": status,
@@ -39115,6 +39126,11 @@ def startup_proof_classification(
         ),
         "feature_proof": False,
         "startup_ready_for_actions": ready_for_actions,
+        "startup_world_ready": bool(ready_for_actions and
+            gate != "startup_native_owner_pending_world" and (
+            (native_metadata.get("frame_state") == "world" and
+             "world.wait" in native_metadata.get("advertised_actions", [])) or
+            screen_probe.get("gameplay_hud_present") is True)),
         "startup_clean_for_feature_steps": clean_load,
         "diagnostic_cleanliness": "clean" if clean_load else (
             "degraded" if ready_for_actions else "unproven"
@@ -39127,7 +39143,7 @@ def startup_proof_classification(
         "screen_gate": str(screen_probe.get("classification", "startup_screen_probe_missing")),
         "debug_popups_recorded": popup_count,
         "debug_errors_recorded": error_count,
-        "rule": "A current bound input owner permits actions after recoverable diagnostics; the raw log remains degraded startup evidence. Clean load and feature claims require their own proof.",
+        "rule": "A current bound input owner permits only its advertised actions, including startup recovery. Pending World and diagnostic cleanliness remain separate from input readiness and feature proof.",
     }
 
 

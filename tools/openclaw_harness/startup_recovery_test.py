@@ -74,6 +74,7 @@ class StartupRecoveryTest(unittest.TestCase):
         self.assertEqual(proof["status"], "green")
         self.assertTrue(proof["startup_ready_for_actions"])
         self.assertTrue(proof["startup_clean_for_feature_steps"])
+        self.assertTrue(proof["startup_world_ready"])
         self.assertEqual(harness.startup_result_status(
             base_ok=True, proof_classification=proof), (True, ""))
 
@@ -142,9 +143,41 @@ class StartupRecoveryTest(unittest.TestCase):
         prompt["native_semantic_startup"].update({
             "frame_state": "prompt", "advertised_actions": ["prompt.choose"],
         })
+        # Earlier HUD pixels cannot supersede the authentic current modal.
+        prompt["startup_screen_probe"]["gameplay_hud_present"] = True
         proof = self.classify(prompt)
         self.assertEqual(proof["feature_gate"], "native_world_after_diagnostics_unproven")
         self.assertFalse(proof["startup_ready_for_actions"])
+
+    def test_authenticated_startup_owner_keeps_world_pending_and_identity_refusals(self):
+        prompt = self.summary(["ERROR : diagnostic requires native Continue"])
+        prompt["native_semantic_startup"].update({
+            "startup_owner": "nonworld_native_input_owner", "frame_state": "prompt",
+            "frame_trace_offset": 232, "advertised_actions": ["prompt.acknowledge"],
+        })
+        prompt["startup_screen_probe"].update({"gameplay_hud_present": True,
+            "visible_error_popup": True, "blocking_overlay_present": True})
+        for lines in ([], ["ERROR : diagnostic requires native Continue"]):
+            prompt["startup_screen_probe"]["debug_error_lines"] = lines
+            prompt["startup_screen_probe"]["startup_error_logged"] = bool(lines)
+            proof = self.classify(prompt)
+            self.assertTrue(proof["startup_ready_for_actions"])
+            self.assertFalse(proof["startup_world_ready"])
+            self.assertFalse(proof["startup_clean_for_feature_steps"])
+            self.assertFalse(proof["feature_proof"])
+            self.assertEqual(proof["feature_gate"], "startup_native_owner_pending_world")
+        for changes in ({"frame_run_id": "foreign"}, {"status": "scanned"},
+                        {"advertised_actions": []}, {"frame_trace_offset": -1},
+                        {"frame_trace_offset": True}, {"frame_event": "frame"}):
+            with self.subTest(changes=changes):
+                invalid = {**prompt, "native_semantic_startup": {
+                    **prompt["native_semantic_startup"], **changes}}
+                refused = self.classify(invalid)
+                self.assertFalse(refused["startup_ready_for_actions"])
+                self.assertFalse(refused["startup_world_ready"])
+        refused = self.classify(prompt, focus_result={"transport": "terminal_native",
+            "ok": True, "pid": self.pid + 1})
+        self.assertFalse(refused["startup_ready_for_actions"])
 
     def test_stale_world_and_process_exit_still_fail(self):
         frame = {

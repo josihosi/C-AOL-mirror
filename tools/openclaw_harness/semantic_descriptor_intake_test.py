@@ -1,5 +1,6 @@
 """Complete native records reach the existing bounded, lossless public channel."""
 import io
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,140 @@ class DescriptorIntakeTest(unittest.TestCase):
     def frame(self):
         return startup.current_semantic_step_frame(
             profile="fixture", run_dir=self.run, run_id=self.descriptor["run_id"], start_offset=0)
+
+    def startup_prompt(self):
+        self.descriptor.update({
+            "sequence": 1, "frame_id": "fixture-run:frame:1", "kind": "prompt",
+            "breadcrumbs": ["Debug error"],
+            "payload": {"title": "DEBUG_MSG", "native_owner": "DEBUG_MSG",
+                        "source_file": "item_location.cpp", "source_line": "388",
+                        "text": "Failed to find item_location owner with character_id 2"},
+            "valid_actions": [{"id": "prompt.acknowledge", "stable_id": "",
+                               "label": "Continue", "enabled": True}],
+        })
+        self.publish(self.encode({"event": "trace_generation", "run_id": "fixture-run",
+                                  "generation": "startup"}) + self.encode(self.descriptor))
+        return startup.await_r014_native_semantic_bootstrap(
+            profile="fixture", run_dir=self.run, run_id="fixture-run",
+            required_state="world", required_actions=["world.wait"],
+            timeout_seconds=0, poll_seconds=0, allow_any_native_input_owner=True)
+
+    def test_startup_diagnostic_owner_is_actionable_but_not_world_proof(self):
+        metadata = self.startup_prompt()
+        self.assertEqual(metadata["status"], "required_state_present")
+        proof = startup.startup_proof_classification(
+            ok=True, screen_summary={"native_semantic_startup": metadata,
+                "startup_screen_probe": {"startup_error_logged": True,
+                    "visible_error_popup": False, "blocking_overlay_present": False,
+                    "debug_error_lines": [self.descriptor["payload"]["text"]]}},
+            native_semantic_startup_ready=True, expected_run_id="fixture-run",
+            expected_pid=os.getpid(), focus_result={"transport": "terminal_native",
+                "ok": True, "pid": os.getpid()})
+        self.assertEqual(startup.startup_result_status(base_ok=True,
+                         proof_classification=proof), (True, ""))
+        self.assertTrue(startup.startup_actions_ready(proof))
+        self.assertFalse(proof["startup_world_ready"])
+        self.assertFalse(proof["startup_clean_for_feature_steps"])
+        self.assertFalse(proof["feature_proof"])
+        self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+
+    def startup_prompt_factory(self, reach_world):
+        self.startup_prompt()
+        (self.run / startup.TRANSITION_EVENT_BINDING_FILENAME).write_text(
+            json.dumps({"run_id": "fixture-run"}))
+        successor = {**self.descriptor, "sequence": 4, "frame_id": "fixture-run:frame:2",
+                     "surface_id": "successor", "kind": "world", "breadcrumbs": ["World"],
+                     "payload": {}, "valid_actions": [
+                         {"id": "world.wait", "stable_id": "", "enabled": True, "label": "Wait"}]}
+
+        def native_continue(*args, **kwargs):
+            request = json.loads((self.run / "semantic.requests.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(request["action_id"], "prompt.acknowledge")
+            receipt = {"event": "surface_receipt", "run_id": "fixture-run", "sequence": 2,
+                "request_id": request["request_id"], "action_id": request["action_id"],
+                "requested_run_id": "fixture-run", "requested_surface_id": request["surface_id"],
+                "requested_frame_id": request["frame_id"], "consuming_surface_id": request["surface_id"],
+                "consuming_frame_id": request["frame_id"], "accepted": True,
+                "rejection_reason": "", "resulting_frame_id": successor["frame_id"]}
+            with self.trace.open("ab") as stream:
+                stream.write(self.encode(receipt))
+                if reach_world:
+                    stream.write(self.encode({"event": "frame", "run_id": "fixture-run",
+                        "sequence": 3, "frame_id": "fixture-run:initial-world", "state": "world",
+                        "producer": "hud_world_ready", "initial_world_ready": True,
+                        "observed_turn": 100, "valid_actions": ["world.wait"]}))
+                stream.write(self.encode(successor))
+            return 1
+
+        def public_session(service, _stdin, _stdout):
+            current = service.call({"action": "game.observe"})
+            self.assertTrue(current["ok"], current)
+            self.assertEqual(current["result"]["observation_id"], self.descriptor["frame_id"])
+            self.assertFalse((self.run / "semantic.requests.jsonl").exists())
+            self.assertFalse(service.call({"action": "game.act", "observation_id": "stale",
+                                          "action_id": "prompt.acknowledge"})["ok"])
+            acted = service.call({"action": "game.act", "observation_id": self.descriptor["frame_id"],
+                                  "action_id": "prompt.acknowledge"})
+            self.assertTrue(acted["ok"], acted)
+            self.assertEqual(acted["observation"]["observation_id"], successor["frame_id"])
+            self.assertFalse(service.call({"action": "game.act", "observation_id": self.descriptor["frame_id"],
+                                          "action_id": "prompt.acknowledge"})["ok"])
+            startup.cockpit_live_final_path(self.run, "recover").write_text(json.dumps({
+                "schema": "caol-cockpit-live-final-v1", "run_id": "fixture-run", "state": "finished"}))
+            return 0
+
+        steps = [{"kind": "native_semantic_bootstrap", "label": "bind_world",
+                  "native_semantic_checkpoint": {"require_initial_hud_world_ready_frame": True,
+                      "required_state": "world", "required_actions": ["world.wait"]}},
+                 {"kind": "cockpit_live_session", "label": "recover", "live_operations": ["game.act"]}]
+        with contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(startup, "semantic_step_trace_start_for_source", return_value=0), \
+                patch.object(startup, "active_playtest_witness_charter", return_value=None), \
+                patch.object(startup, "semantic_wake_pipe_contract", return_value={
+                    "status": "bound", "path": "fixture", "contract": {"transport": "fixture"}}), \
+                patch.object(startup, "write_semantic_wake_pipe", side_effect=native_continue), \
+                patch.object(startup, "serve_cockpit_live", side_effect=public_session):
+            reports = startup.execute_probe_steps(os.getpid(), self.run, steps, profile="fixture",
+                                                  world="Test00", grants_gameplay_proof=True)
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(len((self.run / "semantic.requests.jsonl").read_text().splitlines()), 1)
+        descriptor = json.loads((self.run / "recover.cockpit_live_session.json").read_text())
+        self.assertTrue(descriptor["initial_world_readiness_pending"])
+        self.assertFalse(descriptor["gameplay_credit"])
+        return reports
+
+    def test_fresh_factory_prompt_continue_rechecks_actual_initial_world(self):
+        reports = self.startup_prompt_factory(True)
+        self.assertEqual(reports[0]["native_selection_handoff"]["status"], "world_qualified")
+        self.assertTrue(reports[1]["metadata"]["initial_world_bootstrap"]["proof"]["initial_world_ready"])
+
+    def test_fresh_factory_continue_without_initial_world_remains_unqualified(self):
+        reports = self.startup_prompt_factory(False)
+        self.assertEqual(reports[0]["native_selection_handoff"]["status"], "world_not_qualified")
+        self.assertFalse(reports[1]["metadata"]["gameplay_credit"])
+        self.assertEqual(reports[1]["abort"]["status"], "blocked_initial_world_not_reached")
+
+    def test_startup_prompt_cannot_bypass_disabled_or_missing_live_handoff(self):
+        self.startup_prompt()
+        (self.run / startup.TRANSITION_EVENT_BINDING_FILENAME).write_text(
+            json.dumps({"run_id": "fixture-run"}))
+        for following, opted_out in (([], False),
+                ([{"kind": "cockpit_live_session", "bootstrap_only": True}], False),
+                ([{"kind": "cockpit_live_session"}], True)):
+            with self.subTest(following=following, opted_out=opted_out):
+                checkpoint = {"require_initial_hud_world_ready_frame": True,
+                              "required_state": "world", "required_actions": ["world.wait"]}
+                if opted_out:
+                    checkpoint["allow_recoverable_native_selection_handoff"] = False
+                steps = [{"kind": "native_semantic_bootstrap", "label": "bind_world",
+                          "native_semantic_checkpoint": checkpoint}] + following
+                with patch.object(startup, "semantic_step_trace_start_for_source", return_value=0), \
+                        patch.object(startup, "serve_cockpit_live") as live:
+                    reports = startup.execute_probe_steps(os.getpid(), self.run, steps,
+                        profile="fixture", world="Test00", semantic_bootstrap_timeout_seconds=0)
+                live.assert_not_called()
+                self.assertIn("abort", reports[0])
+                self.assertFalse((self.run / "semantic.requests.jsonl").exists())
 
     def test_replaced_larger_journal_changes_public_owner_not_cached_authority(self):
         for replace_inode in (True, False):
