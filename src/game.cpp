@@ -11873,7 +11873,7 @@ pulp_data game::calculate_character_ability_to_pulp( const Character &you )
     }
 
     add_msg_debug( debugmode::DF_ACTIVITY,
-                   "you: %s\nbash weapon: %s\nfinal pulp_power_bash: %s\npulp_power_stomps: %s\n",
+                   "you: %s\nbash weapon: %s\nweapon bash damage: %.3f\nfinal pulp_power_bash: %.3f\npulp_power_stomps: %.3f\nselected bash factor: %.3f\n",
                    you.name.c_str(), pair_bash.second.type->id.c_str(), pair_bash.first, pulp_power_bash,
                    pulp_power_stomps, bash_factor );
 
@@ -11892,7 +11892,7 @@ pulp_data game::calculate_character_ability_to_pulp( const Character &you )
     }
 
     add_msg_debug( debugmode::DF_ACTIVITY,
-                   "final bash factor: %s, butcher tool name: %s, prying tool name (if used): %s",
+                   "final bash factor: %.3f, butcher tool name: %s, prying tool name (if used): %s",
                    bash_factor, pd.cut_tool, pd.pry_tool );
 
     const float skill_factor = std::sqrt( 2 + std::max(
@@ -11901,7 +11901,7 @@ pulp_data game::calculate_character_ability_to_pulp( const Character &you )
 
     pd.nominal_pulp_power = bash_factor * skill_factor * ( pd.can_cut_precisely ? 1 : 0.85 );
 
-    add_msg_debug( debugmode::DF_ACTIVITY, "final pulp_power: %s", pd.nominal_pulp_power );
+    add_msg_debug( debugmode::DF_ACTIVITY, "final pulp_power: %.3f", pd.nominal_pulp_power );
 
     // since we are trying to depict pulping as more involved than you Isaac Clarke the corpse 100% of time,
     // we would assume there is some time between attacks, where you try to reach some sweet spot,

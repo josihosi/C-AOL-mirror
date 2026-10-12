@@ -1506,6 +1506,15 @@ void npc::starting_inv_wear_item( npc *who, item &it )
 
 void npc::revert_after_activity()
 {
+    // Self-initiated pulp may temporarily run while an ordinary job's route
+    // remains parked in destination_activity. Finishing or abandoning pulp must
+    // preserve that job and its backlog; move() replans its route from here.
+    if( activity.id() == activity_id( "ACT_PULP" ) &&
+        !peek_destination_activity().is_null() ) {
+        activity = player_activity();
+        current_activity_id = peek_destination_activity().id();
+        return;
+    }
     mission = previous_mission;
     attitude = previous_attitude;
     activity = player_activity();
@@ -4863,7 +4872,10 @@ time_duration npc::catch_up_body()
     // effect expires. Off-bubble bodies need the same expiry consequence.
     if( !is_dead() && attitude == NPCATT_FLEE_TEMP &&
         !has_effect( effect_npc_flee_player ) ) {
-        set_attitude( NPCATT_NULL );
+        const bool resume_sorting = mission == NPC_MISSION_ACTIVITY &&
+                                    previous_attitude == NPCATT_ACTIVITY &&
+                                    peek_destination_activity().id() == activity_id( "ACT_MOVE_LOOT" );
+        set_attitude( resume_sorting ? NPCATT_ACTIVITY : NPCATT_NULL );
     }
     return dt;
 }

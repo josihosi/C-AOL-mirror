@@ -336,6 +336,13 @@ void player_activity::do_turn( Character &you )
                 case 2:
                     auto_resume = false;
                     you.cancel_activity();
+                    // Traveling stores its next local route separately from
+                    // the current activity.  Once travel_do_turn has handed
+                    // off that route, cancel_activity() alone cannot stop it.
+                    if( travel_activity && you.has_distant_destination() ) {
+                        openclaw_harness_semantic_native_travel_terminal( you, "interrupted" );
+                        you.abort_automove();
+                    }
                     break;
                 case 3:
                     ignoreQuery = true;

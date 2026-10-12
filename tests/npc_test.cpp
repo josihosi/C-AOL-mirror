@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "activity_actor_definitions.h"
+#include "activity_item_handling.h"
 #include "avatar.h"
 #include "bandit_live_world.h"
 #include "bandit_live_world_probe.h"
@@ -11770,4 +11771,314 @@ TEST_CASE( "loaded NPC outside avatar sound cutoff still hears a local robbery d
     CHECK( hearer.in_sleep_state() );
     hearer.Creature::process_effects();
     CHECK( hearer.in_sleep_state() == !loaded );
+}
+
+
+TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job",
+           "[npc][pulp_job_continuation_067]" )
+{
+    const std::string mode = GENERATE( "ordinary", "backlog", "corpse_gone", "blocked",
+                                       "fire", "reload", "nonpulp", "flee", "flee_reload", "flee_expired_reload", "guard_order" );
+    CAPTURE( mode );
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    restore_on_out_of_scope restore_clock( calendar::turn );
+    restore_on_out_of_scope restore_debug( debug_mode );
+    debug_mode = false; // Enabled diagnostics are exercised by the separate control.
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    zone_manager &zones = zone_manager::get_manager();
+    zones.clear();
+    on_out_of_scope cleanup( [&]() {
+        clear_npcs();
+        zones.clear();
+    } );
+    set_time_to_day();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    npc *worker = &spawn_npc( { 61, 60 }, "thug" );
+    clear_character( *worker );
+    worker->setpos( here, tripoint_bub_ms( 61, 60, 0 ), false );
+    worker->set_fac( faction_your_followers );
+    worker->rules.set_flag( ally_rule::allow_pulp );
+    worker->rules.engagement = combat_engagement::FREE_FIRE;
+    worker->worn.wear_item( *worker, item( itype_backpack ), false, false );
+    const auto corpse_pos = worker->pos_bub();
+    const auto source = corpse_pos + point( 4, 0 );
+    const auto target = corpse_pos + point( 8, 0 );
+    for( const auto &pos : {
+             source, target
+         } ) {
+        here.ter_set( pos, ter_id( "t_floor" ) );
+    }
+    zones.add( "Pulp test source", zone_type_id( "LOOT_UNSORTED" ), faction_your_followers,
+               false, true, here.get_abs( source ), here.get_abs( source ) );
+    zones.add( "Pulp test destination", zone_type_id( "LOOT_FOOD" ), faction_your_followers,
+               false, true, here.get_abs( target ), here.get_abs( target ) );
+    item delivery( itype_id( "test_apple" ) );
+    delivery.set_var( "pulp_continuation_067", std::string( "one" ) );
+    REQUIRE( delivery.get_var( "pulp_continuation_067" ) == "one" );
+    delivery.set_owner( *worker );
+    here.add_item_or_charges( source, delivery );
+    here.build_map_cache( 0 );
+    REQUIRE( zones.get_near_zone_type_for_item( delivery, worker->pos_abs(), MAX_VIEW_DISTANCE,
+            worker->get_faction_id() ) == zone_type_id( "LOOT_FOOD" ) );
+    worker->assign_activity( zone_sort_activity_actor() );
+    // The actual sorting actor discovers the source and uses the ordinary
+    // route producer, before a corpse or pulp activity exists.
+    for( int decision = 0; decision < 8 && !worker->has_destination(); ++decision ) {
+        worker->set_moves( 100 );
+        worker->do_player_activity();
+    }
+    REQUIRE( worker->has_destination() );
+    REQUIRE_FALSE( worker->activity );
+    REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+    const auto job_mission = worker->mission;
+    const auto job_attitude = worker->get_attitude();
+    player_activity backlog( activity_id( "ACT_WAIT" ), 100 );
+    backlog.auto_resume = true;
+    backlog.str_values = { "pending-parent-067" };
+    worker->backlog.push_back( backlog );
+    if( mode != "nonpulp" ) {
+        here.add_item_or_charges( corpse_pos, item::make_corpse( mtype_id( "mon_zombie" ) ) );
+        here.process_items();
+        for( int decision = 0; decision < 5 &&
+             worker->activity.id() != activity_id( "ACT_PULP" ); ++decision ) {
+            worker->set_moves( 100 );
+            worker->move();
+        }
+        REQUIRE( worker->activity.id() == activity_id( "ACT_PULP" ) );
+        REQUIRE( worker->has_destination() );
+        const int damage_before = here.i_at( corpse_pos ).begin()->damage();
+        worker->set_moves( 100 );
+        worker->move();
+        CHECK( worker->get_moves() < 100 );
+        CHECK( here.i_at( corpse_pos ).begin()->damage() > damage_before );
+        CHECK( worker->mission == job_mission );
+        CHECK( worker->get_attitude() == job_attitude );
+        REQUIRE( worker->backlog.size() == 1 );
+        CHECK( worker->backlog.front().auto_resume );
+        CHECK( worker->backlog.front().str_values == backlog.str_values );
+        REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+        worker->set_moves( mode == "backlog" ? 6000 : 100 );
+        const std::string guard_error = capture_debugmsg_during( [&]() {
+            process_monsters_and_npcs_turn_for_test();
+        } );
+        CHECK( guard_error.empty() );
+        CHECK_FALSE( worker->has_effect( effect_npc_suspend ) );
+    }
+    if( mode == "corpse_gone" ) {
+        here.i_clear( corpse_pos );
+    }
+    if( mode == "blocked" ) {
+        for( int dx = -1; dx <= 1; ++dx ) {
+            for( int dy = -1; dy <= 1; ++dy ) {
+                here.ter_set( source + point( dx, dy ), ter_id( "t_rock" ) );
+            }
+        }
+        here.invalidate_map_cache( 0 );
+        here.build_map_cache( 0 );
+        CHECK( here.route( *worker, pathfinding_target::adjacent( source ) ).empty() );
+        worker->set_moves( 100 );
+        worker->move();
+        REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+        REQUIRE_FALSE( worker->has_effect( effect_npc_suspend ) );
+        // Open the same terrain route: do not reassign the job, destination,
+        // activity or worker position to manufacture its recovery.
+        for( int dx = -1; dx <= 1; ++dx ) {
+            for( int dy = -1; dy <= 1; ++dy ) {
+                here.ter_set( source + point( dx, dy ), ter_id( "t_floor" ) );
+            }
+        }
+        here.invalidate_map_cache( 0 );
+        here.build_map_cache( 0 );
+        REQUIRE_FALSE( here.route( *worker, pathfinding_target::adjacent( source ) ).empty() );
+    }
+    if( mode == "fire" ) {
+        here.add_field( corpse_pos, field_type_id( "fd_fire" ), 3 );
+        const auto before = worker->pos_abs();
+        bool displaced = false;
+        for( int step = 0; step < 12 && !displaced; ++step ) {
+            worker->set_moves( 100 );
+            worker->move();
+            displaced = worker->pos_abs() != before;
+        }
+        REQUIRE( displaced ); // Actual danger action, not a manually moved NPC.
+        here.remove_field( corpse_pos, field_type_id( "fd_fire" ) );
+        // Corpse removal makes safe recovery deterministic without restoring
+        // obsolete coordinates or fabricating a route/activity transition.
+        here.i_clear( corpse_pos );
+        worker->set_moves( 100 );
+        worker->move();
+        CHECK( worker->activity.id() != activity_id( "ACT_PULP" ) );
+        REQUIRE( worker->backlog.size() == 1 );
+        CHECK( worker->backlog.front().auto_resume );
+        CHECK( worker->backlog.front().str_values == backlog.str_values );
+    }
+    const bool fleeing = mode == "flee" || mode == "flee_reload" ||
+                         mode == "flee_expired_reload" || mode == "guard_order";
+    if( fleeing ) {
+        // Give the native fleeing selector a genuine reachable retreat
+        // destination rather than assuming fear alone forces displacement.
+        const auto retreat = here.get_abs( corpse_pos + point( 4, 4 ) );
+        zones.add( "Pulp safe retreat", zone_type_id( "NPC_RETREAT" ), faction_your_followers,
+                   false, true, retreat, retreat );
+        REQUIRE( zones.get_nearest( zone_type_id( "NPC_RETREAT" ), worker->pos_abs(),
+                                    MAX_VIEW_DISTANCE, worker->get_faction_id() ) == retreat );
+        worker->set_attitude( NPCATT_FLEE_TEMP );
+        REQUIRE( worker->has_effect( efftype_id( "npc_flee_player" ) ) );
+        worker->get_effect( efftype_id( "npc_flee_player" ) ).set_duration( 6_turns );
+        // A fire is an actual grounded interruption; temporary fear on an
+        // otherwise safe allied worker is not itself proof of flight motion.
+        here.add_field( corpse_pos, field_type_id( "fd_fire" ), 3 );
+        const int corpse_damage_during_danger = here.i_at( corpse_pos ).begin()->damage();
+        const auto origin = worker->pos_abs();
+        for( int step = 0; step < 3; ++step ) {
+            calendar::turn += 1_turns;
+            worker->process_turn();
+            REQUIRE( worker->has_effect( efftype_id( "npc_flee_player" ) ) );
+            worker->set_moves( 100 );
+            worker->move();
+            CHECK( worker->get_attitude() == NPCATT_FLEE_TEMP );
+            CHECK( worker->activity.id() != ACT_MOVE_LOOT );
+            CHECK( here.i_at( corpse_pos ).begin()->damage() == corpse_damage_during_danger );
+            std::cout << "pulp_survival mode=" << mode << " step=" << step
+                      << " position=" << worker->pos_abs().to_string()
+                      << " flee_effect=" << worker->has_effect( efftype_id( "npc_flee_player" ) )
+                      << " fire_escape=" << worker->has_effect( efftype_id( "npc_fire_bad" ) )
+                      << " current=" << worker->activity.id().str()
+                      << " route_steps=" << worker->path.size() << '\n';
+            REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+            REQUIRE( worker->backlog.size() == 1 );
+            CHECK( worker->backlog.front().auto_resume );
+            CHECK( worker->backlog.front().str_values == backlog.str_values );
+            CHECK( here.i_at( source ).size() == 1 );
+            CHECK( here.i_at( target ).empty() );
+        }
+        here.remove_field( corpse_pos, field_type_id( "fd_fire" ) );
+        REQUIRE( worker->pos_abs() != origin ); // Native hazard escape, not displacement injection.
+        REQUIRE( rl_dist( worker->pos_abs(), here.get_abs( corpse_pos ) ) > 1 );
+        worker->set_moves( 100 );
+        worker->move();
+        CHECK( worker->activity.id() != activity_id( "ACT_PULP" ) );
+        CHECK( worker->get_attitude() == NPCATT_FLEE_TEMP );
+    }
+    if( mode == "reload" || mode == "flee_reload" || mode == "flee_expired_reload" ) {
+        const auto id = worker->getID();
+        const auto position = worker->pos_abs();
+        REQUIRE( world_generator->active_world );
+        const auto world_name = world_generator->active_world->world_name;
+        REQUIRE( g->save() );
+        REQUIRE( turn_handler::cleanup_at_end() );
+        world_generator->set_active_world( nullptr );
+        REQUIRE( g->load( world_name ) );
+        clear_creatures(); // Unrelated generated wildlife is outside this job control.
+        auto loaded = overmap_buffer.find_npc( id );
+        REQUIRE( loaded );
+        worker = loaded.get();
+        REQUIRE( worker->is_active() );
+        CHECK( worker->pos_abs() == position );
+        if( fleeing ) {
+            CHECK( worker->get_attitude() == NPCATT_FLEE_TEMP );
+            REQUIRE( worker->has_effect( efftype_id( "npc_flee_player" ) ) );
+            CHECK( worker->activity.id() != activity_id( "ACT_PULP" ) );
+        } else {
+            REQUIRE( worker->activity.id() == activity_id( "ACT_PULP" ) );
+        }
+        REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+        REQUIRE( worker->backlog.size() == 1 );
+        CHECK( worker->backlog.front().auto_resume );
+        CHECK( worker->backlog.front().str_values == backlog.str_values );
+        CHECK( worker->mission == job_mission );
+        CHECK( worker->get_attitude() == ( fleeing ? NPCATT_FLEE_TEMP : job_attitude ) );
+    }
+    if( fleeing ) {
+        if( mode == "flee_expired_reload" ) {
+            worker->on_unload();
+            calendar::turn += 8_turns;
+            worker->on_load( &here ); // Actual body catch-up expiry after registered reload.
+            CHECK( worker->get_attitude() == job_attitude );
+        }
+        for( int tick = 0; tick < 8 && worker->has_effect( efftype_id( "npc_flee_player" ) ); ++tick ) {
+            calendar::turn += 1_turns;
+            worker->process_turn(); // Native effect expiry, no remove_effect shortcut.
+        }
+        REQUIRE_FALSE( worker->has_effect( efftype_id( "npc_flee_player" ) ) );
+        if( mode == "guard_order" ) {
+            REQUIRE_FALSE( worker->has_player_activity() );
+            REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+            talk_function::assign_guard( *worker );
+            CHECK( worker->get_attitude() == NPCATT_NULL );
+            CHECK( worker->mission == NPC_MISSION_GUARD_ALLY );
+            CHECK( here.i_at( target ).empty() );
+            return;
+        }
+        worker->set_moves( 100 );
+        worker->move(); // Actual move expiry caller must restore the pending job's owner.
+        CHECK( worker->get_attitude() == job_attitude );
+        CHECK( worker->mission == job_mission );
+        REQUIRE( worker->backlog.size() == 1 );
+        CHECK( worker->backlog.front().auto_resume );
+    }
+    const auto delivered_count = [&]() {
+        int count = 0;
+        for( const item &it : here.i_at( target ) ) {
+            if( it.get_var( "pulp_continuation_067" ) == "one" ) {
+                ++count;
+            }
+        }
+        return count;
+    };
+    const int work_bound = g->calculate_pulpability( *worker,
+        mtype_id( "mon_zombie" ).obj() ).time_to_pulp + 128;
+    for( int turn = 0; turn < work_bound && delivered_count() == 0; ++turn ) {
+        calendar::turn += 1_turns;
+        worker->process_turn(); // Age native fire/panic effects before the next action pass.
+        worker->set_moves( mode == "backlog" ? 6000 : 100 );
+        worker->move();
+        REQUIRE_FALSE( worker->has_effect( effect_npc_suspend ) );
+    }
+    {
+        CAPTURE( worker->activity.id().str(), worker->peek_destination_activity().id().str(),
+                 worker->has_destination(), worker->pos_abs(), worker->get_moves(), work_bound );
+        std::cout << "pulp_endpoint mode=" << mode << " act=" << worker->activity.id().str()
+                  << " pending=" << worker->peek_destination_activity().id().str()
+                  << " position=" << worker->pos_abs().to_string() << " work_bound=" << work_bound
+                  << " delivery=" << delivered_count() << " source_roots=" << here.i_at( source ).size()
+                  << " target_roots=" << here.i_at( target ).size()
+                  << " fire_effect=" << to_turns<int>( worker->get_effect_dur( efftype_id( "npc_fire_bad" ) ) )
+                  << " fear_effect=" << to_turns<int>( worker->get_effect_dur( efftype_id( "npc_flee_player" ) ) )
+                  << " runaway_effect=" << to_turns<int>( worker->get_effect_dur( effect_npc_run_away ) ) << '\n';
+        // A 6000-move pass may execute and finish the destination job before
+        // this snapshot. Actual tagged delivery, not sampling its activity ID,
+        // proves the real retained actor resumed and completed the job.
+        REQUIRE( delivered_count() == 1 );
+        for( int turn = 0; turn < 8; ++turn ) {
+            calendar::turn += 1_turns;
+            worker->process_turn();
+            worker->set_moves( 100 );
+            worker->move();
+        }
+        CHECK( delivered_count() == 1 );
+        for( const item &it : here.i_at( source ) ) {
+            CHECK( it.get_var( "pulp_continuation_067" ) != "one" );
+        }
+    }
+}
+
+
+TEST_CASE( "pulp ability diagnostics format numeric native values without errors",
+           "[npc][pulp_debug_format_067]" )
+{
+    clear_avatar();
+    restore_on_out_of_scope restore_debug( debug_mode );
+    restore_on_out_of_scope restore_filters( debugmode::enabled_filters );
+    debug_mode = true;
+    debugmode::enabled_filters = { debugmode::DF_ACTIVITY };
+    const std::string errors = capture_debugmsg_during( [&]() {
+        const auto ability = g->calculate_character_ability_to_pulp( get_avatar() );
+        CHECK( ability.nominal_pulp_power > 0 );
+    } );
+    CHECK( errors.empty() );
 }

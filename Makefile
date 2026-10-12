@@ -1662,19 +1662,14 @@ astyle-all: $(ASTYLE_SOURCES)
 	$(ASTYLE_BINARY) --options=.astylerc -n $(ASTYLE_SOURCES)
 	mkdir -p $(ODIR) && touch $(ODIR)/.astyle-check-stamp
 
-# Test whether the system has a version of astyle that supports --dry-run
-ifeq ($(shell $(ASTYLE_BINARY) -Q -X --dry-run src/game.h >/dev/null 2>/dev/null && echo foo),foo)
-  ASTYLE_CHECK=$(shell $(ASTYLE_BINARY) --options=.astylerc --dry-run -X -Q --ascii $(ASTYLE_SOURCES) | sed -E "s/Formatted[[:space:]]+(.*)/Needs formatting: \1\\\n/" | tr -d '\n')
-endif
-
 astyle-check:
-ifdef ASTYLE_CHECK
-	$(info $(ASTYLE_BINARY) -V: $(shell $(ASTYLE_BINARY) -V))
-	@if [ "$(findstring Needs formatting:,$(ASTYLE_CHECK))" = "" ]; then echo "no astyle regressions";\
-        else printf "astyle regressions found.\n$(ASTYLE_CHECK)" && false; fi
-else
-	@echo Cannot run an astyle check, your system either does not have astyle, or it is too old.
-endif
+	@$(ASTYLE_BINARY) -V
+	@output=$$($(ASTYLE_BINARY) --options=.astylerc --dry-run -X -Q --ascii $(ASTYLE_SOURCES) 2>&1); status=$$?; \
+	if [ $$status -ne 0 ]; then printf '%s\n' "$$output" >&2; exit $$status; fi; \
+	if printf '%s\n' "$$output" | grep -q '^Formatted[[:space:]]'; then \
+		printf 'astyle regressions found.\n%s\n' "$$output"; exit 1; \
+	fi; \
+	echo "no astyle regressions"
 
 JSON_SOURCES := $(shell find data -name '* *' -prune -o -name "*.json" -print)
 JSON_CHECK_STAMPS = $(sort $(patsubst %,$(ODIR)/%,$(JSON_SOURCES:.json=.jstyle-check-stamp)))

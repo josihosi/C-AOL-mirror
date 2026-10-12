@@ -27,6 +27,8 @@
 #include <iostream>
 #include "npc.h"
 #include "monster.h"
+#include "options_helpers.h"
+#include "worldfactory.h"
 #include "effect.h"
 #include "coordinates.h"
 #include "cata_scope_helpers.h"
@@ -2877,10 +2879,28 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
            "[semantic_surface][activity_driver_lifetime_067]" )
 {
     const bool enclosing = GENERATE( false, true );
-    const int choice = GENERATE( 1, 2, 3 );
+    const int choice = GENERATE( 1, 2, 3, 4 ); // 4 is native Escape from the tired query.
+    const bool canceled = choice == 2 || choice == 4;
+    const bool escaped = choice == 4;
     CAPTURE( enclosing, choice );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
     clear_avatar();
     clear_map();
+    clear_npcs();
+    if( canceled ) {
+        // Set up the ordinary native turn mode through registered save/load;
+        // handle_action is private and must be reached by its actual caller.
+        REQUIRE( world_generator->active_world );
+        const auto world = world_generator->active_world->world_name;
+        REQUIRE( g->save() );
+        REQUIRE( turn_handler::cleanup_at_end() );
+        world_generator->set_active_world( nullptr );
+        REQUIRE( g->load( world ) );
+        clear_avatar();
+        clear_map();
+        clear_npcs();
+    }
     avatar &u = get_avatar();
     map &here = get_map();
     u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
@@ -2890,8 +2910,9 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
     u.omt_path = { current + point::east, current };
     u.assign_activity( player_activity( activity_id( "ACT_TRAVELLING" ) ) );
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                            "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const auto &key : keys ) {
         const char *value = std::getenv( key.c_str() );
@@ -2904,16 +2925,26 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
     unsetenv( keys[2].c_str() );
     on_out_of_scope restore( [&]() {
         for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
         u.cancel_activity();
         u.clear_destination();
         u.omt_path.clear();
     } );
     const bool owns_terminal = !catacurses::stdscr;
-    if( owns_terminal ) { catacurses::init_interface(); catacurses::resizeterm(); }
-    on_out_of_scope close_terminal( [&]() { if( owns_terminal ) { catacurses::endwin(); } } );
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
     scoped_imgui_context imgui;
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
     test_mode = false;
@@ -2921,11 +2952,16 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
     fixture_root.on_redraw( []( ui_adaptor & ) {} );
     ui_manager::redraw(); // native IMTUI frame/fonts before uilist::calc_data
     semantic_surface_manager nested( run );
-    semantic_surface_manager &manager = enclosing ? nested : openclaw_harness_semantic_surface_manager();
+    semantic_surface_manager &manager = enclosing ? nested :
+                                        openclaw_harness_semantic_surface_manager();
     std::optional<semantic_surface_manager_session> session;
-    if( enclosing ) { session.emplace( manager ); }
+    if( enclosing ) {
+        session.emplace( manager );
+    }
     std::vector<semantic_action_receipt> receipts;
+    std::vector<semantic_action_receipt> world_receipts;
     int menus = 0;
+    int world_frames = 0;
     semantic_action_request selected;
     std::optional<semantic_surface_descriptor> successor;
     semantic_surface_descriptor old_overmap;
@@ -2933,60 +2969,161 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
         // The native action owner has already returned before either activity
         // driver executes. Its old close is never consent to the new decision.
         semantic_surface_scope overmap( manager, "overmap", "Overmap", {},
-                                        { { "overmap.close", "", "Close", true } } );
+        { { "overmap.close", "", "Close", true } } );
         old_overmap = *manager.top();
     }
-    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
-    on_out_of_scope remove_observers( [&]() {
-        manager.set_descriptor_observer( {} ); manager.set_receipt_observer( {} );
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        if( receipt.request_id.find( "ordinary-world-pause-" ) == 0 ) {
+            world_receipts.push_back( receipt );
+        } else {
+            receipts.push_back( receipt );
+        }
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &d ) {
-        if( d.kind == "activity_wait" ) { successor = d; }
-        if( d.kind != "menu" ) { return; }
+    on_out_of_scope remove_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        if( enclosing ) {
+            openclaw_harness_semantic_surface_manager().set_descriptor_observer( {} );
+            openclaw_harness_semantic_surface_manager().set_receipt_observer( {} );
+        }
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & d ) {
+        if( d.kind == "world" ) {
+            ++world_frames;
+            const auto action = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
+            []( const auto & a ) {
+                return a.id == "world.pause";
+            } );
+            REQUIRE( action != d.valid_actions.end() );
+            REQUIRE( action->enabled );
+            REQUIRE( openclaw_harness_semantic_surface_manager().submit_request( { run, d.surface_id, d.frame_id, "ordinary-world-pause-" + std::to_string( world_frames ),
+                    action->id, action->stable_id, {} } ) );
+            return;
+        }
+        if( d.kind == "activity_wait" ) {
+            successor = d;
+        }
+        if( d.kind != "menu" ) {
+            return;
+        }
         ++menus;
         CHECK( active_semantic_surface_manager() == &manager );
         CHECK( d.payload.at( "text" ).find( "You struggle to continue" ) != std::string::npos );
         CHECK( d.frame_id != old_overmap.frame_id );
         REQUIRE( manager.submit_request( { run, old_overmap.surface_id, old_overmap.frame_id,
                                            "stale-close", "overmap.close", "", {} } ) );
+        if( escaped ) {
+            return;
+        }
         const std::string label = choice == 1 ? "Continue after a break." :
                                   choice == 2 ? "Maybe later." : "Finish it.";
         const auto action = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
-        [&]( const auto &a ) { return a.id == "menu.choose" && a.label == label; } );
+        [&]( const auto & a ) {
+            return a.id == "menu.choose" && a.label == label;
+        } );
         REQUIRE( action != d.valid_actions.end() );
         CHECK( action->enabled );
         selected = { run, d.surface_id, d.frame_id, "tired-choice", action->id, action->stable_id, {} };
         REQUIRE( manager.submit_request( selected ) );
     } );
+    if( enclosing ) {
+        // Ordinary handle_action owns the global manager even when the earlier
+        // activity driver preserved an enclosing modal manager.
+        auto &world_manager = openclaw_harness_semantic_surface_manager();
+        world_manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & d ) {
+            if( d.kind == "world" ) {
+                ++world_frames;
+                const auto action = std::find_if( d.valid_actions.begin(), d.valid_actions.end(),
+                []( const auto & a ) {
+                    return a.id == "world.pause";
+                } );
+                REQUIRE( action != d.valid_actions.end() );
+                REQUIRE( action->enabled );
+                REQUIRE( openclaw_harness_semantic_surface_manager().submit_request( { run, d.surface_id, d.frame_id, "ordinary-world-pause-" + std::to_string( world_frames ),
+                        action->id, action->stable_id, {} } ) );
+                return;
+            }
+        } );
+        world_manager.set_receipt_observer( [&]( const auto & receipt ) {
+            world_receipts.push_back( receipt );
+        } );
+    }
     // Disposable curses fixture only: makes the pre-fix missing-menu control
     // terminate honestly, rather than hanging. Semantic dispatch takes priority.
-    REQUIRE( ungetch( 'm' ) != -1 );
+    REQUIRE( ungetch( escaped ? 27 : 'm' ) != -1 );
     process_avatar_activity_turn( u ); // shared by pre-input and post-action loops
     flushinp();
     CHECK( active_semantic_surface_manager() == ( enclosing ? &manager : nullptr ) );
     CHECK( menus == 1 );
-    if( choice == 1 ) { CHECK( u.activity.id() == activity_id( "ACT_WAIT_STAMINA" ) ); }
-    else { CHECK_FALSE( u.activity ); }
-    CHECK( u.has_destination() );
-    if( menus == 0 ) { return; } // Preserve failure without manufacturing a choice.
-    REQUIRE( receipts.size() == 2 );
+    if( choice == 1 ) {
+        CHECK( u.activity.id() == activity_id( "ACT_WAIT_STAMINA" ) );
+    } else {
+        CHECK_FALSE( u.activity );
+    }
+    if( canceled ) {
+        CHECK_FALSE( u.has_destination() );
+        CHECK_FALSE( u.has_destination_activity() );
+        CHECK_FALSE( u.is_auto_moving() );
+        CHECK( u.get_next_auto_move_direction() == ACTION_NULL );
+    } else {
+        CHECK( u.has_destination() );
+    }
+    if( menus == 0 ) {
+        return;    // Preserve failure without manufacturing a choice.
+    }
+    const size_t menu_receipts = escaped ? 1 : 2;
+    REQUIRE( receipts.size() == menu_receipts );
     CHECK_FALSE( receipts.front().accepted );
     CHECK( receipts.front().request_id == "stale-close" );
-    CHECK( receipts.back().accepted );
-    CHECK( receipts.back().request_id == "tired-choice" );
-    CHECK( receipts.back().consuming_frame_id == selected.frame_id );
-    // An ordinary terminal uilist receipts its completed choice on pop. The
-    // next real polling owner then advertises the resulting native activity.
-    // Neither a fabricated World nor a rewritten receipt is needed.
+    if( !escaped ) {
+        CHECK( receipts.back().accepted );
+        CHECK( receipts.back().request_id == "tired-choice" );
+        CHECK( receipts.back().consuming_frame_id == selected.frame_id );
+    }
+    // A terminal uilist choice receipts on pop; Escape has no choice receipt.
+    // Continuing choices publish the resulting blocking owner; explicit
+    // cancellation leaves no activity or auto-move owner to publish here.
     handle_key_blocking_activity();
-    REQUIRE( receipts.size() == 2 );
-    REQUIRE( successor );
-    CHECK( successor->kind == "activity_wait" );
-    CHECK( successor->frame_id != selected.frame_id );
+    REQUIRE( receipts.size() == menu_receipts );
+    if( canceled ) {
+        CHECK_FALSE( successor );
+        CHECK_FALSE( u.has_destination() );
+        CHECK( u.get_next_auto_move_direction() == ACTION_NULL );
+    } else {
+        REQUIRE( successor );
+        CHECK( successor->kind == "activity_wait" );
+        CHECK( successor->frame_id != selected.frame_id );
+    }
     const auto activity_after = u.activity.id();
     const auto route_after = u.omt_path;
-    CHECK_FALSE( manager.submit_request( selected ) );
-    CHECK( receipts.size() == 3 ); // cached receipt, not a second native choice
+    if( canceled ) {
+        const tripoint_abs_ms position_after_cancel = u.pos_abs();
+        // Exercise the next real World input owner, without issuing another
+        // travel command.  Pause is a native nonmoving action used only to
+        // let the caller return after proving no route is consumed.
+        u.set_moves( 100 );
+        CHECK_FALSE( g->do_turn() );
+        // The next genuine owner publication settles the deferred pause
+        // receipt; a dequeue alone must not be counted as acceptance.
+        u.set_moves( 100 );
+        CHECK_FALSE( g->do_turn() );
+        CHECK( world_frames == 2 );
+        CHECK( menus == 1 );
+        CHECK( u.pos_abs() == position_after_cancel );
+        CHECK_FALSE( u.has_destination() );
+        CHECK( u.get_next_auto_move_direction() == ACTION_NULL );
+        CHECK( u.omt_path == route_after ); // Strategic route memory remains inert.
+        CHECK( std::count_if( world_receipts.begin(), world_receipts.end(), []( const auto & r ) {
+            return r.accepted && r.request_id == "ordinary-world-pause-1";
+        } ) == 1 );
+        REQUIRE( receipts.size() == menu_receipts );
+        CHECK( active_semantic_surface_manager() == ( enclosing ? &manager : nullptr ) );
+    }
+    if( !escaped ) {
+        CHECK_FALSE( manager.submit_request( selected ) );
+        CHECK( receipts.size() == menu_receipts + 1 );
+        CHECK( receipts.back().request_id == "tired-choice" ); // cached, no second native choice
+    }
     CHECK( u.activity.id() == activity_after );
     CHECK( u.omt_path == route_after );
     CHECK( menus == 1 );

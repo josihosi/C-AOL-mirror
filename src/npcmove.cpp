@@ -839,6 +839,7 @@ static const activity_id ACT_FORAGE( "ACT_FORAGE" );
 static const activity_id ACT_HARVEST( "ACT_HARVEST" );
 static const activity_id ACT_CAMP_PATROL( "ACT_CAMP_PATROL" );
 static const activity_id ACT_MOVE_LOOT( "ACT_MOVE_LOOT" );
+static const activity_id ACT_PULP( "ACT_PULP" );
 static const activity_id ACT_MULTIPLE_BUTCHER( "ACT_MULTIPLE_BUTCHER" );
 static const activity_id ACT_MULTIPLE_CHOP_PLANKS( "ACT_MULTIPLE_CHOP_PLANKS" );
 static const activity_id ACT_MULTIPLE_CHOP_TREES( "ACT_MULTIPLE_CHOP_TREES" );
@@ -3137,9 +3138,14 @@ void npc::move() {
   // of action. because this will result in an infinite loop
   if (attitude == NPCATT_FLEE) {
     set_attitude(NPCATT_FLEE_TEMP); // Only run for so many hours
-  } else if (attitude == NPCATT_FLEE_TEMP &&
-             !has_effect(effect_npc_flee_player)) {
-    set_attitude(NPCATT_NULL);
+  } else if( attitude == NPCATT_FLEE_TEMP &&
+             !has_effect( effect_npc_flee_player ) ) {
+    // Restore only the native expiry of an interrupted sorting job. Explicit
+    // orders/reset callers of set_attitude(NULL) keep their original meaning.
+    const bool resume_sorting = mission == NPC_MISSION_ACTIVITY &&
+                                previous_attitude == NPCATT_ACTIVITY &&
+                                peek_destination_activity().id() == ACT_MOVE_LOOT;
+    set_attitude( resume_sorting ? NPCATT_ACTIVITY : NPCATT_NULL );
   }
   regen_ai_cache();
     {
@@ -3172,6 +3178,13 @@ void npc::move() {
         return;
     }
     act_on_danger_assessment();
+    // Escape/combat may have moved us away from the interrupted corpse. Drop
+    // only that non-resumable pulp activity, retaining the ordinary job route.
+    if( activity.id() == ACT_PULP && !peek_destination_activity().is_null() &&
+        !can_do_pulp() ) {
+        revert_after_activity();
+        pulp_location.reset();
+    }
     // Forage/harvest activities skip BT re-evaluation to prevent backlog
     // flooding, but must yield to danger so the NPC can fight or flee.
     if( activity.id() == ACT_FORAGE || activity.id() == ACT_HARVEST ) {
@@ -7079,7 +7092,9 @@ bool npc::do_player_activity() {
   // counter.
   const bool multi_type = activity ? activity.is_multi_type() : false;
   const int moves_before = moves;
-  while (moves > 0 && activity && !has_destination()) {
+  while( moves > 0 && activity &&
+         ( !has_destination() || ( activity.id() == ACT_PULP &&
+                                   !peek_destination_activity().is_null() ) ) ) {
         activity.do_turn( *this );
         if( !is_active() ) {
             return true;
