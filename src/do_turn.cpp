@@ -15050,16 +15050,21 @@ std::set<character_id> complete_live_bandit_homeward_boundary_steps(
         }
         if( crossings.empty() || crossings.size() + outing.casualty_ids.size() !=
             outing.member_ids.size() ) {
-            DebugLog( D_INFO, DC_ALL ) << "bandit_live_world local homeward boundary collection"
-                                       << " site=" << site.site_id
-                                       << " activity=" << outing.activity_id
-                                       << " generation=" << outing.generation
-                                       << " steps=" << steps.size()
-                                       << " crossings=" << crossings.size()
-                                       << " casualties=" << outing.casualty_ids.size()
-                                       << " members=" << outing.member_ids.size()
-                                       << " reason=" << ( crossings.empty() ? collection_reason :
-                                               "incomplete_pair" ) << '\n';
+            // An in-bubble destination uses physical movement, so this normal
+            // status need not repeat in debug.log each turn.  The change-only
+            // observation below still retains it; keep other refusals here.
+            if( collection_reason != "destination_in_loaded_bubble" ) {
+                DebugLog( D_INFO, DC_ALL ) << "bandit_live_world local homeward boundary collection"
+                                           << " site=" << site.site_id
+                                           << " activity=" << outing.activity_id
+                                           << " generation=" << outing.generation
+                                           << " steps=" << steps.size()
+                                           << " crossings=" << crossings.size()
+                                           << " casualties=" << outing.casualty_ids.size()
+                                           << " members=" << outing.member_ids.size()
+                                           << " reason=" << ( crossings.empty() ? collection_reason :
+                                                   "incomplete_pair" ) << '\n';
+            }
             record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
                                                   crossings.empty() ? collection_reason : "incomplete_pair", false );
             continue;
