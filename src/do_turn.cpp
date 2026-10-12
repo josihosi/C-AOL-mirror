@@ -9392,9 +9392,19 @@ bool materialize_live_bandit_structural_handoffs()
         tripoint_abs_omt approach_from = resumes_physical_homeward_cursor ?
                                          outing.local_handoff.approach_from :
                                          outing.shared_route[static_cast<std::size_t>( outing.waypoint_index - 1 )];
+        // Retained casualty entries/staging remain part of the strict handoff
+        // snapshot. Offer the survivor slots that can coexist with that history.
+        std::vector<tripoint_abs_ms> casualty_entry_positions;
+        std::vector<tripoint_abs_ms> casualty_staging_positions;
+        for( const auto &member : outing.local_handoff.members ) {
+            if( member.dead ) {
+                casualty_entry_positions.push_back( member.entry_position );
+                casualty_staging_positions.push_back( member.staging_position );
+            }
+        }
         std::vector<tripoint_abs_ms> entry_positions =
             live_bandit_local_handoff_entry_positions( route_position, approach_from,
-                    surviving_member_ids.size() );
+                    surviving_member_ids.size(), casualty_entry_positions );
         tripoint_abs_omt egress_omt = resumes_physical_homeward_cursor ?
                                       outing.shared_route.back() :
                                       outing.waypoint_index + 1 <
@@ -9415,9 +9425,12 @@ bool materialize_live_bandit_structural_handoffs()
             }
             staging_facing_omt = *target_facing_omt;
         }
+        std::vector<tripoint_abs_ms> staging_exclusions = entry_positions;
+        staging_exclusions.insert( staging_exclusions.end(), casualty_staging_positions.begin(),
+                                   casualty_staging_positions.end() );
         std::vector<tripoint_abs_ms> staging_positions =
             live_bandit_local_handoff_entry_positions( route_position, staging_facing_omt,
-                    surviving_member_ids.size(), entry_positions );
+                    surviving_member_ids.size(), staging_exclusions );
         const std::vector<tripoint_abs_ms> initial_entry_positions = entry_positions;
         const std::vector<tripoint_abs_ms> initial_staging_positions = staging_positions;
         const std::size_t initial_entry_count = entry_positions.size();

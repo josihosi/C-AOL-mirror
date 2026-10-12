@@ -4591,6 +4591,14 @@ local_handoff_plan plan_local_pair_handoff( const site_record &site,
 
     std::vector<tripoint_abs_ms> entry_positions;
     std::vector<tripoint_abs_ms> staging_positions;
+    std::vector<tripoint_abs_ms> casualty_entry_positions;
+    std::vector<tripoint_abs_ms> casualty_staging_positions;
+    for( const local_handoff_member_snapshot &member : outing.local_handoff.members ) {
+        if( member.dead ) {
+            casualty_entry_positions.push_back( member.entry_position );
+            casualty_staging_positions.push_back( member.staging_position );
+        }
+    }
     for( const character_id &member_id : outing.member_ids ) {
         if( std::find( surviving_member_ids.begin(), surviving_member_ids.end(), member_id ) ==
             surviving_member_ids.end() ) {
@@ -4623,9 +4631,13 @@ local_handoff_plan plan_local_pair_handoff( const site_record &site,
             project_to<coords::omt>( read_iter->entry_position ) != snapshot.route_position ||
             std::find( entry_positions.begin(), entry_positions.end(),
                        read_iter->entry_position ) != entry_positions.end() ||
+            std::find( casualty_entry_positions.begin(), casualty_entry_positions.end(),
+                       read_iter->entry_position ) != casualty_entry_positions.end() ||
             project_to<coords::omt>( read_iter->staging_position ) != snapshot.route_position ||
             std::find( staging_positions.begin(), staging_positions.end(),
                        read_iter->staging_position ) != staging_positions.end() ||
+            std::find( casualty_staging_positions.begin(), casualty_staging_positions.end(),
+                       read_iter->staging_position ) != casualty_staging_positions.end() ||
             ( read_iter->staging_position == read_iter->entry_position &&
               !resumes_assembled_homeward_pair ) ) {
             plan.notes.push_back( "local handoff blocked: member preflight or entry edge is invalid" );

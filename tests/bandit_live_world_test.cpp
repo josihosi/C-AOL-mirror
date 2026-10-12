@@ -17047,6 +17047,185 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
         CHECK( site.active_outing.owner == bandit_live_world::simulation_owner::local );
     }
 
+    SECTION( "survivor readmission respects retained casualty slot history" ) {
+        const bool cannibal = GENERATE( false, true );
+        const int overlap = GENERATE( 0, 1, 2 );
+        auto world = make_world( cannibal );
+        auto &site = world.sites.front();
+        site.active_outing.waypoint_index = 2;
+        site.active_outing.phase = bandit_live_world::scout_phase::observing;
+        auto cursor = bandit_live_world::current_external_simulation_cursor( site );
+        REQUIRE( cursor );
+        auto reads = make_reads( site );
+        REQUIRE( reads.size() == 2 );
+        const auto origin = project_to<coords::ms>(
+                                site.active_outing.shared_route[site.active_outing.waypoint_index] );
+        // Same in-OMT slots as X4; portable source-created outing and identities.
+        reads[0].entry_position = origin + point( 23, 23 );
+        reads[0].staging_position = origin + point( 23, 22 );
+        reads[1].entry_position = origin + point( 22, 23 );
+        reads[1].staging_position = origin + point( 22, 22 );
+        reads[0].hp_percent = 100;
+        reads[1].hp_percent = 100;
+        const auto first = bandit_live_world::plan_local_pair_handoff( site, *cursor, 100, reads );
+        REQUIRE( first.valid );
+        REQUIRE( bandit_live_world::commit_local_pair_handoff( site, first,
+        []( const bandit_live_world::local_handoff_member_snapshot & ) { return true; },
+        []( const bandit_live_world::local_handoff_member_snapshot & ) {} ) ==
+                 bandit_live_world::local_handoff_commit_result::applied );
+        assemble_pair( site, 100 );
+        cursor = bandit_live_world::current_external_simulation_cursor( site );
+        REQUIRE( cursor );
+        const auto dead_id = site.active_outing.member_ids.front();
+        REQUIRE( bandit_live_world::record_local_pair_member_death(
+                     site, *cursor, dead_id, reads[0].staging_position, 101 ) );
+        const auto dead_history = site.active_outing.local_handoff.members.front();
+        REQUIRE( dead_history.dead );
+        cursor = bandit_live_world::current_external_simulation_cursor( site );
+        REQUIRE( cursor );
+        std::vector<bandit_live_world::local_dematerialization_member_read> exits;
+        for( const auto &member : site.active_outing.local_handoff.members ) {
+            bandit_live_world::local_dematerialization_member_read exit;
+            exit.npc_id = member.npc_id;
+            exit.readable = true;
+            exit.dead = member.dead;
+            exit.hp_percent = member.hp_percent;
+            exit.current_position = member.exit_position;
+            exits.push_back( exit );
+        }
+        const auto unload = bandit_live_world::plan_local_pair_dematerialization(
+                                site, *cursor, 102, exits, site.active_outing.cargo );
+        REQUIRE( unload.valid );
+        REQUIRE( bandit_live_world::commit_local_pair_dematerialization( site, unload,
+        []( const bandit_live_world::local_handoff_member_snapshot & ) { return true; },
+        []( const bandit_live_world::local_handoff_member_snapshot & ) {} ) ==
+                 bandit_live_world::local_handoff_commit_result::applied );
+        REQUIRE( site.roster().valid );
+        const auto native_world = world;
+        cursor = bandit_live_world::current_external_simulation_cursor( site );
+        REQUIRE( cursor );
+        auto survivor_reads = make_reads( site );
+        REQUIRE( survivor_reads.size() == 1 );
+        survivor_reads.front().entry_position = overlap == 1 ? dead_history.entry_position :
+                origin + point( 21, 23 );
+        survivor_reads.front().staging_position = overlap == 2 ? dead_history.staging_position :
+                origin + point( 21, 22 );
+        const auto candidate = bandit_live_world::plan_local_pair_handoff(
+                                   site, *cursor, 103, survivor_reads );
+        const auto before_candidate = serialize_world( world );
+        int bound = 0;
+        const auto result = bandit_live_world::commit_local_pair_handoff( site, candidate,
+        [&bound]( const bandit_live_world::local_handoff_member_snapshot & ) { ++bound; return true; },
+        []( const bandit_live_world::local_handoff_member_snapshot & ) {} );
+        if( overlap == 0 ) {
+            CHECK( candidate.valid );
+            CHECK( result == bandit_live_world::local_handoff_commit_result::applied );
+            CHECK( bound == 2 );
+        } else {
+            CHECK_FALSE( candidate.valid );
+            CHECK( result == bandit_live_world::local_handoff_commit_result::rejected );
+            CHECK( bound == 0 );
+            CHECK( serialize_world( world ) == before_candidate );
+        }
+
+        if( overlap == 0 ) {
+            const bool compatible_slot_available = GENERATE( false, true );
+            const auto prior_turn = calendar::turn;
+            auto prior_world = std::move( overmap_buffer.global_state.bandit_live_world );
+            const auto survivor_id = survivor_reads.front().npc_id;
+            on_out_of_scope cleanup( [&prior_world, prior_turn, survivor_id]() {
+                g->remove_npc( survivor_id );
+                overmap_buffer.remove_npc( survivor_id );
+                overmap_buffer.global_state.bandit_live_world = std::move( prior_world );
+                calendar::turn = prior_turn;
+                clear_creatures();
+            } );
+            calendar::turn = calendar::start_of_cataclysm + 103_minutes;
+            const auto route_position = project_to<coords::omt>( origin );
+            get_map().load( project_to<coords::sm>( route_position ) - point( 4, 4 ), false );
+            clear_creatures();
+            clear_map();
+            // The avatar returns to the inactive survivor's retained exit,
+            // just as X4 did; that occupied square is not an admission slot.
+            get_avatar().setpos( reads[1].staging_position, false );
+            auto actor = make_shared_fast<npc>();
+            actor->normalize();
+            actor->load_npc_template( npc_template_test_talker );
+            actor->setID( survivor_id, true );
+            actor->spawn_at_precise( reads[1].staging_position );
+            overmap_buffer.insert_npc( actor );
+            REQUIRE_FALSE( actor->is_active() );
+            for( const auto &tile : get_map().points_on_zlevel( route_position.z() ) ) {
+                get_map().ter_set( tile, ter_id( "t_wall" ) );
+            }
+            for( const auto &position : { get_avatar().pos_abs(), reads[0].entry_position,
+                                         reads[0].staging_position, reads[1].entry_position,
+                                         reads[1].staging_position } ) {
+                get_map().ter_set( get_map().get_bub( position ), ter_id( "t_floor" ) );
+            }
+            if( !compatible_slot_available ) {
+                get_map().ter_set( get_map().get_bub( dead_history.entry_position ), ter_id( "t_wall" ) );
+            }
+            REQUIRE( get_map().inbounds( origin ) );
+            int viable_slots = 0;
+            for( int x = 21; x <= 23; ++x ) {
+                for( int y = 22; y <= 23; ++y ) {
+                    const auto position = origin + point( x, y );
+                    if( get_map().inbounds( position ) &&
+                        get_map().passable( get_map().get_bub( position ) ) &&
+                        g->is_empty( get_map().get_bub( position ) ) &&
+                        live_bandit_local_handoff_position_is_motor_addressable(
+                            position, get_avatar().pos_abs_sm(), HALF_MAPSIZE - 1 ) ) {
+                        ++viable_slots;
+                    }
+                }
+            }
+            REQUIRE( viable_slots == ( compatible_slot_available ? 3 : 2 ) );
+            // Map loading can initialize dimension state; bind the prepared
+            // native owner only after that setup, as other materializer fixtures do.
+            overmap_buffer.global_state.bandit_live_world = native_world;
+            REQUIRE( bandit_live_world::current_external_simulation_cursor(
+                         overmap_buffer.global_state.bandit_live_world.sites.front() ) );
+            INFO( "faction=" << cannibal << " route=" << route_position.to_string() <<
+                  " phase=" << bandit_live_world::to_string( native_world.sites.front().active_outing.phase ) );
+            bandit_live_world_probe::snapshot events;
+            bool materialized = false;
+            const auto prior_admission = serialize_world( overmap_buffer.global_state.bandit_live_world );
+            {
+                bandit_live_world_probe::session event_session(
+                    bandit_live_world_probe::collection_mode::transition_events );
+                materialized = materialize_live_bandit_structural_handoffs_for_test();
+                events = event_session.result();
+            }
+            std::string reasons;
+            for( const auto &event : events.transition_events ) {
+                reasons += event.transition + ":" + event.reason + ";";
+            }
+            INFO( reasons );
+            CHECK( materialized == compatible_slot_available );
+            const auto &admitted = overmap_buffer.global_state.bandit_live_world.sites.front();
+            CHECK( admitted.active_outing.owner == ( compatible_slot_available ?
+                    bandit_live_world::simulation_owner::local : bandit_live_world::simulation_owner::abstract ) );
+            CHECK( admitted.active_outing.casualty_ids == std::vector<character_id>{ dead_id } );
+            CHECK_FALSE( overmap_buffer.find_npc( dead_id ) );
+            CHECK( g->find_npc( survivor_id ) == actor.get() );
+            CHECK( actor->is_active() == compatible_slot_available );
+            CHECK( admitted.active_outing.local_handoff.members.front().entry_position ==
+                   dead_history.entry_position );
+            CHECK( admitted.active_outing.local_handoff.members.front().staging_position ==
+                   dead_history.staging_position );
+            CHECK( admitted.active_outing.local_handoff.members.front().exit_position ==
+                   dead_history.exit_position );
+            if( !compatible_slot_available ) {
+                CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == prior_admission );
+            } else {
+                const auto committed = serialize_world( overmap_buffer.global_state.bandit_live_world );
+                CHECK_FALSE( materialize_live_bandit_structural_handoffs_for_test() );
+                CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == committed );
+            }
+        }
+    }
+
     SECTION( "physical death and cargo are written once before abstract ownership" ) {
         bandit_live_world::world_state world = make_world( true );
         bandit_live_world::site_record &site = world.sites.front();
