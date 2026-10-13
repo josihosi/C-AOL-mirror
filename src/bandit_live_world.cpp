@@ -5273,7 +5273,8 @@ namespace
 {
 std::optional<site_record> local_pair_abstract_resume_progress_candidate( const site_record &site,
         const simulation_advance_cursor &expected_cursor, const int current_minutes,
-        const std::vector<local_abstract_resume_progress_read> &member_reads )
+        const std::vector<local_abstract_resume_progress_read> &member_reads,
+        const bool has_native_service )
 {
     const active_outing_state &outing = site.active_outing;
     if( site.retired_empty_site || outing.kind != outing_kind::structural_sortie ||
@@ -5332,8 +5333,31 @@ std::optional<site_record> local_pair_abstract_resume_progress_candidate( const 
         }
         reads.push_back( &*read );
     }
-    if( !progressed_omt || *progressed_omt == outing.local_handoff.route_position ) {
+    if( !progressed_omt ) {
         return std::nullopt;
+    }
+
+    if( *progressed_omt == outing.local_handoff.route_position ) {
+        // A real Native motor may consume a qualified cadence repaying debt
+        // without moving the complete party. An observation-only recorder has
+        // no such authority, and unchanged OMT alone cannot prove exact custody.
+        if( !has_native_service || current_minutes <= outing.last_advanced_minutes ||
+            std::any_of( reads.begin(), reads.end(), [&]( const auto *read ) {
+        const auto snapshot = std::find_if( outing.local_handoff.members.begin(),
+        outing.local_handoff.members.end(), [&]( const auto &entry ) {
+            return entry.npc_id == read->npc_id;
+        } );
+        return snapshot == outing.local_handoff.members.end() ||
+               read->current_position != snapshot->exit_position ||
+               read->hp_percent != snapshot->hp_percent;
+        } ) ) {
+            return std::nullopt;
+        }
+        site_record candidate = site;
+        candidate.active_outing.last_advanced_minutes = current_minutes;
+        candidate.active_outing.local_handoff.committed_minutes = current_minutes;
+        return simulation_owner_state_is_consistent( candidate.active_outing ) && candidate.roster().valid ?
+               std::optional<site_record>( std::move( candidate ) ) : std::nullopt;
     }
 
     site_record candidate = site;
@@ -5390,19 +5414,23 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
         const std::function<void()> &commit_members )
 {
     auto candidate = local_pair_abstract_resume_progress_candidate( site, expected_cursor,
-                     current_minutes, member_reads );
+                     current_minutes, member_reads, static_cast<bool>( commit_members ) );
     if( !candidate ) {
         return false;
     }
+    const bool moved = candidate->active_outing.local_handoff.route_position !=
+                       site.active_outing.local_handoff.route_position;
     // The motor preflights every actor/container and supplies a deterministic,
     // non-refusing commit. No actor moves until the complete owner candidate is valid.
     if( commit_members ) {
         commit_members();
     }
     site = std::move( *candidate );
-    record_live_transition( site, &site.active_outing, "local_pair_abstract_resume_progress", "committed",
+    record_live_transition( site, &site.active_outing, "local_pair_abstract_resume_progress",
+                            moved ? "committed" : "cadence_service",
                             "abstract", "abstract",
-                            "paired physical resume advanced its persisted homeward cursor",
+                            moved ? "paired physical resume advanced its persisted homeward cursor" :
+                            "paired native debt service consumed its homeward cadence without displacement",
                             current_minutes, site.active_outing.member_ids );
     return true;
 }
