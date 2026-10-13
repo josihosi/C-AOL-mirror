@@ -453,101 +453,33 @@ size_t site_reader::cached_view_count() const
 {
     return impl->views.size();
 }
-static bool watching_member_impl( const bandit_live_world::site_record &site, const npc &observer,
-                                  vehicle_footprint_index &vehicles,
-                                  std::vector<std::unique_ptr<existing_view>> &lighting_views,
-                                  std::string *reason = nullptr )
+// Immediate physical safety is observer-relative, independent of exact/fallback
+// acquisition rules. Reuse the decision's existing geometry and lighting views.
+static bool watch_position_safe_impl( const npc &observer,
+                                     vehicle_footprint_index &vehicles,
+                                     std::vector<std::unique_ptr<existing_view>> &lighting_views,
+                                     std::string *reason )
 {
-    // Optional explanation of this same acquisition decision, not another
-    // eligibility read or a persisted watcher mode.
     const auto refuse = [reason]( const char *why ) {
         if( reason ) {
             *reason = why;
         }
         return false;
     };
-    const auto &outing = site.active_outing;
-    if( site.retired_empty_site ) {
-        return refuse( "site_retired" );
-    }
-    if( outing.local_projection_reconciliation_rejected ) {
-        return refuse( "projection_rejected" );
-    }
-    if( outing.schema_version < 8 ) {
-        return refuse( "legacy_assignment" );
-    }
-    if( outing.kind != bandit_live_world::outing_kind::structural_sortie ) {
-        return refuse( "wrong_outing_kind" );
-    }
-    if( outing.phase != bandit_live_world::scout_phase::observing ) {
-        return refuse( "not_observing" );
-    }
-    if( outing.selected_watch_kind != bandit_live_world::structural_watch_kind::exact ) {
-        return refuse( "not_exact_watch" );
-    }
-    if( bandit_live_world::target_footprint_watch_distance( outing.selected_watch_omt,
-            outing.target_footprint ) != 3 ) {
-        return refuse( "watch_distance" );
-    }
-    if( outing.alternate_watch_reposition_pending ) {
-        return refuse( "reposition_pending" );
-    }
-    if( outing.member_is_resolved( observer.getID() ) ) {
-        return refuse( "member_resolved" );
-    }
-    if( std::find( outing.member_ids.begin(), outing.member_ids.end(), observer.getID() ) ==
-        outing.member_ids.end() ) {
-        return refuse( "member_unassigned" );
-    }
-    if( observer.pos_abs_omt() != outing.selected_watch_omt ) {
-        return refuse( "not_at_watch" );
-    }
-    if( ( outing.owner == bandit_live_world::simulation_owner::local &&
-          ( !outing.local_handoff.is_active() || outing.local_handoff.phase != outing.phase ||
-            !outing.local_handoff.cohesion_assembled || outing.local_handoff.cohesion_abort_return ) ) ) {
-        return refuse( "local_handoff_not_ready" );
-    }
-    if( observer.is_dead_state() ) {
-        return refuse( "dead" );
-    }
-    if( observer.is_blind() ) {
-        return refuse( "blind" );
-    }
-    if( observer.in_sleep_state() ) {
-        return refuse( "sleeping" );
-    }
-    if( observer.has_flag( json_character_flag( "CANNOT_MOVE" ) ) ) {
-        return refuse( "cannot_move" );
-    }
-    if( !observer.path.empty() ) {
-        return refuse( "local_path_pending" );
-    }
-    if( !observer.omt_path.empty() ) {
-        return refuse( "overmap_path_pending" );
-    }
-    if( observer.goto_to_this_pos ) {
-        return refuse( "local_destination_pending" );
-    }
-    if( observer.mission == NPC_MISSION_TRAVELLING ) {
-        return refuse( "travelling" );
-    }
-    if( ( observer.goal != npc::no_goal_point && observer.goal != outing.selected_watch_omt ) ) {
-        return refuse( "other_goal" );
-    }
-    if( observer.get_attitude() == NPCATT_FLEE || observer.get_attitude() == NPCATT_FLEE_TEMP ) {
-        return refuse( "flight" );
-    }
-    if( observer.get_attitude() == NPCATT_KILL ) {
-        return refuse( "combat_attitude" );
-    }
-    if( observer.get_ai_danger() > 0 ) {
-        return refuse( "ai_danger" );
-    }
-    if( observer.get_ai_target().lock() ) {
-        return refuse( "ai_target" );
-    }
-    if( observer.get_current_attack() ) {
-        return refuse( "attack_pending" );
+    // Native turns refresh these tactical plans only for active actors. Unload
+    // and body catch-up retain the cache; its old target/danger/attack is not a
+    // current off-bubble perception. Preserve it for Native AI, and read actual
+    // fields and visible hostiles below for either owner instead of clearing it.
+    if( observer.is_active() ) {
+        if( observer.get_ai_danger() > 0 ) {
+            return refuse( "ai_danger" );
+        }
+        if( observer.get_ai_target().lock() ) {
+            return refuse( "ai_target" );
+        }
+        if( observer.get_current_attack() ) {
+            return refuse( "attack_pending" );
+        }
     }
     for( const char *effect : {
              "narcosis", "stunned", "downed", "psi_stunned",
@@ -624,11 +556,14 @@ static bool watching_member_impl( const bandit_live_world::site_record &site, co
             if( observer.sees_without_clairvoyance( here, *enemy ) ) {
                 return refuse( "visible_hostile" );
             }
-        } else if( view->has_ray( observer.pos_abs(), enemy->pos_abs() ) ) {
+        } else {
+            if( !view->has_ray( observer.pos_abs(), enemy->pos_abs() ) ) {
+                return refuse( "hostile_geometry_unavailable" );
+            }
             const auto observer_light = existing_ambient( observer.pos_abs(), lighting_views, vehicles );
             const auto target_light = existing_ambient( enemy->pos_abs(), lighting_views, vehicles );
             if( !observer_light || !target_light ) {
-                continue;
+                return refuse( "hostile_lighting_unavailable" );
             }
             set_view_ambient( *view, observer.pos_abs(), *observer_light );
             set_view_ambient( *view, enemy->pos_abs(), *target_light );
@@ -644,9 +579,104 @@ static bool watching_member_impl( const bandit_live_world::site_record &site, co
         }
     }
     if( reason ) {
-        *reason = "eligible";
+        *reason = origin_known ? "eligible" : "eligible_lookout_geometry_unknown";
     }
     return true;
+}
+
+static bool watching_member_impl( const bandit_live_world::site_record &site, const npc &observer,
+                                  vehicle_footprint_index &vehicles,
+                                  std::vector<std::unique_ptr<existing_view>> &lighting_views,
+                                  std::string *reason = nullptr )
+{
+    // Optional explanation of this same acquisition decision, not another
+    // eligibility read or a persisted watcher mode.
+    const auto refuse = [reason]( const char *why ) {
+        if( reason ) {
+            *reason = why;
+        }
+        return false;
+    };
+    const auto &outing = site.active_outing;
+    if( site.retired_empty_site ) {
+        return refuse( "site_retired" );
+    }
+    if( outing.local_projection_reconciliation_rejected ) {
+        return refuse( "projection_rejected" );
+    }
+    if( outing.schema_version < 8 ) {
+        return refuse( "legacy_assignment" );
+    }
+    if( outing.kind != bandit_live_world::outing_kind::structural_sortie ) {
+        return refuse( "wrong_outing_kind" );
+    }
+    if( outing.phase != bandit_live_world::scout_phase::observing ) {
+        return refuse( "not_observing" );
+    }
+    const bool exact_watch =
+        outing.selected_watch_kind == bandit_live_world::structural_watch_kind::exact;
+    const bool fallback_watch =
+        outing.selected_watch_kind == bandit_live_world::structural_watch_kind::fallback;
+    if( !exact_watch && !fallback_watch ) {
+        return refuse( "not_exact_watch" );
+    }
+    const auto distance = bandit_live_world::target_footprint_watch_distance(
+                              outing.selected_watch_omt, outing.target_footprint );
+    if( !distance || ( exact_watch ? *distance != 3 : ( *distance < 4 || *distance > 5 ) ) ) {
+        return refuse( "watch_distance" );
+    }
+    if( outing.alternate_watch_reposition_pending ) {
+        return refuse( "reposition_pending" );
+    }
+    if( outing.member_is_resolved( observer.getID() ) ) {
+        return refuse( "member_resolved" );
+    }
+    if( std::find( outing.member_ids.begin(), outing.member_ids.end(), observer.getID() ) ==
+        outing.member_ids.end() ) {
+        return refuse( "member_unassigned" );
+    }
+    if( observer.pos_abs_omt() != outing.selected_watch_omt ) {
+        return refuse( "not_at_watch" );
+    }
+    if( ( outing.owner == bandit_live_world::simulation_owner::local &&
+          ( !outing.local_handoff.is_active() || outing.local_handoff.phase != outing.phase ||
+            !outing.local_handoff.cohesion_assembled || outing.local_handoff.cohesion_abort_return ) ) ) {
+        return refuse( "local_handoff_not_ready" );
+    }
+    if( observer.is_dead_state() ) {
+        return refuse( "dead" );
+    }
+    if( observer.is_blind() ) {
+        return refuse( "blind" );
+    }
+    if( observer.in_sleep_state() ) {
+        return refuse( "sleeping" );
+    }
+    if( observer.has_flag( json_character_flag( "CANNOT_MOVE" ) ) ) {
+        return refuse( "cannot_move" );
+    }
+    if( !observer.path.empty() ) {
+        return refuse( "local_path_pending" );
+    }
+    if( !observer.omt_path.empty() ) {
+        return refuse( "overmap_path_pending" );
+    }
+    if( observer.goto_to_this_pos ) {
+        return refuse( "local_destination_pending" );
+    }
+    if( observer.mission == NPC_MISSION_TRAVELLING ) {
+        return refuse( "travelling" );
+    }
+    if( ( observer.goal != npc::no_goal_point && observer.goal != outing.selected_watch_omt ) ) {
+        return refuse( "other_goal" );
+    }
+    if( observer.get_attitude() == NPCATT_FLEE || observer.get_attitude() == NPCATT_FLEE_TEMP ) {
+        return refuse( "flight" );
+    }
+    if( observer.get_attitude() == NPCATT_KILL ) {
+        return refuse( "combat_attitude" );
+    }
+    return watch_position_safe_impl( observer, vehicles, lighting_views, reason );
 }
 bool watching_member( const bandit_live_world::site_record &site, const npc &observer )
 {
