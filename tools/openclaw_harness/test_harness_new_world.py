@@ -348,5 +348,98 @@ class RegisteredGenerationOnlyTest(unittest.TestCase):
             self.assertEqual((world/"master.gsav").read_bytes(), before)
 
 
+
+class GenerationRegistryFinalizationTest(unittest.TestCase):
+    def test_native_generation_finalizer_ingests_setup_without_feature_verification(self):
+        for variant in ("valid", "wrong_owner", "wrong_run", "missing_save", "failed_exit"):
+            with self.subTest(variant=variant):
+                self.exercise_finalization(variant)
+
+    def exercise_finalization(self, variant):
+        from contextlib import redirect_stdout
+        import hashlib
+        import io
+        import scenario_registry_cli as cli
+        import scenario_registry_store as store
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve(); run = root/"run"; run.mkdir()
+            registry_path = root/"registry.sqlite3"
+            scenario = generation_scenario(); source = root/"generation.json"
+            source.write_text(json.dumps(scenario))
+            connection = store.open_registry(str(registry_path))
+            try:
+                store.rebuild_manifest_projection(connection, source_paths=[source])
+                selection = store.execute_registry_query(
+                    connection, store.parse_registry_query_request({"requirements": [], "preferences": []}),
+                    scenario_id=scenario["name"], coordinator_brief={"outcome": "generate an owned save only"})
+                self.assertTrue(selection.token_id)
+                token = selection.token_id
+                authority = store.issue_wec_authority(
+                    connection, evidence_class="setup support", authority="registry", run_id=token,
+                    binding_id="e"*64, source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+            finally:
+                connection.close()
+            native = generation_startup(run); native["generation_identity"]["run_id"] = token
+            if variant == "wrong_owner": native["readiness"]["world_owned_by_run"] = False
+            if variant == "wrong_run": native["generation_identity"]["run_id"] = "foreign-run"
+            if variant == "missing_save": native["readiness"]["marker"] = {}
+            if variant == "failed_exit": native["exit_code"] = 1
+            accepted = variant == "valid"
+            declaration = harness.load_scenario(scenario["name"], source_path=str(source))
+            receipt = json.dumps({"registry_path": str(registry_path), "token_id": token,
+                "source_path": str(source), "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "wec_authority": authority, "runtime_binding": {"executable_sha256": "e"*64}})
+            adapters = store.BindingAdapters(
+                runtime=lambda _: {"status": "compatible", "facts": {"source_sha256": "a"*64, "executable_sha256": "e"*64}},
+                fixture=lambda _: {"status": "compatible", "facts": {"source_sha256": "f"*64}},
+                profile=lambda _: {"status": "compatible", "facts": {"source_sha256": "1"*64}})
+            actual = []
+            callback = cli._registry_post_finalize_ingest(receipt)
+            def hook(path, payload):
+                actual.append(callback(path, payload))
+            args = harness.build_parser().parse_args(["probe", scenario["name"], "--profile", "offline"])
+            args._loaded_scenario = declaration
+            args.registry_launch_receipt = receipt
+            args.registry_post_finalize_hook = hook
+            with patch.object(cli, "production_binding_adapters", return_value=adapters), \
+                 patch.object(harness, "repo_root", return_value=root), \
+                 patch.object(harness, "detect_executable", return_value=root/"game"), \
+                 patch.object(harness, "run_startup_in_process", return_value=(0, native, "native generator stub", "")), \
+                 patch.object(harness, "current_owned_process_generation", return_value={
+                     "status": "exited", "pid": 101, "expected": {"pid": 101}}), \
+                 patch.object(harness, "cleanup_game_process", side_effect=AssertionError("offline test signalled process")), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(harness._run_probe_mode(args), 0 if accepted else 1)
+            report = json.loads((run/"probe.report.json").read_text())
+            connection = store.open_registry(str(registry_path))
+            try:
+                events = [(r["event_kind"],r["reason"]) for r in connection.execute(
+                    "SELECT event_kind,reason FROM token_history WHERE token_id=? ORDER BY token_event_id", (token,))]
+                ingestion_errors = [dict(r) for r in connection.execute(
+                    "SELECT ingestion_status,error_text FROM report_ingestion_history")]
+                counts = {t:connection.execute("SELECT count(*) FROM "+t).fetchone()[0]
+                    for t in ["verification_history", "scenario_intervention_history"]}
+                preparation = [r[0] for r in connection.execute(
+                    "SELECT preparation_status FROM scenario_intervention_history")]
+            finally:
+                connection.close()
+            print(json.dumps({"control": "native_generation_finalizer_ingestion", "variant": variant, "callback": actual,
+                "token_events": events, "counts": counts, "preparation": preparation, "ingestion_errors": ingestion_errors, "native_game_started": False}))
+            self.assertEqual(actual[0]["status"], "ingested_setup_only", actual)
+            self.assertIn(("verification_run","setup_only_report_ingested"), events)
+            self.assertFalse(any(kind=="invalidated" for kind,_ in events))
+            self.assertEqual(counts["verification_history"], 0)
+            self.assertFalse(report["feature_proof"])
+            self.assertEqual(report["wec_authority"], authority)
+            self.assertEqual(report["run_id"], token)
+            self.assertEqual(report["binding_id"], "e"*64)
+            self.assertEqual(counts["scenario_intervention_history"], 1)
+            self.assertEqual(report["ok"], accepted)
+            self.assertEqual(report["scenario_setup"]["interventions"][0]["native_receipt"]["accepted"], accepted)
+            self.assertEqual(preparation, ["prepared" if accepted else "unprepared"])
+            self.assertFalse(actual[0]["final_gates"]["automated_certification"])
+            self.assertFalse(actual[0]["final_gates"]["windows_feel"])
+
+
 if __name__ == "__main__":
     unittest.main()

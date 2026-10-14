@@ -24268,9 +24268,24 @@ def generation_only_probe_report(scenario: Mapping[str, Any], startup_rc: int,
     proof = {"status": "green" if accepted else "red", "verdict": verdict,
              "evidence_class": "setup", "feature_proof": False,
              "rule": "Only authenticated native world save/exit is proved; no World or gameplay credit."}
+    setup_receipt = {
+        "operation": "native_world_generation",
+        "arguments": dict(contract),
+        "target": {"profile": expected_profile, "run_id": expected_run_id},
+        "native_receipt": {
+            "owner": "harness_new_world", "accepted": accepted,
+            "generation_identity": dict(identity) if isinstance(identity, Mapping) else {},
+            "readiness": dict(readiness), "exit_code": startup.get("exit_code"),
+        },
+        "before_facts": {"save_marker_mtime": readiness.get("baseline_save_marker_mtime")},
+        "after_facts": {"save_marker": readiness.get("marker", {}),
+                        "world_owned_by_run": readiness.get("world_owned_by_run")},
+        "evidence_effect": "none_for_manufactured_state", "gameplay_credit": False,
+    }
     return {"ok": accepted, "mode": "probe", "scenario": scenario.get("name", ""),
             "profile": startup.get("profile", ""), "world": contract["world"], "fixture": "",
-            "startup": dict(startup), "steps": [{**dict(scenario["steps"][0]),
+            "startup": dict(startup), "scenario_setup": {"interventions": [setup_receipt]},
+            "steps": [{**dict(scenario["steps"][0]),
                 "status": "green" if accepted else "red", "readiness": dict(readiness)}],
             "screen": {"status": "not_required_generation_only"},
             "proof_classification": proof, "evidence_class": "setup", "feature_proof": False,
@@ -42772,6 +42787,17 @@ def _run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
             scenario, start_rc, start_result, expected_profile=profile,
             expected_run_id=transition_event_run_id)
         report["mode"] = mode
+        registry_receipt_text = str(getattr(args, "registry_launch_receipt", "") or "")
+        if registry_receipt_text:
+            receipt = json.loads(registry_receipt_text)
+            if receipt.get("diagnostic_replay") is True:
+                report["diagnostic_replay"] = True
+            if isinstance(receipt.get("wec_authority"), Mapping):
+                report["wec_authority"] = dict(receipt["wec_authority"])
+                report["run_id"] = str(receipt["wec_authority"].get("run_id", ""))
+                report["binding_id"] = str(receipt["wec_authority"].get("binding_id", ""))
+            if receipt.get("authority_kind") == "registry_repair_exact_contradiction":
+                report["supersedes_verification_id"] = str(receipt["red_verification_id"])
         finalize_scenario_report(
             run_dir, report, scenario=scenario,
             cleanup_pid=int(start_result.get("pid", 0) or 0),
