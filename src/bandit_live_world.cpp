@@ -16708,8 +16708,12 @@ std::vector<structural_outing_plan> cheap_structural_outing_candidates(
             if( lhs_expiry.has_value() != rhs_expiry.has_value() ) {
                 return lhs_expiry.has_value();
             }
-            if( lhs_expiry && *lhs_expiry != *rhs_expiry ) {
-                return *lhs_expiry < *rhs_expiry;
+            if( lhs_expiry.has_value() && rhs_expiry.has_value() ) {
+                const int lhs_expiry_minutes = lhs_expiry.value();
+                const int rhs_expiry_minutes = rhs_expiry.value();
+                if( lhs_expiry_minutes != rhs_expiry_minutes ) {
+                    return lhs_expiry_minutes < rhs_expiry_minutes;
+                }
             }
         }
         return cheap_plan_precedes( lhs, rhs, site );
@@ -24413,24 +24417,31 @@ bool covert_scout_egress_route_respects_retry_memory(
     const active_outing_state &outing, const tripoint_abs_omt &member_start,
     const std::vector<tripoint_abs_omt> &route, const bool current_route_failed )
 {
+    if( route.empty() ) {
+        return false;
+    }
     const tripoint_abs_omt route_origin = outing.covert_egress_attempts > 0 &&
                                           current_route_failed ?
                                           outing.local_handoff.egress_omt :
                                           outing.selected_watch_omt;
     const std::optional<int> origin_distance = target_footprint_watch_distance(
                 route_origin, outing.target_footprint );
-    const std::optional<int> destination_distance = route.empty() ? std::nullopt :
+    const std::optional<int> destination_distance =
             target_footprint_watch_distance( route.front(), outing.target_footprint );
     const std::optional<int> start_distance = target_footprint_watch_distance(
                 member_start, outing.target_footprint );
-    if( !origin_distance || !destination_distance || !start_distance ||
-        route.back() != member_start ||
-        *destination_distance < *origin_distance ||
-        ( outing.covert_egress_attempts > 0 && current_route_failed &&
-          *destination_distance <= *origin_distance ) ) {
+    if( !origin_distance || !destination_distance || !start_distance ) {
         return false;
     }
-    int previous_distance = *start_distance;
+    const int origin_distance_omt = origin_distance.value();
+    const int destination_distance_omt = destination_distance.value();
+    if( route.back() != member_start ||
+        destination_distance_omt < origin_distance_omt ||
+        ( outing.covert_egress_attempts > 0 && current_route_failed &&
+          destination_distance_omt <= origin_distance_omt ) ) {
+        return false;
+    }
+    int previous_distance = start_distance.value();
     for( std::size_t reverse_index = route.size(); reverse_index > 0; --reverse_index ) {
         const std::size_t index = reverse_index - 1;
         const tripoint_abs_omt &route_omt = route[index];

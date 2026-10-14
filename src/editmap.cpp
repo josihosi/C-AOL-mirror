@@ -387,12 +387,12 @@ void editmap_ui::handle_action()
     bool invalidate_ui = false;
 
     semantic_surface_manager *const semantic_manager = active_semantic_surface_manager();
-    const auto semantic_payload = [&brush]() {
+    const auto semantic_payload = [&brush, &state = editmap_state]() {
         const field_type_id fire = field_type_str_id( "fd_fire" );
         return std::map<std::string, std::string> {
             { "target", brush.target.to_string() },
             { "origin", brush.origin.to_string() },
-            { "mode", editmap_state.mode == EMM_DRAWING ? "drawing" : "selecting" },
+            { "mode", state.mode == EMM_DRAWING ? "drawing" : "selecting" },
             { "brush_shape", io::enum_to_string( brush.shape_basic_brush ) },
             { "terrain_enabled", brush.drawing_terrain ? "true" : "false" },
             { "furniture_enabled", brush.drawing_furniture ? "true" : "false" },
