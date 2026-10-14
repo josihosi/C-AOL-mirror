@@ -3,6 +3,7 @@
 #include "bandit_pursuit_handoff.h"
 
 #include <cstdint>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -25,12 +26,17 @@
 #include "map_helpers_tests.h"
 #include "map_scale_constants.h"
 #include "npc.h"
+#include "options.h"
+#include "path_info.h"
+#include "filesystem.h"
 #include "omdata.h"
 #include "overmap.h"
 #include "overmapbuffer.h"
 #include "point.h"
 #include "player_helpers.h"
 #include "rng.h"
+#include "regional_settings.h"
+#include "worldfactory.h"
 
 static const string_id<npc_template> npc_template_test_talker( "test_talker" );
 
@@ -77,17 +83,62 @@ std::map<std::string, tripoint_abs_omt> find_natural_hostile_camps()
     std::map<std::string, tripoint_abs_omt> found;
     // Match the hidden fresh-world route: generate (1,0) through the ordinary default route
     // while no cardinal neighbor is loaded.
+    const cata_path disk = PATH_INFO::current_dimension_save_path() / "overmaps/o.1.0.zzip";
+    const cata_path plain = PATH_INFO::current_dimension_save_path() / "o.1.0";
+    const bool region_present = get_options().has_option( "DEFAULT_REGION" );
+    std::cout << "batch_worldgen_input catch_seed=" << Catch::getCurrentContext().getConfig()->rngSeed()
+              << " game_seed=" << g->get_seed()
+              << " absent_target_cardinals_asserted=1"
+              << " disk_present=" << file_exist( disk )
+              << " plain_present=" << file_exist( plain )
+              << " compression=" << world_generator->active_world->has_compression_enabled()
+              << " default_region_present=" << region_present
+              << " default_region=" << ( region_present ?
+                                         get_options().get_option( "DEFAULT_REGION" ).getValue() : "unavailable" )
+              << '\n';
+    std::cout << "batch_worldgen_lane"
+#if defined(_MSC_VER)
+              << " msvc=" << _MSC_VER
+#else
+              << " compiler=" << __VERSION__
+#endif
+#if defined(TILES)
+              << " tiles=1"
+#else
+              << " tiles=0"
+#endif
+#if defined(_LIBCPP_VERSION)
+              << " libcxx=" << _LIBCPP_VERSION
+#elif defined(__GLIBCXX__)
+              << " libstdcxx=" << __GLIBCXX__
+#endif
+              << '\n';
     overmap &generated = overmap_buffer.get( point_abs_om( 1, 0 ) );
+    std::cout << "batch_worldgen_region id=" << generated.get_settings().id.str()
+              << " city_size=" << generated.get_settings().get_settings_city().city_size
+              << " city_spacing=" << generated.get_settings().get_settings_city().city_spacing << '\n';
+    int scanned_tiles = 0;
+    int bandit_tiles = 0;
+    int cannibal_tiles = 0;
     for( int x = 0; x < OMAPX && found.size() < 2; ++x ) {
         for( int y = 0; y < OMAPY && found.size() < 2; ++y ) {
             const tripoint_om_omt local( x, y, 0 );
+            ++scanned_tiles;
             const std::optional<overmap_special_id> special = generated.overmap_special_at( local );
             if( special && ( *special == overmap_special_id( "bandit_camp" ) ||
                              *special == overmap_special_id( "cannibal_camp" ) ) ) {
+                bandit_tiles += *special == overmap_special_id( "bandit_camp" );
+                cannibal_tiles += *special == overmap_special_id( "cannibal_camp" );
                 found.emplace( special->str(), project_combine( generated.pos(), local ) );
             }
         }
     }
+    std::cout << "batch_worldgen_camps scanned_tiles=" << scanned_tiles
+              << " observed_bandit_tiles=" << bandit_tiles
+              << " observed_cannibal_tiles=" << cannibal_tiles
+              << " found_bandit=" << found.count( "bandit_camp" )
+              << " found_cannibal=" << found.count( "cannibal_camp" )
+              << " scan_complete=" << ( found.size() < 2 ) << '\n';
     return found;
 }
 

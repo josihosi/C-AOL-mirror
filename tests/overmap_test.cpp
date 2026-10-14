@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <iostream>
 #include <list>
 #include <map>
 #include <memory>
@@ -56,6 +57,7 @@
 #include "vehicle.h"
 #include "vpart_position.h"
 #include "writhing_stalker_ai.h"
+#include "worldfactory.h"
 #include "zombie_rider_overmap_ai.h"
 
 static const overmap_special_id overmap_special_Cabin( "Cabin" );
@@ -929,6 +931,38 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
         }
     }
 
+    const std::size_t initial_expected = yet_to_be_seen.size();
+    std::size_t requested_regions = 0;
+    std::size_t scanned_regions = 0;
+    std::size_t prior_remaining = initial_expected;
+    std::size_t filtered_candidates = 0;
+    const auto report_generation = [&]( const char *stage, const int pass ) {
+        std::set<std::string> missing_ids;
+        for( const auto &id : yet_to_be_seen ) {
+            missing_ids.insert( id->id.str() );
+        }
+        std::cout << "batch_worldgen_coverage stage=" << stage << " pass=" << pass
+                  << " origin=" << overmap_origin.to_string()
+                  << " requested_regions=" << requested_regions
+                  << " scanned_regions=" << scanned_regions
+                  << " observed_types=" << stats.size()
+                  << " initial_expected=" << initial_expected
+                  << " newly_covered=" << ( prior_remaining - yet_to_be_seen.size() )
+                  << " remaining=" << yet_to_be_seen.size()
+                  << " filtered_candidates=" << filtered_candidates << " first_remaining=";
+        int shown = 0;
+        for( const auto &id : missing_ids ) {
+            if( shown++ == 8 ) {
+                break;
+            }
+            std::cout << id << ',';
+        }
+        std::cout << '\n';
+        prior_remaining = yet_to_be_seen.size();
+    };
+    on_out_of_scope report_exit( [&]() {
+        report_generation( "exit", -1 );
+    } );
     // Build reverse map: oter_type_id -> info about specials that produce it.
     // Used for the filtered generation phase and diagnostic logging.
     struct special_spawn_info {
@@ -940,8 +974,31 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
         int occ_max;
     };
     std::unordered_map<oter_type_id, std::vector<special_spawn_info>> terrain_to_specials;
-    const int city_size = overmap_buffer.get_default_settings(
-                              point_abs_om() ).get_settings_city().city_size;
+    const bool region_present = get_options().has_option( "DEFAULT_REGION" );
+    std::cout << "batch_worldgen_coverage_input catch_seed=" <<
+              Catch::getCurrentContext().getConfig()->rngSeed()
+              << " game_seed=" << g->get_seed()
+              << " default_region_present=" << region_present
+              << " default_region=" << ( region_present ?
+                                         get_options().get_option( "DEFAULT_REGION" ).getValue() : "unavailable" )
+              << " whitelist=TEST_DATA/overmap_terrain_coverage_test/overmap_terrain_coverage_whitelist.json"
+              << " whitelist_entries=" << test_data::overmap_terrain_coverage_whitelist.size()
+              << " mods_count=" << world_generator->active_world->active_mod_order.size()
+              << " mods=";
+    int mods_shown = 0;
+    for( const auto &id : world_generator->active_world->active_mod_order ) {
+        if( mods_shown++ == 8 ) {
+            break;
+        }
+        std::cout << id.str() << ',';
+    }
+    std::cout << '\n';
+    const auto &default_settings = overmap_buffer.get_default_settings( point_abs_om() );
+    const int city_size = default_settings.get_settings_city().city_size;
+    std::cout << "batch_worldgen_coverage_settings id=" << default_settings.id.str()
+              << " city_size=" << city_size
+              << " city_spacing=" << default_settings.get_settings_city().city_spacing << '\n';
+    report_generation( "initial", -1 );
     for( const overmap_special &sp : overmap_specials::get_all() ) {
         if( !sp.can_spawn( city_size ) ) {
             continue;
@@ -969,6 +1026,7 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
         // First we just touch all the overmaps in an area to cause them to generate.
         for( const point_abs_om &om_cur : closest_points_first( overmap_origin, 0, 3 ) ) {
             point_abs_omt omt_start = project_to<coords::omt>( om_cur );
+            ++requested_regions;
             overmap_buffer.ter( { omt_start, 0 } );
         }
         // Then we scan the generated overmaps.
@@ -981,6 +1039,7 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
             if( overmap_buffer.ter_existing( { omt_start, 0 } ) == oter_id() ) {
                 continue;
             }
+            ++scanned_regions;
             point_abs_omt omt_end = omt_start + ( point::south_east * OMAPX );
             for( point_abs_omt p = omt_start; p.y() < omt_end.y(); p.y()++ ) {
                 for( p.x() = omt_start.x(); p.x() < omt_end.x(); p.x()++ ) {
@@ -998,6 +1057,7 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
                 }
             }
         }
+        report_generation( "normal", attempt_no );
         // The second phase of this test is to perform the tile-level mapgen
         // for each oter_type, in hopes of triggering any errors that might arise
         // with that.
@@ -1078,10 +1138,12 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
         }
 
         if( !filtered.empty() ) {
+            filtered_candidates = filtered.size();
             overmap_buffer.reset();
             overmap_special_batch custom_batch( overmap_origin, filtered );
             for( const point_abs_om &om_cur :
                  closest_points_first( overmap_origin, 0, 3 ) ) {
+                ++requested_regions;
                 overmap_buffer.create_custom_overmap( om_cur, custom_batch );
             }
             // Scan the custom overmaps for newly-placed terrains.
@@ -1091,6 +1153,7 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
                 if( overmap_buffer.ter_existing( { omt_start, 0 } ) == oter_id() ) {
                     continue;
                 }
+                ++scanned_regions;
                 point_abs_omt omt_end = omt_start + ( point::south_east * OMAPX );
                 for( point_abs_omt p = omt_start; p.y() < omt_end.y(); p.y()++ ) {
                     for( p.x() = omt_start.x(); p.x() < omt_end.x(); p.x()++ ) {
@@ -1107,6 +1170,7 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
                     }
                 }
             }
+            report_generation( "filtered", 0 );
             // Mapgen sampling for newly observed terrains.
             for( std::pair<const oter_type_id, omt_stats> &p : stats ) {
                 int goal_samples = 1;
