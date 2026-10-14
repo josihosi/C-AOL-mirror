@@ -14,8 +14,8 @@ before confirming: an accepted filter request alone is not proof that the visibl
 
 ## GUI setup on this Mac
 
-Use the verified Mac bridge socket on every Peekaboo call. Its `permissions status --json` must
-report the capability actually being used. Read `SESSION/game-process.json` for the bound PID
+Use the verified Mac bridge socket on every Peekaboo call. On an actual failure, query bridge
+and permissions status through that same socket; do not repeat already granted permission requests. Read `SESSION/game-process.json` for the bound PID
 and confirm that process is still the session's game. Replace PID below with that value; never
 copy a historical process ID. Prefer native semantic actions where they expose the operation.
 
@@ -52,8 +52,8 @@ request and message time. Manufactured setup has zero ecology credit.
 When the owner has prepared a brazier, fuel and a firewood source zone, use them through ordinary
 gameplay. From an adjacent safe tile, open inventory, select the current charged lighter, choose
 its **Activate** item action, and at **Light where?** choose the brazier tile from the current
-direction controls. Row 03 of `build_logs/harness-fixes-matrix20/INDEX.md` and its transcript prove
-this native route: it returned World with `fd_fire` and `fd_hot_air1` on the chosen tile. Use fresh
+direction controls. A historical native check returned World with `fd_fire` and `fd_hot_air1`
+on the chosen tile; its matrix/transcript was consumed and is not a current dependency. Use fresh
 item and direction IDs in each run. A brazier alone, an accepted command, hot air elsewhere, or a
 preseeded fire does not prove this run ignited the brazier. After confirming actual fire, step
 about two tiles away without stepping onto the burning tile. Check that fuel and fire persist.
@@ -66,10 +66,10 @@ the smoke/camp watch without trying to light it again.
 
 For the owner's closed-room smoke and open-room light comparisons, use the prepared separate save
 copies and ordinary fires. Keep the windows and curtains at their stated starting positions;
-avoid a smokebomb or injected signal as a substitute. When fuel is genuinely absent, use only an
-owner-authorized, recorded setup intervention; it earns no natural signal credit. The owner has
-specifically authorized at least 1,000 splintered wood units on the tile right of the brazier if
-that prepared fuel is missing. Read [behavior and movement](behavior-and-movement.md) for the
+avoid a smokebomb or injected signal as a substitute. For the prepared closed-window smoke case, use the existing fuel and source zone without
+adding fuel setup. Investigate actual ignition or maintenance failure through current controls;
+use an intervention only when the current assignment specifically authorizes it, with zero natural
+signal credit. An old run's wood-spawn permission is not standing authority. Read [behavior and movement](behavior-and-movement.md) for the
 long observation and quicksave decision loop.
 
 The reusable isolated scenario `r029.setup_information_diagnostic_mcw` and its matching brief/charter

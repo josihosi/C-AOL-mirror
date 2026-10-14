@@ -60,10 +60,14 @@ its `.d` targets can still name the old path (and older dependencies may name th
 target). Use a fresh empty build prefix when dependency provenance is uncertain; otherwise
 verify the actual dependency targets and changed-header consumers before reusing objects.
 R015 mixed old `game.o` with the new site layout and crashed; R016 clean dependency rebuild
-plus same-save native World/action recovered it. Exact evidence:
-`build_logs/first-smoke-016/startup-crash-diagnosis-checkpoint.md`,
-`full-build/object-provenance.json` and `native-recovery-result.json` in that directory.
-This is a changed-header/cache condition, not a mandatory clean rebuild on every playtest.
+plus same-save native World/action recovered it. Those raw R016 artifacts were consumed;
+retain the dependency lesson rather than searching for or recreating them.
+This is a changed-header/cache condition, not a mandatory clean rebuild on every playtest. Keep one current HEAD-compatible build/cache for each needed renderer and reuse valid dependencies.
+A necessary fresh build replaces the superseded product; it does not establish permanent retention
+of both. Do not copy whole object trees, worktrees or game data into per-check proof directories.
+Record the revision, relevant build settings, executable identity and result once. Owners remove
+obsolete products and generated playtest saves/logs after active users release them. Preserve user
+data and active operations; completed runs do not require retained proof archives.
 A stale executable may support an explicitly isolated
 harness diagnosis only; current-product conclusions require a source-matching executable.
 
@@ -129,5 +133,5 @@ explicit routes through `runtime-status-artifact --sha256 <receipt-digest>` and 
 
 For a focused Tiles-linked C++ test, reuse the configured source-bound build's compile/link inputs
 or its existing test target. A standalone default test make can omit SDL3 flags and Tiles objects;
-that is a build setup failure, not a game regression. The recovered R048 command and inputs are
-retained in `build_logs/first-smoke-048/r048-route-probe-build/build.full.log`.
+that is a build setup failure, not a game regression. The historical R048 full build log was
+consumed; use the current build target and its actual compile/link inputs.

@@ -17,7 +17,7 @@ last captured event, truncation/orphan repeat bases and display pagination. A qu
 capture limit. A quiet interval is negative evidence only for the selected, supported and retained
 scope. An intent is not movement, a shot is not a hit, and a hit is not a confirmed death.
 
-## Every suite arm
+## Faction arm evidence
 
 | Arm | Minimum evidence for the claimed outcome | Existing route and remaining limit |
 | --- | --- | --- |
@@ -42,6 +42,10 @@ scope. An intent is not movement, a shot is not a hit, and a hit is not a confir
 | 7 lamp-only | Electrical baseline/on-state, light read/report, absence of smoke in measured capture, faction-specific response | Existing typed signal records; missing lamp baseline is setup, not a logging defect. |
 | 8 patrol/defense | Actual duty/shift/locker state, release/recruitment, chosen target and combat; separate peaceful collector interval | Selected camp NPC decisions work. Duty/roster/inventory snapshots establish changes; gap B/C only if decisive cause is missing. |
 | CLI controls | Ordered accepted actions, pending/exact-ID recovery, requested/completed count, real turns/moves/HP and owner, terminal cleanup | Existing R043 audit/receipts. Keep control result separate from packaged-run classifier; gap E. |
+
+## Companion and added transition stories
+
+The [companion protocol](llm-companion-journey.md) owns its command/character report and runner/request correlation. [Suite X1–X6](playtest-suite.md#added-transition-stories--owner-selected-2026-10-05) state their additional proof without a second coverage database: X1 reuses payment/item/save evidence; X2 adds individual rider target/impact/ammo continuity; X3 reuses source/report provenance; X4 reuses casualty/handover evidence with explicit debug intervention; X4b separately captures a debug-spawned rider and native bandit threat response, combat/survival and resumed return; X5 follows activity progress/materials through recovery; X6 combines applicable boundaries over a useful longer trip. Preserve teleport/invisibility/induced-death scope rather than attributing those interventions to ordinary NPC behavior. Source tests and historical manifests do not establish native adoption.
 
 ## Bounded implementation gaps for the existing tooling owner
 
@@ -88,15 +92,11 @@ receipt key. For a repeated rejection emit first/last/count and concrete rejecti
 change. No all-world polling. Test split pair, boundary corner, survivor/zero survivors, save/reload,
 vertical edge and idempotent return/cargo against actual adapters. Preserve accepted earlier proofs.
 
-**E — Clean exit classified as failure: source-supported harness bug.** startup_harness.py
-computes expected_clean_terminal_exit before deferred scenario terminalization from an already
-finished cockpit cleanup status alone. Reconcile the SAME run/step's requested finish, exact process
-exit and final cleanup before producing the final feature verdict, preserving prior genuine feature
-errors. Use one shared predicate/finalization path rather than another special-case status string.
-Never make every process exit green: crash/nonzero/unrequested exit, wrong binding, incomplete
-cleanup and missing evidence stay failures/unknown. Reproduce the R043 deferred-clean-exit case and
-negative controls; rederive a corrected report with provenance while retaining the original. Native
-accepted action receipts remain valid; a final report repair is not new gameplay proof.
+**E — Historical clean-exit classification, corrected.** Current startup finalization withholds
+intermediate clean-exit credit and authenticates the requested quit and exact process exit before
+classifying the final result. Do not reproduce or rederive an old report merely because this
+historical issue is listed. Investigate a fresh contrary result through its actual binding; crashes,
+unrequested exits, missing evidence and incomplete cleanup retain their distinct outcomes.
 
 ## Retention, usability and scope
 

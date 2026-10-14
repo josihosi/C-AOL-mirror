@@ -1,17 +1,24 @@
 # Smoke → cannibal raid
 
+Historical raw records named below that were consumed are comparison context, not retrievable
+inputs or prerequisites. Use the current selected handoff and current controls.
+
 **Outcome:** real smoke causes scouting, return/report and a raid that physically attacks.
 A raid killing the player is success for this arm; passive pacing is not.
 Expect the lit fire to develop smoke, an eligible camp to notice it, and scouts to investigate
 before a later raid. One weak sample or an observation before the next camp scan is not failure;
 continue while the situation develops, checking changes rather than assuming guaranteed growth.
 
-**Evidence boundary:** the [suite coverage table](playtest-suite.md#current-coverage-and-next-complete-pass)
+**Evidence boundary:** the [suite coverage table](playtest-suite.md#ordered-coverage-and-reusable-starts)
 links retained results and current gaps. Ordinary-view attacks and attributed kills are proved at
 their bound run/build scope; a saved-contact continuation does not prove fresh smoke admission.
 Reuse the controls below with the selected build, not historical timing or actor IDs.
 
 ## Start
+
+For the current full-suite pass and four normal parallel trials, select the arm's initial pre-signal save and perform the complete relevant journey. A late ready-report/pre-raid checkpoint may reproduce a defect but cannot replace admission, scouting or report evidence in that pass. Preserve current live closeouts and held scenes; this document does not authorize their restart.
+
+The successful ordinary roof journey R068/run24c535 began at turn5216234/min7737 from a 45-file prepared pre-signal copy, raw tree `3154e8f09eacee04e3e1a6a3353dd80ffefab2615337ac79ef4f447859a84326`. Its original prepared manifest derives from archive `josef-basecamp-closed-windows-20260924-122642.zip`, SHA256 `4b11469931507c49f0b373934730fed6b729b7a29b87c6f78eca0f728e8320c3`; the manifest records the prepared overmap change, so the raw archive is not the prepared tree. Old executable0bdc/product74c64 and historical timing/IDs prove that run only. Use the existing current-source selection and a byte-bound disposable initial copy, with the roof route below.
 
 Coordinator supplies the selected scenario/session, start-save identity, current completed
 setup and remaining outcome. Include `RUN` (native run directory), `PROFILE` and `RUN_ID`
@@ -20,7 +27,7 @@ create a disposable copy. Use a preserved-copy manifest for independent starts.
 
 For the normalized closed-window setup: indoor brazier `[3159,3449,0]`, camp OMT
 `[131,143,0]`. Closed windows isolate smoke from exterior light. Verify current state once;
-a continuation may already have fire, scouts or raid knowledge. Keep ordinary vision for this
+a diagnostic continuation may already have fire, scouts or raid knowledge and must retain that narrower credit. Full-start ignition requires the intended unlit source; do not silently replace it with an already-burning checkpoint. Keep ordinary vision for this
 arm. Use the current observation/menu; collect any pending request before issuing another.
 
 Before long waits, apply the shared [mutation setup](setup-and-interactions.md#mutation-setup-for-suite-runs): verify avatar `DEBUG_LS`, add only if missing, retain ordinary vision. Exact saved-regression starts retain their declared setup.
@@ -29,8 +36,7 @@ Before long waits, apply the shared [mutation setup](setup-and-interactions.md#m
 
 1. **Make smoke if needed.** Walk beside the brazier, select the charged lighter in inventory,
    Activate, choose the brazier direction, confirm fuel if prompted. Resolve IDs from each
-   returned menu. Check native ignition/fire, then smoke and camp admission. Already burning:
-   skip ignition. [Exact fire controls](../GAME-MANUAL.md#fire-in-a-prepared-brazier).
+   returned menu. Check native ignition/fire, then smoke and camp admission. Already lit during this same journey: do not ignite twice. A diagnostic already-burning start does not prove ignition. [Exact fire controls](../GAME-MANUAL.md#fire-in-a-prepared-brazier).
    If the first sample is rejected, use [visibility over time](smoke-light-visibility.md) to distinguish
    evolving fire/smoke strength from a fixed range, terrain or cross-z boundary.
 2. **Advance through the current stage.** Use an explicit `safe` wait sized to the next known
@@ -41,8 +47,9 @@ Before long waits, apply the shared [mutation setup](setup-and-interactions.md#m
    does not promise to stop for a distant NPC's combat or death.
 3. **Inspect meaningful changes.** Use the decision points below. Read the returned frame and
    retrieve only missing operation/actor evidence, preferably in one related query batch.
-   Preserve source handles and performance alarms; investigate actual turns over100ms through
-   the existing performance task. Avoid an automatic look/save/full-roster sequence.
+   Preserve source handles and configured [performance alarms](live-operation.md): wait alarms use
+   a 100-turn mean above 100ms; non-wait assessment needs its bound config. Separate wall time
+   from simulation time and disclose missing measurement. Avoid an automatic look/save/full-roster sequence.
 4. **Let the assault happen.** Inspect first harm and its source. For deliberate combat-through-
    outcome, use `play wait 1m ignore` or the currently advertised native duration. Ignore permits
    damage/death. If already inside a wait submenu, use its advertised action; do not submit a
@@ -57,6 +64,8 @@ can be projections, not NPC locations.** Preserve the first failing checkpoint f
 repair. Native death is evidence even if the last player save predates it.
 
 ## Decision points for efficient repeats
+
+Full roof-death order: initial copy → Safe Off/ordinary visibility/authorized Life Support → actual ladder and working tile → ordinary ignition and maintained fuel → native channel admission → same-ID scouting/watch/return/report → legitimate response/night/rally/contact → actual attacker arrival/contact and combat against the player on z=1 → attributed native player death on z=1 → death-flow/native process exit → journal/report. Combine proven quiet waits and ordinary movement segments aggressively while preserving their interruption policy; resolve new menus and actual Pay/Fight choices from current responses. For this selected roof-death story, retain exact attacker and player positions, target/action, damage and death attribution: roof ignition followed by downstairs death does not pass upstairs contact or roof death. No ladder-only route is required. R048 establishes roof arrival/combat with unknown fatal attribution; R068 establishes attributed roof death at its historical source. If raiders naturally die before the requested contact, credit the actual survival outcome and retain upstairs contact/death as unproved; do not force a death or infer an AI defect from that outcome alone. Death is the requested terminal gameplay result, not a reason to manufacture a final living save. Retain damage/death evidence and complete the current native closeout before sealing. Historical R068 added Life Support late; current setup guidance applies it before long waits rather than reproducing that mistake.
 
 These are questions to answer when the stage changes, not mandatory stops or separate tool calls.
 A single returned result may answer several. Skip already-proved setup on a scoped continuation;
@@ -84,7 +93,7 @@ use bounded waits and inspect the retained changes at each return.
 
 ### Counted actions after the R043 pilot
 
-The [R043 control result](../../../../build_logs/first-smoke-043/result.md) validated
+The R043 control result validated
 `play repeat world.autoattack --count 10` in a deliberately quiet, no-hostile disposable scene.
 It completed ten accepted actions, including collection of one pending exact request; a matched
 run with ten individual Tabs reached the same turn. `play repeat --resume` continues only that
@@ -141,7 +150,7 @@ For the suite's viewer variant, use a **fresh separate closed-window viewer arm*
 An exact saved-casualty regression has its own narrower scope. Reuse Start/Play above; do not repeat that setup in a second
 script. Record both `DEBUG_CLAIRVOYANCE` and `DEBUG_CLAIRVOYANCE_PLUS`, apply only missing
 ones through live controls, then `world.pause` once and verify both active. The prior viewer
-[run](../../../../build_logs/first-smoke-021/r021-clean-closed-dual-clair-viewer-final-witness.json)
+run
 verified this without movement. Walk beside the unlit indoor brazier and use ordinary lighter
 ignition. Do not move before saving or relight an already burning fire.
 
@@ -161,7 +170,7 @@ ordinary-view exposure/combat proof; retain only observed actions and attributed
 
 ## Roof variant
 
-For disposable roof runs, use [Get and verify Debug Life Support](setup-and-interactions.md#get-and-verify-debug-life-support) before long waits. Do not toggle an active trait off or add the debug mutation bundle. This is survival setup, not signal proof; keep ordinary vision unless running the named viewer variant.
+Required roof setup: verify exact **Debug Life Support (DEBUG_LS) active before long waits**, using [Get and verify Debug Life Support](setup-and-interactions.md#get-and-verify-debug-life-support). Add it through the current native mutation menu only if missing; confirm active state after returning to World. Life Support stabilizes hunger, thirst and sleepiness; it does not prevent combat death. Do not toggle an active trait off or add the debug mutation bundle. This is survival setup, not signal proof; keep ordinary vision unless running the named viewer variant.
 
 Reuse the same fire/wait/actor-proof sequence. For the normalized house, use
 [Josef's base-save route and actions](../GAME-MANUAL.md#josefs-two-brazier-base-save): the real
@@ -177,16 +186,14 @@ position after each segment and use the actual ladder. From the working tile the
 `[3156,3447,1]` is northeast. The run used the current lighter Activate action, answered the live
 “Light where?” prompt with northeast, and then observed `f_brazier`, `fd_fire`, and hot-air fields.
 Some local snapshots lacked `fd_smoke` even though the bound overmap sample recorded actual smoke
-admission; check both the local fire and the native signal packet. The full stage sequence and
-raw event handles are in the [R051 roof result](../../../../build_logs/first-smoke-068/r051-roof-fire-result.md).
+admission; check both the local fire and the native signal packet. The R051 result file was consumed; the stage and route facts here are historical comparison
+only, not current input authority.
 
 ### Exact command batches from the retained roof route
 
 The successful run's `semantic.requests.jsonl` records the ordered native action IDs, not a shell
 transcript. These are the exact action arguments in that record, using the current `play_cli.py`
-spelling. Supply `SESSION` from the fresh selected launch. Run one action at a time and confirm the
-listed endpoint; collect an outstanding result and re-observe before continuing after an
-interruption or prompt.
+spelling. Supply `SESSION` from the fresh selected launch. Execute compatible movement segments with existing advertised move/repeat controls or sequential commands, and confirm the listed endpoint from returned results. A separate model round trip per ordinary step is unnecessary. Collect outstanding results and stop the segment on interruption, rejection, changed input owner or unresolved prompt; do not invent an arbitrary batch-file API.
 
 | Batch | Entry state | `play_cli.py` action arguments, in order | Endpoint |
 | --- | --- | --- | --- |
@@ -218,12 +225,8 @@ the brazier. This is an ordinary local-fuel control, not an ignition or debug-fu
 | `roof_source_pick_one_plank` | Player `[3155,3448,1]`; source tile east `[3156,3448,1]` | `act world.move.east`; `act world.pickup`; `act direction.choose --target pause` (Here/current tile); `act inventory.increase_quantity --target CURRENT_PLANK_UID`; `act inventory.commit` | One plank selected from the physical local stack; turn 5216321→5216323 |
 | `roof_source_drop_plank` | Player `[3156,3448,1]` with the plank | `act world.drop`; `act inventory.toggle --target CURRENT_PLANK_UID`; `act inventory.commit`; `act world.move.west` | Plank dropped on the source tile beside the brazier; player returned to `[3155,3448,1]` at turn 5216328 |
 
-The two recorded selector UIDs were `2193089` for pickup and `4262880` for drop. Rebind both to the
-current plank rows; do not reuse those historical UIDs. The [pickup requests](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_030511_62c60c818e6340e2acbe0113e87ce5c2/semantic.requests.jsonl)
-and [drop requests](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_030938_6a718470eb0c4ac9ad636260603dd79a/semantic.requests.jsonl)
-bind the inputs; the corresponding [pickup steps](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_030511_62c60c818e6340e2acbe0113e87ce5c2/semantic.steps.jsonl)
-and [drop steps](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_030938_6a718470eb0c4ac9ad636260603dd79a/semantic.steps.jsonl)
-show acceptance. The native refill at turn 5216418 is in the [first continuation steps](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_032618_3060089e77714996b514e3b9cf4532f1/semantic.steps.jsonl).
+Historical R050 pickup/Drop requests and continuation steps were consumed. The table preserves
+usable control patterns, not current UIDs or live authority; resolve item rows from this run.
 
 For the observed 900-turn sample, the save at 5216328 began with `fd_fire` but no smoke. The logged
 start action was `act world.wait`; the current “Wait a while” menu entry was chosen before
@@ -234,16 +237,12 @@ with `act world.wait`; the current “Wait a while” menu entry was chosen befo
 interval ended at 5217228. Do not treat the menu's chosen duration as elapsed time; use the
 returned turn and re-observe any prompt.
 
-The production-channel query is the exact `scan_id` `4a87fd6267e05739793dfd15dd0b9b049f58a7d146133dd7867b7341995740cf:2`
-in [R008's channel records](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_033322_b955f5e076ef4013972fc7b7147dbab8/r008.production.channels.jsonl).
-At minute 7750, `live_smoke@3156,3447,1` and `live_light@3156,3447,1` both had
-`observed=true`, `isolated=true`, `signal_origin=local_field`, and consumer
-`bandit_live_world.signal_scan`. This is a positive light-and-smoke observation during the interval,
-not proof of continuous emission. The endpoint save at 5217228 still had intensity-1 fire but no
-`fd_smoke`. A search of `debug.final.log` alone missed the structured light row; use the bound
-production-channel record for this claim. The exact action and final save records are in the [900-
-turn steps](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_033322_b955f5e076ef4013972fc7b7147dbab8/semantic.steps.jsonl)
-and [saved World](../../../../.userdata/first-smoke-050-rural-bandit-only-20260930/harness_runs/20261005_033322_b955f5e076ef4013972fc7b7147dbab8/lastworld.after.json).
+Historical R050 scan `4a87fd6267e05739793dfd15dd0b9b049f58a7d146133dd7867b7341995740cf:2`
+recorded both local-field light and smoke at3156,3447,1/min7750. This was one positive observation,
+not continuous emission proof. Its endpoint5217228 retained intensity1 fire but no smoke field.
+The raw channel/action/World records were consumed. For a new claim use the current run-bound
+structured channel evidence; searching only the debug text can miss an independently logged light
+row. These historical wait choices are examples, not the assigned run's schedule.
 
 The retained run's full `wait.2h` intervals began at minutes 7738, 7858, 7978, 8098, 8278, and
 8398; `wait.1h` began at 8218. The final two-hour choice was interrupted at minute 8424 by the
@@ -258,8 +257,7 @@ interrupted it. Read returned elapsed game time and query the current native sit
 chosen endpoint. After first attributed combat harm, use `wait 1m ignore` only when the intent is to
 let that combat continue. The original action and timing records are the bound roof run's
 [semantic requests](../../../../.userdata/r051-r067-roof-fire-comparison-20261004/harness_runs/20261004_230703_95d5cf2e0afc4867893479a76595852a/semantic.requests.jsonl)
-and [semantic steps](../../../../.userdata/r051-r067-roof-fire-comparison-20261004/harness_runs/20261004_230703_95d5cf2e0afc4867893479a76595852a/semantic.steps.jsonl); the interpreted route and endpoints are in the
-[R051 roof result](../../../../build_logs/first-smoke-068/r051-roof-fire-result.md).
+and [semantic steps](../../../../.userdata/r051-r067-roof-fire-comparison-20261004/harness_runs/20261004_230703_95d5cf2e0afc4867893479a76595852a/semantic.steps.jsonl) at that historical source/run. Its separate interpreted result file was consumed.
 
 For the cadence used there, choose the supported `Wait a while` action with a useful long interval
 and recheck the saved/current signal, same-ID scouts, and current activity when that interval
@@ -347,7 +345,7 @@ python3 tools/openclaw_harness/cockpit_file_bridge.py log-query \
 ```
 
 For scout/report transitions and signal channels, use the bound transition/channel records
-and selected fields; [tested historical selectors](../../../../build_logs/first-smoke-011/r011-r001-filled-smoke-raid-protocol-candidate.md#observed-action-and-proof-segments)
+and selected fields; tested historical selectors
 show the actual schema. Historical sequence numbers are not reusable filters.
 The damage trace requires a build with the harness-only R017 hook. Missing source attribution
 is an evidence gap, not proof that no attack occurred. Names, gunshots and shot counters alone

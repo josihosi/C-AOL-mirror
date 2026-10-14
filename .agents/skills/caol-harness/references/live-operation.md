@@ -62,8 +62,6 @@ python3 tools/openclaw_harness/play_cli.py --session SESSION --wait-seconds REMA
 python3 tools/openclaw_harness/play_cli.py --session SESSION resume --request-id REQUEST_ID
 python3 tools/openclaw_harness/play_cli.py --session SESSION cancel --reason "stop this pending request"
 python3 tools/openclaw_harness/play_cli.py --session SESSION inspect SELECTOR
-python3 tools/openclaw_harness/play_cli.py --session SESSION journal --reason "What this run established"
-python3 tools/openclaw_harness/play_cli.py --session SESSION finish --witness FILE
 ```
 
 `controls` is read-only, even while a request is pending. It provides copyable wait/movement
@@ -79,12 +77,13 @@ same process was waiting in ordinary World input: Luna opened the native main me
 exact-PID Peekaboo Escape, observed it, canceled with Escape, then obtained fresh World through
 `look`. Use that bounded recovery only after verifying World/no modal and PID/birth; never send
 an action against the stale activity frame or replay the wait. Reobserve each step and retain the
-actual result. See `build_logs/first-smoke-051/continuation-minute7810-wait-block-observation.json`
-and `coordinator-stale-world-sample.txt`; final recovery handles belong to the R051 return.
+actual result. The original R051 raw recovery records were consumed; this is a bounded historical
+recovery example, not evidence that the same condition exists now.
 
-To end without making a gameplay claim, use `quit --reason "your reason"`, or send
-`{"action":"run.quit","stop_reason":"your reason"}` through `call --request`. A client disconnect also leaves the game running. Only explicit native
-quit, `run.quit`, `run.finish`, or requested bridge cleanup ends it.
+Use the current native save/quit route for ordinary closure. Harness `quit` / `run.quit` or
+bridge cleanup can terminate the process and require authority for that disposal; choosing not to
+make a gameplay claim does not authorize loss of unsaved state. A client disconnect leaves the
+game running. Terminal `journal` and reporting `finish` require native exit first; they are not live evidence commands. See [witness and finish](witness-and-finish.md).
 
 ## Save and reload continuation
 

@@ -21,8 +21,9 @@ Break at a decision, unexpected prompt, rejection, danger or performance alarm. 
 request identity and collect it rather than replaying submitted input. Merge adjacent compatible
 waits with no intervening decision and stop once the outcome is proved.
 
-The actual player's start handoff contains only the selected build/save/scenario, current
-checkpoint and delta, relevant story and command segments, and remaining proof. Link accepted
+The chaperone and actual player's start handoff carries the short canonical
+[world vision](SKILL.md#the-world-we-are-testing), followed by the selected build/save/scenario,
+current checkpoint and delta, relevant story and command segments, and remaining proof. Link accepted
 history and original receipts for retrieval; omit obsolete builds, superseded diagnosis, completed
 branches and duplicated manuals from the ordinary start. Keep any historical fact that changes
 this run's decision or evidence ceiling. Parent and input helper receive the same current segment.
@@ -62,12 +63,12 @@ gameplay actions.
 | How should the CLI show the game? | [Readable play output](#readable-play-output). |
 | Which game facts have already been learned? | [Current reusable findings](#current-reusable-findings). |
 | What should I record, revise, or prune? | [Add, prune and correct notes](#add-prune-and-correct-notes). |
-| Are detailed logs confined to harness sessions? | [Logging gate audit pending](#logging-gate-audit-pending). |
+| Are detailed logs confined to harness sessions? | [Logging scope](#logging-scope). |
 
 For scenario authoring, reuse the existing registry and a relevant source manifest returned by
 its exact scenario query. [CONTROL_LOOKUP](../../../tools/openclaw_harness/CONTROL_LOOKUP.md)
-is the detailed control catalogue; [the playtest matrix](../../../build_logs/harness-fixes-matrix20/INDEX.md)
-retains verified interaction examples. Link those originals instead of copying old controls.
+is the current detailed control catalogue. The old interaction matrix was consumed; use the
+relevant existing recipe and current native controls rather than that missing dependency.
 Validate a candidate through `scenario_registry.py::validate_manifest` before selection; record setup
 changes separately from native behavior. The scenario-consolidation ledger item owns broader
 catalogue reduction; this manual does not create a parallel registry or erase variants.
@@ -95,6 +96,21 @@ history; check the current player, hazards and pending input before walking.
 | Roof working/watch tile | `[3155,3448,1]` | Roof brazier is Northeast from here. |
 | Roof brazier | `[3156,3447,1]` | Inspect actual fuel and fire before ignition. |
 
+### Normalized firewood zones and stock
+
+The canonical [r050 bandit-only INITIAL](../../../tools/openclaw_harness/fixtures/saves/live-debug/r050_rural_roof_bandit_only_v1/save/TestSetup00) has these saved zones in [Test00's zone file](../../../tools/openclaw_harness/fixtures/saves/live-debug/r050_rural_roof_bandit_only_v1/save/TestSetup00/%23VGVzdDAw.zones.json). These are starting facts, not later run revisions. The indoor-cannibal normalized recipe has identical zone bytes and the same relevant six tiles, even though its complete map packs and faction sites differ.
+
+| Saved identity/name | Type and owner | Enabled; start = end | Starting contents/role |
+| --- | --- | --- | --- |
+| `zone-11`, Basecamp fire source | `SOURCE_FIREWOOD`, `your_followers` | Yes; `[3159,3449,0]` | Empty unlit indoor brazier. A fuel source zone at the fire is not a separate destination command. |
+| `zone-13`, Basecamp kindling | `SOURCE_FIREWOOD`, `your_followers` | Yes; `[3160,3449,0]` | `splinter` kindling on ordinary floor; also a fuel source. |
+
+Both are ordinary nonpersonal, nonvehicle zones, with identical start/end z=0 and no temporary disabling. Saved `2x4` wood is at `[3159,3448,0]` and `[3157,3449,0]`; `[3158,3449,0]` mixes `2x4` with lighters, whistles and flashlights. The roof brazier `[3156,3447,1]` is also empty and unlit. No firewood trap is present on these six inspected tiles. Neither listed zone is a roof-level source; inspect actual roof fuel/access if maintaining the roof fire. This extraction establishes item types and geometry, not the quantity or duration of usable fuel in an altered run.
+
+[Native refuelling](../../../src/activity_item_handling.cpp) (`find_refuel_spot_zone`, `try_fuel_fire`) unions enabled matching-faction `SOURCE_FIREWOOD` tiles within `PICKUP_RANGE=6` of the actor, sorts them by distance, and chooses the first tile with items, accessible contents and a clear pickup path. Only then does it test that selected tile's nonliquid items for burnability. It does not try a second zone when the selected tile has no useful burnable item; the firewood-trap fallback is used only when no zone tile qualifies. The fire destination is an accessible existing fire selected separately (or an explicit fire target). There is no distinct `FIREWOOD_SOURCE` zone type in this recipe. Zone Manager's Source label, a kindling label, a loot-storage zone and the burning destination are different roles.
+
+Widen a source across the **whole accessible wood pile** through the current native zone controls when useful; no one-tile restriction applies. Inspect both sources, stock, actor/fire positions and access before attributing a maintenance failure. Mixed tools or payment goods can be selected and burned; keep the intended fuel supply explicit without inventing a universal ban on brazier or tool coordinates. Fire expiry plus an unassessed report does not establish that one zone caused the failed assessment. The closed Fight run's full initial stock and selected refuel tile were not retained, so that causal conclusion is withdrawn.
+
 ### Walk upstairs and approach the roof fire
 
 From the current ground-floor tile, inspect native terrain and take a passable local route to
@@ -104,8 +120,8 @@ on `[3149,3454,1]`. A down staircase elsewhere is not the roof ladder.
 
 From that verified roof endpoint, six East and six North steps reached `[3155,3448,1]` in
 the successful run. Check hazards and passability as you walk; use the coordinates to adapt
-if your position differs. Do not step onto the fire. Native proof is in
-[R040's route checkpoint](../../../build_logs/first-smoke-040/continuation-checkpoint-20260929.md):
+if your position differs. Do not step onto the fire. Historical R040 route facts (raw checkpoint
+consumed):
 receipt67 ascended at turn5,295,930; receipts75–97 reached the watch tile at turn5,295,951.
 The same ladder supported descent at turn5,295,928. Level-down from roof shingles at the
 watch tile was a no-op and is a recovery note, not a route step.
@@ -129,14 +145,21 @@ working tile. Read any firewood-source prompt and confirm the prepared fuel. Ver
 [fire procedure](#fire-in-a-prepared-brazier) retains the verified lighter and extinguishing
 receipts, current control pattern and residual-smoke checks.
 
-For a maintained roof fire, retreat safely without stepping on fire and remain near it.
-Check the actual stock, source-zone coverage and whether fuel is replenished as native time
-advances. Josef expects the original templates to contain enough wood and notes that leaving
-for downstairs can prevent nearby auto-refuelling. These are maintenance checks, not proof
-of the exact refuelling radius or a reason to resize zones before a failure is observed.
-If wood remains but replenishment fails, retain the player/fire/source positions and current
-zone facts for diagnosis. Fire presence alone does not prove exterior smoke or light reach;
-follow the [signal visibility checks](references/smoke-light-visibility.md).
+For a maintained fire, inspect accessible fuel at the actual fire level and both sources using
+[the normalized zone facts and native selection rules](#normalized-firewood-zones-and-stock).
+The pickup search radius is six tiles from the actor; a ground-floor source does not certify
+roof coverage or actual clear access. Maintenance may burn nonwood fuel. Whole-pile source
+expansion is permitted when geometry requires it. Keep the intended fuel and the bulky-payment
+basket distinct, and verify actual fire/refuelling rather than infer it from visible stock.
+Fire presence alone does not prove exterior smoke or light reach; use
+[signal visibility](references/smoke-light-visibility.md) when that is the question.
+
+For bulky M240 setup, step away from the actual brazier before spawning once. Inspect actual
+placement and root count; native spill onto adjacent tiles is valid. Do not assume a fixed
+destination or spawn again because the pile is spread out. After ignition, retreat over currently
+safe passable tiles. Roof-level creature absence does not establish that ground attackers are
+passive. Use the actual ladder tile and available door route when deciding how to meet or escape
+them; historical coordinates alone do not establish current access.
 
 To extinguish, stand adjacent and open the brazier's native Examine menu, choose the current
 enabled **Extinguish fire** entry, then verify `fd_fire` is absent. Smoke and heat may remain;
@@ -145,6 +168,9 @@ check their decay before calling the signal off. Do not replace this with an Inv
 ### Wait, save and return
 
 Use [wait and observe](#wait-and-observe) for the intended next stage and interruption mode.
+Across interruptions, keep the accepted request identity and collect its result rather than
+replaying the wait. Performance alarms are separate from reporting cost: retrieve the exact
+measurement handle before choosing further diagnosis.
 Check actual game time, relevant actor IDs and meaningful changes; repeated unchanged motion
 or a rejected route needs inspection. For long disposable roof observations, verify
 `DEBUG_LS` is active as survival setup; do not toggle it off. Keep ordinary vision for ordinary
@@ -168,6 +194,11 @@ source handles and available queries. Follow the response's full-evidence handle
 summary omits a needed fact. The [evidence reference](references/evidence-and-diagnostics.md)
 explains retrieval and [live operation](references/live-operation.md) explains current owners,
 menus and pending requests. A missing field is unknown, not proof that nothing happened.
+
+After Pay, disappearance of the committed-contact projection is normal. Follow the current
+paid party and surface facts. When a custody or departure question remains, retrieve the
+specific saved member, custody or release facts needed; do not reconstruct the full journal
+merely to certify an already accepted positive outcome.
 
 ## NPC interval check
 
@@ -242,7 +273,7 @@ Use existing run-bound descriptors, exact event handles and fresh saves first. I
 action or attacker is missing, request one harness-enabled trace scoped to the IDs and turns
 that decide the question. Avoid normal-game verbose logs and per-turn full-state dumps. At
 closeout, retain raw evidence for open claims and prune only verified redundant temporary
-exports, as described in [Logging gate audit pending](#logging-gate-audit-pending).
+exports, as described in [Logging scope](#logging-scope).
 
 ## Smoke and light visibility
 
@@ -349,9 +380,9 @@ indoors or in darkness does not by itself prove lack of exposure.
 | --- | --- | --- |
 | `.userdata/reference-saves/archives/josef-basecamp-closed-windows-20260924-122642.zip` (SHA-256 `4b11469931507c49f0b373934730fed6b729b7a29b87c6f78eca0f728e8320c3`) | 45 save files; TestCamp01 at OMT `[131,143,0]`, closed windows, unlit indoor brazier `[3159,3449,0]` and roof brazier `[3156,3447,1]`; saved NPC2 Tilda has `ACT_MOVE_LOOT`, NPC3 Casey has `ACT_NULL`. No cannibal camp site is present. | Copy the archive into a disposable profile. The indoor z=0 brazier is smoke-only for outside discovery with windows closed; use verified roof or separate open-window geometry for exterior light. The archive is a baseline, not proof of hostile site eligibility or stocked player inventory. Inspect native fuel, lighter, roster and window state before action. |
 | `.userdata/reference-saves/josef-basecamp-open-windows-20260924-122356/` | Owner-created corrected open-window reference. Its README says all building windows are open and the source save is unchanged; Josef also describes this comparison setup as having the building doors open. | For the later open-versus-closed signal runs, copy this save separately and verify actual windows, doors, signal source, camp setup and file identity before play. The README's window claim is owner-confirmed, not a native replay or proof that every door is open. |
-| Controlled smoke geometry in `build_logs/first-smoke-008/controlled-site-profile-stage.json` | A 45-file disposable copy of that archive; only `overmaps/o.0.0.zzip` changes, adding cannibal camp footprint/terrain at `[135,137,0]`. Player save, NPC activities, eight existing camp objects and map data remain unchanged. The archived player save SHA is `037c9bf694be280cb19fe607ef691429593120245c2741d6b0906dfa8833d247`. | Recorded setup for a camp-eligible smoke arm. It adds no fire, smoke, scout knowledge or contact. Do not copy the separate migration-cancel or smokebomb transforms. Recheck hashes and semantics on each new copy. |
-| Saved raid checkpoint in `build_logs/first-smoke-009/luna-handoff.json` | Minute 8734, turn 5276059, existing gen2 raid `#hostile:2`, reserved NPCs 5/7. | Continuation only. Do not call it a fresh unaware smoke start, and never overwrite the original profile. Use a separate clean start for combined light-plus-smoke or any arm contaminated by earlier fire/contact. |
-| Preserved minute-8734 raid checkpoint | [Starting scene](../../../build_logs/first-smoke-010/starting-scene.json) records the 16×16 house shell, doors, braziers, player and saved NPC IDs/coordinates. Its [57-file manifest](../../../build_logs/first-smoke-010/starting-save-manifest.json) binds the preserved source profile after graceful quit. The earlier R010 [copy receipt](../../../build_logs/first-smoke-010/disposable-copy-receipt.json) binds its separate prelaunch bytes. | Copy the preserved source into a new disposable profile and match the complete manifest before using these baseline facts. The already played R010 profile has changed; do not treat it as a clean start or proof of a repaired native assault. |
+| Historical R008 controlled smoke geometry (raw stage record consumed) | A 45-file disposable copy of that archive; only `overmaps/o.0.0.zzip` changes, adding cannibal camp footprint/terrain at `[135,137,0]`. Player save, NPC activities, eight existing camp objects and map data remain unchanged. The archived player save SHA is `037c9bf694be280cb19fe607ef691429593120245c2741d6b0906dfa8833d247`. | Historical setup only, not a selectable current checkpoint. Use an available registry-bound pre-signal fixture and its declared bytes; do not reconstruct the old disposable profile. |
+| Historical R009 raid checkpoint (raw handoff consumed) | Minute8734/turn5276059, gen2 raid and reserved NPCs5/7. | Downstream comparison only, not a current start or fresh ignition/admission proof. Select an available complete save through the registry. |
+| Historical R010 minute-8734 checkpoint | Scene/57-file manifest/copy receipt were consumed after use. | Unavailable as a current input. Do not recreate it, copy a guessed profile or require its deleted manifest before playing an available selected save. |
 
 These are evidence-bound examples, not the current state of any open game. Read the run's latest
 save and native World before using a template; a stale instruction such as “fire not yet lit”
@@ -433,9 +464,9 @@ select the lighter's **Activate** action, then at **Light where?** choose the br
 advertised direction target. Verify `f_brazier` and native `fd_fire` on that tile, and the matching
 ignition result; `fd_hot_air1` alone is insufficient. Retreat about two tiles without stepping
 on fire. If it is already burning, observe instead of igniting again. Investigate a concrete
-failure before changing supplies; do not substitute a smokebomb. Row 03 of
-`build_logs/harness-fixes-matrix20/INDEX.md` is the proven action sequence, while the
-[item-activation reference](references/setup-interaction.md) explains current controls.
+failure before changing supplies; do not substitute a smokebomb. The
+[item-activation reference](references/setup-interaction.md) explains current controls; the old
+interaction matrix was consumed.
 
 **Closed-window ground floor is smoke-only for outside discovery.** In every scenario copied
 from the normalized closed-window save, a fire inside the house at z=0 does not expose light
@@ -482,13 +513,14 @@ proves ignition. When disk evidence is needed, follow [Save a checkpoint](refere
 For a light-then-off test, record actual light reach and any admission at the one-minute check;
 do not infer admission from the flame. After extinguishing, verify fire and residual smoke have
 both ended before following the same actors.
-For a closed-window smoke roster probe, check the camp first, light the ordinary fire, and
+Only for the focused closed-window smoke-onset roster probe, check the camp first, light the ordinary fire, and
 inspect after one real native minute. Continue with short waits, checking smoke packet,
 admission and concrete member IDs after each. Five minutes is a checkpoint, not a stop time:
 keep it lit until initiation or a specific source/gate failure is established. Extinguish only
 after the requested smoke observation is complete, then check residual fields. Keep each turn,
 actual signal field and concrete member ID distinct; delayed materialization is a result to
-measure, not assume.
+measure, not assume. Full end-to-end journeys instead use meaningful interruptible intervals and
+phase changes; these short probe checks are not a cadence for every suite run.
 
 ### Extinguish through Examine
 
@@ -547,10 +579,10 @@ sequence and current game result before adding a macro or more output fields.
 
 | Finding | Scope and evidence | Use in later tests |
 | --- | --- | --- |
-| An already travelling reserved attacker can retain an obsolete rally guard that blocks loaded approach. | Failing-before and passing production path tests plus Mac build in `build_logs/first-smoke-009/worker-receipt.json`; repair in `src/do_turn.cpp`. Native assault remains a separate proof. | Check same-ID goal/path and both persistent/cached guard after reload; require physical OMT arrival before contact. |
+| An already travelling reserved attacker can retain an obsolete rally guard that blocks loaded approach. | Failing-before and passing production path tests plus Mac build in historical R009 (raw worker receipt consumed); repair in `src/do_turn.cpp`. Native assault remains a separate proof. | Check same-ID goal/path and both persistent/cached guard after reload; require physical OMT arrival before contact. |
 | Debug clairvoyance has two mutations: `DEBUG_CLAIRVOYANCE_PLUS` and `DEBUG_CLAIRVOYANCE`. | `data/json/mutations/debug.json`; verified viewing setup above. | In a disposable viewing run, record both mutations, pass one real turn and verify the view. Do not credit either as a signal cause. |
 | Local hostile posture reads the player's view of reserved members. Clairvoyance may change exposure and `hold_off` decisions. | `src/do_turn.cpp::live_bandit_make_gate_input` and `live_bandit_try_sight_avoid_reposition`; run `06099f7263e37a362941a1fc57bc56d550ad77539e1b8aed76d06326515a0106` is a limited viewer example. | Preserve a separate no-clairvoyance copy for concealed-player assault proof; inspect local-gate exposure logs before interpreting a visible standoff. |
-| Cannibal routine members remain abstract until a valid signal admits their response. Terrain alone can create suspected leads without a scout. | `src/do_turn.cpp::live_bandit_materialize_abstract_members_for_routine`; the [R012 no-fire result](../../../build_logs/first-smoke-012/no-fire-control-result.md) ran 1,441 native minutes with 12 suspected leads, no ready observer and no outing or raid. | Treat an unlit default camp with no scouts as the careful-player baseline. For post-signal routine behavior, admit a short real signal, record any knowledge it creates, extinguish the source, then follow the same NPC IDs through visits and returns. Do not call that a no-signal discovery test. |
+| Cannibal routine members remain abstract until a valid signal admits their response. Terrain alone can create suspected leads without a scout. | `src/do_turn.cpp::live_bandit_materialize_abstract_members_for_routine`; historical R012 (raw no-fire result consumed) ran 1,441 native minutes with 12 suspected leads, no ready observer and no outing or raid. | Treat an unlit default camp with no scouts as the careful-player baseline. For post-signal routine behavior, admit a short real signal, record any knowledge it creates, extinguish the source, then follow the same NPC IDs through visits and returns. Do not call that a no-signal discovery test. |
 | Debug life support and invisibility are separate traits. | `data/json/mutations/debug.json`: `DEBUG_LS` stabilizes hunger, thirst and sleepiness; `DEBUG_CLOAK` grants invisibility. | Record each trait and one real turn after activation. A cloaked travel run changes hostile sight and cannot substitute for an ordinary visibility claim. |
 | A stopped wait does not establish the intended interval. | Native wait receipts and the wait method above. | Record the interruption and elapsed turns, then usually resume the remaining wait after an ordinary distraction. Stop or adapt for a consequential threat. |
 
@@ -560,24 +592,16 @@ At a meaningful game transition, write a short local note with: question, run/so
 turn range, actor/operation IDs, exact evidence handles, observed fact, alternative explanation,
 claim limit and next decision. Keep current owner instructions in the WEC/assignment, not duplicated in this manual. Promote only
 reusable, verified knowledge into the table above.
-When a new result corrects a note, update that row and retain the old artifact link; do not keep
-two conflicting tips. Merge repeated procedure into the relevant reference page and keep this
-index short. Retire source-specific warnings once a regression and native proof absorb them.
-Prune stale setup advice and redundant wording during a natural handoff or closeout, while
-preserving accepted evidence and the current owner contract. Never prune raw logs or save data
-merely to make a claim appear clean; artifact retention follows the task's lifecycle and owner
-save rules.
+When a new result corrects a note, replace obsolete advice and record the concise finding and
+reproduction recipe. Do not require old artifact links to stay live: completed playtest saves,
+logs, captures and proof archives are disposable. Report failures honestly before removing their
+temporary files. Git preserves source history; current task context preserves the useful outcome.
+Cleanup is part of delivery, with user data and active owner operations protected.
 
-## Logging gate audit pending
+## Logging scope
 
-`OPENCLAW_HARNESS_UI_TRACE` gates the detailed owner trace in `src/do_turn.cpp` and is set by
-`tools/openclaw_harness/startup_harness.py` for harness children. At source build
-`b76d1f3d63401f693df6b905743c37457de6c79a50d51cff2b468dc7a2e53b45`, the
-`render_local_gate_report` `DebugLog(D_INFO)` calls in `src/do_turn.cpp` are unconditional.
-These should be reviewed after the active native run for harness-only diagnostic gating;
-do not infer that all game debug output is already isolated. Any change needs a targeted
-ordinary-launch and harness-launch check, with no suppression of errors or claim evidence.
-At run closeout and natural handoffs, inventory task-owned temporary traces and duplicate
-exports. Retain evidence-bearing raw logs, source handles, hashes, saves and receipts for open
-claims; prune redundant temporary copies only after their durable references are verified and
-no worker or retained session needs them. Avoid deleting live run logs or owner saves.
+`OPENCLAW_HARNESS_UI_TRACE` gates detailed owner trace in `src/do_turn.cpp` for harness children.
+Ordinary debug-log producers can have a different scope; this does not establish that every game
+diagnostic is harness-only. Use the actual run's configured traces and retain only decisive current
+output. Report a demonstrated runaway producer through its existing owner rather than starting a
+new logging audit or suppressing errors during a playtest.

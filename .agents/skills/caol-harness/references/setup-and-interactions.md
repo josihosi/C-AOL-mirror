@@ -32,7 +32,30 @@ Typed thirst chatter is still handled by the explicit safe-wait macro; direct `a
 not run that handler. For byte-exact bug reproduction, preserve inherited traits in the original;
 if this setup changes them, label the disposable run as a setup variant rather than byte-exact.
 
+### Stamina setup for future non-stamina playtests
+
+Owner-selected setup: enable avatar **Debug Stamina (`DEBUG_STAMINA`)** individually for
+future non-stamina journeys. Use current `world.debug_menu` → Player → Mutate, resolve the
+advertised Debug Stamina entry, enable only if missing, then verify native mutation state.
+Do not use Toggle debug mutations or change owner saves. `Character::mod_stamina` returns
+without changing stamina in either direction for this trait, including ordinary recovery;
+it also excludes the tired-activity query. The JSON regeneration modifier is +9, but
+recovery still calls this skipped mod_stamina path. It does not refill existing low stamina. It does not suppress hunger, thirst, sleep, damage or death. Apply to
+the avatar only; do not normalize existing exhaustion or grant combat immunity.
+
+Stamina/prompt regression checks keep natural stamina and omit this trait. The real prompt is
+“You struggle to continue.  Keep trying?” with **Continue after a break.**, **Maybe later.**,
+and **Finish it.** Use its current advertised choice, then collect the original successor;
+never reuse an Overmap close or assume Finish it replenishes stamina. Break starts a stamina
+rest activity with auto-resume; Maybe later cancels the current activity. Targeted854 native
+travel nevertheless re-presented the tired menu after Maybe later, so verify the actual
+route/successor rather than assuming travel stopped. Finish it suppresses this activity's
+query while continuing. The harness activity-session correction serves ordinary blocking UI
+in both pre-input and post-action drivers; it is not a stamina-specific adapter.
+
 ### Vision and other mutations by arm
+
+**Owner-selected exceptions (2026-10-05):** [suite X2–X4](playtest-suite.md#shared-execution-and-debug-boundaries) permit avatar debug teleportation in X2/X3 and avatar invisibility/teleportation plus one exact bandit debug kill in X4. The separate [X4b return ambush](playtest-suite.md#x4b-rider-ambush-during-bandit-return) permits one hostile zombie rider debug spawn near the bandit party and the same avatar observation setup; combat and any resulting death must occur natively. These are named controlled variants; the ordinary-arm defaults below still apply elsewhere. Use current native debug controls, preserve intervention evidence and distinguish induced setup from subsequent native behavior. No blanket debug bundle or NPC relocation is implied.
 
 - Ordinary smoke, roof, rural, bandit payment/Fight, patrol, light-only and away/return: `DEBUG_LS`
   as above; no added clairvoyance, night/map vision, cloak, invisibility or debug light. Use selected
@@ -46,7 +69,7 @@ if this setup changes them, label the disposable run as a setup variant rather t
   steer the ordinary run or count debug sight as reciprocal exposure. Current do_turn.cpp burn
   checks use `sees_without_clairvoyance` for both participants; that protects this specific gate,
   not every visibility-dependent system or the worker's choices.
-- Cloak/invisibility, debug light, invulnerability/healing, stamina/speed boosts, temperature
+- Cloak/invisibility, debug light, invulnerability/healing, speed boosts, temperature
   immunity and mind control are not defaults. Each changes a relevant detection, light, survival,
   movement or combat variable. Use only in an explicitly identified diagnostic/setup branch,
   with the ordinary arm retained. Never grant the blanket debug mutation bundle for convenience.

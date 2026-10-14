@@ -17,7 +17,7 @@ The cockpit exposes structured movement/wait macros through `call --request` and
 retrieval through `inspect`; use those when the proof question needs them rather than reconstructing transport bookkeeping
 for ordinary native actions.
 
-At the honest boundary, seal `run.witness` and call `run.finish`. State the smallest conclusion
+After the exact bound native process exits, use `journal --reason REASON` to seal `run.witness`, then `finish --witness FILE` to report. While it is alive, use `inspect`, `evidence`, `messages` or status for evidence. When authorized to close, use the current advertised native save/quit route and observe actual process exit. `play.quit` / `run.quit` is a harness termination request: its scenario cleanup can send SIGTERM. It is not native save/quit and is not covered by permission for graceful closure alone. A stop reason saying “graceful” does not change that behavior. If no current native close control is available, retain the exact state and report that capability gap; do not substitute generic quit. Early reporting refuses without revoking those native controls. Dead/crashed runs can be reported honestly without a successful save or exit0; historical sealed journals remain immutable. State the smallest conclusion
 supported by cited immutable evidence; do not invent facts or promote the evidence ceiling.
 Stop reasons and witness text are your own conclusions, not independent game observations.
 Reconcile them with the resulting native state and any later messages, including outcomes revealed
@@ -34,11 +34,29 @@ coordinator's separate causal judgment.
 For extraction examples, see [journal citation packaging](searching.md#journal-citation-packaging).
 
 Report startup, feature outcome, contradictions, evidence ceiling, and cleanup separately.
-The primary worker owns every game launched by it or its helpers, including failed starts and
-replacement generations. Native save/quit preserves the requested game state; explicit `run.finish`
-seals the witness and requests process cleanup, which does not earn native-save/exit proof.
-Inspect cleanup's current PID/birth identity and verify OS exit for all owned attempts and their
-brokers, or hand over an explicitly retained run with its purpose and exact session. A minimized
-window, stopped broker or finished report alone leaves that obligation open. A failed startup's
-retained-process result requires an explicit owner action. Preserve the run and report the exact
-blocker if supported graceful closure fails; do not silently force-kill it.
+An already accepted positive outcome needs its supported conclusion and exact retained
+retrieval handles, not additional fatal-actor proof, a second witness or reconstruction of final
+serializer internals. Keep unresolved participation, defense, camera, legacy and needs questions
+explicit at their actual scope. Reuse settled evidence and closeout; do not replay gameplay to
+prove a guidance change. This does not turn an unsupported causal claim into a supported one.
+Luna performs current advertised native save/quit, reports exact exit/evidence handles and
+removes its generated residue when closure and deletion are within its assigned ownership.
+It need not wait for a chaperone to perform each ordinary closeout step. If the owner or transport
+limits a needed OS check or cleanup operation, return that exact remaining operation with its
+PID/birth and run binding; the chaperone performs or routes it once. Do not bypass a rejected
+operation through another utility or assume permission to discard unsaved state.
+The chaperone remains accountable for closing every completed or abandoned game launched by its
+players, including failed starts and replacement generations, and reconciling their exit evidence. Close games, brokers, bridges and
+helpers through the ordinary graceful lifecycle, then verify their exact PID/start identities have
+exited at the OS level. Worker return, a hidden window, a report or `run.finish` is NOT closure.
+Delete generated run/profile/session residue after closure; retain only concise commit/run/outcome
+and reproduction notes. Do not keep old processes or saves indefinitely or create cleanup backups.
+
+Respect current input ownership and protect active games. For explicitly owner-approved disposal,
+state loss is authorized: if the controller is dead and graceful closure is unavailable, use a
+supported identity-bound termination route within that disposal scope, then verify exit and clean
+up. Do not reinterpret unrelated held or current games as approved for disposal. A real tool or
+permission rejection remains a blocker; report the exact failed operation without bypassing it.
+An intentionally continuing game must have an explicit current purpose and owner, not simply be
+left running after its player returns. Native-save proof still requires an actual successful save;
+closure or disposal never supplies that proof.

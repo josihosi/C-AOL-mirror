@@ -1,6 +1,6 @@
 # R-029 signal evidence boundary
 
-For the current investigation, identify the intended live site and observer before interpreting the
+For a signal investigation, identify the intended live site and observer before interpreting the
 adapter callback. An overmap-special footprint is setup, not proof of its eligible roster. Keep
 camp `tripoint_abs_omt` separate from member `home_spawn_tile` (`tripoint_abs_ms`); one OMT spans
 24 map squares when SEEX=12. Use the source/event location, not a nearby-looking sprite.
@@ -25,9 +25,9 @@ volume 383. The intended `[0,-1,-1]` footprint's hypothetical threshold 59 is no
 geometry. The retained debug reports two sites but one eligible callback. Why the other site was
 not eligible is still unresolved; inspect its actual roster/state rather than inventing a reason.
 
-Exact run, callback records, surrounding World frames, source pointers, original durable receipt
-and corrected interpretation are in `.de67/state/review-owner-ffc9168450f6/` and
-`.de67/debug-findings.md`. Retain native reload/shot/callback proof. A new positive experiment first
+The historical raw review directory `review-owner-ffc9168450f6` was consumed. Current concise
+issue disposition belongs in `.de67/debug-findings.md`; the recorded callback geometry above is
+comparison context, not retrievable raw proof or a current session. A new positive experiment first
 needs an identified eligible recipient and sufficient stimulus; a negative result without those
 conditions remains setup/eligibility uncertainty. Do not auto-promote or repair gameplay.
 
