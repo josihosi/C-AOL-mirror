@@ -7,6 +7,7 @@
   - [Code style (astyle)](#code-style-astyle)
       - [Instruction:](#instruction)
   - [JSON style](#json-style)
+  - [Local changed-source checks](#local-changed-source-checks)
   - [ctags](#ctags)
   - [clang-tidy](#clang-tidy)
     - [Custom clang-tidy plugin](#custom-clang-tidy-plugin)
@@ -86,6 +87,54 @@ On Windows, there is an [AStyle extension for Visual Studio 2019](https://github
 ## JSON style
 
 See the [JSON style guide](../JSON/JSON_STYLE.md).
+
+## Local changed-source checks
+
+Run the changed-source entry point from the repository root:
+
+```sh
+python3 tools/check_changed_source.py
+```
+
+It checks tracked changes against `HEAD` plus untracked, non-ignored files. Use
+`--base <ref>` to compare with another Git ref, or `--files path ...` to select
+specific changed paths. C and C++ files receive a dry-run AStyle check and,
+when the existing generated include scan, compile database, LLVM 22 tool, and
+project plugin are available, clang-tidy on affected translation units.
+Changed Python files go to Flake8. JSON declarations under
+`tools/openclaw_harness/scenarios/` go to the existing read-only declaration
+linter.
+
+AStyle runs only when the installed version matches CI's pinned 3.1; other
+versions are reported as incomplete before formatting analysis. The formatter
+uses dry-run mode and never rewrites source. The command does not build or
+refresh C++ analysis artifacts. Missing dependency scans, compile metadata,
+plugin, or analysis tools are reported as incomplete coverage. Existing dependency scans
+are checked against changed file timestamps; a scan that predates a changed C++
+input is reported as stale. The make rules key `.inc` scans to translation-unit
+files, so a changed header can require an explicit refresh. The existing `make
+includes`/clang-tidy preparation route can create or refresh those artifacts;
+coordinate with the current build/cache owner before running it. For an
+existing custom analysis cache, set `CATA_BUILD_DIR`; the entry point passes
+that same path to clang-tidy's `-p` option and the existing wrapper. When cached
+clang-tidy inputs are usable, its existing wrapper writes profiling traces in a
+temporary directory that is removed after analysis. Every changed C++ path must
+appear in the existing include map; if any changed input is unmapped, coverage
+is incomplete even when other changed inputs select translation units. The
+line-based dependency selector also reports newline-containing paths as
+unsupported instead of treating them as complete. Freshness uses the actual
+`.inc` paths associated with affected translation units, including tile object
+scans under `obj/tiles`. If multiple layouts resolve to the same translation
+unit, every layout scan is checked—even when only one scan maps the changed
+header—so an ambiguous stale layout keeps coverage incomplete.
+
+Exit status `0` means all selected checks ran and passed, `1` means a selected
+check found a problem, and `2` means coverage is incomplete or setup could not
+be established. Unclassified changed paths are listed, receive no lint check,
+and make the result incomplete. `.build`, build, userdata, generated, log, and
+proof paths are excluded from traversal. Output includes exact files and
+diagnostics available from the underlying tools. This local check does not
+establish runtime behavior such as gameplay, custody, or liveness invariants.
 
 ## ctags
 
