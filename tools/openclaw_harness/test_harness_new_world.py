@@ -241,5 +241,112 @@ class HarnessNewWorldTest(unittest.TestCase):
             self.assertTrue(world_dir.exists())
 
 
+def generation_scenario():
+    from scenario_registry import PROOF_ROUTE_ROLES
+    return {
+        "name": "terminal.offline_generation", "manifest_version": 1,
+        "profile": "offline", "world": "", "fixture": "",
+        "harness_new_world": "ordinary-offline", "harness_raw_seed": "830205385",
+        "harness_new_world_scenario": "evacuee",
+        "capabilities": {"runtime.entry_mode": "native_world_generation"},
+        "steps": [{"kind": "native_world_generation", "label": "generate_save"}],
+        "proof_route": {role: ["generate_save"] for role in PROOF_ROUTE_ROLES},
+        "runtime_contract": {
+            "playtest_mode": "terminal", "terminal_transport": "pty",
+            "permitted_input": [], "forbidden_input": ["keyboard"],
+            "setup_only_debug": True, "disposable_copy": True, "helpers": [],
+            "permissions": [], "platform": ["macos"], "profile": "offline",
+            "fixture": "", "grants_gameplay_proof": False,
+            "requirements": {"os": "macos", "source": "selected-build", "profile": "offline",
+                "fixture": "", "helper": "none", "peekaboo": False, "input": [],
+                "ocr": False, "cleanup": True},
+        },
+    }
+
+
+def generation_startup(run_dir):
+    return {
+        "ok": True, "reason": "harness_world_saved", "strategy": "harness_new_world",
+        "pid": 101, "profile": "offline", "run_dir": str(run_dir), "exit_code": 0,
+        "feature_proof": False,
+        "generation_identity": {"world": "ordinary-offline", "raw_seed": "830205385",
+            "ordinary_scenario": "evacuee", "profile": "offline", "run_dir": str(run_dir), "run_id": "offline-run"},
+        "readiness": {"kind": "harness_process_exit", "pid": 101, "returncode": 0,
+            "world_owned_by_run": True, "feasibility_artifact_ready": True,
+            "marker": {"mtime": 20.0, "world_name": "ordinary-offline"}, "baseline_save_marker_mtime": 10.0,
+            "debug_error_evidence_count": 0},
+    }
+
+
+class RegisteredGenerationOnlyTest(unittest.TestCase):
+    def test_registry_declaration_and_terminal_readiness_share_generation_contract(self):
+        from scenario_registry import validate_manifest
+        scenario = generation_scenario()
+        with tempfile.TemporaryDirectory() as raw:
+            declaration = Path(raw)/"offline-generation.json"
+            declaration.write_text(json.dumps(scenario))
+            validate_manifest(scenario, path=declaration)
+        with patch.object(harness.sys, "platform", "darwin"), patch.object(
+            harness, "validate_selected_product_build", return_value=({
+                "build_configuration": {"renderer": "curses", "make_variables": ["SOUND=0"]}}, "")):
+            self.assertEqual(harness.terminal_mode_readiness(scenario, Path("game"))["status"], "ready")
+        self.assertEqual(harness.declared_generation_only(scenario), {
+            "world": "ordinary-offline", "raw_seed": "830205385", "ordinary_scenario": "evacuee"})
+
+    def test_declared_generation_does_not_accept_feature_or_reused_world_operations(self):
+        import copy
+        for key, value in [("fixture", "old-fixture"), ("world", "existing"),
+            ("saved_world_snapshot", "/old/save"), ("post_relaunch", {"steps": []}),
+            ("advance_turns", 1), ("capture_world_after", True), ("harness_raw_seed", "0")]:
+            with self.subTest(key=key):
+                scenario = copy.deepcopy(generation_scenario()); scenario[key] = value
+                with self.assertRaises(ValueError): harness.declared_generation_only(scenario)
+        scenario = generation_scenario()
+        scenario["steps"].append({"kind": "cockpit_live_session", "label": "play"})
+        with self.assertRaises(ValueError): harness.declared_generation_only(scenario)
+
+    def test_authenticated_save_exit_has_setup_credit_and_no_world_gate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            report = harness.generation_only_probe_report(generation_scenario(), 0, generation_startup(Path(raw)), expected_profile="offline", expected_run_id="offline-run")
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["feature_proof"])
+        self.assertEqual(report["evidence_class"], "setup")
+        self.assertEqual(report["screen"]["status"], "not_required_generation_only")
+
+    def test_failure_missing_stale_save_wrong_owner_seed_or_scenario_stays_red(self):
+        import copy
+        base = generation_startup(Path("/offline/run"))
+        variants = [({"exit_code": 1}, {}), ({"pid": 0}, {"pid": 0}), ({"profile": "other"}, {}), ({"ok": False}, {}),
+                    ({"feature_proof": True}, {}), ({}, {"marker": {}}),
+                    ({}, {"marker": {"mtime": 10}}), ({}, {"world_owned_by_run": False}),
+                    ({}, {"debug_error_evidence_count": 1}), ({}, {"pid": 999})]
+        for root_delta, ready_delta in variants:
+            start = copy.deepcopy(base); start.update(root_delta); start["readiness"].update(ready_delta)
+            with self.subTest(root=root_delta, readiness=ready_delta):
+                self.assertFalse(harness.generation_only_probe_report(generation_scenario(), 0, start, expected_profile="offline", expected_run_id="offline-run")["ok"])
+        for key, value in [("world", "different"), ("raw_seed", "42"),
+                           ("ordinary_scenario", "missed"), ("profile", "other"),
+                           ("run_dir", "/other/run"), ("run_id", "other-run")]:
+            start = copy.deepcopy(base); start["generation_identity"][key] = value
+            with self.subTest(identity=key):
+                self.assertFalse(harness.generation_only_probe_report(generation_scenario(), 0, start, expected_profile="offline", expected_run_id="offline-run")["ok"])
+        self.assertFalse(harness.generation_only_probe_report(generation_scenario(), 1, base, expected_profile="offline", expected_run_id="offline-run")["ok"])
+
+    def test_saved_generation_normal_load_reuses_same_profile_bytes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); world = root/".userdata/offline/save/ordinary-offline"
+            world.mkdir(parents=True); (world/"master.gsav").write_text("native-save-stub")
+            before = (world/"master.gsav").read_bytes()
+            with patch.object(harness, "repo_root", return_value=root), patch.object(
+                harness.shutil, "copytree", side_effect=AssertionError("same-profile continuation copied data")):
+                result = harness.install_saved_world_snapshot("offline", "ordinary-offline", str(world))
+                with patch.object(harness, "detect_executable", return_value=root/"game"), patch.object(
+                    harness, "create_run_dir", return_value=root/"run"):
+                    plan = harness.build_plan("offline", "ordinary-offline", "")
+            self.assertEqual(result["status"], "green_saved_world_snapshot_reused")
+            self.assertEqual(plan.strategy, "autoload_world")
+            self.assertEqual((world/"master.gsav").read_bytes(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -433,4 +433,80 @@ class TerminalModeIsolationTest(unittest.TestCase):
             print(json.dumps({"control": "actual_launch_pair", "owners": observations, "children_exited": True, "private_directories_removed": True}))
 
 
+
+
+
+class TerminalGenerationProbeTest(unittest.TestCase):
+    def test_public_probe_finalizes_generation_before_live_world_gate(self):
+        from test_harness_new_world import generation_scenario, generation_startup
+        scenario = generation_scenario()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve(); run = root/"run"; run.mkdir()
+            args = harness.build_parser().parse_args(["probe", scenario["name"], "--profile", "offline"])
+            args._loaded_scenario = scenario
+            start = generation_startup(run)
+            args.registry_launch_receipt = '{"runtime_binding":{"run_id":"offline-run"}}'
+            def startup(command, **kwargs):
+                self.assertEqual(command[command.index("--harness-new-world")+1], "ordinary-offline")
+                self.assertEqual(command[command.index("--harness-raw-seed")+1], "830205385")
+                self.assertEqual(command[command.index("--harness-new-world-scenario")+1], "evacuee")
+                self.assertFalse(kwargs["live_session"])
+                return 0, start, "owned generator stub", ""
+            with patch.object(harness, "repo_root", return_value=root), \
+                 patch.object(harness, "load_scenario", return_value=scenario), \
+                 patch.object(harness, "validate_selected_product_build", return_value=({
+                     "build_configuration": {"renderer": "curses", "make_variables": ["SOUND=0"]}}, "")), \
+                 patch.object(harness, "scenario_manifest_binding", return_value={"source": {"sha256": "offline"}}), \
+                 patch.object(harness, "registry_authority_transition_run_id", return_value="offline-run"), \
+                 patch.object(harness, "detect_executable", return_value=root/"game"), \
+                 patch.object(harness, "run_startup_in_process", side_effect=startup) as called, \
+                 patch.object(harness, "finalize_scenario_report") as finalize, \
+                 patch.object(harness, "startup_actions_ready", side_effect=AssertionError("generation required live World")), \
+                 patch.object(harness, "launch_game", side_effect=AssertionError("offline test launched native game")):
+                self.assertEqual(harness.run_probe_mode(args), 0)
+            called.assert_called_once(); finalize.assert_called_once()
+            report = finalize.call_args.args[1]
+            self.assertTrue(report["ok"]); self.assertFalse(report["feature_proof"])
+            self.assertEqual(report["world"], "ordinary-offline")
+            self.assertEqual(finalize.call_args.kwargs["cleanup_pid"], 101)
+            self.assertTrue((root/".userdata/offline/.harness-owner.lock").is_file())
+            self.assertFalse((root/".userdata/offline/save").exists())
+
+    def test_declared_generation_failure_is_finalized_without_live_or_relaunch(self):
+        from test_harness_new_world import generation_scenario, generation_startup
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve(); run = root/"run"; run.mkdir()
+            args = harness.build_parser().parse_args(["probe", "offline", "--profile", "offline"])
+            args._loaded_scenario = generation_scenario()
+            args.registry_launch_receipt = '{"runtime_binding":{"run_id":"offline-run"}}'
+            start = generation_startup(run); start.update(ok=False, exit_code=1, reason="harness_world_process_failed")
+            with patch.object(harness, "repo_root", return_value=root), \
+                 patch.object(harness, "scenario_manifest_binding", return_value={}), \
+                 patch.object(harness, "registry_authority_transition_run_id", return_value="offline-run"), \
+                 patch.object(harness, "detect_executable", return_value=root/"game"), \
+                 patch.object(harness, "run_startup_in_process", return_value=(1, start, "", "")), \
+                 patch.object(harness, "finalize_scenario_report") as finalize, \
+                 patch.object(harness, "launch_game", side_effect=AssertionError("native launch")):
+                self.assertEqual(harness._run_probe_mode(args), 1)
+            report = finalize.call_args.args[1]
+            self.assertFalse(report["ok"]); self.assertFalse(report["feature_proof"])
+            self.assertEqual(report["screen"]["status"], "not_required_generation_only")
+
+
+    def test_invalid_generation_refuses_before_profile_or_native_launch(self):
+        from test_harness_new_world import generation_scenario
+        scenario = generation_scenario(); scenario["fixture"] = "legacy-fixture"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            args = harness.build_parser().parse_args(["probe", "offline", "--profile", "offline"])
+            with patch.object(harness, "repo_root", return_value=root), \
+                 patch.object(harness, "load_scenario", return_value=scenario), \
+                 patch.object(harness, "registry_authority_transition_run_id", return_value="offline-run"), \
+                 patch.object(harness, "detect_executable", return_value=root/"game"), \
+                 patch.object(harness, "run_startup_in_process") as startup:
+                with self.assertRaisesRegex(SystemExit, "generation cannot include"):
+                    harness.run_probe_mode(args)
+            startup.assert_not_called()
+            self.assertFalse((root/".userdata").exists())
+
 if __name__ == '__main__': unittest.main()

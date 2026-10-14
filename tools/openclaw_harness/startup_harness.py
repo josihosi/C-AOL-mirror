@@ -24207,6 +24207,76 @@ def scenario_playtest_mode(scenario: Mapping[str, Any]) -> str:
     return mode
 
 
+def declared_generation_only(scenario: Mapping[str, Any]) -> Optional[Dict[str, str]]:
+    """A declared native save-and-exit step is setup, never a World session."""
+    steps = scenario.get("steps", [])
+    if not isinstance(steps, list) or not any(
+        isinstance(step, Mapping) and step.get("kind") == "native_world_generation" for step in steps
+    ):
+        return None
+    if len(steps) != 1 or scenario.get("capabilities", {}).get("runtime.entry_mode") != "native_world_generation":
+        raise ValueError("native world generation requires one declared generation-only step")
+    world, seed = validate_harness_new_world(
+        str(scenario.get("harness_new_world", "")), str(scenario.get("harness_raw_seed", "")))
+    ordinary_scenario = validate_harness_new_world_scenario(
+        str(scenario.get("harness_new_world_scenario", "")))
+    if not world or any(scenario.get(key) for key in (
+        "world", "fixture", "saved_world_snapshot", "profile_snapshot", "post_relaunch",
+        "capture_world_after", "advance_turns", "artifact_patterns", "recommended_test_command",
+    )):
+        raise ValueError("native world generation cannot include live, saved-start or feature operations")
+    return {"world": world, "raw_seed": seed, "ordinary_scenario": ordinary_scenario}
+
+
+def generation_only_probe_report(scenario: Mapping[str, Any], startup_rc: int,
+                                 startup: Mapping[str, Any], *, expected_profile: str,
+                                 expected_run_id: str) -> Dict[str, Any]:
+    """Finalize the authenticated generator result without a live-HUD gate."""
+    contract = declared_generation_only(scenario)
+    if contract is None:
+        raise ValueError("scenario does not declare native world generation")
+    readiness = startup.get("readiness", {})
+    if not isinstance(readiness, Mapping):
+        readiness = {}
+    identity = startup.get("generation_identity", {})
+    accepted = bool(
+        startup_rc == 0 and startup.get("ok") is True
+        and type(startup.get("pid")) is int and startup["pid"] > 0
+        and startup.get("profile") == expected_profile
+        and bool(expected_run_id)
+        and startup.get("reason") == "harness_world_saved"
+        and startup.get("strategy") == "harness_new_world"
+        and startup.get("exit_code") == 0 and startup.get("feature_proof") is False
+        and isinstance(identity, Mapping)
+        and all(identity.get(key) == value for key, value in contract.items())
+        and identity.get("profile") == expected_profile
+        and identity.get("run_id") == expected_run_id
+        and identity.get("run_dir") == startup.get("run_dir")
+        and isinstance(readiness, Mapping)
+        and readiness.get("kind") == "harness_process_exit"
+        and readiness.get("pid") == startup.get("pid")
+        and readiness.get("returncode") == 0
+        and readiness.get("world_owned_by_run") is True
+        and readiness.get("feasibility_artifact_ready") is True
+        and isinstance(readiness.get("marker"), Mapping)
+        and readiness["marker"].get("world_name") == contract["world"]
+        and harness_process_ready(0, readiness.get("marker", {}),
+                                  readiness.get("baseline_save_marker_mtime", 0),
+                                  readiness.get("debug_error_evidence_count", -1))
+    )
+    verdict = "native_world_generated" if accepted else "native_world_generation_rejected"
+    proof = {"status": "green" if accepted else "red", "verdict": verdict,
+             "evidence_class": "setup", "feature_proof": False,
+             "rule": "Only authenticated native world save/exit is proved; no World or gameplay credit."}
+    return {"ok": accepted, "mode": "probe", "scenario": scenario.get("name", ""),
+            "profile": startup.get("profile", ""), "world": contract["world"], "fixture": "",
+            "startup": dict(startup), "steps": [{**dict(scenario["steps"][0]),
+                "status": "green" if accepted else "red", "readiness": dict(readiness)}],
+            "screen": {"status": "not_required_generation_only"},
+            "proof_classification": proof, "evidence_class": "setup", "feature_proof": False,
+            "verdict": verdict, "reason": verdict}
+
+
 def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
                             selected_product_build: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Validate the additive mechanical lane, without GUI or save substitution."""
@@ -24218,11 +24288,19 @@ def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
         return row
     contract = scenario.get("runtime_contract", {})
     reason = ""
+    try:
+        generation = declared_generation_only(scenario)
+    except ValueError as error:
+        row.update(status="unsupported_terminal_mode", reason=str(error))
+        return row
+    allowed_steps = {"native_semantic_bootstrap", "cockpit_live_session"}
+    if generation is not None:
+        allowed_steps = {"native_world_generation"}
     if sys.platform not in {"darwin", "win32"}:
         reason = "terminal adapter is available on native Mac and Windows only"
     elif contract.get("require_screen_observability") is True or scenario.get("capture_world_after") is True:
         reason = "selected scenario requires graphical observability; select Tiles for this claim"
-    elif any(step.get("kind") not in {"native_semantic_bootstrap", "cockpit_live_session"}
+    elif any(step.get("kind") not in allowed_steps
              for step in scenario.get("steps", []) if isinstance(step, Mapping)):
         reason = "terminal launch requires native semantic bootstrap/live steps; other scripted startup controls are unvalidated"
     selected = selected_product_build
@@ -40109,7 +40187,9 @@ def _run_startup(args: argparse.Namespace) -> int:
                     marker,
                     baseline_save_marker_mtime,
                     debug_error_evidence_count,
-                ) and harness_world_owned_by_run(profile, plan.harness_new_world, run_dir)
+                )
+                world_owned = harness_world_owned_by_run(profile, plan.harness_new_world, run_dir)
+                ready = ready and world_owned
                 ready = ready and feasibility_ready
                 world_cleanup = (
                     {"status": "not_required_owned_world"}
@@ -40124,6 +40204,8 @@ def _run_startup(args: argparse.Namespace) -> int:
                     "returncode": code,
                     "marker": marker,
                     "save_marker_created": save_ready,
+                    "world_owned_by_run": world_owned,
+                    "baseline_save_marker_mtime": baseline_save_marker_mtime,
                     "feasibility_artifact": feasibility_artifact,
                     "feasibility_artifact_required": plan.harness_bandit_feasibility,
                     "feasibility_artifact_ready": feasibility_ready,
@@ -40160,6 +40242,13 @@ def _run_startup(args: argparse.Namespace) -> int:
                     "evidence_class": "startup/load",
                     "feature_proof": False,
                     "gui_automation": "not_run_harness_new_world_route",
+                    "generation_identity": {
+                        "world": plan.harness_new_world,
+                        "raw_seed": plan.harness_raw_seed,
+                        "ordinary_scenario": plan.harness_new_world_scenario,
+                        "profile": profile, "run_dir": str(run_dir),
+                        "run_id": transition_binding["run_id"],
+                    },
                 }
                 result["cleanup"] = finalize_failed_certification_start(certification_lease, run_dir)
                 write_json(run_dir / "startup.result.json", result)
@@ -42281,6 +42370,7 @@ def _run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
     scenario = getattr(args, "_loaded_scenario", None) or load_scenario(
         args.scenario, source_path=selected_path or None, expected_sha256=selected_sha256,
     )
+    generation_contract = declared_generation_only(scenario)
     args.terminal_transport = scenario_terminal_transport(scenario)
     if bool(getattr(args, "cockpit_live_session", False)):
         capabilities = scenario.get("capabilities", {})
@@ -42677,6 +42767,20 @@ def _run_probe_mode(args: argparse.Namespace, *, handoff: bool = False) -> int:
 
     run_dir_value = str(start_result.get("run_dir", "")).strip()
     run_dir = Path(run_dir_value) if run_dir_value else None
+    if generation_contract is not None:
+        report = generation_only_probe_report(
+            scenario, start_rc, start_result, expected_profile=profile,
+            expected_run_id=transition_event_run_id)
+        report["mode"] = mode
+        finalize_scenario_report(
+            run_dir, report, scenario=scenario,
+            cleanup_pid=int(start_result.get("pid", 0) or 0),
+            report_filename=report_filename,
+            compact_stdout=bool(getattr(args, "compact_stdout", False)),
+            post_finalize_hook=post_finalize_hook,
+        )
+        return 0 if report["ok"] else 1
+
     if start_rc != 0 or not start_result.get("ok"):
         proof_classification = start_result.get("proof_classification") if isinstance(start_result.get("proof_classification"), dict) else {
             "evidence_class": "startup/load",
