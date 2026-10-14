@@ -208,6 +208,8 @@ jobs:
     name: ${{ matrix.title }}
     runs-on: ${{ matrix.os }}
     env:
+        # C++ formatting is checked by the pinned AStyle 3.1 workflow.
+        ASTYLE: "0"
         ZSTD_CLEVEL: 17
         CMAKE: ${{ matrix.cmake }}
         COMPILER: ${{ matrix.compiler }}
@@ -273,7 +275,7 @@ jobs:
       if: ${{ env.SKIP == 'false' && runner.os == 'Linux' }}
       run: |
           sudo apt-get update
-          sudo apt-get install libncursesw5-dev ccache gettext parallel astyle ${{ matrix.extra_package }}
+          sudo apt-get install libncursesw5-dev ccache gettext parallel ${{ matrix.extra_package }}
           sudo locale-gen en_US.UTF-8 de_DE.UTF-8
     - name: setup SDL3 stack (ubuntu)
       if: ${{ env.SKIP == 'false' && runner.os == 'Linux' && matrix.tiles == 1 && matrix.sdl3 == 1 }}
@@ -291,7 +293,7 @@ jobs:
     - name: install build dependencies (mac)
       if: ${{ env.SKIP == 'false' && runner.os == 'macOS' }}
       run: |
-          HOMEBREW_NO_AUTO_UPDATE=yes HOMEBREW_NO_INSTALL_CLEANUP=yes brew install gettext ccache parallel astyle
+          HOMEBREW_NO_AUTO_UPDATE=yes HOMEBREW_NO_INSTALL_CLEANUP=yes brew install gettext ccache parallel
     - name: install SDL3 dependencies (mac)
       if: ${{ env.SKIP == 'false' && runner.os == 'macOS' && matrix.tiles == 1 && matrix.sdl3 == 1 }}
       run: |

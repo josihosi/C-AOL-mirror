@@ -88,12 +88,12 @@ jobs:
       if: matrix.language == 'cpp'
       run: |
        sudo apt-get update
-       sudo apt-get install -y astyle gettext libncursesw5-dev
+       sudo apt-get install -y gettext libncursesw5-dev
 
     - name: Build C++ for analysis
       if: matrix.language == 'cpp'
       run: |
-       make RELEASE=1 TESTS=0
+       make RELEASE=1 TESTS=0 ASTYLE=0
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v4
