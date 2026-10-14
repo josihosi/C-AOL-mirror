@@ -22,6 +22,61 @@ REGISTRY_SOURCE = ROOT / "tools/openclaw_harness/scenario_registry.py"
 
 
 class ChangedSourceEntryPointTest(unittest.TestCase):
+    def test_changed_cpp_line_filter_uses_diff_hunks_and_full_untracked_files(self):
+        with tempfile.TemporaryDirectory(prefix="changed-source-line-filter-") as temp:
+            root = Path(temp).resolve()
+            (root / "src").mkdir()
+            (root / "src/changed.cpp").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+            (root / "src/new.cpp").write_text("new\nfile\n", encoding="utf-8")
+            tracked = subprocess.CompletedProcess([], 0, "src/changed.cpp\n", "")
+            diff = subprocess.CompletedProcess(
+                [], 0,
+                "@@ -1 +1 @@\n-one\n+ONE\n@@ -4,0 +5 @@\n+five\n",
+                "",
+            )
+            untracked = subprocess.CompletedProcess([], 1, "", "")
+            with mock.patch.object(lint, "run", side_effect=[tracked, diff, untracked]):
+                result, error = lint.changed_cpp_line_filter(
+                    "HEAD", ["src/changed.cpp", "src/new.cpp"], root=root
+                )
+            self.assertIsNone(error)
+            self.assertEqual(result, [
+                {"name": str(root / "src/changed.cpp"), "lines": [[1, 1], [5, 5]]},
+                {"name": str(root / "src/new.cpp"), "lines": [[1, 2]]},
+            ])
+
+    def test_entrypoint_keeps_diff_failure_incomplete_after_full_fallback_passes(self):
+        with tempfile.TemporaryDirectory(prefix="changed-source-no-line-diff-") as temp:
+            root = Path(temp).resolve()
+            (root / "src").mkdir()
+            (root / "src/alpha.cpp").write_text("int alpha() { return 0; }\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(lint, "ROOT", root), \
+                    mock.patch.object(lint, "changed_from_git", return_value=["src/alpha.cpp"]), \
+                    mock.patch.object(lint, "run_astyle", return_value=0), \
+                    mock.patch.object(lint, "changed_cpp_line_filter", return_value=(None, "diff unavailable")), \
+                    mock.patch.object(lint, "run_cpp_analysis", return_value=0) as analyze, \
+                    contextlib.redirect_stdout(output):
+                status = lint.main([])
+            self.assertEqual(status, 2)
+            self.assertIn("INCOMPLETE: changed-line filter unavailable: diff unavailable", output.getvalue())
+            self.assertIn("RESULT: incomplete coverage", output.getvalue())
+            analyze.assert_called_once_with(["src/alpha.cpp"], line_filter=None, compact=True)
+
+    def test_compact_clang_tidy_output_deduplicates_and_keeps_full_log(self):
+        with tempfile.TemporaryDirectory(prefix="changed-source-compact-") as temp:
+            log = Path(temp) / "tidy.log"
+            output = io.StringIO()
+            diagnostic = "src/alpha.cpp:8:3: error: avoid auto [cata-almost-never-auto,-warnings-as-errors]\n"
+            with contextlib.redirect_stdout(output):
+                lint.compact_clang_tidy_output([
+                    ("src/alpha.cpp", 1, diagnostic),
+                    ("tests/smoke.cpp", 1, "../src/alpha.cpp:8:3: error: avoid auto [cata-almost-never-auto,-warnings-as-errors]\n"),
+                ], log)
+            self.assertEqual(log.read_text(encoding="utf-8").count("avoid auto"), 2)
+            self.assertIn("2 occurrence(s), 1 unique", output.getvalue())
+            self.assertIn("src/alpha.cpp:8 [cata-almost-never-auto] avoid auto (2 TU reports)", output.getvalue())
+
     def test_git_changed_path_traversal_uses_nul_delimiters(self):
         results = [
             subprocess.CompletedProcess([], 0, b"tools/changed.py\0tools/line\nbreak.py\0", b""),
@@ -210,7 +265,7 @@ class ChangedSourceEntryPointTest(unittest.TestCase):
                 partial_tus, partial_reason = lint.select_cpp_tus(["src/alpha.h"], root=root)
             self.assertEqual(partial_tus, ["src/alpha.cpp"])
             self.assertIn("src/beta.cpp", partial_reason)
-            self.assertIn("lack existing include scans", partial_reason)
+            self.assertIn("lack parser-visible include-scan provenance", partial_reason)
 
             output = io.StringIO()
             with mock.patch.object(lint, "ROOT", root), \
@@ -232,6 +287,145 @@ class ChangedSourceEntryPointTest(unittest.TestCase):
                 populated_tus, populated_reason = lint.select_cpp_tus(["src/alpha.h"], root=root)
             self.assertIsNone(populated_reason)
             self.assertEqual(populated_tus, ["src/alpha.cpp", "src/beta.cpp"])
+
+    def test_c_compile_database_map_is_resolved_to_the_c_translation_unit(self):
+        with tempfile.TemporaryDirectory(prefix="changed-source-c-scan-") as temp:
+            root = Path(temp).resolve()
+            for part in (
+                "src", "tests", "obj", "tests/obj", "build", "build-scripts",
+            ):
+                (root / part).mkdir(parents=True)
+            (root / "src/alpha.h").write_text("// shared header\n", encoding="utf-8")
+            (root / "src/alpha.cpp").write_text('#include "alpha.h"\n', encoding="utf-8")
+            (root / "src/allocator.c").write_text('#include "alpha.h"\n', encoding="utf-8")
+            (root / "tests/smoke.cpp").write_text("int test() { return 0; }\n", encoding="utf-8")
+            (root / "obj/alpha.inc").write_text(". ./src/alpha.h\n", encoding="utf-8")
+            (root / "obj/allocator.inc").write_text(". ./src/alpha.h\n", encoding="utf-8")
+            (root / "tests/obj/smoke.inc").write_text(".. ../tests/smoke.cpp\n", encoding="utf-8")
+            database = [
+                {"directory": str(root), "file": str(root / source), "command": "clang -c"}
+                for source in ("src/alpha.cpp", "src/allocator.c", "tests/smoke.cpp")
+            ]
+            (root / "build/compile_commands.json").write_text(
+                json.dumps(database), encoding="utf-8"
+            )
+
+            with mock.patch.dict(os.environ, {"CATA_BUILD_DIR": "build"}):
+                tus, reason = lint.select_cpp_tus(["src/alpha.h"], root=root)
+
+            self.assertEqual(tus, ["src/allocator.c", "src/alpha.cpp"])
+            self.assertIsNone(reason)
+            active, mapped, omissions, error = lint.cpp_database_coverage(
+                root / "build/compile_commands.json", root
+            )
+            self.assertIsNone(error)
+            self.assertIn("src/allocator.c", active)
+            self.assertIn("src/allocator.c", mapped)
+
+            plugin = root / "plugin.so"
+            plugin.touch()
+            (root / ".clang-tidy").touch()
+            wrapper = root / "build-scripts/clang-tidy-wrapper.sh"
+            wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            observed = []
+            run_real = lint.run
+
+            def fake_run(command, cwd=None, env=None, **kwargs):
+                if command[0] == "bash":
+                    observed.append(command)
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return run_real(command, cwd=cwd, env=env, **kwargs)
+
+            output = io.StringIO()
+            with mock.patch.object(lint, "ROOT", root), \
+                    mock.patch.object(lint, "run_astyle", return_value=0), \
+                    mock.patch.object(lint.shutil, "which", return_value="/isolated/clang-tidy"), \
+                    mock.patch.object(lint, "version_text", return_value="LLVM version 22.1.0"), \
+                    mock.patch.object(lint, "run", side_effect=fake_run), \
+                    mock.patch.dict(os.environ, {
+                        "CATA_BUILD_DIR": "build",
+                        "CATA_CLANG_TIDY": "/isolated/clang-tidy",
+                        "CATA_CLANG_TIDY_PLUGIN": str(plugin),
+                    }), \
+                    contextlib.redirect_stdout(output):
+                status = lint.main(["--files", "src/allocator.c"])
+
+            self.assertEqual(status, 0)
+            self.assertEqual(len(observed), 1)
+            self.assertTrue(observed[0][-1].endswith("/src/allocator.c"))
+            self.assertIn("Affected translation units from existing include scan: src/allocator.c", output.getvalue())
+            self.assertIn("PASS: clang-tidy-22 on selected affected translation units", output.getvalue())
+
+    def test_header_analysis_runs_known_tus_but_reports_utility_and_plugin_gaps(self):
+        with tempfile.TemporaryDirectory(prefix="changed-source-cdb-gaps-") as temp:
+            root = Path(temp).resolve()
+            for part in (
+                "src", "tests", "obj", "tests/obj", "build", "build-scripts",
+                "tools/format", "src/chkjson", "tools/save", "tools/clang-tidy-plugin",
+            ):
+                (root / part).mkdir(parents=True, exist_ok=True)
+            header = root / "src/alpha.h"
+            source = root / "src/alpha.cpp"
+            header.write_text("// shared header\n", encoding="utf-8")
+            source.write_text('#include "alpha.h"\nint alpha() { return 1; }\n', encoding="utf-8")
+            (root / "obj/alpha.inc").write_text(". ./src/alpha.h\n", encoding="utf-8")
+            (root / "tests/smoke.cpp").write_text("int smoke() { return 0; }\n", encoding="utf-8")
+            (root / "tests/obj/smoke.inc").write_text(".. ../tests/smoke.cpp\n", encoding="utf-8")
+            for path in (
+                "tools/format/format.cpp", "src/chkjson/chkjson.cpp",
+                "tools/save/zzip_main.cpp", "tools/clang-tidy-plugin/Check.cpp",
+            ):
+                (root / path).write_text("int omitted() { return 0; }\n", encoding="utf-8")
+            plugin = root / "plugin.so"
+            plugin.touch()
+            (root / ".clang-tidy").touch()
+            wrapper = root / "build-scripts/clang-tidy-wrapper.sh"
+            wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            database = [{
+                "directory": str(root),
+                "file": str(source),
+                "arguments": ["clang++", "-c", str(source)],
+            }]
+            (root / "build/compile_commands.json").write_text(
+                json.dumps(database), encoding="utf-8"
+            )
+
+            observed = {}
+
+            run_real = lint.run
+
+            def fake_run(command, cwd=None, env=None, **kwargs):
+                if command[0] == "bash":
+                    observed["command"] = command
+                    observed["cwd"] = cwd
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return run_real(command, cwd=cwd, env=env, **kwargs)
+
+            output = io.StringIO()
+            with mock.patch.object(lint, "ROOT", root), \
+                    mock.patch.object(lint.shutil, "which", return_value="/isolated/clang-tidy"), \
+                    mock.patch.object(lint, "version_text", return_value="LLVM version 22.1.0"), \
+                    mock.patch.object(lint, "run", side_effect=fake_run), \
+                    mock.patch.dict(os.environ, {
+                        "CATA_BUILD_DIR": "build",
+                        "CATA_CLANG_TIDY": "/isolated/clang-tidy",
+                        "CATA_CLANG_TIDY_PLUGIN": str(plugin),
+                    }), \
+                    contextlib.redirect_stdout(output):
+                status = lint.run_cpp_analysis(
+                    ["src/alpha.h"], line_filter=[{"name": str(source), "lines": [[1, 2]]}]
+                )
+
+            self.assertEqual(status, 2)
+            self.assertIn("src/alpha.cpp", observed["command"][-1])
+            filter_arg = next(arg for arg in observed["command"] if arg.startswith("--line-filter="))
+            self.assertEqual(json.loads(filter_arg.split("=", 1)[1])[0]["lines"], [[1, 2]])
+            self.assertIn("Makefile direct-link utilities (3 TUs)", output.getvalue())
+            self.assertIn("standalone clang-tidy plugin (1 TU)", output.getvalue())
+            self.assertIn("Affected-header coverage remains incomplete", output.getvalue())
+            self.assertIn("INCOMPLETE: changed-header coverage incomplete", output.getvalue())
 
     def test_existing_clang_tidy_wrapper_forwards_build_dir_and_translation_unit(self):
         with tempfile.TemporaryDirectory(prefix="changed-source-wrapper-") as temp:

@@ -101,6 +101,9 @@ It checks tracked changes against `HEAD` plus untracked, non-ignored files. Use
 specific changed paths. C and C++ files receive a dry-run AStyle check and,
 when the existing generated include scan, compile database, LLVM 22 tool, and
 project plugin are available, clang-tidy on affected translation units.
+The default Git-diff route passes changed C/C++ line ranges to clang-tidy's
+`--line-filter`; untracked source files are checked across their full contents.
+clang-tidy still analyzes each selected translation unit.
 Changed Python files go to Flake8. JSON declarations under
 `tools/openclaw_harness/scenarios/` go to the existing read-only declaration
 linter.
@@ -128,10 +131,89 @@ scans under `obj/tiles`. If multiple layouts resolve to the same translation
 unit, every layout scan is checked—even when only one scan maps the changed
 header—so an ambiguous stale layout keeps coverage incomplete.
 When an existing compile database is available for a changed header, the
-checker also compares its in-repository, non-third-party C++ translation units
-with the dependency scans. Any active translation unit missing a scan makes
-header coverage incomplete, since the available maps cannot establish whether
-that unit includes the changed header.
+checker also compares its in-repository, non-third-party C and C++ translation
+units with the dependency scans. Any active translation unit missing a scan
+makes header coverage incomplete, since the available maps cannot establish whether
+that unit includes the changed header. The Make compile database does not
+include the direct-link utility sources (`tools/format`, `src/chkjson`, and
+`tools/save/zzip_main.cpp`) or the standalone clang-tidy plugin CMake target.
+The checker reports these known omissions and keeps affected-header coverage
+incomplete while any are absent. A source-only check still analyzes its selected
+translation unit, but does not claim repository-wide or header-wide coverage.
+The existing include-map parser derives translation-unit paths by replacing
+`.inc` with `.cpp`; the checker resolves a matching `.c` source when the `.cpp`
+path does not exist. Missing parser-visible maps still make coverage incomplete.
+
+For the default Git-diff route, clang-tidy findings are deduplicated by
+file/line/rule/message across affected translation units and summarized in the
+terminal. The complete output produced by the filtered clang-tidy invocations
+is saved to a temporary log path printed by the checker. Remove that log after
+inspection. Explicit `--files` checks retain the full per-translation-unit
+output for focused reviews.
+
+### macOS clang-tidy metadata
+
+The local clang-tidy wrapper uses LLVM 22 and the custom plugin. On macOS, keep
+the project's 10.15 deployment target and make the Apple SDK's libc++ search
+explicit in the compile database: Homebrew LLVM 22 otherwise selects its bundled
+libc++, which warns that deployments below 11.0 are unsupported. `-isysroot`
+alone does not change that bundled-header selection. The following uses Apple
+Clang with the installed SDK, generates commands for explicit object targets
+only, and then creates the existing include maps. It avoids the root `all`
+target, whose dry-run includes recursive and linker recipes. Run from the
+repository root with GNU Make and `compiledb` installed:
+
+```bash
+set -euo pipefail
+repo=$PWD
+sdk=$(xcrun --sdk macosx --show-sdk-path)
+make_args=(
+    RELEASE=1 TILES=0 SOUND=0 ASTYLE=0 PCH=0 CCACHE=0 NATIVE=osx
+    CLANG=/usr/bin/clang++ CXX=/usr/bin/clang++
+    "OTHERS=-isysroot $sdk -nostdinc++ -isystem $sdk/usr/include/c++/v1"
+)
+app_objects=()
+for source in src/*.cpp src/third-party/flatbuffers/*.cpp \
+              src/third-party/fmt/*.cc src/third-party/imgui/*.cpp \
+              src/third-party/imtui/*.cpp src/cata_allocator_c.c \
+              src/third-party/zstd/common/*.c src/third-party/zstd/compress/*.c \
+              src/third-party/zstd/decompress/*.c; do
+    relative=${source#src/}
+    app_objects+=("obj/${relative%.*}.o")
+done
+compiledb --no-build --output "$repo/build/compile_commands.json" --overwrite make \
+    -o version -o src/version.h -o prefix -o src/prefix.h \
+    "${make_args[@]}" "${app_objects[@]}"
+
+test_objects=()
+for source in tests/*.cpp; do
+    relative=${source#tests/}
+    test_objects+=("obj/${relative%.cpp}.o")
+done
+( cd tests && compiledb --no-build --output "$repo/build/compile_commands.json" make \
+    "${make_args[@]}" "${test_objects[@]}" )
+
+# Scan headers only; these rules preprocess to /dev/null and write .inc maps.
+# Suppress Make's forced version/prefix generation while refreshing the scans.
+make -B -j1 -o version -o version-force -o src/version.h \
+    -o prefix -o src/prefix.h includes "${make_args[@]}"
+```
+
+On GNU Make 3.81, run the test database command from `tests/` as shown; its
+backtick-form directory messages are not understood by `compiledb` when
+invoked with `make -C tests`. `-B` refreshes every include map for the selected
+source set. The `-o` options mark the forced version and prefix targets old so
+the metadata refresh does not regenerate `src/version.h` or `src/prefix.h`.
+Verify the dry-run has only preprocessor recipes before running this command.
+This is the heavier metadata step, separate from an ordinary
+changed-source check; it runs one preprocessor at a time and does not compile
+objects or link the game/tests. The existing Make scan recipes use `-Wno-error`
+only for preprocessing so diagnostics do not block map output. clang-tidy still
+runs with the project configuration and strict diagnostics. Keep the CDB and
+include maps bound to the same source/configuration set, and rerun this
+preparation after source/header changes before using header coverage. The
+checker prints the represented TU count, map availability, and known omissions
+on each C++ invocation.
 
 If an isolated LLVM 22 executable is not named `clang-tidy-22`, set
 `CATA_CLANG_TIDY` to its executable path; the checker still requires its

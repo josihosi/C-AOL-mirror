@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import shutil
 import subprocess
@@ -84,6 +85,78 @@ def version_text(binary, args):
     return None if result is None or result.returncode else result.stdout.strip()
 
 
+def changed_cpp_line_filter(base, changed_cpp, root=None):
+    """Build clang-tidy's line filter from added/changed lines in tracked files."""
+    root = Path(root or ROOT).resolve()
+    entries = []
+    for relative in changed_cpp:
+        path = root / relative
+        if not path.is_file():
+            continue
+        tracked = run(["git", "ls-files", "--error-unmatch", "--", relative], cwd=root)
+        if tracked is None:
+            return None, "could not determine tracked status for {}".format(relative)
+        if tracked.returncode:
+            ranges = [[1, max(1, len(path.read_text(encoding="utf-8", errors="replace").splitlines()))]]
+        else:
+            diff = run(["git", "diff", "--no-ext-diff", "--unified=0", base, "--", relative], cwd=root)
+            if diff is None or diff.returncode:
+                return None, "could not read changed line ranges for {}".format(relative)
+            ranges = []
+            for match in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", diff.stdout, re.MULTILINE):
+                start = max(1, int(match.group(1)))
+                count = int(match.group(2) or "1")
+                # For a deletion-only hunk, include the adjacent surviving line.
+                end = start + max(1, count) - 1
+                ranges.append([start, end])
+            if not ranges:
+                ranges = [[1, max(1, len(path.read_text(encoding="utf-8", errors="replace").splitlines()))]]
+
+        merged = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        entries.append({"name": str(path.resolve()), "lines": merged})
+    return entries, None
+
+
+def compact_clang_tidy_output(outputs, log_path):
+    """Write complete per-TU output and print deduplicated diagnostics."""
+    diagnostic = re.compile(
+        r"^(.*?):(\d+):(\d+): (warning|error): (.*?) \[([^,\]]+)(?:,[^\]]*)?\]$"
+    )
+    counts = {}
+    unmatched_errors = set()
+    raw = []
+    for tu, returncode, output in outputs:
+        raw.append("===== {} (exit {}) =====\n{}".format(tu, returncode, output))
+        for line in output.splitlines():
+            match = diagnostic.match(line)
+            if match:
+                filename = match.group(1).replace("\\", "/")
+                if filename.startswith(str(ROOT.resolve()) + "/"):
+                    filename = filename[len(str(ROOT.resolve())) + 1:]
+                filename = posixpath.normpath(filename)
+                while filename.startswith("../"):
+                    filename = filename[3:]
+                key = (filename, int(match.group(2)), match.group(6), match.group(5))
+                counts[key] = counts.get(key, 0) + 1
+            elif re.search(r"(?:fatal )?error:|Error while processing|unable to load", line, re.IGNORECASE):
+                unmatched_errors.add(line.strip())
+    Path(log_path).write_text("\n".join(raw), encoding="utf-8")
+    print("Complete clang-tidy output: {}".format(log_path))
+    print("clang-tidy diagnostics: {} occurrence(s), {} unique file/line/rule/message finding(s)".format(
+        sum(counts.values()), len(counts)
+    ))
+    for (filename, line, rule, message), count in sorted(counts.items()):
+        repeat = " ({} TU reports)".format(count) if count > 1 else ""
+        print("{}:{} [{}] {}{}".format(filename, line, rule, message, repeat))
+    for line in sorted(unmatched_errors):
+        print("clang-tidy error output: {}".format(line))
+
+
 def source_classifier(path):
     suffix = Path(path).suffix.lower()
     if suffix in CPP_SUFFIXES:
@@ -96,7 +169,7 @@ def source_classifier(path):
 
 
 def active_cpp_tus_from_database(database, root):
-    """Read active in-repository C++ TUs from an existing compile database."""
+    """Read active in-repository C and C++ TUs from an existing compile database."""
     try:
         with Path(database).open(encoding="utf-8") as stream:
             entries = json.load(stream)
@@ -128,6 +201,71 @@ def active_cpp_tus_from_database(database, root):
             continue
         active.add(relative.as_posix())
     return active, None
+
+
+def known_cpp_database_omissions(root, active_tus):
+    """Return known Make utility/plugin TUs absent from this compile database."""
+    root = Path(root)
+    target_families = {
+        "Makefile direct-link utilities": [
+            *root.glob("tools/format/*.cpp"),
+            *root.glob("src/chkjson/*.cpp"),
+            root / "tools/save/zzip_main.cpp",
+        ],
+        "standalone clang-tidy plugin": list(root.glob("tools/clang-tidy-plugin/**/*.cpp")),
+    }
+    omissions = {}
+    for family, sources in target_families.items():
+        missing = sorted(
+            path.relative_to(root).as_posix()
+            for path in sources
+            if path.is_file() and path.relative_to(root).as_posix() not in active_tus
+        )
+        if missing:
+            omissions[family] = missing
+    return omissions
+
+
+def include_map_candidates(root, source):
+    """Return the existing Make include-map layouts for a database TU."""
+    root = Path(root)
+    path = Path(source)
+    if not path.parts:
+        return []
+    if path.parts[0] == "tests":
+        return [root / "tests/obj" / path.relative_to("tests").with_suffix(".inc")]
+    if path.parts[0] == "src":
+        relative = path.relative_to("src").with_suffix(".inc")
+        return [root / "obj" / relative, root / "obj/tiles" / relative]
+    return []
+
+
+def cpp_database_coverage(database, root):
+    """Summarize represented TUs, available maps and known target omissions."""
+    active_tus, error = active_cpp_tus_from_database(database, root)
+    if error:
+        return set(), set(), {}, error
+    mapped = {
+        source for source in active_tus
+        if any(path.is_file() for path in include_map_candidates(root, source))
+    }
+    omissions = known_cpp_database_omissions(root, active_tus)
+    return active_tus, mapped, omissions, None
+
+
+def brief_paths(paths, limit=6):
+    paths = sorted(paths)
+    shown = ", ".join(paths[:limit])
+    if len(paths) > limit:
+        shown += ", and {} more".format(len(paths) - limit)
+    return shown
+
+
+def cpp_database_gap_summary(omissions):
+    return "; ".join(
+        "{} ({} TU{})".format(family, len(paths), "" if len(paths) == 1 else "s")
+        for family, paths in sorted(omissions.items())
+    )
 
 
 def run_astyle(paths):
@@ -264,6 +402,10 @@ def select_cpp_tus(changed_cpp, root=None):
             self.includes_to_sources = ScanTrackingMap()
 
         def parse_includes_file(self, includes_file, source_file_path, relative_root):
+            expected_source = root / source_file_path
+            c_source = expected_source.with_suffix(".c")
+            if not expected_source.is_file() and c_source.is_file():
+                source_file_path = c_source.relative_to(root).as_posix()
             self.includes_to_sources.current_scan = Path(includes_file.name).resolve()
             self.includes_to_sources.current_source = source_file_path
             return super().parse_includes_file(includes_file, source_file_path, relative_root)
@@ -273,6 +415,13 @@ def select_cpp_tus(changed_cpp, root=None):
     test_scans_ok = include_map.parse_includes_files_from(str(root / "tests/obj"), "tests", "tests")
     if not source_scans_ok or not test_scans_ok:
         return tus, "existing source and test include maps could not both be read"
+    # The shared helper maps every .inc filename to .cpp. Keep its C++ results,
+    # discard guessed source paths that do not exist, and merge the same
+    # parser's source-backed results (including .c TUs) for each changed input.
+    tus = {source for source in tus if (root / source).is_file()}
+    for changed in changed_cpp:
+        tus.update(include_map.get_files_affected_by(changed))
+    tus = sorted(tus)
     unmapped = [path for path in changed_cpp if not include_map.get_files_affected_by(path)]
     if unmapped:
         return tus, "changed C++ input(s) absent from existing include scan: " + ", ".join(unmapped)
@@ -309,19 +458,41 @@ def select_cpp_tus(changed_cpp, root=None):
             build_dir = root / build_dir
         database = build_dir / "compile_commands.json"
         if database.is_file():
-            active_tus, database_error = active_cpp_tus_from_database(database, root)
+            active_tus, mapped_tus, omissions, database_error = cpp_database_coverage(
+                database, root
+            )
             if database_error:
                 return tus, "changed-header coverage cannot be checked: " + database_error
             scanned_tus = set(include_map.includes_to_sources.scan_paths_by_source)
             missing_scans = sorted(active_tus - scanned_tus)
+            # The inventory is a quick summary. The parsed source provenance above
+            # remains authoritative for maps used by the changed header.
+            missing_maps = sorted(active_tus - mapped_tus)
+            coverage_gaps = []
             if missing_scans:
-                return tus, "active compile database translation unit(s) lack existing include scans for changed header coverage: " + ", ".join(missing_scans)
+                coverage_gaps.append(
+                    "active compile database translation unit(s) lack parser-visible include-scan provenance ({})".format(
+                        brief_paths(missing_scans)
+                    )
+                )
+            elif missing_maps:
+                coverage_gaps.append(
+                    "active compile database translation unit(s) lack existing include maps ({})".format(
+                        brief_paths(missing_maps)
+                    )
+                )
+            if omissions:
+                coverage_gaps.append(
+                    "compile database omits known targets: " + cpp_database_gap_summary(omissions)
+                )
+            if coverage_gaps:
+                return tus, "changed-header coverage incomplete: " + "; ".join(coverage_gaps)
     return tus, None
 
 
-def run_cpp_analysis(changed_cpp):
+def run_cpp_analysis(changed_cpp, line_filter=None, compact=False):
     tus, reason = select_cpp_tus(changed_cpp)
-    print("C++ changed files: {}".format(", ".join(changed_cpp)))
+    print("C/C++ changed files: {}".format(", ".join(changed_cpp)))
     if tus:
         print("Affected translation units from existing include scan: {}".format(", ".join(tus)))
     else:
@@ -335,14 +506,34 @@ def run_cpp_analysis(changed_cpp):
     if not build_dir.is_absolute():
         build_dir = ROOT / build_dir
     database = build_dir / "compile_commands.json"
+    if database.is_file():
+        active_tus, mapped_tus, omissions, coverage_error = cpp_database_coverage(
+            database, ROOT
+        )
+        if coverage_error:
+            print("C/C++ metadata coverage is incomplete: " + coverage_error)
+        else:
+            print(
+                "C/C++ metadata: {} in-repository non-third-party compile database TU(s); "
+                "include maps exist for {}/{}.".format(
+                    len(active_tus), len(mapped_tus), len(active_tus)
+                )
+            )
+            if omissions:
+                print("C++ database omits known targets: " + cpp_database_gap_summary(omissions))
+            if len(mapped_tus) != len(active_tus) or omissions:
+                print(
+                    "Affected-header coverage remains incomplete until omitted targets "
+                    "are represented and every active TU has a current include scan."
+                )
+    else:
+        print("C/C++ metadata coverage is incomplete: compile database is missing")
     plugin_name = os.environ.get("CATA_CLANG_TIDY_PLUGIN")
     plugin = Path(plugin_name) if plugin_name else build_dir / "tools/clang-tidy-plugin/libCataAnalyzerPlugin.so"
     if not plugin.is_absolute():
         plugin = ROOT / plugin
     plugin = plugin.resolve()
     prerequisites = []
-    if reason:
-        prerequisites.append(reason)
     if not (ROOT / ".clang-tidy").is_file():
         prerequisites.append(".clang-tidy is missing")
     if not database.is_file():
@@ -356,8 +547,12 @@ def run_cpp_analysis(changed_cpp):
     if not tus:
         prerequisites.append("no affected translation units were established")
     if prerequisites:
+        if reason:
+            prerequisites.insert(0, reason)
         print("INCOMPLETE: C++ correctness analysis skipped: " + "; ".join(prerequisites))
         return 2
+    if reason:
+        print("INCOMPLETE: " + reason)
     # Use the same local wrapper and plugin route as CI. This is read-only and
     # consumes only pre-existing compile metadata and plugin artifacts.
     env = os.environ.copy()
@@ -366,13 +561,18 @@ def run_cpp_analysis(changed_cpp):
     env["CATA_CLANG_TIDY_PLUGIN"] = str(plugin)
     wrapper = ROOT / "build-scripts/clang-tidy-wrapper.sh"
     status = 0
+    outputs = []
+    line_filter_arg = []
+    if line_filter:
+        line_filter_arg = ["--line-filter=" + json.dumps(line_filter, separators=(",", ":"))]
     for tu in tus:
         # The existing wrapper writes clang-tidy-trace in its working
         # directory. Keep those generated profiles out of the workspace.
         try:
             with tempfile.TemporaryDirectory(prefix="check-changed-source-tidy-") as trace_dir:
                 result = run(
-                    ["bash", str(wrapper), "-p", str(build_dir), str((ROOT / tu).resolve())],
+                    ["bash", str(wrapper), "-p", str(build_dir), *line_filter_arg,
+                     str((ROOT / tu).resolve())],
                     cwd=Path(trace_dir), env=env,
                 )
         except OSError as exc:
@@ -383,12 +583,27 @@ def run_cpp_analysis(changed_cpp):
             print("INCOMPLETE: could not execute clang-tidy wrapper for {}".format(tu))
             status = 2
         elif result.stdout.strip():
-            print(result.stdout.rstrip())
+            if compact:
+                outputs.append((tu, result.returncode, result.stdout))
+            else:
+                print(result.stdout.rstrip())
         if result is not None and result.returncode:
             print("FAIL: clang-tidy failed for {} (exit {})".format(tu, result.returncode))
             status = 1
+    if compact and outputs:
+        try:
+            fd, log_path = tempfile.mkstemp(prefix="check-changed-source-clang-tidy-", suffix=".log")
+            os.close(fd)
+            compact_clang_tidy_output(outputs, log_path)
+        except OSError as exc:
+            print("INCOMPLETE: could not save complete clang-tidy output: {}".format(exc))
+            status = 2
+    if status == 0 and reason:
+        return 2
     if status == 0:
         print("PASS: clang-tidy-22 on selected affected translation units")
+    elif status == 1 and reason:
+        print("RESULT: selected translation-unit findings; affected-header coverage remains incomplete")
     return status
 
 
@@ -424,7 +639,20 @@ def main(argv=None):
     statuses = [2] if incomplete_input else []
     if groups["cpp"]:
         statuses.append(run_astyle(groups["cpp"]))
-        statuses.append(run_cpp_analysis(groups["cpp"]))
+        line_filter = None
+        compact = not args.files
+        if compact:
+            line_filter, line_filter_error = changed_cpp_line_filter(args.base, groups["cpp"])
+            if line_filter_error:
+                print("INCOMPLETE: changed-line filter unavailable: {}".format(line_filter_error))
+                statuses.append(2)
+            elif line_filter:
+                print("clang-tidy line filter: changed lines in {} C/C++ file(s)".format(
+                    len(line_filter)
+                ))
+        statuses.append(run_cpp_analysis(
+            groups["cpp"], line_filter=line_filter, compact=compact
+        ))
     if groups["python"]:
         statuses.append(run_flake8(groups["python"]))
     if groups["declaration"]:
