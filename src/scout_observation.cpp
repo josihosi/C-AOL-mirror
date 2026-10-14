@@ -276,7 +276,7 @@ float optical_magnification()
     return 2.0f / std::max( 1.0f, get_weather().weather_id->sight_penalty );
 }
 
-scout_observation::visibility_read read( const Character &observer,
+scout_observation::visibility_read read_visibility( const Character &observer,
         const tripoint_abs_ms &origin, const tripoint_abs_ms &target,
         const Character *actor,
         std::vector<std::unique_ptr<existing_view>> *cached_views = nullptr,
@@ -435,19 +435,21 @@ visibility_read site_reader::read( const Character &observer, const tripoint_abs
                                    const tripoint_abs_ms &target,
                                    const std::vector<tripoint_abs_omt> &footprint )
 {
-    return ::read( observer, origin, target, nullptr, &impl->views, &impl->vehicles, footprint );
+    return read_visibility( observer, origin, target, nullptr, &impl->views, &impl->vehicles,
+                            footprint );
 }
 visibility_read site_reader::read_character( const Character &observer, const Character &target,
                                              const std::vector<tripoint_abs_omt> &footprint )
 {
-    return ::read( observer, observer.pos_abs(), target.pos_abs(), &target, &impl->views, &impl->vehicles,
-                   footprint );
+    return read_visibility( observer, observer.pos_abs(), target.pos_abs(), &target, &impl->views,
+                            &impl->vehicles, footprint );
 }
 visibility_read site_reader::read_signal( const Character &observer, const tripoint_abs_ms &origin,
                                           const tripoint_abs_ms &target,
                                           const std::vector<tripoint_abs_omt> &footprint )
 {
-    return ::read( observer, origin, target, nullptr, &impl->views, &impl->vehicles, footprint );
+    return read_visibility( observer, origin, target, nullptr, &impl->views, &impl->vehicles,
+                            footprint );
 }
 size_t site_reader::cached_view_count() const
 {
@@ -699,12 +701,12 @@ size_t site_reader::cached_vehicle_scan_count() const
 }
 visibility_read read_character( const Character &observer, const Character &target )
 {
-    return read( observer, observer.pos_abs(), target.pos_abs(), &target );
+    return read_visibility( observer, observer.pos_abs(), target.pos_abs(), &target );
 }
 visibility_read read_site_tile( const Character &observer, const tripoint_abs_ms &origin,
                                 const tripoint_abs_ms &target )
 {
-    return read( observer, origin, target, nullptr );
+    return read_visibility( observer, origin, target, nullptr );
 }
 bool associated_with_site( const tripoint_abs_omt &position,
                            const std::vector<tripoint_abs_omt> &footprint,

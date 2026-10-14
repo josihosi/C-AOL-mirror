@@ -81,7 +81,9 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 22 all
           sudo apt-get install -y python3-pip ninja-build cmake
-          pip3 install --user lit
+          # PyPI has no LLVM 22 lit release. This published version retains
+          # the external-shell ShTest API used by the plugin's LLVM 22 tests.
+          pip3 install --user 'lit==18.1.8'
           # Plugin .so ABI is tied to the exact LLVM patch version it links
           # against; feeding the installed version into the cache key forces
           # a rebuild on apt point releases (e.g. 22.1.6 -> 22.1.7) and

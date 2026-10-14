@@ -84,7 +84,15 @@ jobs:
     #    and modify them (or add more) to build your code if your project
     #    uses a compiled language
 
-    - run: |
+    - name: Install C++ build prerequisites
+      if: matrix.language == 'cpp'
+      run: |
+       sudo apt-get update
+       sudo apt-get install -y astyle gettext libncursesw5-dev
+
+    - name: Build C++ for analysis
+      if: matrix.language == 'cpp'
+      run: |
        make RELEASE=1 TESTS=0
 
     - name: Perform CodeQL Analysis

@@ -1,7 +1,5 @@
 #include "activity_actor.h"
 
-void openclaw_harness_semantic_wait_activity_complete();
-
 #include <algorithm>
 #include <array>
 #include <climits>

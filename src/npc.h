@@ -1638,13 +1638,13 @@ class npc : public Character
         bool set_camp_patrol_order( const tripoint_abs_ms &target, npc_mission patrol_mission );
         void clear_camp_patrol_order();
         bool has_camp_patrol_order() const;
-        const bandit_live_world_projection_lease &get_bandit_live_world_projection_lease() const;
+        const ::bandit_live_world_projection_lease &get_bandit_live_world_projection_lease() const;
         // Read-only diagnostic clock; this is not proof of movement or ownership.
         time_point get_last_updated() const {
             return last_updated;
         }
         void set_bandit_live_world_projection_lease(
-            const bandit_live_world_projection_lease &lease );
+            const ::bandit_live_world_projection_lease &lease );
         void clear_bandit_live_world_projection_lease();
         bool has_activity() const;
         bool has_job() const {
@@ -1679,7 +1679,7 @@ class npc : public Character
         npc_attitude previous_attitude = NPCATT_NULL;
         bool has_ecology_covert_player_camp_assignment() const;
         bool camp_patrol_order_active = false;
-        bandit_live_world_projection_lease bandit_live_world_projection_lease;
+        ::bandit_live_world_projection_lease bandit_live_world_projection_lease;
         bool known_to_u = false; // Does the player know this NPC?
         // Type of complaint->last time we complained about this type
         std::map<std::string, time_point> complaints;

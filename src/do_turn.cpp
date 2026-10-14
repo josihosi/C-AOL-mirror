@@ -1304,8 +1304,6 @@ bool live_bandit_shakedown_already_opened( const bandit_live_world::site_record 
     return false;
 }
 
-int live_bandit_current_minutes();
-
 struct live_bandit_paid_return_travel_order {
     npc *member_npc;
     std::vector<tripoint_abs_omt> route;
@@ -6060,10 +6058,10 @@ bool note_live_bandit_aftermath()
         bandit_live_world::terminal_hostile_shakedown_replay_identity stale = exact;
         stale.generation = stale.generation == std::numeric_limits<int>::max() ?
                            stale.generation - 1 : stale.generation + 1;
-        const auto serialized_state = []() {
+        const auto serialized_state = [&world = state]() {
             std::ostringstream serialized;
             JsonOut json( serialized );
-            state.serialize( json );
+            world.serialize( json );
             return serialized.str();
         };
         const std::string before = serialized_state();
