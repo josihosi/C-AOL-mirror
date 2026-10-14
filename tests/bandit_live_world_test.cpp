@@ -109,23 +109,44 @@
 #include "weakpoint.h"
 #include "worldfactory.h"
 
+// Harness fixtures use the process-local CRT environment on both hosts.
+static int set_test_env( const char *name, const char *value, int overwrite )
+{
+#if defined(_WIN32)
+    if( !overwrite && std::getenv( name ) ) {
+        return 0;
+    }
+    return _putenv_s( name, value );
+#else
+    return setenv( name, value, overwrite );
+#endif
+}
+
+static int unset_test_env( const char *name )
+{
+#if defined(_WIN32)
+    return _putenv_s( name, "" );
+#else
+    return unsetenv( name );
+#endif
+}
+
+// The shared native channel may prepend its canonical semantic envelope to
+// administrative rows. Unknown envelopes and malformed JSON still fail parsing.
+static JsonValue native_trace_value( const std::string &line )
+{
+    static const std::string prefix = "openclaw_harness_semantic_step: ";
+    const std::size_t offset = line.compare( 0, prefix.size(), prefix ) == 0 ? prefix.size() : 0;
+    return json_loader::from_string( line.substr( offset ) );
+}
+
 std::string live_bandit_homeward_boundary_discriminator_for_test();
-bool persist_live_bandit_local_progress_for_test( const bandit_live_world::site_record &before,
-        const bandit_live_world::site_record &after );
-int record_live_bandit_stationary_watch_signals_for_test( bandit_live_world::world_state &state,
-        const std::vector<live_bandit_signal_observation> &signals, bool cadence_due );
 std::string live_bandit_homeward_unsafe_current_route_read_for_test( character_id member_id );
 std::string live_bandit_homeward_partner_route_read_for_test(
     character_id member_id, character_id partner_id );
 std::map<character_id, std::pair<tripoint_abs_ms, tripoint_abs_ms>>
         live_bandit_homeward_boundary_steps_for_test();
 std::string live_bandit_homeward_boundary_collection_for_test();
-std::map<character_id, tripoint_abs_omt> live_bandit_elevated_recovery_orders_for_test();
-std::map<character_id, std::pair<tripoint_abs_ms, tripoint_abs_ms>>
-        live_bandit_elevated_recovery_boundary_for_test();
-std::map<character_id, std::pair<tripoint_abs_ms, tripoint_abs_ms>>
-        live_bandit_ingress_boundary_steps_for_test();
-void live_bandit_elevated_recovery_npc_turn_for_test( bool overmap_step );
 
 namespace
 {
@@ -940,14 +961,14 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
             if( const char *value = std::getenv( trace_names[index] ) ) {
                 prior_trace_environment[index] = value;
             }
-            unsetenv( trace_names[index] );
+            unset_test_env( trace_names[index] );
         }
         on_out_of_scope restore_trace_environment( [trace_names, prior_trace_environment, trace_path]() {
             for( std::size_t index = 0; index < trace_names.size(); ++index ) {
                 if( prior_trace_environment[index] ) {
-                    setenv( trace_names[index], prior_trace_environment[index]->c_str(), 1 );
+                    set_test_env( trace_names[index], prior_trace_environment[index]->c_str(), 1 );
                 } else {
-                    unsetenv( trace_names[index] );
+                    unset_test_env( trace_names[index] );
                 }
             }
             std::error_code ignored;
@@ -958,12 +979,12 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         CHECK_FALSE( std::filesystem::exists( trace_path ) );
         live_operation.site_search_retry_after_turn = 0;
         const std::string selected_id = std::to_string( first.getID().get_value() );
-        setenv( trace_names[0], "r048-route-probe", 1 );
-        setenv( trace_names[1], "r048-route-probe", 1 );
-        setenv( trace_names[2], "r048-route-probe", 1 );
-        setenv( trace_names[3], trace_path.string().c_str(), 1 );
-        setenv( trace_names[4], "r048-route-probe", 1 );
-        setenv( trace_names[5], selected_id.c_str(), 1 );
+        set_test_env( trace_names[0], "r048-route-probe", 1 );
+        set_test_env( trace_names[1], "r048-route-probe", 1 );
+        set_test_env( trace_names[2], "r048-route-probe", 1 );
+        set_test_env( trace_names[3], trace_path.string().c_str(), 1 );
+        set_test_env( trace_names[4], "r048-route-probe", 1 );
+        set_test_env( trace_names[5], selected_id.c_str(), 1 );
         CHECK_FALSE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
         raid_decision_trace::native_recorder().closeout();
 
@@ -972,7 +993,7 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         bool saw_occupied_blocker = false;
         std::string row;
         while( std::getline( input, row ) ) {
-            JsonObject record = json_loader::from_string( row ).get_object();
+            JsonObject record = native_trace_value( row ).get_object();
             record.allow_omitted_members();
             if( record.get_string( "event" ) != "raid_site_route_probe" ||
                 record.get_int( "npc_id" ) != first.getID().get_value() ) {
@@ -1053,25 +1074,25 @@ TEST_CASE( "bound raid decision trace selects current survivors and exposes comp
     on_out_of_scope restore_environment( [env_names, old_environment]() {
         for( std::size_t index = 0; index < env_names.size(); ++index ) {
             if( old_environment[index] ) {
-                setenv( env_names[index], old_environment[index]->c_str(), 1 );
+                set_test_env( env_names[index], old_environment[index]->c_str(), 1 );
             } else {
-                unsetenv( env_names[index] );
+                unset_test_env( env_names[index] );
             }
         }
     } );
-    unsetenv( env_names[0] );
-    setenv( env_names[1], "run", 1 );
-    setenv( env_names[2], "run", 1 );
-    setenv( env_names[3], sink.c_str(), 1 );
+    unset_test_env( env_names[0] );
+    set_test_env( env_names[1], "run", 1 );
+    set_test_env( env_names[2], "run", 1 );
+    set_test_env( env_names[3], sink.c_str(), 1 );
     CHECK_FALSE( raid_decision_trace::native_recorder().enabled() );
     raid_decision_trace::native_recorder().record( "8", "raid_actor_action", 10,
             "\"npc_id\":8" );
-    setenv( env_names[0], "other", 1 );
+    set_test_env( env_names[0], "other", 1 );
     CHECK_FALSE( raid_decision_trace::native_recorder().enabled() );
     raid_decision_trace::native_recorder().record( "8", "raid_actor_action", 10,
             "\"npc_id\":8" );
     CHECK_FALSE( std::filesystem::exists( path ) );
-    unsetenv( env_names[0] );
+    unset_test_env( env_names[0] );
     const std::array<raid_decision_trace::binding, 4> invalid = {{
             { "", "run", "run", sink },
             { "run", "", "run", sink },
@@ -1135,7 +1156,7 @@ TEST_CASE( "bound raid decision trace selects current survivors and exposes comp
     int search = 0;
     int repeats = 0;
     while( std::getline( input, row ) ) {
-        JsonValue value = json_loader::from_string( row );
+        JsonValue value = native_trace_value( row );
         JsonObject parsed = value.get_object();
         parsed.allow_omitted_members();
         const std::string event = parsed.get_string( "event" );
@@ -1206,9 +1227,9 @@ TEST_CASE( "scenario bound NPC decision trace selects camp scout and bandit iden
     on_out_of_scope restore_env( [names, previous]() {
         for( std::size_t i = 0; i < names.size(); ++i ) {
             if( previous[i] ) {
-                setenv( names[i], previous[i]->c_str(), 1 );
+                set_test_env( names[i], previous[i]->c_str(), 1 );
             } else {
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
         }
     } );
@@ -1219,8 +1240,8 @@ TEST_CASE( "scenario bound NPC decision trace selects camp scout and bandit iden
     defender.assigned_camp = get_avatar().pos_abs_omt();
     auto &world = overmap_buffer.global_state.bandit_live_world;
     const std::vector<bandit_live_world::site_record> previous_sites = world.sites;
-    on_out_of_scope restore_sites( [previous_sites]() {
-        world.sites = previous_sites;
+    on_out_of_scope restore_sites( [previous_sites, target_world = &world]() {
+        target_world->sites = previous_sites;
     } );
     world.sites.clear();
     bandit_live_world::site_record cannibal_site;
@@ -1246,18 +1267,18 @@ TEST_CASE( "scenario bound NPC decision trace selects camp scout and bandit iden
     const std::string ids = std::to_string( defender.getID().get_value() ) + ',' +
                             std::to_string( scout.getID().get_value() ) + ',' +
                             std::to_string( bandit.getID().get_value() );
-    setenv( names[1], "r025-selected", 1 );
-    setenv( names[2], "r025-selected", 1 );
-    setenv( names[3], path.string().c_str(), 1 );
-    setenv( names[4], "signal-off-camp", 1 );
-    setenv( names[5], ids.c_str(), 1 );
-    unsetenv( names[0] );
+    set_test_env( names[1], "r025-selected", 1 );
+    set_test_env( names[2], "r025-selected", 1 );
+    set_test_env( names[3], path.string().c_str(), 1 );
+    set_test_env( names[4], "signal-off-camp", 1 );
+    set_test_env( names[5], ids.c_str(), 1 );
+    unset_test_env( names[0] );
     CHECK_FALSE( raid_decision_trace::native_recorder().enabled() );
     CHECK_FALSE( std::filesystem::exists( path ) );
-    setenv( names[0], "wrong-run", 1 );
+    set_test_env( names[0], "wrong-run", 1 );
     CHECK_FALSE( raid_decision_trace::native_recorder().enabled() );
     CHECK_FALSE( std::filesystem::exists( path ) );
-    setenv( names[0], "r025-selected", 1 );
+    set_test_env( names[0], "r025-selected", 1 );
     const raid_decision_trace::selected_npc_scope scope =
         raid_decision_trace::environment_selected_npcs();
     REQUIRE( scope.valid() );
@@ -1265,18 +1286,18 @@ TEST_CASE( "scenario bound NPC decision trace selects camp scout and bandit iden
     CHECK( scope.includes( scout.getID().get_value() ) );
     CHECK( scope.includes( bandit.getID().get_value() ) );
     CHECK_FALSE( scope.includes( excluded.getID().get_value() ) );
-    setenv( names[6], "10", 1 );
-    setenv( names[7], "20", 1 );
+    set_test_env( names[6], "10", 1 );
+    set_test_env( names[7], "20", 1 );
     const raid_decision_trace::selected_npc_scope windowed =
         raid_decision_trace::environment_selected_npcs();
     CHECK_FALSE( windowed.includes_turn( 9 ) );
     CHECK( windowed.includes_turn( 10 ) );
     CHECK( windowed.includes_turn( 20 ) );
     CHECK_FALSE( windowed.includes_turn( 21 ) );
-    setenv( names[6], "21", 1 );
+    set_test_env( names[6], "21", 1 );
     CHECK_FALSE( raid_decision_trace::environment_selected_npcs().valid() );
-    unsetenv( names[6] );
-    unsetenv( names[7] );
+    unset_test_env( names[6] );
+    unset_test_env( names[7] );
     defender.trace_hostile_decision_for_harness( "Pause", "execute_action" );
     scout.trace_hostile_decision_for_harness( "Go to position", "execute_action" );
     bandit.trace_hostile_decision_for_harness( "Pause", "execute_action" );
@@ -1287,7 +1308,7 @@ TEST_CASE( "scenario bound NPC decision trace selects camp scout and bandit iden
     std::map<int, std::string> roles;
     int scope_rows = 0;
     while( std::getline( input, row ) ) {
-        JsonObject record = json_loader::from_string( row ).get_object();
+        JsonObject record = native_trace_value( row ).get_object();
         record.allow_omitted_members();
         if( record.get_string( "event" ) == "raid_trace_scope" ) {
             ++scope_rows;
@@ -1340,9 +1361,9 @@ TEST_CASE( "selected raid trace records applied combat sleep and confirmed death
     on_out_of_scope restore( [names, previous, path]() {
         for( std::size_t index = 0; index < names.size(); ++index ) {
             if( previous[index] ) {
-                setenv( names[index], previous[index]->c_str(), 1 );
+                set_test_env( names[index], previous[index]->c_str(), 1 );
             } else {
-                unsetenv( names[index] );
+                unset_test_env( names[index] );
             }
         }
         std::error_code ignored;
@@ -1356,17 +1377,17 @@ TEST_CASE( "selected raid trace records applied combat sleep and confirmed death
     unselected_zombie.spawn( get_avatar().pos_abs() + point( 2, 0 ) );
     const bodypart_id torso( "torso" );
     const std::string actor_id = std::to_string( raider.getID().get_value() );
-    setenv( names[1], "r041-native", 1 );
-    setenv( names[2], "r041-native", 1 );
-    setenv( names[3], path.string().c_str(), 1 );
-    setenv( names[4], "roof-raid", 1 );
-    setenv( names[5], actor_id.c_str(), 1 );
-    unsetenv( names[0] );
+    set_test_env( names[1], "r041-native", 1 );
+    set_test_env( names[2], "r041-native", 1 );
+    set_test_env( names[3], path.string().c_str(), 1 );
+    set_test_env( names[4], "roof-raid", 1 );
+    set_test_env( names[5], actor_id.c_str(), 1 );
+    unset_test_env( names[0] );
     const int off_hp = zombie.get_hp();
     zombie.apply_damage( &raider, torso, 2 );
     CHECK( zombie.get_hp() == off_hp - 2 );
     CHECK_FALSE( std::filesystem::exists( path ) );
-    setenv( names[0], "r041-native", 1 );
+    set_test_env( names[0], "r041-native", 1 );
     const int on_hp = zombie.get_hp();
     weakpoint_attack melee;
     melee.type = weakpoint_attack::attack_type::MELEE_BASH;
@@ -1402,7 +1423,7 @@ TEST_CASE( "selected raid trace records applied combat sleep and confirmed death
     bool null_source_seen = false;
     std::string line;
     while( std::getline( input, line ) ) {
-        JsonObject row = json_loader::from_string( line ).get_object();
+        JsonObject row = native_trace_value( line ).get_object();
         row.allow_omitted_members();
         const std::string event = row.get_string( "event" );
         if( event == "raid_actor_damage" ) {
@@ -1470,7 +1491,7 @@ TEST_CASE( "raid trace retains each same turn actor base and later critical edge
     bool damage = false;
     bool death = false;
     while( std::getline( input, line ) ) {
-        JsonObject row = json_loader::from_string( line ).get_object();
+        JsonObject row = native_trace_value( line ).get_object();
         row.allow_omitted_members();
         const std::string event = row.get_string( "event" );
         if( event == "raid_actor_action" && row.get_int( "game_turn" ) == 20 ) {
@@ -1525,9 +1546,9 @@ TEST_CASE( "selected NPC decision trace preserves one same seed native choice",
     on_out_of_scope restore_env( [names, previous]() {
         for( std::size_t i = 0; i < names.size(); ++i ) {
             if( previous[i] ) {
-                setenv( names[i], previous[i]->c_str(), 1 );
+                set_test_env( names[i], previous[i]->c_str(), 1 );
             } else {
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
         }
     } );
@@ -1538,13 +1559,13 @@ TEST_CASE( "selected NPC decision trace preserves one same seed native choice",
     trace_on.set_attitude( NPCATT_WAIT );
     trace_off.set_moves( 100 );
     trace_on.set_moves( 100 );
-    setenv( names[1], "r025-choice", 1 );
-    setenv( names[2], "r025-choice", 1 );
-    setenv( names[3], path.string().c_str(), 1 );
-    setenv( names[4], "choice-fixture", 1 );
+    set_test_env( names[1], "r025-choice", 1 );
+    set_test_env( names[2], "r025-choice", 1 );
+    set_test_env( names[3], path.string().c_str(), 1 );
+    set_test_env( names[4], "choice-fixture", 1 );
     const std::string id = std::to_string( trace_on.getID().get_value() );
-    setenv( names[5], id.c_str(), 1 );
-    unsetenv( names[0] );
+    set_test_env( names[5], id.c_str(), 1 );
+    unset_test_env( names[0] );
     rng_set_engine_seed( 25025 );
     trace_off.move();
     const cata_default_random_engine off_rng = rng_get_engine();
@@ -1552,7 +1573,7 @@ TEST_CASE( "selected NPC decision trace preserves one same seed native choice",
     const int off_moves = trace_off.get_moves();
     const npc_attitude off_attitude = trace_off.get_attitude();
     CHECK_FALSE( std::filesystem::exists( path ) );
-    setenv( names[0], "r025-choice", 1 );
+    set_test_env( names[0], "r025-choice", 1 );
     rng_set_engine_seed( 25025 );
     trace_on.move();
     CHECK( rng_get_engine() == off_rng );
@@ -1564,7 +1585,7 @@ TEST_CASE( "selected NPC decision trace preserves one same seed native choice",
     std::string row;
     bool saw_actor = false;
     while( std::getline( input, row ) ) {
-        JsonObject record = json_loader::from_string( row ).get_object();
+        JsonObject record = native_trace_value( row ).get_object();
         record.allow_omitted_members();
         if( record.get_string( "event" ) == "raid_actor_action" ) {
             CHECK( record.get_int( "npc_id" ) == trace_on.getID().get_value() );
@@ -7286,14 +7307,14 @@ TEST_CASE( "bandit_live_world_abstract_scout_travel_trace_captures_pair_refusal"
         _putenv_s( "OPENCLAW_HARNESS_RUN_ID", had_run_id ? saved_run_id.c_str() : "" );
 #else
         if( had_transition_path ) {
-            setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_transition_path.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_transition_path.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+            unset_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
         }
         if( had_run_id ) {
-            setenv( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
+            unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
         }
 #endif
     } );
@@ -7301,8 +7322,8 @@ TEST_CASE( "bandit_live_world_abstract_scout_travel_trace_captures_pair_refusal"
     _putenv_s( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", "" );
     _putenv_s( "OPENCLAW_HARNESS_RUN_ID", "" );
 #else
-    unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
-    unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
+    unset_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+    unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
 #endif
     CHECK_FALSE( bandit_live_world_probe::transition_events_enabled() );
     prepare_live_bandit_abstract_scout_travel_for_test();
@@ -8233,9 +8254,9 @@ TEST_CASE( "scout homeward observation follows native selection and local moveme
             _putenv_s( name, value ? value->c_str() : "" );
 #else
             if( value ) {
-                setenv( name, value->c_str(), 1 );
+                set_test_env( name, value->c_str(), 1 );
             } else {
-                unsetenv( name );
+                unset_test_env( name );
             }
 #endif
         };
@@ -8463,9 +8484,9 @@ TEST_CASE( "scout homeward capture is opt-in change-only bounded and run-bound",
         _putenv_s( name, value ? value->c_str() : "" );
 #else
         if( value ) {
-            setenv( name, value->c_str(), 1 );
+            set_test_env( name, value->c_str(), 1 );
         } else {
-            unsetenv( name );
+            unset_test_env( name );
         }
 #endif
     };
@@ -8613,14 +8634,14 @@ TEST_CASE( "bandit_live_world_transition_stream_is_append_only_and_run_scoped",
         _putenv_s( "OPENCLAW_HARNESS_RUN_ID", had_run_id ? saved_run_id.c_str() : "" );
 #else
         if( had_path ) {
-            setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+            unset_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
         }
         if( had_run_id ) {
-            setenv( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
+            unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
         }
 #endif
     };
@@ -8629,8 +8650,8 @@ TEST_CASE( "bandit_live_world_transition_stream_is_append_only_and_run_scoped",
     _putenv_s( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str() );
     _putenv_s( "OPENCLAW_HARNESS_RUN_ID", "stream-test-run" );
 #else
-    setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
-    setenv( "OPENCLAW_HARNESS_RUN_ID", "stream-test-run", 1 );
+    set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
+    set_test_env( "OPENCLAW_HARNESS_RUN_ID", "stream-test-run", 1 );
 #endif
     bandit_live_world::world_state world;
     add_bandit_camp_member( world, 0, 45500 );
@@ -8669,7 +8690,7 @@ TEST_CASE( "bandit_live_world_transition_stream_is_append_only_and_run_scoped",
     bool contact_seen = false;
     bool handoff_seen = false;
     while( std::getline( input, line ) ) {
-        const JsonObject event = json_loader::from_string( line );
+        const JsonObject event = native_trace_value( line );
         event.allow_omitted_members();
         CHECK( event.get_int( "schema_version" ) == 1 );
         CHECK( event.get_int( "sequence" ) == expected_sequence++ );
@@ -8756,9 +8777,9 @@ TEST_CASE( "bandit_live_world_contact_observation_only_requests_changed_contacts
         _putenv_s( key, value ? value->c_str() : "" );
 #else
         if( value ) {
-            setenv( key, value->c_str(), 1 );
+            set_test_env( key, value->c_str(), 1 );
         } else {
-            unsetenv( key );
+            unset_test_env( key );
         }
 #endif
     };
@@ -8862,9 +8883,9 @@ TEST_CASE( "bandit_live_world_transition_stream_reconciles_external_tail",
         _putenv_s( key, value ? value->c_str() : "" );
 #else
         if( value ) {
-            setenv( key, value->c_str(), 1 );
+            set_test_env( key, value->c_str(), 1 );
         } else {
-            unsetenv( key );
+            unset_test_env( key );
         }
 #endif
     };
@@ -8903,7 +8924,7 @@ TEST_CASE( "bandit_live_world_transition_stream_reconciles_external_tail",
         std::vector<int> result;
         std::string line;
         while( std::getline( input, line ) ) {
-            const JsonObject record = json_loader::from_string( line );
+            const JsonObject record = native_trace_value( line );
             record.allow_omitted_members();
             result.push_back( record.get_int( "sequence" ) );
         }
@@ -8951,7 +8972,7 @@ TEST_CASE( "bandit_live_world_transition_stream_reconciles_external_tail",
         std::vector<std::string> reasons;
         std::string line;
         while( std::getline( input, line ) ) {
-            const JsonObject record = json_loader::from_string( line );
+            const JsonObject record = native_trace_value( line );
             record.allow_omitted_members();
             if( record.get_string( "transition" ) == "production_signal_dispatch_admission" ) {
                 reasons.push_back( record.get_string( "reason" ) );
@@ -11903,7 +11924,7 @@ TEST_CASE( "bandit_structural_bounty_classifies_coarse_terrain",
     CHECK( open.terrain_class == "open" );
     CHECK( open.terrain_fit_class == "road" );
 
-    for( const std::string &unsafe_compound : {
+    for( const std::string unsafe_compound : {
              "pond_field", "mil_base_minefield_nw", "open_air"
          } ) {
         const bandit_live_world::structural_bounty_read unsafe =
@@ -13953,7 +13974,7 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
             bandit_live_world::preflight_local_pair_handoff(
                 malformed.sites.front(), malformed_cursor, 99, malformed_reads );
         CHECK_FALSE( all_failed.valid );
-        for( const std::string &name : {
+        for( const std::string name : {
                  "owner", "epoch", "identities", "route", "phase", "time"
              } ) {
             CHECK( has_failure( all_failed, name ) );
@@ -21482,14 +21503,14 @@ TEST_CASE( "staffed camp signal reads emit actor-bound live transition receipts"
         _putenv_s( "OPENCLAW_HARNESS_RUN_ID", had_run_id ? saved_run_id.c_str() : "" );
 #else
         if( had_path ) {
-            setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+            unset_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
         }
         if( had_run_id ) {
-            setenv( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
+            unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
         }
 #endif
     };
@@ -21498,8 +21519,8 @@ TEST_CASE( "staffed camp signal reads emit actor-bound live transition receipts"
     _putenv_s( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str() );
     _putenv_s( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-stream-test" );
 #else
-    setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
-    setenv( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-stream-test", 1 );
+    set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
+    set_test_env( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-stream-test", 1 );
 #endif
 
     bandit_live_world::world_state world = make_structural_signal_test_world( false, 16136 );
@@ -21527,7 +21548,7 @@ TEST_CASE( "staffed camp signal reads emit actor-bound live transition receipts"
     std::string line;
     bool receipt_seen = false;
     while( std::getline( input, line ) ) {
-        const JsonObject event = json_loader::from_string( line );
+        const JsonObject event = native_trace_value( line );
         event.allow_omitted_members();
         if( event.get_string( "transition" ) != "staffed_camp_signal_read" ) {
             continue;
@@ -21571,14 +21592,14 @@ TEST_CASE( "staffed camp blocked signal reads preserve leads and emit bounded re
         _putenv_s( "OPENCLAW_HARNESS_RUN_ID", had_run_id ? saved_run_id.c_str() : "" );
 #else
         if( had_path ) {
-            setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+            unset_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
         }
         if( had_run_id ) {
-            setenv( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
+            unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
         }
 #endif
     };
@@ -21587,8 +21608,8 @@ TEST_CASE( "staffed camp blocked signal reads preserve leads and emit bounded re
     _putenv_s( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str() );
     _putenv_s( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-blocked-test" );
 #else
-    setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
-    setenv( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-blocked-test", 1 );
+    set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
+    set_test_env( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-blocked-test", 1 );
 #endif
 
     bandit_live_world::world_state world = make_structural_signal_test_world( false, 16137 );
@@ -21622,7 +21643,7 @@ TEST_CASE( "staffed camp blocked signal reads preserve leads and emit bounded re
     std::string line;
     bool receipt_seen = false;
     while( std::getline( input, line ) ) {
-        const JsonObject event = json_loader::from_string( line );
+        const JsonObject event = native_trace_value( line );
         event.allow_omitted_members();
         if( event.get_string( "transition" ) != "staffed_camp_signal_read" ) {
             continue;
@@ -21673,14 +21694,14 @@ TEST_CASE( "staffed camp out of range signal reads preserve leads and emit bound
         _putenv_s( "OPENCLAW_HARNESS_RUN_ID", had_run_id ? saved_run_id.c_str() : "" );
 #else
         if( had_path ) {
-            setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+            unset_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
         }
         if( had_run_id ) {
-            setenv( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
+            set_test_env( "OPENCLAW_HARNESS_RUN_ID", saved_run_id.c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
+            unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
         }
 #endif
     };
@@ -21689,8 +21710,8 @@ TEST_CASE( "staffed camp out of range signal reads preserve leads and emit bound
     _putenv_s( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str() );
     _putenv_s( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-out-of-range-test" );
 #else
-    setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
-    setenv( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-out-of-range-test", 1 );
+    set_test_env( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", stream_path.c_str(), 1 );
+    set_test_env( "OPENCLAW_HARNESS_RUN_ID", "camp-signal-out-of-range-test", 1 );
 #endif
 
     bandit_live_world::world_state world = make_structural_signal_test_world( false, 16138 );
@@ -21725,7 +21746,7 @@ TEST_CASE( "staffed camp out of range signal reads preserve leads and emit bound
     std::string line;
     bool receipt_seen = false;
     while( std::getline( input, line ) ) {
-        const JsonObject event = json_loader::from_string( line );
+        const JsonObject event = native_trace_value( line );
         event.allow_omitted_members();
         if( event.get_string( "transition" ) != "staffed_camp_signal_read" ) {
             continue;
@@ -42221,9 +42242,9 @@ TEST_CASE( "physical camp signal dispatch shares watch and return lifecycle",
         _putenv_s( key, value ? value->c_str() : "" );
 #else
         if( value ) {
-            setenv( key, value->c_str(), 1 );
+            set_test_env( key, value->c_str(), 1 );
         } else {
-            unsetenv( key );
+            unset_test_env( key );
         }
 #endif
     };
@@ -43436,11 +43457,6 @@ TEST_CASE( "visible roof light and smoke reach the saved watch report as distinc
     CHECK( bounded_party.clears_margin );
 }
 
-int advance_live_bandit_local_scout_assessments_for_test();
-bool complete_loaded_live_bandit_route_arrivals_for_test();
-bool record_live_bandit_structural_member_returns_for_test();
-bool persist_live_bandit_local_projection_leases_for_test( const bandit_live_world::site_record
-        &site );
 bandit_live_world::local_projection_reconciliation_result
 reconcile_loaded_bandit_live_world_projections_for_test();
 
@@ -50915,9 +50931,9 @@ TEST_CASE( "actual shouted contact records once only for selected opt in identit
     on_out_of_scope restore( [ = ]() {
         for( size_t i = 0; i < names.size(); ++i ) {
             if( previous[i] ) {
-                setenv( names[i], previous[i]->c_str(), 1 );
+                set_test_env( names[i], previous[i]->c_str(), 1 );
             } else {
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
         }
         std::filesystem::remove( path );
@@ -50935,17 +50951,17 @@ TEST_CASE( "actual shouted contact records once only for selected opt in identit
     for( size_t i : {
              size_t( 0 ), size_t( 1 ), size_t( 2 )
          } ) {
-        setenv( names[i], run.c_str(), 1 );
+        set_test_env( names[i], run.c_str(), 1 );
     }
     if( capture == "disabled" ) {
-        unsetenv( names[0] );
+        unset_test_env( names[0] );
     }
-    setenv( names[3], path.string().c_str(), 1 );
-    setenv( names[4], "r066-visit", 1 );
-    setenv( names[5], std::to_string( capture == "receiver" ? receiver.getID().get_value() :
+    set_test_env( names[3], path.string().c_str(), 1 );
+    set_test_env( names[4], "r066-visit", 1 );
+    set_test_env( names[5], std::to_string( capture == "receiver" ? receiver.getID().get_value() :
                                       capture == "other" ? -1 : scene.collector->getID().get_value() ).c_str(), 1 );
-    setenv( names[6], std::to_string( turn + ( capture == "outside_turn" ? 1 : 0 ) ).c_str(), 1 );
-    unsetenv( names[7] );
+    set_test_env( names[6], std::to_string( turn + ( capture == "outside_turn" ? 1 : 0 ) ).c_str(), 1 );
+    unset_test_env( names[7] );
     REQUIRE( scene.communicate() );
     CHECK_FALSE( scene.communicate() );
     const bool captured = capture == "speaker" || capture == "receiver";
@@ -50954,7 +50970,7 @@ TEST_CASE( "actual shouted contact records once only for selected opt in identit
     std::ifstream input( path );
     std::string line;
     while( std::getline( input, line ) ) {
-        JsonObject row = json_loader::from_string( line ).get_object();
+        JsonObject row = native_trace_value( line ).get_object();
         row.allow_omitted_members();
         if( row.get_string( "event" ) != "bandit_shakedown_contact" ) {
             continue;
@@ -51013,9 +51029,9 @@ TEST_CASE( "robbery delivery trace uses actual native operands without changing 
     on_out_of_scope restore( [ = ]() {
         for( size_t i = 0; i < names.size(); ++i ) {
             if( previous[i] ) {
-                setenv( names[i], previous[i]->c_str(), 1 );
+                set_test_env( names[i], previous[i]->c_str(), 1 );
             } else {
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
         }
         std::filesystem::remove( path );
@@ -51050,13 +51066,13 @@ TEST_CASE( "robbery delivery trace uses actual native operands without changing 
     for( size_t i : {
              size_t( 0 ), size_t( 1 ), size_t( 2 )
          } ) {
-        setenv( names[i], run.c_str(), 1 );
+        set_test_env( names[i], run.c_str(), 1 );
     }
-    setenv( names[3], path.string().c_str(), 1 );
-    setenv( names[4], "r067-delivery", 1 );
-    setenv( names[5], std::to_string( scene.collector->getID().get_value() ).c_str(), 1 );
-    setenv( names[6], std::to_string( turn ).c_str(), 1 );
-    unsetenv( names[7] );
+    set_test_env( names[3], path.string().c_str(), 1 );
+    set_test_env( names[4], "r067-delivery", 1 );
+    set_test_env( names[5], std::to_string( scene.collector->getID().get_value() ).c_str(), 1 );
+    set_test_env( names[6], std::to_string( turn ).c_str(), 1 );
+    unset_test_env( names[7] );
     std::filesystem::remove( path );
     sounds::reset_sounds();
     REQUIRE_FALSE( establish_bandit_shakedown_communication_for_test( scene.site() ) );
@@ -51085,7 +51101,7 @@ TEST_CASE( "robbery delivery trace uses actual native operands without changing 
         const auto actor_before = r054_actor_bytes( receiver );
         const auto world_before = overmap_buffer.global_state.bandit_live_world;
         const auto engine_before = rng_get_engine();
-        unsetenv( names[0] );
+        unset_test_env( names[0] );
         sounds::process_sound_markers( &receiver );
         const auto actor_after = r054_actor_bytes( receiver );
         const auto world_after = serialize_world( overmap_buffer.global_state.bandit_live_world );
@@ -51102,7 +51118,7 @@ TEST_CASE( "robbery delivery trace uses actual native operands without changing 
         sounds::reset_sounds();
         capture.str( "" );
         capture.clear();
-        setenv( names[0], run.c_str(), 1 );
+        set_test_env( names[0], run.c_str(), 1 );
         sounds::sound( source, volume, sounds::sound_t::alert,
                        "We want payment. Pay us, or fight!", demand, "", "" );
         sounds::process_sound_markers( &receiver );
@@ -51124,7 +51140,7 @@ TEST_CASE( "robbery delivery trace uses actual native operands without changing 
     int deliveries = 0;
     int emissions = 0;
     while( std::getline( input, line ) ) {
-        auto row = json_loader::from_string( line ).get_object();
+        auto row = native_trace_value( line ).get_object();
         row.allow_omitted_members();
         if( row.get_string( "event" ) == "bandit_shakedown_emission" ) {
             ++emissions;
@@ -51233,9 +51249,9 @@ TEST_CASE( "attack callback trace attributes zero damage escalation without chan
     on_out_of_scope restore( [ = ]() {
         for( size_t i = 0; i < names.size(); ++i ) {
             if( previous[i] ) {
-                setenv( names[i], previous[i]->c_str(), 1 );
+                set_test_env( names[i], previous[i]->c_str(), 1 );
             } else {
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
         }
         overmap_buffer.global_state.bandit_live_world = previous_world;
@@ -51303,20 +51319,20 @@ TEST_CASE( "attack callback trace attributes zero damage escalation without chan
         sounds::reset_sounds();
         std::filesystem::remove( path );
         const std::string run = "r065-" + attacker_kind + "-" + selection;
-        setenv( names[1], run.c_str(), 1 );
-        setenv( names[2], run.c_str(), 1 );
-        setenv( names[3], path.string().c_str(), 1 );
-        setenv( names[4], "peaceful-visit", 1 );
+        set_test_env( names[1], run.c_str(), 1 );
+        set_test_env( names[2], run.c_str(), 1 );
+        set_test_env( names[3], path.string().c_str(), 1 );
+        set_test_env( names[4], "peaceful-visit", 1 );
         const int selected_id = selection == "source" ? attacker_npc.getID().get_value() :
                                 selection == "neither" ? -1 : victim.getID().get_value();
-        setenv( names[5], std::to_string( selected_id ).c_str(), 1 );
+        set_test_env( names[5], std::to_string( selected_id ).c_str(), 1 );
         const int turn = to_turns<int>( calendar::turn - calendar::turn_zero );
-        setenv( names[6], std::to_string( turn + ( selection == "outside_turn" ? 1 : 0 ) ).c_str(), 1 );
-        unsetenv( names[7] );
+        set_test_env( names[6], std::to_string( turn + ( selection == "outside_turn" ? 1 : 0 ) ).c_str(), 1 );
+        unset_test_env( names[7] );
         if( enabled ) {
-            setenv( names[0], run.c_str(), 1 );
+            set_test_env( names[0], run.c_str(), 1 );
         } else {
-            unsetenv( names[0] );
+            unset_test_env( names[0] );
         }
         const int hp_before = victim.get_hp();
         // This is the real reaction callback for a launched/avoided attack.
@@ -51346,7 +51362,7 @@ TEST_CASE( "attack callback trace attributes zero damage escalation without chan
         std::ifstream input( path );
         std::string line;
         while( std::getline( input, line ) ) {
-            JsonObject row = json_loader::from_string( line ).get_object();
+            JsonObject row = native_trace_value( line ).get_object();
             row.allow_omitted_members();
             const auto object = [&row]( const std::string & field ) {
                 JsonObject value = row.get_object( field );
@@ -51561,27 +51577,27 @@ class r067_reply_capture
                 if( const char *value = std::getenv( names[i] ) ) {
                     previous[i] = value;
                 }
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
             std::filesystem::remove( path );
             if( enabled ) {
                 for( size_t i : {
                          0, 1, 2
                      } ) {
-                    setenv( names[i], run.c_str(), 1 );
+                    set_test_env( names[i], run.c_str(), 1 );
                 }
-                setenv( names[3], path.string().c_str(), 1 );
-                setenv( names[4], "fight-reply-controls", 1 );
-                setenv( names[5], std::to_string( member ).c_str(), 1 );
+                set_test_env( names[3], path.string().c_str(), 1 );
+                set_test_env( names[4], "fight-reply-controls", 1 );
+                set_test_env( names[5], std::to_string( member ).c_str(), 1 );
             }
         }
         ~r067_reply_capture() {
             raid_decision_trace::native_recorder().closeout();
             for( size_t i = 0; i < names.size(); ++i ) {
                 if( previous[i] ) {
-                    setenv( names[i], previous[i]->c_str(), 1 );
+                    set_test_env( names[i], previous[i]->c_str(), 1 );
                 } else {
-                    unsetenv( names[i] );
+                    unset_test_env( names[i] );
                 }
             }
             std::filesystem::remove( path );
@@ -51817,19 +51833,19 @@ TEST_CASE( "activity demand keeps native semantic ownership through Pay trade su
                  std::make_pair( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", old_bound )
              } ) {
             if( entry.second ) {
-                setenv( entry.first, entry.second->c_str(), 1 );
+                set_test_env( entry.first, entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first );
+                unset_test_env( entry.first );
             }
         }
     } );
     const std::string run = "r067-trade-successor-" + mode + "-" + response;
     if( mode == "disabled_outer" ) {
-        unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
-        unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+        unset_test_env( "OPENCLAW_HARNESS_RUN_ID" );
+        unset_test_env( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
     } else {
-        setenv( "OPENCLAW_HARNESS_RUN_ID", run.c_str(), 1 );
-        setenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run.c_str(), 1 );
+        set_test_env( "OPENCLAW_HARNESS_RUN_ID", run.c_str(), 1 );
+        set_test_env( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run.c_str(), 1 );
     }
     restore_on_out_of_scope restore_width( FULL_SCREEN_WIDTH );
     restore_on_out_of_scope restore_height( FULL_SCREEN_HEIGHT );
@@ -52797,19 +52813,19 @@ TEST_CASE( "retained Fight motor distinguishes encounter ownership from ordinary
         on_out_of_scope restore_env( [names, previous]() {
             for( size_t i = 0; i < names.size(); ++i ) {
                 if( previous[i] ) {
-                    setenv( names[i], previous[i]->c_str(), 1 );
+                    set_test_env( names[i], previous[i]->c_str(), 1 );
                 } else {
-                    unsetenv( names[i] );
+                    unset_test_env( names[i] );
                 }
             }
         } );
         for( size_t i : {
                  0, 1, 2, 4
              } ) {
-            setenv( names[i], name.c_str(), 1 );
+            set_test_env( names[i], name.c_str(), 1 );
         }
-        setenv( names[3], trace_path.string().c_str(), 1 );
-        setenv( names[5], "5", 1 );
+        set_test_env( names[3], trace_path.string().c_str(), 1 );
+        set_test_env( names[5], "5", 1 );
         const auto initial = actor.pos_abs();
         actor.set_moves( 100 );
         actor.move();
@@ -52827,7 +52843,7 @@ TEST_CASE( "retained Fight motor distinguishes encounter ownership from ordinary
         int actions = 0;
         std::string row;
         while( std::getline( input, row ) ) {
-            auto event = json_loader::from_string( row ).get_object();
+            auto event = native_trace_value( row ).get_object();
             event.allow_omitted_members();
             if( event.get_string( "event" ) == "raid_actor_action" ) {
                 ++actions;
@@ -53098,15 +53114,15 @@ TEST_CASE( "opt-in signal adapter explains actual watcher and producer-reader re
         for( int i = 0; i < 2; ++i )
         {
             if( old[i] ) {
-                setenv( names[i], old[i]->c_str(), 1 );
+                set_test_env( names[i], old[i]->c_str(), 1 );
             } else {
-                unsetenv( names[i] );
+                unset_test_env( names[i] );
             }
         }
         reset_live_light_sample_cache();
     } );
-    setenv( names[0], "1", 1 );
-    setenv( names[1], "signal-diagnostic-control", 1 );
+    set_test_env( names[0], "1", 1 );
+    set_test_env( names[1], "signal-diagnostic-control", 1 );
     REQUIRE( debug_log_enabled( D_INFO, DC_ALL ) ); // No debug-level override is needed.
     bandit_live_world::structural_threat_observer_request request;
     request.current_omt = outing.selected_watch_omt;
@@ -53195,7 +53211,7 @@ TEST_CASE( "opt-in signal adapter explains actual watcher and producer-reader re
     CHECK( object_at( candidate.get_array( "readers" ), 0 ).get_bool( "visible" ) );
 
     SECTION( "opt-in off preserves acquisition and compact ordinary row" ) {
-        setenv( names[0], "0", 1 );
+        set_test_env( names[0], "0", 1 );
         rng_get_engine() = initial_rng;
         const auto quiet = acquire( { packet } );
         CHECK( rng_get_engine() == acquired_rng );
@@ -54900,7 +54916,7 @@ TEST_CASE( "retained Darell paid home order meets persistent guard after smoke c
     std::ifstream trace_input( std::getenv( "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" ) );
     std::string row;
     while( std::getline( trace_input, row ) ) {
-        JsonObject record = json_loader::from_string( row ).get_object();
+        JsonObject record = native_trace_value( row ).get_object();
         record.allow_omitted_members();
         if( record.get_string( "event", "" ) == "raid_actor_action" ) {
             std::cout << "R067_DARELL_TRACE ownership=" << ownership << " motor=" << native_motor
@@ -55220,7 +55236,7 @@ TEST_CASE( "authenticated scouts disengage homeward without dismissing a current
     bool homeward_action = false;
     while( std::getline( events, line ) ) {
         if( line.find( "raid_actor_action" ) != std::string::npos ) {
-            JsonObject event = json_loader::from_string( line ).get_object();
+            JsonObject event = native_trace_value( line ).get_object();
             event.allow_omitted_members();
             if( event.get_string( "event", "" ) == "raid_actor_action" ) {
                 const auto action = event.get_string( "action", "" );
@@ -58680,16 +58696,16 @@ void r067_native_retirement_control( const std::string &failure, const std::stri
         for( const auto &[key, value] : close_environment ) {
             const char *old = std::getenv( key.c_str() );
             prior_environment[key] = old ? std::optional<std::string>( old ) : std::nullopt;
-            setenv( key.c_str(), value.c_str(), 1 );
+            set_test_env( key.c_str(), value.c_str(), 1 );
         }
         semantic_surface_manager &menu_manager = openclaw_harness_semantic_surface_manager();
         on_out_of_scope restore_close_environment( [&]() {
             menu_manager.set_descriptor_observer( {} );
             for( const auto &[key, value] : prior_environment ) {
                 if( value ) {
-                    setenv( key.c_str(), value->c_str(), 1 );
+                    set_test_env( key.c_str(), value->c_str(), 1 );
                 } else {
-                    unsetenv( key.c_str() );
+                    unset_test_env( key.c_str() );
                 }
             }
         } );
@@ -58718,30 +58734,30 @@ void r067_native_retirement_control( const std::string &failure, const std::stri
         const char *old_world = std::getenv( "CAOL_R067_REFUSAL_WORLD" );
         const std::optional<std::string> previous = old_world ? std::optional<std::string>
                 ( old_world ) : std::nullopt;
-        setenv( "CAOL_R067_REFUSAL_WORLD", world_name.c_str(), 1 );
+        set_test_env( "CAOL_R067_REFUSAL_WORLD", world_name.c_str(), 1 );
         on_out_of_scope restore_probe_environment( [&]() {
             if( previous ) {
-                setenv( "CAOL_R067_REFUSAL_WORLD", previous->c_str(), 1 );
+                set_test_env( "CAOL_R067_REFUSAL_WORLD", previous->c_str(), 1 );
             } else {
-                unsetenv( "CAOL_R067_REFUSAL_WORLD" );
+                unset_test_env( "CAOL_R067_REFUSAL_WORLD" );
             }
         } );
         // A fresh process has no controller/session or runtime retirement map.
         // Its public readers inspect the same untouched world bytes instead.
         for( const auto &[key, value] : close_environment ) {
             ( void )value;
-            unsetenv( key.c_str() );
+            unset_test_env( key.c_str() );
         }
         const char *old_cache = std::getenv( "OPENCLAW_HARNESS_CACHE_DIR" );
         const std::optional<std::string> previous_cache = old_cache ?
                 std::optional<std::string>( old_cache ) : std::nullopt;
         const std::string fresh_cache = PATH_INFO::user_dir() + "/fresh-refusal-cache";
-        setenv( "OPENCLAW_HARNESS_CACHE_DIR", fresh_cache.c_str(), 1 );
+        set_test_env( "OPENCLAW_HARNESS_CACHE_DIR", fresh_cache.c_str(), 1 );
         on_out_of_scope restore_probe_cache( [&]() {
             if( previous_cache ) {
-                setenv( "OPENCLAW_HARNESS_CACHE_DIR", previous_cache->c_str(), 1 );
+                set_test_env( "OPENCLAW_HARNESS_CACHE_DIR", previous_cache->c_str(), 1 );
             } else {
-                unsetenv( "OPENCLAW_HARNESS_CACHE_DIR" );
+                unset_test_env( "OPENCLAW_HARNESS_CACHE_DIR" );
             }
         } );
         const std::string command = r067_shell_argument( r067_control_executable() ) +
@@ -59623,7 +59639,7 @@ TEST_CASE( "encounter demand and native payment share current physical eligibili
     const int eligible_value = 8 * goods.price( true ) + 2 * item( itype_id( "coin_gold" ) ).price(
                                    true );
     std::vector<std::string> excluded;
-    for( const std::string &reason : {
+    for( const std::string reason : {
              "unowned", "foreign", "denied"
          } ) {
         item other( itype_id( "coin_gold" ) );

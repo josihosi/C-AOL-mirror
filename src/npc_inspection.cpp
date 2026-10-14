@@ -445,15 +445,18 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                 json.start_object();
                 json.member( "provenance",
                              "Read-only assigned-camp patrol shift-cache diagnostic; it never refreshes the plan or synchronizes this actor's patrol order." );
-                const std::optional<basecamp *> camp = actor.assigned_camp ?
-                overmap_buffer.find_camp( actor.assigned_camp->xy() ) :
-                std::nullopt;
-                json.member( "camp_found", camp && *camp != nullptr );
-                if( !camp || *camp == nullptr ) {
+                basecamp *current_camp = nullptr;
+                if( actor.assigned_camp ) {
+                    const auto camp = overmap_buffer.find_camp( actor.assigned_camp->xy() );
+                    if( camp.has_value() ) {
+                        current_camp = camp.value();
+                    }
+                }
+                json.member( "camp_found", current_camp != nullptr );
+                if( current_camp == nullptr ) {
                     json.end_object();
                     return;
                 }
-                basecamp *const current_camp = *camp;
                 json.member( "camp_site", current_camp->camp_omt_pos() );
                 json.member( "patrol_zone_defined", current_camp->has_patrol_zone() );
                 const camp_patrol_shift_cache_view cached_plan =

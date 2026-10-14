@@ -61,6 +61,36 @@ class inspection_imgui_context
 };
 } // namespace
 
+TEST_CASE( "NPC inspection preserves absent and missing assigned camp state",
+           "[semantic_surface][npc_inspection]" )
+{
+    clear_avatar();
+    clear_map();
+    clear_creatures();
+    npc &actor = spawn_npc( get_avatar().pos_bub().xy() + point::east, "test_talker" );
+    const tripoint_abs_omt missing_camp = get_avatar().pos_abs_omt() + point( 8, 8 );
+    REQUIRE_FALSE( overmap_buffer.find_camp( missing_camp.xy() ) );
+    SECTION( "no assigned camp" ) {
+        actor.assigned_camp.reset();
+    }
+    SECTION( "assigned camp is unavailable" ) {
+        actor.assigned_camp = missing_camp;
+    }
+    const auto assignment = actor.assigned_camp;
+    const auto mission = actor.mission;
+    const auto moves = actor.get_moves();
+    const auto turn = calendar::turn;
+    const auto facts = npc_inspection_payload( actor, get_avatar() );
+    const JsonObject patrol = json_loader::from_string( facts.at( "diagnostic_camp_patrol" ) );
+    patrol.allow_omitted_members();
+    CHECK_FALSE( patrol.get_bool( "camp_found" ) );
+    CHECK_FALSE( patrol.has_member( "camp_site" ) );
+    CHECK( actor.assigned_camp == assignment );
+    CHECK( actor.mission == mission );
+    CHECK( actor.get_moves() == moves );
+    CHECK( calendar::turn == turn );
+}
+
 TEST_CASE( "NPC inspection reads patrol cache without initializing or refreshing it",
            "[semantic_surface][npc_inspection][camp][patrol]" )
 {
