@@ -2,6 +2,7 @@
 """Run existing local checks on changed source and report uncovered analysis."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -92,6 +93,41 @@ def source_classifier(path):
     if suffix in JSON_SUFFIXES and path.startswith("tools/openclaw_harness/scenarios/"):
         return "declaration"
     return None
+
+
+def active_cpp_tus_from_database(database, root):
+    """Read active in-repository C++ TUs from an existing compile database."""
+    try:
+        with Path(database).open(encoding="utf-8") as stream:
+            entries = json.load(stream)
+    except (OSError, ValueError) as exc:
+        return set(), "could not read compile database: {}".format(exc)
+    if not isinstance(entries, list):
+        return set(), "compile database root is not a list"
+
+    root = Path(root).resolve()
+    active = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
+            return set(), "compile database entry {} has no source file".format(index)
+        source = Path(entry["file"])
+        if not source.is_absolute():
+            directory = entry.get("directory")
+            if not isinstance(directory, str) or not directory:
+                return set(), "compile database entry {} has no working directory for relative source".format(index)
+            working_directory = Path(directory)
+            if not working_directory.is_absolute():
+                working_directory = root / working_directory
+            source = working_directory / source
+        try:
+            relative = source.resolve().relative_to(root)
+        except ValueError:
+            # External dependency builds are outside this repository's lint scope.
+            continue
+        if relative.suffix.lower() not in CPP_SUFFIXES or "third-party" in relative.parts:
+            continue
+        active.add(relative.as_posix())
+    return active, None
 
 
 def run_astyle(paths):
@@ -263,6 +299,23 @@ def select_cpp_tus(changed_cpp, root=None):
                     stale.append("{} (scan predates {})".format(display_path, changed))
     if stale:
         return tus, "existing include scan may be stale for: " + ", ".join(stale)
+
+    changed_headers = [path for path in changed_cpp if Path(path).suffix.lower() in {
+        ".h", ".hh", ".hpp", ".hxx",
+    }]
+    if changed_headers:
+        build_dir = Path(os.environ.get("CATA_BUILD_DIR", "build"))
+        if not build_dir.is_absolute():
+            build_dir = root / build_dir
+        database = build_dir / "compile_commands.json"
+        if database.is_file():
+            active_tus, database_error = active_cpp_tus_from_database(database, root)
+            if database_error:
+                return tus, "changed-header coverage cannot be checked: " + database_error
+            scanned_tus = set(include_map.includes_to_sources.scan_paths_by_source)
+            missing_scans = sorted(active_tus - scanned_tus)
+            if missing_scans:
+                return tus, "active compile database translation unit(s) lack existing include scans for changed header coverage: " + ", ".join(missing_scans)
     return tus, None
 
 

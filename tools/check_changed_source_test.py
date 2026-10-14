@@ -3,6 +3,7 @@
 import contextlib
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -182,6 +183,55 @@ class ChangedSourceEntryPointTest(unittest.TestCase):
             mixed_tus, mixed_fixed_reason = lint.select_cpp_tus(["src/alpha.h"], root=root)
             self.assertIsNone(mixed_fixed_reason)
             self.assertEqual(mixed_tus, tus)
+
+    def test_changed_header_requires_scans_for_active_compile_database_tus(self):
+        with tempfile.TemporaryDirectory(prefix="changed-source-active-tus-") as temp:
+            root = Path(temp).resolve()
+            for part in ("src", "tests", "obj", "tests/obj", "build"):
+                (root / part).mkdir(parents=True)
+            header = root / "src/alpha.h"
+            header.write_text("// shared header\n", encoding="utf-8")
+            for name in ("alpha.cpp", "beta.cpp"):
+                (root / "src" / name).write_text("int value() { return 1; }\n", encoding="utf-8")
+            (root / "tests/smoke.cpp").write_text("int test() { return 0; }\n", encoding="utf-8")
+            alpha_scan = root / "obj/alpha.inc"
+            alpha_scan.write_text(". ./src/alpha.h\n", encoding="utf-8")
+            test_scan = root / "tests/obj/smoke.inc"
+            test_scan.write_text(".. ../tests/smoke.cpp\n", encoding="utf-8")
+            database = [
+                {"directory": str(root), "file": str(root / source), "command": "clang++ -c"}
+                for source in ("src/alpha.cpp", "src/beta.cpp", "tests/smoke.cpp")
+            ]
+            (root / "build/compile_commands.json").write_text(
+                json.dumps(database), encoding="utf-8"
+            )
+
+            with mock.patch.dict(os.environ, {"CATA_BUILD_DIR": "build"}):
+                partial_tus, partial_reason = lint.select_cpp_tus(["src/alpha.h"], root=root)
+            self.assertEqual(partial_tus, ["src/alpha.cpp"])
+            self.assertIn("src/beta.cpp", partial_reason)
+            self.assertIn("lack existing include scans", partial_reason)
+
+            output = io.StringIO()
+            with mock.patch.object(lint, "ROOT", root), \
+                    mock.patch.object(lint, "run_astyle", return_value=0), \
+                    mock.patch.dict(os.environ, {
+                        "CATA_BUILD_DIR": "build",
+                        "CATA_CLANG_TIDY": "missing-clang-tidy-22",
+                        "CATA_CLANG_TIDY_PLUGIN": str(root / "missing-plugin.so"),
+                    }), \
+                    contextlib.redirect_stdout(output):
+                status = lint.main(["--files", "src/alpha.h"])
+            self.assertEqual(status, 2)
+            self.assertIn("src/beta.cpp", output.getvalue())
+            self.assertIn("RESULT: incomplete coverage", output.getvalue())
+
+            beta_scan = root / "obj/beta.inc"
+            beta_scan.write_text(". ./src/alpha.h\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"CATA_BUILD_DIR": "build"}):
+                populated_tus, populated_reason = lint.select_cpp_tus(["src/alpha.h"], root=root)
+            self.assertIsNone(populated_reason)
+            self.assertEqual(populated_tus, ["src/alpha.cpp", "src/beta.cpp"])
 
     def test_existing_clang_tidy_wrapper_forwards_build_dir_and_translation_unit(self):
         with tempfile.TemporaryDirectory(prefix="changed-source-wrapper-") as temp:

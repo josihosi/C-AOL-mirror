@@ -127,6 +127,11 @@ unsupported instead of treating them as complete. Freshness uses the actual
 scans under `obj/tiles`. If multiple layouts resolve to the same translation
 unit, every layout scan is checked—even when only one scan maps the changed
 header—so an ambiguous stale layout keeps coverage incomplete.
+When an existing compile database is available for a changed header, the
+checker also compares its in-repository, non-third-party C++ translation units
+with the dependency scans. Any active translation unit missing a scan makes
+header coverage incomplete, since the available maps cannot establish whether
+that unit includes the changed header.
 
 If an isolated LLVM 22 executable is not named `clang-tidy-22`, set
 `CATA_CLANG_TIDY` to its executable path; the checker still requires its
