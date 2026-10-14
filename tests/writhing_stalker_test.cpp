@@ -6,6 +6,7 @@
 
 #include "calendar.h"
 #include "cata_catch.h"
+#include "cata_scope_helpers.h"
 #include "character.h"
 #include "damage.h"
 #include "debug.h"
@@ -372,6 +373,12 @@ TEST_CASE( "writhing_stalker_live_plan_is_independent_of_diagnostic_filter",
     };
 
     const auto run_plan = []( bool diagnostics_enabled ) {
+        const int previous_level = getDebugLevel();
+        const int previous_class = getDebugClass();
+        on_out_of_scope restore_filters( [previous_level, previous_class]() {
+            limitDebugLevel( previous_level );
+            limitDebugClass( previous_class );
+        } );
         clear_map_without_vision();
         map &here = get_map();
         Character &you = get_player_character();
@@ -393,8 +400,14 @@ TEST_CASE( "writhing_stalker_live_plan_is_independent_of_diagnostic_filter",
                            stalker.anger, stalker.aggro_character, calendar::turn };
     };
 
+    const int caller_level = getDebugLevel();
+    const int caller_class = getDebugClass();
     const plan_state enabled = run_plan( true );
+    CHECK( getDebugLevel() == caller_level );
+    CHECK( getDebugClass() == caller_class );
     const plan_state disabled = run_plan( false );
+    CHECK( getDebugLevel() == caller_level );
+    CHECK( getDebugClass() == caller_class );
     CHECK( enabled.destination == disabled.destination );
     CHECK( enabled.wander_destination == disabled.wander_destination );
     CHECK( enabled.wander_range == disabled.wander_range );
@@ -403,8 +416,6 @@ TEST_CASE( "writhing_stalker_live_plan_is_independent_of_diagnostic_filter",
     CHECK( enabled.aggro_character == disabled.aggro_character );
     CHECK( enabled.turn == disabled.turn );
 
-    limitDebugLevel( DL_ALL );
-    limitDebugClass( DC_ALL );
     clear_map_without_vision();
 }
 

@@ -6,15 +6,24 @@
 #include <functional>
 #include <initializer_list>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "cata_catch.h"
+#include "cata_scope_helpers.h"
 #include "debug.h"
 #include "debug_capture.h"
 
 TEST_CASE( "debug_log_enabled_matches_debug_stream_filtering", "[debug][logging]" )
 {
+    REQUIRE_FALSE( debug_has_error_been_observed() );
+    const int previous_level = getDebugLevel();
+    const int previous_class = getDebugClass();
+    on_out_of_scope restore_filters( [previous_level, previous_class]() {
+        limitDebugLevel( previous_level );
+        limitDebugClass( previous_class );
+    } );
     limitDebugLevel( DL_ALL );
     limitDebugClass( DC_ALL );
     CHECK( debug_log_enabled( D_INFO, D_GAME ) );
@@ -27,10 +36,86 @@ TEST_CASE( "debug_log_enabled_matches_debug_stream_filtering", "[debug][logging]
     limitDebugClass( 0 );
     CHECK_FALSE( debug_log_enabled( D_INFO, D_GAME ) );
     CHECK( debug_log_enabled( D_INFO, D_MAIN ) );
+    CHECK_FALSE( debug_has_error_been_observed() );
+}
 
-    // Do not leak the test's filter state into the rest of the suite.
-    limitDebugLevel( DL_ALL );
-    limitDebugClass( DC_ALL );
+TEST_CASE( "temporary_debug_filters_restore_caller_masks", "[debug][logging]" )
+{
+    const int previous_level = getDebugLevel();
+    const int previous_class = getDebugClass();
+    on_out_of_scope restore_filters( [previous_level, previous_class]() {
+        limitDebugLevel( previous_level );
+        limitDebugClass( previous_class );
+    } );
+    limitDebugLevel( D_WARNING | D_ERROR );
+    limitDebugClass( D_GAME );
+
+    const auto temporary_filters = []( bool throw_error ) {
+        const int previous_level = getDebugLevel();
+        const int previous_class = getDebugClass();
+        on_out_of_scope restore_filters( [previous_level, previous_class]() {
+            limitDebugLevel( previous_level );
+            limitDebugClass( previous_class );
+        } );
+        limitDebugLevel( D_INFO );
+        limitDebugClass( D_MAP );
+        CHECK( debug_log_enabled( D_INFO, D_MAP ) );
+        if( throw_error ) {
+            throw std::runtime_error( "test filter unwind" );
+        }
+        return;
+    };
+
+    SECTION( "early return restores both masks" ) {
+        temporary_filters( false );
+    }
+    SECTION( "exception restores both masks" ) {
+        CHECK_THROWS_AS( temporary_filters( true ), std::runtime_error );
+    }
+    SECTION( "nested filter restores the enclosing filter first" ) {
+        const int previous_level = getDebugLevel();
+        const int previous_class = getDebugClass();
+        {
+            on_out_of_scope restore_filters( [previous_level, previous_class]() {
+                limitDebugLevel( previous_level );
+                limitDebugClass( previous_class );
+            } );
+            limitDebugLevel( 0 );
+            limitDebugClass( 0 );
+            temporary_filters( false );
+            CHECK( getDebugLevel() == 0 );
+            CHECK( getDebugClass() == 0 );
+            CHECK( debug_log_enabled( D_ERROR, D_MAP ) );
+            CHECK( debug_log_enabled( D_INFO, D_MAIN ) );
+        }
+    }
+
+    CHECK( getDebugLevel() == ( D_WARNING | D_ERROR ) );
+    CHECK( getDebugClass() == D_GAME );
+    CHECK( debug_log_enabled( D_WARNING, D_GAME ) );
+    CHECK( debug_log_enabled( D_ERROR, D_MAP ) );
+    CHECK( debug_log_enabled( D_INFO, D_MAIN ) );
+    CHECK_FALSE( debug_log_enabled( D_INFO, D_MAP ) );
+}
+
+// Run this hidden control alone: its genuine error must retain the runner's exit1.
+TEST_CASE( "debug_filter_setters_preserve_a_preexisting_error",
+           "[debug][logging][nogame][.debug_error_preexisting]" )
+{
+    REQUIRE_FALSE( debug_has_error_been_observed() );
+    const int previous_level = getDebugLevel();
+    const int previous_class = getDebugClass();
+    on_out_of_scope restore_filters( [previous_level, previous_class]() {
+        limitDebugLevel( previous_level );
+        limitDebugClass( previous_class );
+    } );
+    DebugLog( D_ERROR, D_GAME ) << "Expected genuine error for debug-filter preservation control";
+    REQUIRE( debug_has_error_been_observed() );
+    limitDebugLevel( 0 );
+    CHECK( debug_has_error_been_observed() );
+    limitDebugClass( 0 );
+    CHECK( debug_has_error_been_observed() );
+    CHECK( debug_log_enabled( D_ERROR, D_GAME ) );
 }
 
 TEST_CASE( "capture_json_escape_round_trip", "[debug_capture]" )

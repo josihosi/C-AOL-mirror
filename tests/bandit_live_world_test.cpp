@@ -59086,11 +59086,15 @@ TEST_CASE( "normal New Game admits an existing failed-save world before consumin
     body->randomize( npc_class_id::NULL_ID() ); // Native ID allocation, no imported counter.
     map &here = get_map();
     const auto positions = here.points_in_radius( get_avatar().pos_bub(), 4 );
-    const auto position = std::find_if( positions.begin(), positions.end(), [&]( const auto & point ) {
-        return here.passable( point ) && point != get_avatar().pos_bub() &&
-               get_creature_tracker().creature_at( point ) == nullptr;
-    } );
-    REQUIRE( position != positions.end() );
+    std::optional<tripoint_bub_ms> position;
+    for( const tripoint_bub_ms &point : positions ) {
+        if( here.passable( point ) && point != get_avatar().pos_bub() &&
+            get_creature_tracker().creature_at( point ) == nullptr ) {
+            position = point;
+            break;
+        }
+    }
+    REQUIRE( position.has_value() );
     body->spawn_at_precise( here.get_abs( *position ) );
     const character_id carrier = body->getID();
     const auto carrier_position = body->pos_abs();

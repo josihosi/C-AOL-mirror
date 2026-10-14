@@ -649,14 +649,24 @@ void realDebugmsg( const char *filename, const char *line, const char *funcname,
 
 void limitDebugLevel( int level_bitmask )
 {
-    DebugLog( DL_ALL, DC_ALL ) << "Set debug level to: " << level_bitmask;
+    DebugLog( D_INFO, D_MAIN ) << "Set debug level to: " << level_bitmask;
     debugLevel = level_bitmask;
 }
 
 void limitDebugClass( int class_bitmask )
 {
-    DebugLog( DL_ALL, DC_ALL ) << "Set debug class to: " << class_bitmask;
+    DebugLog( D_INFO, D_MAIN ) << "Set debug class to: " << class_bitmask;
     debugClass = class_bitmask;
+}
+
+int getDebugLevel()
+{
+    return debugLevel;
+}
+
+int getDebugClass()
+{
+    return debugClass;
 }
 
 bool debug_log_enabled( DebugLevel lev, DebugClass cl )

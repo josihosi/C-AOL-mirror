@@ -204,6 +204,10 @@ void limitDebugLevel( int );
  */
 void limitDebugClass( int );
 
+/** Return the configured masks, without the always-enabled error/main overrides. */
+int getDebugLevel();
+int getDebugClass();
+
 /**
  * Return whether a message at the supplied level/class would be emitted.
  * Callers with expensive diagnostic arguments can use this to avoid building
