@@ -1,4 +1,5 @@
 #include "bandit_live_world.h"
+#include "bandit_live_world_probe.h"
 #include "bandit_pursuit_handoff.h"
 
 #include <cstdint>
@@ -30,10 +31,6 @@
 #include "point.h"
 #include "player_helpers.h"
 #include "rng.h"
-
-bandit_live_world::structural_route_read live_bandit_structural_route_read_for_test(
-    const bandit_live_world::site_record &, const bandit_live_world::structural_outing_plan &,
-    int &watch_path_budget );
 
 static const string_id<npc_template> npc_template_test_talker( "test_talker" );
 
@@ -321,6 +318,13 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
 TEST_CASE( "natural hunting blind watch uses the production selector and exact pair handoff",
            "[bandit][live_world][natural_worldgen][structural_bounty][slow]" )
 {
+    const time_point saved_fixture_turn = calendar::turn;
+    on_out_of_scope restore_fixture_turn( [saved_fixture_turn]() {
+        set_time( saved_fixture_turn );
+    } );
+    // The optical query uses native illumination at the same minute as the
+    // maintenance transaction, rather than midnight before its later handoff.
+    set_time( calendar::start_of_cataclysm + 1000_minutes );
     overmap_buffer.clear();
     on_out_of_scope clear_generated_world( []() {
         overmap_buffer.clear();
@@ -371,6 +375,14 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
                                blind_pos.z() ) ).id().str() == "field" );
     CHECK( overmap_buffer.ter( target ).id().str() == "field" );
 
+    // Overmap placement alone does not create the physical target geometry
+    // required by the production optical reader. Prepare it through ordinary
+    // native map loading; the reader still decides visibility and route safety.
+    {
+        tinymap target_geometry;
+        target_geometry.load( target, false );
+    }
+
     bandit_live_world::world_state world;
     bandit_live_world::site_record site;
     site.site_id = "overmap_special:bandit_camp@" +
@@ -407,12 +419,23 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         int budget = 64;
         return live_bandit_structural_route_read_for_test( owned, plan, budget );
     };
+    bandit_live_world_probe::session optical_probe(
+        bandit_live_world_probe::collection_mode::transition_events );
     const auto maintenance = bandit_live_world::advance_structural_bounty_maintenance(
                                  world, 1000, 1, 1, terrain_lookup,
     []( const bandit_live_world::site_record &, const bandit_live_world::camp_map_lead & ) {
         return bandit_live_world::structural_threat_read();
     }, route_lookup );
     const bandit_live_world::site_record &routed = world.sites.front();
+    std::ostringstream optical_reads;
+    const auto &optical_snapshot = optical_probe.result();
+    for( const auto &event : optical_snapshot.transition_events ) {
+        if( event.transition == "watch_geometry_read" ) {
+            optical_reads << event.site_id << " generation=" << event.generation
+                          << " " << event.reason << '\n';
+        }
+    }
+    CAPTURE( optical_reads.str(), optical_snapshot.dropped_transition_events );
     CAPTURE( blind_pos, target, maintenance.scan.candidates_sampled, maintenance.scan.leads_seeded,
              maintenance.dispatches_planned, maintenance.dispatches_blocked,
              maintenance.scan.notes, maintenance.outing.notes,
@@ -441,6 +464,13 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
                       routed.active_outing.shared_route.end(), target ) ==
            routed.active_outing.shared_route.end() );
 
+    const int dispatched_generation = routed.active_outing.generation;
+    const std::string dispatched_activity_id = routed.active_outing.activity_id;
+    const std::string dispatched_report_key = routed.active_outing.report_application_key;
+    REQUIRE( dispatched_generation > 0 );
+    REQUIRE_FALSE( dispatched_activity_id.empty() );
+    REQUIRE_FALSE( dispatched_report_key.empty() );
+
     bandit_live_world::site_record &mutable_site = world.sites.front();
     mutable_site.active_outing.waypoint_index = static_cast<int>( std::distance(
                 mutable_site.active_outing.shared_route.cbegin(), selected_watch_route_iter ) );
@@ -456,7 +486,6 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     const bandit_live_world::world_state saved_owner =
         overmap_buffer.global_state.bandit_live_world;
     const time_point saved_turn = calendar::turn;
-    calendar::turn += 1000_minutes;
     std::vector<character_id> generated_ids;
     on_out_of_scope restore_owner( [&saved_owner, &generated_ids, saved_turn]() {
         for( const character_id id : generated_ids ) {
@@ -541,7 +570,101 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     clear_creatures();
     CHECK_FALSE( get_map().inbounds( project_to<coords::ms>( live_site.anchor ) +
                                      point( SEEX, SEEY ) ) );
-    REQUIRE( dematerialize_live_bandit_structural_handoffs_for_test() );
+    std::ostringstream unload_inputs;
+    const auto capture_unload_inputs = [&]( const char *stage ) {
+        const auto &unloading = live_site.active_outing;
+        unload_inputs << stage << " minute=" << to_minutes<int>( calendar::turn -
+                      calendar::start_of_cataclysm )
+                      << " owner=" << bandit_live_world::to_string( unloading.owner )
+                      << " phase=" << bandit_live_world::to_string( unloading.phase )
+                      << " epoch=" << unloading.handoff_epoch << " advanced=" << unloading.last_advanced_minutes
+                      << " committed=" << unloading.local_handoff.committed_minutes
+                      << " cursor=" << static_cast<bool>( bandit_live_world::current_external_simulation_cursor(
+                                  live_site ) )
+                      << " assembled=" << unloading.local_handoff.cohesion_assembled
+                      << " abort=" << unloading.local_handoff.cohesion_abort_return
+                      << " deadline=" << unloading.local_handoff.cohesion_deadline_minutes
+                      << " reroutes=" << unloading.local_handoff.cohesion_reroutes_used
+                      << " alternate=" << unloading.alternate_watch_reposition_pending
+                      << " route=" << unloading.local_handoff.route_position.to_string()
+                      << " watch=" << unloading.selected_watch_omt.to_string()
+                      << " alternate_omt=" << unloading.alternate_watch_omt.to_string() << '\n';
+        for( const character_id id : generated_ids ) {
+            const auto member = overmap_buffer.find_npc( id );
+            unload_inputs << "actor=" << id.get_value() << " found=" << static_cast<bool>( member );
+            if( member ) {
+                const auto &lease = member->get_bandit_live_world_projection_lease();
+                unload_inputs << " active=" << member->is_active() << " dead=" << member->is_dead()
+                              << " inbounds=" << get_map().inbounds( member->pos_abs() )
+                              << " pos=" << member->pos_abs().to_string()
+                              << " body_min=" << to_minutes<int>( member->get_last_updated() - calendar::start_of_cataclysm )
+                              << " moves=" << member->get_moves()
+                              << " mission=" << static_cast<int>( member->mission )
+                              << " goal=" << member->goal.to_string()
+                              << " omt_path=" << member->omt_path.size()
+                              << " local_path=" << member->path.size()
+                              << " lease=" << lease.present << ':' << lease.owner << ':' << lease.generation
+                              << ':' << lease.handoff_epoch << ':' << lease.last_advanced_minutes;
+            }
+            unload_inputs << '\n';
+        }
+    };
+    capture_unload_inputs( "before" );
+    const std::size_t unload_event_start = optical_probe.result().transition_events.size();
+    bool dematerialized = dematerialize_live_bandit_structural_handoffs_for_test();
+    std::optional<int> reposition_deadline;
+    bool serviced_alternate_arrival = false;
+    while( !dematerialized && live_site.active_outing.alternate_watch_reposition_pending ) {
+        // The ordinary inactive owner must move the real pair to a selected
+        // alternate before its transfer adapter can accept their arrival.
+        calendar::turn += 5_minutes;
+        process_overmap_npc_move_for_test();
+        dematerialized = live_site.active_outing.owner == bandit_live_world::simulation_owner::abstract &&
+                         live_site.active_outing.handoff_epoch == local_epoch_before + 1;
+        if( dematerialized ) {
+            break;
+        }
+        const int deadline = live_site.active_outing.local_handoff.cohesion_deadline_minutes;
+        if( !reposition_deadline && deadline >= 0 ) {
+            reposition_deadline = deadline;
+        }
+        // Cohesion runs before generic overmap travel. An actual arrival in
+        // this pass therefore gets its next ordinary cohesion opportunity before
+        // requiring a published rendezvous bound. A refusal is not retried forever.
+        if( !reposition_deadline ) {
+            const bool at_alternate = std::all_of( generated_ids.begin(), generated_ids.end(),
+            [&live_site]( const character_id id ) {
+                const auto member = overmap_buffer.find_npc( id );
+                return member && !member->is_dead() &&
+                       member->pos_abs_omt() == live_site.active_outing.alternate_watch_omt;
+            } );
+            if( at_alternate && !serviced_alternate_arrival ) {
+                serviced_alternate_arrival = true;
+                continue;
+            }
+            break;
+        }
+        // Keep the first actual deadline, without extending it on later passes.
+        if( to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) >= *reposition_deadline ) {
+            break;
+        }
+    }
+    capture_unload_inputs( "after" );
+    std::ostringstream unload_trace;
+    const auto &unload_snapshot = optical_probe.result();
+    for( std::size_t index = unload_event_start; index < unload_snapshot.transition_events.size();
+         ++index ) {
+        const auto &event = unload_snapshot.transition_events[index];
+        if( event.transition == "scout_homeward_dematerialization" ||
+            event.transition == "alternate_watch_cohesion" ) {
+            unload_trace << event.site_id << " generation=" << event.generation << " epoch=" <<
+                         event.handoff_epoch
+                         << " phase=" << event.new_phase << " outcome=" << event.outcome
+                         << " reason=" << event.reason << '\n';
+        }
+    }
+    CAPTURE( unload_inputs.str(), unload_trace.str(), unload_snapshot.dropped_transition_events );
+    REQUIRE( dematerialized );
     CHECK( live_site.active_outing.owner == bandit_live_world::simulation_owner::abstract );
     CHECK( live_site.active_outing.local_handoff.is_abstract_resume() );
     CHECK( live_site.active_outing.local_handoff.members.size() == generated_ids.size() );
@@ -730,10 +853,51 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
                                         ( 60 - current_minutes_before_report % 60 );
     calendar::turn += ( next_structural_cadence - current_minutes_before_report ) * 1_minutes;
     process_overmap_npc_move_for_test();
-    CHECK( live_site.current_scout_report.is_present() );
-    CHECK( live_site.current_scout_report.source_generation == live_site.active_outing.generation );
-    CHECK( live_site.current_scout_report.revision > report_revision_before );
-    CHECK( live_site.applied_report_generation == live_site.active_outing.generation );
-    CHECK( live_site.camp_decision.state !=
+    // Completing the exact physical return releases and clears the active
+    // outing. Its durable report remains bound to the dispatched identity.
+    const auto &report = live_site.current_scout_report;
+    REQUIRE( report.is_present() );
+    CHECK_FALSE( live_site.active_outing.is_active() );
+    CHECK( report.source_generation == dispatched_generation );
+    CHECK( report.source_activity_id == dispatched_activity_id );
+    CHECK( report.application_key == dispatched_report_key );
+    CHECK( report.revision == report_revision_before + 1 );
+    CHECK( report.carrier_ids == generated_ids );
+    CHECK_FALSE( report.provisional );
+    CHECK( live_site.applied_report_generation == dispatched_generation );
+    CHECK( live_site.applied_return_generation == dispatched_generation );
+
+    // This natural terrain-only fixture has no completed sensing assessment or
+    // capable named home reserve for a response. A delivered report does not
+    // authorize an attack; the decision owner must retain the exact pending report.
+    const auto effective_report = bandit_live_world::evaluate_scout_report_at(
+                                      report, to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) );
+    CHECK( effective_report.valid );
+    CHECK_FALSE( effective_report.assessment_ready );
+    CHECK( live_site.camp_decision.state ==
            bandit_live_world::camp_decision_state::report_awaiting_assessment );
+    CHECK( live_site.camp_decision.source_report_generation == report.source_generation );
+    CHECK( live_site.camp_decision.source_report_revision == report.revision );
+    CHECK( live_site.camp_decision.source_report_activity_id == report.source_activity_id );
+    CHECK( live_site.camp_decision.source_report_application_key == report.application_key );
+    CHECK_FALSE( live_site.active_hostile_operation.is_active() );
+    CHECK( std::count_if( live_site.acted_reports.begin(), live_site.acted_reports.end(),
+    [&report]( const bandit_live_world::acted_report_summary & acted ) {
+        return acted.source_generation == report.source_generation &&
+               acted.report_revision == report.revision &&
+               acted.acted_minutes == report.delivered_minutes &&
+               acted.target_id == report.target_id && acted.target_omt == report.target_omt;
+    } ) == 1 );
+
+    const int delivered_revision = report.revision;
+    const int delivered_minutes = report.delivered_minutes;
+    const std::size_t accepted_report_count = live_site.acted_reports.size();
+    process_overmap_npc_move_for_test();
+    CHECK( live_site.current_scout_report.revision == delivered_revision );
+    CHECK( live_site.current_scout_report.delivered_minutes == delivered_minutes );
+    CHECK( live_site.current_scout_report.source_generation == dispatched_generation );
+    CHECK( live_site.current_scout_report.application_key == dispatched_report_key );
+    CHECK( live_site.applied_return_generation == dispatched_generation );
+    CHECK( live_site.acted_reports.size() == accepted_report_count );
+    CHECK_FALSE( live_site.active_hostile_operation.is_active() );
 }

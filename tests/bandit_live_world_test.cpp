@@ -50959,7 +50959,7 @@ TEST_CASE( "actual shouted contact records once only for selected opt in identit
     set_test_env( names[3], path.string().c_str(), 1 );
     set_test_env( names[4], "r066-visit", 1 );
     set_test_env( names[5], std::to_string( capture == "receiver" ? receiver.getID().get_value() :
-                                      capture == "other" ? -1 : scene.collector->getID().get_value() ).c_str(), 1 );
+                                            capture == "other" ? -1 : scene.collector->getID().get_value() ).c_str(), 1 );
     set_test_env( names[6], std::to_string( turn + ( capture == "outside_turn" ? 1 : 0 ) ).c_str(), 1 );
     unset_test_env( names[7] );
     REQUIRE( scene.communicate() );
@@ -51327,7 +51327,8 @@ TEST_CASE( "attack callback trace attributes zero damage escalation without chan
                                 selection == "neither" ? -1 : victim.getID().get_value();
         set_test_env( names[5], std::to_string( selected_id ).c_str(), 1 );
         const int turn = to_turns<int>( calendar::turn - calendar::turn_zero );
-        set_test_env( names[6], std::to_string( turn + ( selection == "outside_turn" ? 1 : 0 ) ).c_str(), 1 );
+        set_test_env( names[6], std::to_string( turn + ( selection == "outside_turn" ? 1 : 0 ) ).c_str(),
+                      1 );
         unset_test_env( names[7] );
         if( enabled ) {
             set_test_env( names[0], run.c_str(), 1 );

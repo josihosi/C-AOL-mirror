@@ -8328,11 +8328,12 @@ bandit_live_world_probe::scout_homeward_member_read read_live_bandit_homeward_ac
 
 std::optional<bandit_live_world_probe::transition_event> make_live_bandit_homeward_event(
     const bandit_live_world::site_record &site, const std::string_view transition,
-    const std::string_view entrypoint )
+    const std::string_view entrypoint, const bool include_observing = false )
 {
     const auto &outing = site.active_outing;
     if( !bandit_live_world_probe::transition_events_enabled() || !outing.is_active() ||
-        !bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ) {
+        !( bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ||
+           ( include_observing && outing.phase == bandit_live_world::scout_phase::observing ) ) ) {
         return std::nullopt;
     }
     bandit_live_world_probe::transition_event event;
@@ -8649,7 +8650,7 @@ bool dematerialize_live_bandit_structural_handoffs( const int fail_quiesce_id = 
     for( bandit_live_world::site_record &site : state.sites ) {
         const bandit_live_world::active_outing_state &outing = site.active_outing;
         auto homeward_event = make_live_bandit_homeward_event(
-                                  site, "scout_homeward_dematerialization", "stable_unloaded" );
+                                  site, "scout_homeward_dematerialization", "stable_unloaded", true );
         if( site.retired_empty_site || !outing.is_active() ||
             outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             outing.schema_version < 7 ||
@@ -8686,8 +8687,14 @@ bool dematerialize_live_bandit_structural_handoffs( const int fail_quiesce_id = 
             }
         }
         std::set<character_id> body_blocked;
-        if( !live_bandit_handoff_bodies_are_authenticated( site, local_bodies ) ||
-            !settle_live_bandit_inactive_bodies( site, local_bodies, changed, body_blocked ) ) {
+        if( !live_bandit_handoff_bodies_are_authenticated( site, local_bodies ) ) {
+            record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
+                                                  "local body authentication refused", false );
+            continue;
+        }
+        if( !settle_live_bandit_inactive_bodies( site, local_bodies, changed, body_blocked ) ) {
+            record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
+                                                  "inactive body settlement refused", false );
             continue;
         }
         if( native_body_blocked != nullptr ) {
@@ -8697,6 +8704,8 @@ bool dematerialize_live_bandit_structural_handoffs( const int fail_quiesce_id = 
         // Placement now consumes current physical facts and published casualties.
         cursor = bandit_live_world::current_external_simulation_cursor( site );
         if( !cursor ) {
+            record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
+                                                  "body settlement left no current cursor", false );
             continue;
         }
         const bool complete_physical_return_ready =
@@ -8788,10 +8797,14 @@ bool dematerialize_live_bandit_structural_handoffs( const int fail_quiesce_id = 
             bodies.push_back( backup.member );
         }
         if( !finish_live_bandit_loaded_handoff_bodies( site, bodies, changed ) ) {
+            record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
+                                                  "finishing loaded handoff bodies refused", false );
             continue;
         }
         cursor = bandit_live_world::current_external_simulation_cursor( site );
         if( !cursor ) {
+            record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
+                                                  "handoff body finishing left no current cursor", false );
             continue;
         }
         // Rollback owns only the subsequent projection change. Native body
@@ -8876,8 +8889,6 @@ bool dematerialize_live_bandit_structural_handoffs( const int fail_quiesce_id = 
         };
 
         if( outing.alternate_watch_reposition_pending ) {
-            record_live_bandit_homeward_transfer( homeward_event, site, "not_invoked",
-                                                  "alternate-watch reposition adapter selected", false );
             std::vector<bandit_live_world::local_alternate_watch_member_read> alternate_reads;
             alternate_reads.reserve( reads.size() );
             for( const bandit_live_world::local_dematerialization_member_read &read : reads ) {
@@ -8898,11 +8909,19 @@ bool dematerialize_live_bandit_structural_handoffs( const int fail_quiesce_id = 
                 bandit_live_world::plan_local_pair_alternate_watch_reposition(
                     site, *cursor, live_bandit_current_minutes(), alternate_reads );
             if( !alternate_plan.valid ) {
+                record_live_bandit_homeward_transfer( homeward_event, site, "rejected",
+                                                      alternate_plan.notes.empty() ? "invalid alternate-watch plan without a note" :
+                                                      alternate_plan.notes.front(), true, false );
                 continue;
             }
             const bandit_live_world::local_handoff_commit_result alternate_result =
                 bandit_live_world::commit_local_pair_alternate_watch_reposition(
                     site, alternate_plan, quiesce_member, rollback_member );
+            record_live_bandit_homeward_transfer( homeward_event, site,
+                                                  live_bandit_homeward_commit_result( alternate_result ),
+                                                  "alternate-watch reposition commit returned " +
+                                                  std::string( live_bandit_homeward_commit_result( alternate_result ) ), true, true,
+                                                  live_bandit_homeward_commit_result( alternate_result ) );
             if( alternate_result !=
                 bandit_live_world::local_handoff_commit_result::applied ) {
                 continue;
@@ -11843,8 +11862,8 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
     optical_reference.normalize();
     optical_reference.recalc_sight_limits();
     scout_observation::site_reader optical_geometry;
-    const auto terrain_lookup = [&optical_reference,
-                                 &optical_geometry]( const tripoint_abs_omt & candidate,
+    const auto terrain_lookup = [&optical_reference, &site, &plan,
+                                                     &optical_geometry]( const tripoint_abs_omt & candidate,
     const std::vector<tripoint_abs_omt> &footprint ) {
         bandit_live_world::structural_watch_terrain_read terrain;
         terrain.concealed = overmap_buffer.ter( candidate )->get_see_cost() > 0;
@@ -11867,9 +11886,37 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
             const tripoint_abs_ms origin = project_to<coords::ms>( candidate ) + tripoint_rel_ms( SEEX, SEEY,
                                            0 );
             const tripoint_abs_ms target = project_to<coords::ms>( *nearest );
+            const auto record_view = [&]( const char *role, const tripoint_abs_ms & observed,
+            const scout_observation::visibility_read & view ) {
+                if( !terrain.concealed || !bandit_live_world_probe::transition_events_enabled() ) {
+                    return;
+                }
+                bandit_live_world_probe::transition_event event;
+                event.domain = "bandit_live_world";
+                event.transition = "watch_geometry_read";
+                event.outcome = "diagnostic";
+                event.site_id = site.site_id;
+                event.operation_id = plan.activity_id;
+                event.generation = plan.generation;
+                event.target_lead_id = plan.lead_id;
+                event.target_lead_revision = plan.lead_revision;
+                event.at_minutes = live_bandit_current_minutes();
+                for( const auto id : plan.member_ids ) {
+                    event.actor_ids.push_back( id.get_value() );
+                }
+                std::ostringstream detail;
+                detail << "role=" << role << " candidate=" << candidate.to_string()
+                       << " origin=" << origin.to_string() << " target=" << observed.to_string()
+                       << " known=" << view.known << " visible=" << view.visible
+                       << " reason=" << view.reason;
+                event.reason = detail.str();
+                bandit_live_world_probe::record_live_transition_event( event );
+                bandit_live_world_probe::record_transition_event( std::move( event ) );
+            };
             if( scout_observation::associated_with_site( get_avatar().pos_abs_omt(), footprint ) ) {
                 const auto view = optical_geometry.read( optical_reference, origin,
                                   get_avatar().pos_abs(), footprint );
+                record_view( "avatar", get_avatar().pos_abs(), view );
                 checked = view.known;
                 useful = view.visible;
             }
@@ -11884,6 +11931,7 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                 }
                 ++actor_reads;
                 const auto view = optical_geometry.read( optical_reference, origin, actor.pos_abs(), footprint );
+                record_view( "npc", actor.pos_abs(), view );
                 checked = checked || view.known;
                 useful = useful || view.visible;
             }
@@ -11895,6 +11943,7 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                 }
                 const auto view = optical_geometry.read( optical_reference, origin,
                                   target + tripoint_rel_ms( offset.x, offset.y, 0 ), footprint );
+                record_view( "corner", target + tripoint_rel_ms( offset.x, offset.y, 0 ), view );
                 checked = checked || view.known;
                 useful = useful || view.visible;
                 if( useful ) {
