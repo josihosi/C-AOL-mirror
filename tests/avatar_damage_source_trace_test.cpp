@@ -32,13 +32,26 @@ class scoped_damage_trace_environment
             restore( "OPENCLAW_HARNESS_UI_TRACE", old_trace );
             restore( "OPENCLAW_HARNESS_RUN_ID", old_run );
         }
+        void set_trace( const char *value ) {
+            assign( "OPENCLAW_HARNESS_UI_TRACE", value );
+        }
+        void set_run( const char *value ) {
+            assign( "OPENCLAW_HARNESS_RUN_ID", value );
+        }
     private:
-        static void restore( const char *name, const std::optional<std::string> &value ) {
+        static void assign( const char *name, const char *value ) {
+#if defined(_WIN32)
+            _putenv_s( name, value ? value : "" );
+#else
             if( value ) {
-                setenv( name, value->c_str(), 1 );
+                setenv( name, value, 1 );
             } else {
                 unsetenv( name );
             }
+#endif
+        }
+        static void restore( const char *name, const std::optional<std::string> &value ) {
+            assign( name, value ? value->c_str() : nullptr );
         }
         std::optional<std::string> old_trace;
         std::optional<std::string> old_run;
@@ -76,8 +89,8 @@ TEST_CASE( "avatar_damage_source_trace_records_real_harm_only_in_bound_harness",
     const bodypart_id torso( "torso" );
     const int initial_hp = avatar.get_part_hp_cur( torso );
 
-    setenv( "OPENCLAW_HARNESS_RUN_ID", "damage-source-test-run", 1 );
-    unsetenv( "OPENCLAW_HARNESS_UI_TRACE" );
+    saved_environment.set_run( "damage-source-test-run" );
+    saved_environment.set_trace( nullptr );
     std::string ordinary_log;
     {
         scoped_stderr_capture capture;
@@ -87,7 +100,7 @@ TEST_CASE( "avatar_damage_source_trace_records_real_harm_only_in_bound_harness",
     CHECK( ordinary_log.find( "component=avatar_damage_source" ) == std::string::npos );
     CHECK( avatar.get_part_hp_cur( torso ) == initial_hp - 1 );
 
-    setenv( "OPENCLAW_HARNESS_UI_TRACE", "1", 1 );
+    saved_environment.set_trace( "1" );
     std::string bound_log;
     {
         scoped_stderr_capture capture;
