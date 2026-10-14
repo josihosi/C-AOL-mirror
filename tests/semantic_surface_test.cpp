@@ -2834,6 +2834,279 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     CHECK( fs::file_size( trace ) == before );
 }
 
+
+TEST_CASE( "native journal rejects invalid records and initial temporary IO before valid retry",
+           "[semantic_surface][native_journal_failure_067]" )
+{
+    namespace fs = std::filesystem;
+    const int failure = GENERATE( 0, 1, 2, 3, 4, 5 );
+    CAPTURE( failure );
+    const fs::path directory = fs::temp_directory_path() /
+                               ( "native-journal-failure-" + std::to_string(
+                                     std::chrono::steady_clock::now().time_since_epoch().count() ) );
+    fs::create_directories( directory / "config" );
+    const fs::path trace = directory / "native.jsonl";
+    const fs::path temporary = trace.string() + ".next";
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    const std::string original_directory = PATH_INFO::user_dir();
+    const bool previous_error = debug_has_error_been_observed();
+    on_out_of_scope cleanup( [&] {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+        deinitDebug();
+        PATH_INFO::init_user_dir( original_directory );
+        PATH_INFO::set_standard_filenames();
+        setupDebug( DebugOutput::std_err );
+        if( !previous_error ) { debug_reset_error_observed(); }
+        fs::remove_all( directory );
+    } );
+    deinitDebug();
+    PATH_INFO::init_user_dir( directory.string() + "/" );
+    PATH_INFO::set_standard_filenames();
+    setupDebug( DebugOutput::file );
+    const fs::path log = fs::path( PATH_INFO::debug() );
+    const std::string run = directory.filename().string();
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    const std::string good = "{\"event\":\"frame\",\"run_id\":\"" + run +
+                             "\",\"frame_id\":\"first-frame\"}";
+    std::string record;
+    const char *expected_stage = "";
+    if( failure == 0 ) {
+        record = "{\"event\":@}";
+        expected_stage = "json_parse";
+    } else if( failure == 1 ) {
+        record = "{\"event\":7,\"run_id\":\"" + run + "\"}";
+        expected_stage = "record_type field=event";
+    } else if( failure == 2 ) {
+        record = "{\"event\":\"frame\",\"run_id\":false}";
+        expected_stage = "record_type field=run_id";
+    } else if( failure == 3 ) {
+        record = "{\"event\":\"frame\",\"run_id\":\"foreign\"}";
+        expected_stage = "record_run_mismatch";
+    } else if( failure == 4 ) {
+        // A real temporary-target open failure, not a permission assumption.
+        fs::create_directory( temporary );
+        record = good;
+        expected_stage = "temporary_open";
+    } else {
+        // First compaction writes successfully, then the actual rename fails.
+        fs::create_directory( trace );
+        record = good;
+        expected_stage = "rename";
+    }
+    CHECK_FALSE( write_native_semantic_event( record ) );
+    CHECK_FALSE( fs::is_regular_file( trace ) );
+    deinitDebug();
+    std::ifstream errors( log );
+    const std::string text( ( std::istreambuf_iterator<char>( errors ) ),
+                            std::istreambuf_iterator<char>() );
+    CHECK( text.find( std::string( "stage=" ) + expected_stage ) != std::string::npos );
+    CHECK( text.find( record ) == std::string::npos );
+    if( failure <= 2 ) {
+        CHECK( text.find( "line=-1 column=-1" ) == std::string::npos );
+    }
+    if( failure == 5 ) {
+        CHECK( text.find( "error_code=0" ) == std::string::npos );
+    }
+    errors.close();
+    setupDebug( DebugOutput::file );
+    if( failure == 4 ) { fs::remove( temporary ); }
+    if( failure == 5 ) { fs::remove( trace ); }
+    REQUIRE( write_native_semantic_event( good ) );
+    CHECK( fs::file_size( trace ) > 0 );
+    CHECK_FALSE( fs::exists( temporary ) );
+    std::ifstream published( trace );
+    std::string row;
+    int frames = 0;
+    while( std::getline( published, row ) ) {
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        REQUIRE( row.compare( 0, prefix.size(), prefix ) == 0 );
+        std::istringstream body( row.substr( prefix.size() ) );
+        TextJsonIn input( body );
+        const auto object = input.get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_string( "run_id" ) == run );
+        if( object.get_string( "event" ) == "frame" ) { ++frames; }
+    }
+    // Temporary IO remembers the complete failed row for replacement retry;
+    // parser/run refusals never entered retention. No malformed row publishes.
+    CHECK( frames == ( failure >= 4 ? 2 : 1 ) );
+}
+
+TEST_CASE( "initial HUD World is emitted only after actual journal publication",
+           "[semantic_surface][initial_world_publication_retry_067]" )
+{
+    namespace fs = std::filesystem;
+    const fs::path directory = fs::temp_directory_path() /
+                               ( "native-initial-retry-" + std::to_string(
+                                     std::chrono::steady_clock::now().time_since_epoch().count() ) );
+    fs::create_directories( directory );
+    const fs::path trace = directory / "native.jsonl";
+    const fs::path temporary = trace.string() + ".next";
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    const bool previous_error = debug_has_error_been_observed();
+    on_out_of_scope cleanup( [&] {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+        if( !previous_error ) { debug_reset_error_observed(); }
+        fs::remove_all( directory );
+    } );
+    const auto run = directory.filename().string();
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    const auto context = get_default_mode_input_context();
+    fs::create_directory( temporary );
+    openclaw_harness_semantic_initial_world_frame_if_ready( &context, true, true, true );
+    CHECK_FALSE( fs::exists( trace ) );
+    fs::remove( temporary );
+    // SAME run/context and no gameplay input: failed output must not latch emitted.
+    openclaw_harness_semantic_initial_world_frame_if_ready( &context, true, true, true );
+    REQUIRE( fs::exists( trace ) );
+    const auto bytes = fs::file_size( trace );
+    openclaw_harness_semantic_initial_world_frame_if_ready( &context, true, true, true );
+    CHECK( fs::file_size( trace ) == bytes );
+    std::ifstream published( trace );
+    std::string row;
+    bool ready = false;
+    while( std::getline( published, row ) ) {
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        std::istringstream body( row.substr( prefix.size() ) );
+        TextJsonIn input( body );
+        const auto object = input.get_object();
+        object.allow_omitted_members();
+        ready = ready || ( object.get_string( "event" ) == "frame" &&
+                          object.get_string( "producer", "" ) == "hud_world_ready" &&
+                          object.get_bool( "initial_world_ready", false ) );
+    }
+    CHECK( ready );
+}
+
+
+TEST_CASE( "rejected receipt and travel types cannot alter later journal retention",
+           "[semantic_surface][native_journal_rejected_retention_067]" )
+{
+    namespace fs = std::filesystem;
+    const int invalid = GENERATE( 0, 1, 2, 3 );
+    CAPTURE( invalid );
+    const fs::path directory = fs::temp_directory_path() /
+                               ( "native-rejected-retention-" + std::to_string(
+                                     std::chrono::steady_clock::now().time_since_epoch().count() ) );
+    fs::create_directories( directory );
+    const fs::path trace = directory / "native.jsonl";
+    const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
+                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &key : keys ) {
+        const char *value = std::getenv( key.c_str() );
+        previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
+    }
+    const bool previous_error = debug_has_error_been_observed();
+    on_out_of_scope cleanup( [&] {
+        for( const auto &entry : previous ) {
+            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            else { unsetenv( entry.first.c_str() ); }
+        }
+        if( !previous_error ) { debug_reset_error_observed(); }
+        fs::remove_all( directory );
+    } );
+    const auto run = directory.filename().string();
+    setenv( keys[0].c_str(), run.c_str(), 1 );
+    setenv( keys[1].c_str(), run.c_str(), 1 );
+    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    const std::string base = "\"run_id\":\"" + run + "\",";
+    REQUIRE( write_native_semantic_event( "{" + base +
+                                          "\"event\":\"surface_descriptor\",\"frame_id\":\"frame-0\"}" ) );
+    REQUIRE( write_native_semantic_event( "{" + base +
+                                          "\"event\":\"surface_receipt\",\"request_id\":\"accepted-once\","
+                                          "\"accepted\":true,\"resulting_frame_id\":\"frame-0\"}" ) );
+    for( const auto state : { "active", "hostile_boundary", "progress" } ) {
+        REQUIRE( write_native_semantic_event( "{" + base +
+                                              "\"event\":\"travel\",\"travel_id\":\"current-trip\","
+                                              "\"state\":\"" + state + "\"}" ) );
+    }
+    std::string rejected;
+    if( invalid == 0 ) {
+        rejected = "{" + base + "\"event\":\"surface_receipt\",\"request_id\":\"rejected-record\","
+                   "\"accepted\":true,\"resulting_frame_id\":7}";
+    } else if( invalid == 1 ) {
+        rejected = "{" + base + "\"event\":\"surface_receipt\",\"request_id\":\"rejected-record\","
+                   "\"accepted\":7,\"resulting_frame_id\":\"frame-0\"}";
+    } else if( invalid == 2 ) {
+        rejected = "{" + base + "\"event\":\"travel\",\"travel_id\":\"rejected-record\",\"state\":7}";
+    } else {
+        rejected = "{" + base + "\"event\":\"travel\",\"travel_id\":7,\"state\":\"rejected-record\"}";
+    }
+    REQUIRE_FALSE( write_native_semantic_event( rejected ) );
+    // Evict the earlier rows from the existing 256-record recent window so
+    // retry tests the authority pins, not a surviving diagnostic copy.
+    for( int index = 0; index <= 256; ++index ) {
+        REQUIRE( write_native_diagnostic_event( "{" + base +
+                                                "\"event\":\"turn\",\"index\":" + std::to_string( index ) + "}" ) );
+    }
+    // Use the already-supported real output failure/replacement route to
+    // compel compaction, without calling a private journal or extra parser.
+    fs::remove( trace );
+    fs::create_directory( trace );
+    REQUIRE_FALSE( write_native_diagnostic_event( "{" + base + "\"event\":\"turn\"}" ) );
+    fs::remove( trace );
+    REQUIRE( write_native_semantic_event( "{" + base +
+                                          "\"event\":\"surface_descriptor\",\"frame_id\":\"frame-1\"}" ) );
+    std::ifstream published( trace );
+    std::string row;
+    bool accepted = false;
+    bool current_frame = false;
+    std::set<std::string> travel_states;
+    while( std::getline( published, row ) ) {
+        CHECK( row.find( "rejected-record" ) == std::string::npos );
+        const std::string prefix = "openclaw_harness_semantic_step: ";
+        std::istringstream body( row.compare( 0, prefix.size(), prefix ) == 0 ?
+                                 row.substr( prefix.size() ) : row );
+        TextJsonIn input( body );
+        const auto object = input.get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_string( "run_id" ) == run );
+        const auto kind = object.get_string( "event" );
+        if( kind == "surface_descriptor" ) {
+            current_frame = current_frame || object.get_string( "frame_id" ) == "frame-1";
+        } else if( kind == "surface_receipt" ) {
+            if( object.get_string( "request_id" ) == "accepted-once" ) {
+                CHECK( object.get_bool( "accepted" ) );
+                CHECK( object.get_string( "resulting_frame_id" ) == "frame-0" );
+                accepted = true;
+            }
+        } else if( kind == "travel" ) {
+            CHECK( object.get_string( "travel_id" ) == "current-trip" );
+            travel_states.insert( object.get_string( "state" ) );
+        }
+    }
+    CHECK( accepted );
+    CHECK( current_frame );
+    CHECK( travel_states == std::set<std::string>{ "active", "hostile_boundary", "progress" } );
+    CHECK_FALSE( fs::exists( trace.string() + ".next" ) );
+    std::cout << "R067_REJECTED_RETENTION invalid=" << invalid
+              << " accepted=" << accepted << " current_frame=" << current_frame
+              << " retained_travel_states=" << travel_states.size() << '\n';
+}
+
 TEST_CASE( "debug file is bounded during one long running process", "[debug][native_log_window]" )
 {
     namespace fs = std::filesystem;

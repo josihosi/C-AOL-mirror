@@ -341,9 +341,9 @@ static bool openclaw_harness_semantic_step_trace_enabled()
     return !openclaw_harness_bound_semantic_run_id().empty();
 }
 
-static void openclaw_harness_write_semantic_step_event( const std::string &event )
+static bool openclaw_harness_write_semantic_step_event( const std::string &event )
 {
-    write_native_semantic_event( event );
+    return write_native_semantic_event( event );
 }
 
 static std::string openclaw_harness_semantic_event_clock()
@@ -1968,7 +1968,9 @@ static std::string openclaw_harness_semantic_step_frame(
           << openclaw_harness_diagnostic_zombie_rider_bands()
           << ",\"visible_zones\":" << openclaw_harness_visible_zones( here, avatar_pos ) << '}'
           << ",\"valid_actions\":" << action_ids.str() << '}';
-    openclaw_harness_write_semantic_step_event( event.str() );
+    if( !openclaw_harness_write_semantic_step_event( event.str() ) ) {
+        return {};
+    }
     return frame_id;
 }
 

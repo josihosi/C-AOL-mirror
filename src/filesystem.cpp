@@ -176,8 +176,14 @@ bool rename_file( const cata_path &old_path, const cata_path &new_path )
 
 bool rename_file( const std::filesystem::path &old_path, const std::filesystem::path &new_path )
 {
-    setFsNeedsSync();
     std::error_code ec;
+    return rename_file( old_path, new_path, ec );
+}
+
+bool rename_file( const std::filesystem::path &old_path, const std::filesystem::path &new_path,
+                  std::error_code &ec )
+{
+    setFsNeedsSync();
     int attempts = 0;
     do {
         std::filesystem::rename( old_path, new_path, ec );

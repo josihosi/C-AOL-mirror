@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -24,6 +26,31 @@ enum class native_record_format {
     diagnostic
 };
 
+// Fixed diagnostic tokens only: never print exception text or record contents.
+struct native_journal_failure {
+    const char *stage = "json_parse";
+    const char *field = "none";
+    int line = -1;
+    int column = -1;
+    int error_code = 0;
+    const char *error_category = "none";
+    std::ios::iostate stream_state = std::ios::goodbit;
+};
+
+void native_journal_json_location( const JsonError &error, native_journal_failure &failure )
+{
+    // JsonError seeks its input to EOF. Its fixed, inputless source header
+    // retains the location; copying what() would also copy the failed record.
+    if( std::sscanf( error.what(),
+                    "Json error: file <unknown source file>, at line %d, character %d:",
+                    &failure.line, &failure.column ) != 2 &&
+        std::sscanf( error.what(),
+                    "::error file=<unknown source file>,line=%d,col=%d::",
+                    &failure.line, &failure.column ) != 2 ) {
+        failure.line = failure.column = -1;
+    }
+}
+
 // Keep bounded recent diagnostics plus the current input transaction.  A large
 // action catalog is not truncated to meet a diagnostic budget.
 class native_semantic_journal
@@ -38,15 +65,48 @@ class native_semantic_journal
         native_semantic_journal( std::string path, std::string run ) :
             path( std::move( path ) ), run( std::move( run ) ) {}
 
-        bool append( const std::string &event, native_record_format format ) {
+        bool append( const std::string &event, native_record_format format,
+                     native_journal_failure &failure ) {
             std::istringstream input( event );
             TextJsonIn jsin( input );
             const TextJsonObject object = jsin.get_object();
             object.allow_omitted_members();
-            if( object.get_string( "run_id", "" ) != run ) {
+            const auto read_string = [&]( const char *field ) {
+                failure.stage = "record_type";
+                failure.field = field;
+                return object.get_string( field, "" );
+            };
+            if( read_string( "run_id" ) != run ) {
+                failure.stage = "record_run_mismatch";
                 return false;
             }
-            const std::string kind = object.get_string( "event", "" );
+            const std::string kind = read_string( "event" );
+            // Read every field used by this semantic retention branch before
+            // changing sequence, pins or trip state. A type refusal cannot
+            // become publishable authority on a later compaction retry.
+            std::string frame;
+            std::string result;
+            std::string trip;
+            std::string state;
+            std::string action;
+            bool accepted = false;
+            if( format == native_record_format::semantic ) {
+                if( kind == "surface_descriptor" ) {
+                    frame = read_string( "frame_id" );
+                } else if( kind == "surface_receipt" ) {
+                    result = read_string( "resulting_frame_id" );
+                    failure.stage = "record_type";
+                    failure.field = "accepted";
+                    accepted = object.get_bool( "accepted", false );
+                } else if( kind == "travel" ) {
+                    trip = read_string( "travel_id" );
+                    state = read_string( "state" );
+                } else if( kind == "receipt" ) {
+                    action = read_string( "action_id" );
+                }
+            }
+            failure.stage = "retention";
+            failure.field = "none";
             const std::string prefix = format == native_record_format::semantic ?
                                        "openclaw_harness_semantic_step: " : "";
             auto row = std::make_shared<const record>( record { ++sequence, prefix + event + '\n' } );
@@ -54,7 +114,7 @@ class native_semantic_journal
             // current input pins, even if their event names resemble authority.
             if( format == native_record_format::semantic ) {
                 if( kind == "surface_descriptor" ) {
-                    current_frame = object.get_string( "frame_id", "" );
+                    current_frame = frame;
                     pins["surface"] = row;
                     if( current_frame == accepted_result ) {
                         pins["accepted_successor"] = row;
@@ -64,7 +124,6 @@ class native_semantic_journal
                     }
                 } else if( kind == "surface_receipt" ) {
                     pins["receipt"] = row;
-                    const std::string result = object.get_string( "resulting_frame_id", "" );
                     // Cached receipt replay can occur after a newer redraw. Its
                     // immutable result still names the previous successor, which
                     // may now exist only in these pins, not the recent window.
@@ -72,23 +131,22 @@ class native_semantic_journal
                         pins.erase( "receipt_successor" );
                     }
                     receipt_result = result;
-                    if( object.get_bool( "accepted", false ) ) {
+                    if( accepted ) {
                         pins["accepted_receipt"] = row;
                         if( accepted_result != result ) {
                             pins.erase( "accepted_successor" );
                         }
                         accepted_result = result;
-                        if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
+                        if( result == current_frame &&
                             pins.count( "surface" ) ) {
                             pins["accepted_successor"] = pins["surface"];
                         }
                     }
-                    if( object.get_string( "resulting_frame_id", "" ) == current_frame &&
+                    if( result == current_frame &&
                         pins.count( "surface" ) ) {
                         pins["receipt_successor"] = pins["surface"];
                     }
                 } else if( kind == "travel" ) {
-                    const std::string trip = object.get_string( "travel_id", "" );
                     if( current_trip != trip ) {
                         pins.erase( "travel_active" );
                         pins.erase( "travel_progress" );
@@ -99,7 +157,6 @@ class native_semantic_journal
                     // The existing travel consumer requires the start and latest
                     // progress of this trip alongside its terminal receipt. Earlier
                     // adverse boundaries remain evidence even after travel resumes.
-                    const std::string state = object.get_string( "state", "" );
                     if( state == "active" || state == "progress" ) {
                         pins["travel_" + state] = row;
                     }
@@ -113,7 +170,6 @@ class native_semantic_journal
                 } else if( kind == "frame" || kind == "native_save_completion" ) {
                     pins[kind] = row;
                 } else if( kind == "receipt" ) {
-                    const std::string action = object.get_string( "action_id", "" );
                     pins[action.compare( 0, 5, "wait." ) == 0 ? "duration_receipt" :
                          "movement_receipt"] = row;
                 }
@@ -134,12 +190,36 @@ class native_semantic_journal
             // plus the diagnostic allowance. Initial publication also replaces
             // any unrelated previous process's file with a fresh generation.
             if( !published || disk_bytes + row->text.size() > diagnostic_bytes + pinned_bytes + 512 ) {
-                return compact();
+                return compact( failure );
             }
+            failure.field = "none";
+            failure.stage = "append_open";
+            errno = 0;
             std::ofstream output( path, std::ios::binary | std::ios::app );
+            if( !output.is_open() ) {
+                failure.error_code = errno;
+                failure.error_category = errno ? "generic" : "unavailable";
+                failure.stream_state = output.rdstate();
+                published = false;
+                return false;
+            }
+            failure.stage = "append_write";
+            errno = 0;
             output << row->text;
+            if( !output ) {
+                failure.error_code = errno;
+                failure.error_category = errno ? "generic" : "unavailable";
+                failure.stream_state = output.rdstate();
+                published = false;
+                return false;
+            }
+            failure.stage = "append_close";
+            errno = 0;
             output.close();
             if( !output ) {
+                failure.error_code = errno;
+                failure.error_category = errno ? "generic" : "unavailable";
+                failure.stream_state = output.rdstate();
                 // A partial append cannot be followed by another JSON row.
                 // Rebuild the remembered complete records on the next write.
                 published = false;
@@ -150,7 +230,7 @@ class native_semantic_journal
         }
 
     private:
-        bool compact() {
+        bool compact( native_journal_failure &failure ) {
             std::vector<std::shared_ptr<const record>> rows;
             for( const auto &pin : pins ) {
                 if( std::find( recent.begin(), recent.end(), pin.second ) == recent.end() &&
@@ -163,7 +243,19 @@ class native_semantic_journal
                 return left->sequence < right->sequence;
             } );
             const std::string temporary = path + ".next";
+            failure.field = "none";
+            failure.stage = "temporary_open";
+            errno = 0;
             std::ofstream output( temporary, std::ios::binary | std::ios::trunc );
+            if( !output.is_open() ) {
+                failure.error_code = errno;
+                failure.error_category = errno ? "generic" : "unavailable";
+                failure.stream_state = output.rdstate();
+                published = false;
+                return false;
+            }
+            failure.stage = "temporary_write";
+            errno = 0;
             // This marker makes replacement observable on filesystems whose
             // inode identities are unavailable. It never grants native input.
             const auto instance = std::chrono::system_clock::now().time_since_epoch().count();
@@ -182,10 +274,32 @@ class native_semantic_journal
                 output << row->text;
             }
             const auto bytes = output.tellp();
-            output.close();
-            if( bytes < 0 || !output || !rename_file( temporary, path ) ) {
+            failure.error_code = errno;
+            failure.error_category = errno ? "generic" : "unavailable";
+            failure.stream_state = output.rdstate();
+            bool complete = bytes >= 0 && bool( output );
+            if( complete ) {
+                failure.stage = "temporary_close";
+                errno = 0;
+                output.close();
+                failure.error_code = errno;
+                failure.error_category = errno ? "generic" : "unavailable";
+                failure.stream_state = output.rdstate();
+                complete = bool( output );
+            } else {
+                output.close();
+            }
+            if( complete ) {
+                failure.stage = "rename";
                 std::error_code error;
-                std::filesystem::remove( temporary, error );
+                complete = rename_file( std::filesystem::u8path( temporary ),
+                                        std::filesystem::u8path( path ), error );
+                failure.error_code = error.value();
+                failure.error_category = error ? error.category().name() : "none";
+            }
+            if( !complete ) {
+                std::error_code cleanup_error;
+                std::filesystem::remove( temporary, cleanup_error );
                 published = false;
                 return false;
             }
@@ -237,21 +351,30 @@ bool write_native_event( const std::string &event, native_record_format format )
     const std::lock_guard<std::mutex> lock( mutex );
     static std::string identity;
     static std::unique_ptr<native_semantic_journal> journal;
+    static bool failure_reported = false;
     const std::string next_identity = std::string( run ) + '\n' + path;
     if( identity != next_identity ) {
         identity = next_identity;
         journal = std::make_unique<native_semantic_journal>( path, run );
+        failure_reported = false;
     }
-    static bool failure_reported = false;
     bool written = false;
+    native_journal_failure failure;
     try {
-        written = journal->append( event, format );
+        written = journal->append( event, format, failure );
+    } catch( const JsonError &error ) {
+        native_journal_json_location( error, failure );
     } catch( const std::exception & ) {
         // A failed publication is not authority. Keep the failure diagnostic
         // small; never mirror the discarded action catalog into debug.log.
     }
     if( !written && !failure_reported ) {
-        DebugLog( D_ERROR, DC_ALL ) << "Native semantic journal publication failed for run " << run;
+        DebugLog( D_ERROR, DC_ALL ) << "Native semantic journal publication failed for run " << run
+                << " stage=" << failure.stage << " field=" << failure.field
+                << " line=" << failure.line << " column=" << failure.column
+                << " error_code=" << failure.error_code
+                << " error_category=" << failure.error_category
+                << " stream_state=" << static_cast<unsigned>( failure.stream_state );
     } else if( written && failure_reported ) {
         DebugLog( D_INFO, DC_ALL ) << "Native semantic journal publication resumed for run " << run;
     }

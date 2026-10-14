@@ -44,6 +44,9 @@ bool remove_file( const cata_path &path );
 bool remove_directory( const std::filesystem::path &path );
 // Rename a file, overriding the target!
 bool rename_file( const std::filesystem::path &old_path, const std::filesystem::path &new_path );
+// Same rename policy, retaining the actual filesystem failure for its caller.
+bool rename_file( const std::filesystem::path &old_path, const std::filesystem::path &new_path,
+                  std::error_code &error );
 bool rename_file( const cata_path &old_path, const cata_path &new_path );
 
 std::filesystem::path abs_path( const std::filesystem::path &path );
