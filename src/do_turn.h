@@ -42,6 +42,8 @@ struct robbery_demand;
 // It records a candidate in the current operation, never contact or a target.
 void hear_bandit_shakedown_demand( const sounds::robbery_demand &demand, Character &hearer );
 
+// Shared avatar activity step before input and after a native action.
+void process_avatar_activity_turn( avatar &u );
 void handle_key_blocking_activity();
 // A successful unrelated native conversation cancels only a deferred Pay
 // choice. The demand and its trade successor do not enter avatar::talk_to.

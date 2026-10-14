@@ -3255,7 +3255,6 @@ TEST_CASE( "debug file is bounded during one long running process", "[debug][nat
 
 
 extern "C" int flushinp();
-void process_avatar_activity_turn( avatar &u );
 void handle_key_blocking_activity();
 
 #if !defined(TILES)
