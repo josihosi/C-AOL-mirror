@@ -195,8 +195,9 @@ bool horde_map::can_accept_entity( const tripoint_abs_ms &p, const horde_entity 
     if( actor_id.empty() ) {
         return true;
     }
-    for( const std::pair<const tripoint_abs_ms, horde_entity> &existing : get_view( horde_map_flavors::active |
-            horde_map_flavors::idle | horde_map_flavors::dormant | horde_map_flavors::immobile ) ) {
+    for( const std::pair<const tripoint_abs_ms, horde_entity> &existing : get_view(
+             horde_map_flavors::active |
+             horde_map_flavors::idle | horde_map_flavors::dormant | horde_map_flavors::immobile ) ) {
         if( existing.second.monster_data && existing.second.monster_data->is_caol_predator() &&
             existing.second.monster_data->predator_state().actor_id == actor_id ) {
             return false;
@@ -275,7 +276,7 @@ void horde_map::signal_entities( const tripoint_abs_ms &origin, int volume )
 
 int horde_map::attract_entities_to_light( const tripoint_abs_ms &origin, const int intensity,
         const int observer_radius_sm, const std::string &sample_id, const time_point &observed,
-        const std::function<bool( const tripoint_abs_ms &)> &visible, int *candidate_count )
+        const std::function<bool( const tripoint_abs_ms & )> &visible, int *candidate_count )
 {
     if( candidate_count != nullptr ) {
         *candidate_count = 0;
@@ -287,7 +288,7 @@ int horde_map::attract_entities_to_light( const tripoint_abs_ms &origin, const i
     std::unordered_map<tripoint_abs_ms, horde_entity> migrating_hordes;
     const tripoint_abs_sm source_sm = project_to<coords::sm>( origin );
     const auto consider = [this, &origin, &source_sm, intensity, observer_radius_sm, &sample_id,
-    &observed, &visible, &attracted, &migrating_hordes, candidate_count]( auto &outer ) {
+          &observed, &visible, &attracted, &migrating_hordes, candidate_count]( auto & outer ) {
         for( auto outer_it = outer.begin(); outer_it != outer.end(); ) {
             // The outer key is an existing spatial bucket.  Reject it before
             // touching its entities so source delivery is bounded by the

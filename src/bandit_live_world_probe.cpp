@@ -48,8 +48,8 @@ bool read_stream_file_stamp( const std::string &path, stream_file_stamp &stamp )
 {
 #if defined(_WIN32)
     const HANDLE handle = CreateFileW( std::filesystem::path( path ).c_str(),
-                                      FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
+                                       FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
     if( handle == INVALID_HANDLE_VALUE ) {
         return false;
     }
@@ -272,7 +272,7 @@ std::string world_tree_sha256( const std::string &world_path )
     for( std::filesystem::recursive_directory_iterator iterator( root, error ), end;
          !error && iterator != end; iterator.increment( error ) ) {
         const std::filesystem::path relative = iterator->path().lexically_relative( root );
-        const bool excluded = std::any_of( relative.begin(), relative.end(), []( const auto &part ) {
+        const bool excluded = std::any_of( relative.begin(), relative.end(), []( const auto & part ) {
             const std::string value = part.string();
             return value == "harness_runs" || value == "cache" || value == "__pycache__" || value == ".git";
         } );
@@ -289,8 +289,9 @@ std::string world_tree_sha256( const std::string &world_path )
     if( error || files.empty() ) {
         return "";
     }
-    std::sort( files.begin(), files.end(), [&root]( const auto &lhs, const auto &rhs ) {
-        return lhs.lexically_relative( root ).generic_string() < rhs.lexically_relative( root ).generic_string();
+    std::sort( files.begin(), files.end(), [&root]( const auto & lhs, const auto & rhs ) {
+        return lhs.lexically_relative( root ).generic_string() < rhs.lexically_relative(
+                   root ).generic_string();
     } );
     sha256 digest;
     static constexpr char domain[] = "caol-world-save:v1\0";
@@ -336,7 +337,7 @@ std::int64_t bucket_upper_bound( const std::size_t index )
         upper = base + delta;
     }
     return static_cast<std::int64_t>( std::min<std::uint64_t>(
-            upper, std::numeric_limits<std::int64_t>::max() ) );
+                                          upper, std::numeric_limits<std::int64_t>::max() ) );
 }
 
 bool is_safe_run_id( const std::string_view value )
@@ -453,8 +454,8 @@ bool live_transition_stream_enabled()
 }
 
 void write_scout_homeward_observation( JsonOut &json,
-                                      const bandit_live_world_probe::scout_homeward_observation &read,
-                                      const bool include_moves )
+                                       const bandit_live_world_probe::scout_homeward_observation &read,
+                                       const bool include_moves )
 {
     const auto optional_bool = [&json]( const char *name, const std::optional<bool> value ) {
         if( value ) {
@@ -970,8 +971,8 @@ scoped_section::~scoped_section()
     }
 
     const std::int64_t inclusive_ns = std::max<std::int64_t>( 0,
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now() - started_ ).count() );
+                                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - started_ ).count() );
     assert( session_->stack_depth_ == frame_index_ + 1 );
     const session::active_frame frame = session_->stack_[frame_index_];
     session_->stack_depth_--;
@@ -1139,7 +1140,7 @@ void record_signal_dispatch_admission( transition_event event )
         cached_path = transition_stream.path;
         cached_run = transition_stream.run_id;
         cached_revision = transition_stream.revision;
-        const auto context = []( const transition_event &value ) {
+        const auto context = []( const transition_event & value ) {
             return std::tie( value.outcome, value.reason, value.operation_id, value.generation,
                              value.simulation_owner, value.handoff_epoch, value.previous_phase,
                              value.new_phase, value.actor_ids );
@@ -1211,7 +1212,7 @@ void record_scout_homeward_observation( transition_event event )
         write_scout_homeward_observation( context_json, *event.scout_homeward, false );
         context_json.end_array();
 
-        const auto retain_change = [&]( auto &subjects, transition_event &receipt, const bool commit ) {
+        const auto retain_change = [&]( auto & subjects, transition_event & receipt, const bool commit ) {
             const auto previous = subjects.find( subject.str() );
             if( previous == subjects.end() && subjects.size() >= max_transition_events ) {
                 // One extra bounded sentinel makes an exhausted subject table observable.
@@ -1227,7 +1228,8 @@ void record_scout_homeward_observation( transition_event event )
                 return true;
             }
             change_only_transition_state retained = previous == subjects.end() ?
-                    change_only_transition_state{} : previous->second;
+                                                    change_only_transition_state{} :
+                                                    previous->second;
             if( retained.truncated || retained.signature == context.str() ) {
                 return false;
             }
@@ -1272,11 +1274,11 @@ void record_local_pair_handoff_snapshot( const transition_event &event,
         const std::string_view omt )
 {
     const char *const path_value = std::getenv(
-                                      "OPENCLAW_HARNESS_LOCAL_PAIR_SNAPSHOT_PATH" );
+                                       "OPENCLAW_HARNESS_LOCAL_PAIR_SNAPSHOT_PATH" );
     const char *const source_sha256 = std::getenv(
-                                     "OPENCLAW_HARNESS_RUNTIME_SOURCE_SHA256" );
+                                          "OPENCLAW_HARNESS_RUNTIME_SOURCE_SHA256" );
     const char *const executable_sha256 = std::getenv(
-                                         "OPENCLAW_HARNESS_EXECUTABLE_SHA256" );
+            "OPENCLAW_HARNESS_EXECUTABLE_SHA256" );
     if( path_value == nullptr || path_value[0] == '\0' || source_sha256 == nullptr ||
         source_sha256[0] == '\0' || executable_sha256 == nullptr ||
         executable_sha256[0] == '\0' || site_payload.empty() ||
@@ -1345,7 +1347,7 @@ void record_fixture_monster_lifecycle( const monster &critter, const std::string
                                        const std::string_view owner )
 {
     const char *const selected_actor = std::getenv(
-                "OPENCLAW_HARNESS_R019_LIFECYCLE_ACTOR_ID" );
+                                           "OPENCLAW_HARNESS_R019_LIFECYCLE_ACTOR_ID" );
     const char *const selected_run = std::getenv( "OPENCLAW_HARNESS_R019_LIFECYCLE_RUN_ID" );
     const char *const active_run = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
     if( selected_actor == nullptr || selected_actor[0] == '\0' || selected_run == nullptr ||
@@ -1388,7 +1390,7 @@ void record_certification_save_receipt( const int game_minutes, const std::strin
     event.certification_round_id = required_environment( "OPENCLAW_CERTIFICATION_ROUND_ID" );
     event.certification_lease_id = required_environment( "OPENCLAW_CERTIFICATION_LEASE_ID" );
     const std::string capability = required_environment(
-                                           "OPENCLAW_CERTIFICATION_SAVE_CAPABILITY" );
+                                       "OPENCLAW_CERTIFICATION_SAVE_CAPABILITY" );
     event.certification_previous_world_tree_sha256 = required_environment(
                 "OPENCLAW_CERTIFICATION_PREVIOUS_WORLD_TREE_SHA256" );
     event.certification_previous_world_save_sha256 = required_environment(

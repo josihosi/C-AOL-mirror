@@ -46,13 +46,13 @@ TEST_CASE( "drop and generic multiselect publish selected UID quantities before 
     semantic_surface_manager_session session( manager );
     semantic_surface_scope world( manager, "world", "World" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     std::string initial_frame;
     std::string selected_frame;
     int publications = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "inventory" ) {
             return;
         }
@@ -102,7 +102,8 @@ TEST_CASE( "ammo selector publishes native reload quantities and rejects unchang
     clear_avatar();
     clear_map();
     avatar &you = get_avatar();
-    const item_location magazine = you.i_add( item( itype_id( "glockmag" ), calendar::turn_zero, 0 ), false );
+    const item_location magazine = you.i_add( item( itype_id( "glockmag" ), calendar::turn_zero, 0 ),
+                                   false );
     const item_location ammo = you.i_add( item( itype_id( "9mm" ), calendar::turn_zero, 10 ), false );
     REQUIRE( magazine );
     REQUIRE( ammo );
@@ -117,7 +118,7 @@ TEST_CASE( "ammo selector publishes native reload quantities and rejects unchang
     semantic_surface_manager_session session( manager );
     semantic_surface_scope world( manager, "world", "World" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
         if( receipt.request_id == "quantity" && at_limit ) {
             CHECK_FALSE( receipt.accepted );
@@ -132,7 +133,7 @@ TEST_CASE( "ammo selector publishes native reload quantities and rejects unchang
     } );
     int publications = 0;
     std::string quantity_frame;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "inventory" ) {
             return;
         }
@@ -264,7 +265,7 @@ std::vector<item_location> collated_water_items( avatar &you )
     for( int i = 0; i < 3; ++i ) {
         item bottle( itype_id( "jug_plastic" ) );
         REQUIRE( bottle.put_in( item( itype_id( "water_clean" ), calendar::turn, i + 2 ),
-                               pocket_type::CONTAINER ).success() );
+                                pocket_type::CONTAINER ).success() );
         item_location container;
         if( i == 2 ) {
             you.wield( bottle );
@@ -272,7 +273,7 @@ std::vector<item_location> collated_water_items( avatar &you )
         } else {
             const tripoint_bub_ms pos = you.pos_bub();
             container = item_location( map_cursor( pos ),
-                                      &get_map().add_item_or_charges( pos, bottle ) );
+                                       &get_map().add_item_or_charges( pos, bottle ) );
         }
         REQUIRE( container );
         result.emplace_back( container, &container->only_item() );
@@ -314,11 +315,11 @@ TEST_CASE( "collated inventory publishes each physical UID and selects a nonfron
     semantic_surface_manager_session session( manager );
     semantic_surface_scope world( manager, "world", "World" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     std::optional<semantic_action_request> submitted;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "inventory" ) {
             return;
         }
@@ -334,8 +335,8 @@ TEST_CASE( "collated inventory publishes each physical UID and selects a nonfron
         }
         if( !submitted ) {
             submitted = semantic_action_request{ descriptor.run_id, descriptor.surface_id,
-                        descriptor.frame_id, "choose-once", cancel ? "inventory.cancel" : "inventory.select",
-                        cancel ? std::nullopt : std::optional<std::string>( uid ), {} };
+                                                 descriptor.frame_id, "choose-once", cancel ? "inventory.cancel" : "inventory.select",
+                                                 cancel ? std::nullopt : std::optional<std::string>( uid ), {} };
             REQUIRE( manager.submit_request( *submitted ) );
         }
     } );
@@ -369,7 +370,8 @@ TEST_CASE( "collated group controls retain ordered native quantities without dup
     inventory_entry *header = nullptr;
     for( inventory_column *column : selector.get_all_columns() ) {
         for( inventory_entry *entry : column->get_entries( []( const inventory_entry & e ) {
-        return e.is_collation_header(); } ) ) {
+        return e.is_collation_header();
+        } ) ) {
             header = entry;
         }
     }
@@ -396,8 +398,9 @@ TEST_CASE( "collated group controls retain ordered native quantities without dup
     semantic_surface_manager manager( "uid-group" );
     std::optional<inventory_input> input;
     int dispatches = 0;
-    semantic_surface_scope owner( manager, "inventory", "Inventory", {}, selector.semantic_actions( modes ),
-    [&]( const semantic_action_request &request ) {
+    semantic_surface_scope owner( manager, "inventory", "Inventory", {}, selector.semantic_actions(
+                                      modes ),
+    [&]( const semantic_action_request & request ) {
         ++dispatches;
         auto result = selector.handle_semantic_request( request, input );
         result.defer_receipt_to_successor = false;
@@ -496,7 +499,7 @@ TEST_CASE( "repeated physical rows deduplicate while contradictory UID groups re
     semantic_surface_manager manager( "uid-conflict" );
     std::optional<inventory_input> input;
     semantic_surface_scope owner( manager, "inventory", "Inventory", {}, actions,
-    [&]( const semantic_action_request &request ) {
+    [&]( const semantic_action_request & request ) {
         return selector.handle_semantic_request( request, input );
     } );
     check_unique_uid_actions( *manager.top() );

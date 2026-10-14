@@ -4,7 +4,8 @@
 #include "monster.h"
 #include "point.h"
 
-namespace {
+namespace
+{
 
 bool is_predator_evolution_type( const mtype_id &type )
 {

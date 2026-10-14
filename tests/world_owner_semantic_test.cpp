@@ -12,21 +12,21 @@ TEST_CASE( "retired one-turn World waits for its actual successor across serial 
     semantic_surface_manager manager( "world-run" );
     std::vector<semantic_surface_descriptor> frames;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &frame ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & frame ) {
         frames.push_back( frame );
     } );
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     std::optional<semantic_surface_scope> world;
-    world.emplace( manager, "world", "World", std::map<std::string, std::string>{},
-                   std::vector<semantic_action_descriptor>{ { "world.debug_menu", "", "Debug", true } },
-    [&]( const semantic_action_request &request ) {
+    world.emplace( manager, "world", "World", std::map<std::string, std::string> {},
+    std::vector<semantic_action_descriptor> { { "world.debug_menu", "", "Debug", true } },
+    [&]( const semantic_action_request & request ) {
         REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
         return semantic_action_dispatch_result{ true, "", "" };
     } );
     const std::string retired_id = world->surface_id();
-    const auto submit = [&]( const std::string &id, const std::string &action ) {
+    const auto submit = [&]( const std::string & id, const std::string & action ) {
         REQUIRE( manager.top() );
         const semantic_surface_descriptor frame = *manager.top();
         REQUIRE( manager.submit_request( { "world-run", frame.surface_id, frame.frame_id,
@@ -92,13 +92,13 @@ TEST_CASE( "direct World action settles only on the recreated input owner",
 {
     semantic_surface_manager manager( "world-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     {
         semantic_surface_scope world( manager, "world", "World", {}, {
             { "world.pause", "", "Pause", true }
-        }, [&]( const semantic_action_request &request ) {
+        }, [&]( const semantic_action_request & request ) {
             REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
             return semantic_action_dispatch_result{ true, "", "" };
         } );
@@ -122,12 +122,12 @@ TEST_CASE( "pre-modal World dispatch receipts once and cannot replay its native 
     semantic_surface_manager manager( "world-run" );
     std::vector<semantic_action_receipt> receipts;
     int modal_dispatches = 0;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World", {}, {
         { "world.basecamp_missions", "2", "Open Base Missions", true }
-    }, [&]( const semantic_action_request &request ) {
+    }, [&]( const semantic_action_request & request ) {
         ++modal_dispatches;
         REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
         return semantic_action_dispatch_result{ true, "", "", false, false,
@@ -155,7 +155,7 @@ TEST_CASE( "unavailable World modal dispatch is rejected without retiring World"
 {
     semantic_surface_manager manager( "world-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World", {}, {
@@ -180,7 +180,7 @@ TEST_CASE( "rejected World action preserves input and persistent parents still r
 {
     semantic_surface_manager manager( "world-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World", {}, {

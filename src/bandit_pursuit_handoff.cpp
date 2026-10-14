@@ -80,7 +80,7 @@ void apply_identity_updates( std::vector<anchored_identity_state> &identities,
 {
     for( const anchored_identity_state &update : updates ) {
         const auto it = std::find_if( identities.begin(), identities.end(),
-        [&update]( const anchored_identity_state &identity ) {
+        [&update]( const anchored_identity_state & identity ) {
             return identity.id == update.id;
         } );
         if( it == identities.end() ) {
@@ -105,11 +105,11 @@ bool has_canonical_component_keys( const abstract_group_state &group,
                                    const return_packet &packet )
 {
     const std::string expected_return_key = make_operation_component_key(
-                group.group_id, group.activity_generation, "return" );
+            group.group_id, group.activity_generation, "return" );
     const std::string expected_report_key = make_operation_component_key(
-                group.group_id, group.activity_generation, "report" );
+            group.group_id, group.activity_generation, "report" );
     const std::string expected_cargo_key = make_operation_component_key(
-                group.group_id, group.activity_generation, "cargo" );
+            group.group_id, group.activity_generation, "cargo" );
     return !group.group_id.empty() &&
            group.return_application_key == expected_return_key &&
            group.report_application_key == expected_report_key &&

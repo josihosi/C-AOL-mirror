@@ -115,7 +115,7 @@ void mapbuffer::forget_vehicle( vehicle &v )
                 continue;
             }
             auto &parts = entry->second;
-            parts.erase( std::remove_if( parts.begin(), parts.end(), [&]( const auto &part ) {
+            parts.erase( std::remove_if( parts.begin(), parts.end(), [&]( const auto & part ) {
                 return part.first == &v;
             } ), parts.end() );
             if( parts.empty() ) {
@@ -152,10 +152,12 @@ void mapbuffer::index_vehicle( vehicle &v, tripoint_abs_sm owner )
 
 void mapbuffer::update_vehicle_index( vehicle &v )
 {
-    const auto owns = [&]( const tripoint_abs_sm &owner ) {
+    const auto owns = [&]( const tripoint_abs_sm & owner ) {
         const submap *sm = lookup_submap_cached( owner );
         return sm && std::any_of( sm->vehicles.begin(), sm->vehicles.end(),
-        [&]( const auto &candidate ) { return candidate.get() == &v; } );
+        [&]( const auto & candidate ) {
+            return candidate.get() == &v;
+        } );
     };
     if( owns( v.sm_pos ) ) {
         index_vehicle( v, v.sm_pos );
@@ -555,7 +557,7 @@ void mapbuffer::deserialize( const JsonArray &ja, const bool skip_existing )
         if( skip_existing && submap_json.has_array( "coordinates" ) ) {
             JsonArray coordinates = submap_json.get_array( "coordinates" );
             const tripoint_abs_sm position{ coordinates.next_int(), coordinates.next_int(),
-                                           coordinates.next_int() };
+                                            coordinates.next_int() };
             if( submaps.count( position ) ) {
                 submap_json.allow_omitted_members();
                 continue;

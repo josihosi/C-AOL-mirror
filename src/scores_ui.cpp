@@ -127,10 +127,10 @@ void scores_ui::draw_scores_ui()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "scores", _( "Your scores" ),
-        std::map<std::string, std::string>{ { "native_owner", "SCORES_UI" } },
-        std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "native_owner", "SCORES_UI" } },
+        std::vector<semantic_action_descriptor> {
             { "scores.close", "", _( "Close scores" ), true }
-        }, [&semantic_action]( const semantic_action_request &request ) {
+        }, [&semantic_action]( const semantic_action_request & request ) {
             if( request.action_id != "scores.close" || request.stable_id.has_value() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }

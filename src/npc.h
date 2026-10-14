@@ -1527,7 +1527,7 @@ class npc : public Character
         const pathfinding_settings &get_pathfinding_settings() const override;
         const pathfinding_settings &get_pathfinding_settings( bool no_bashing ) const;
         using path_avoid_diagnostic = std::function<void( const tripoint_bub_ms &, std::string_view,
-                                     const Creature * )>;
+                                      const Creature * )>;
         std::function<bool( const tripoint_bub_ms & )> get_path_avoid() const override;
         std::function<bool( const tripoint_bub_ms & )> get_path_avoid(
             const path_avoid_diagnostic &diagnostic ) const;
@@ -1584,10 +1584,10 @@ class npc : public Character
         // Prepare the owning native route without spending a movement action.
         // Validated cached routes must reach the current waypoint boundary.
         bool prepare_omt_destination_path( const std::function<bool(
-                                          const std::vector<tripoint_bub_ms> & )> &path_validator = {} );
+                                               const std::vector<tripoint_bub_ms> & )> &path_validator = {} );
         // Move there; on the micro scale
         void go_to_omt_destination( const std::function<bool(
-                                    const std::vector<tripoint_bub_ms> & )> &path_validator = {} );
+                                        const std::vector<tripoint_bub_ms> & )> &path_validator = {} );
         // We made it!
         void reach_omt_destination();
 

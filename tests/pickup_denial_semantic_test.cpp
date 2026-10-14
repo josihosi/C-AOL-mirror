@@ -84,19 +84,21 @@ TEST_CASE( "pickup explains a native pocket denial and permits read-only details
     int state = 0;
     int request_sequence = 0;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        auto submit = [&]( const std::string &action, const std::optional<std::string> &uid = std::nullopt ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        auto submit = [&]( const std::string & action,
+        const std::optional<std::string> &uid = std::nullopt ) {
             REQUIRE( manager.submit_request( { "pickup-denial-run", descriptor.surface_id,
                                                descriptor.frame_id, std::to_string( ++request_sequence ), action, uid, {} } ) );
         };
         if( descriptor.kind == "inventory" ) {
-            const auto advertised = [&]( const std::string &action, const std::string &uid ) ->
+            const auto advertised = [&]( const std::string & action, const std::string & uid ) ->
             const semantic_action_descriptor & {
                 const auto found = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-                [&]( const semantic_action_descriptor &candidate ) {
+                                                 [&]( const semantic_action_descriptor & candidate )
+                {
                     return candidate.id == action && candidate.stable_id == uid;
                 } );
                 REQUIRE( found != descriptor.valid_actions.end() );
@@ -242,11 +244,13 @@ TEST_CASE( "queued pickup after Wield owns a fresh native cancel and World succe
     clear_map();
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     restore_on_out_of_scope<time_point> restore_turn( calendar::turn );
-    restore_on_out_of_scope<decltype( g->uquit )> restore_quit( g->uquit );
+    restore_on_out_of_scope < decltype( g->uquit ) > restore_quit( g->uquit );
     g->uquit = QUIT_NO;
     const std::string locale = std::setlocale( LC_CTYPE, nullptr );
     REQUIRE( std::setlocale( LC_CTYPE, "en_US.UTF-8" ) );
-    on_out_of_scope restore_locale( [&]() { std::setlocale( LC_CTYPE, locale.c_str() ); } );
+    on_out_of_scope restore_locale( [&]() {
+        std::setlocale( LC_CTYPE, locale.c_str() );
+    } );
     if( !imclient ) {
         catacurses::init_interface();
         catacurses::resizeterm();
@@ -278,10 +282,10 @@ TEST_CASE( "queued pickup after Wield owns a fresh native cancel and World succe
     semantic_surface_descriptor reopened;
     std::map<std::string, semantic_action_receipt> receipts;
     int phase = 0;
-    const auto observe = [&]( const semantic_surface_descriptor &descriptor ) {
+    const auto observe = [&]( const semantic_surface_descriptor & descriptor ) {
         auto &owner = descriptor.kind == "world" ? manager : pickup_manager;
-        const auto submit = [&]( const std::string &id, const std::string &action,
-                                 std::optional<std::string> uid = std::nullopt ) {
+        const auto submit = [&]( const std::string & id, const std::string & action,
+        std::optional<std::string> uid = std::nullopt ) {
             REQUIRE( owner.submit_request( { descriptor.run_id, descriptor.surface_id,
                                              descriptor.frame_id, id, action, uid, {} } ) );
         };
@@ -294,7 +298,7 @@ TEST_CASE( "queued pickup after Wield owns a fresh native cancel and World succe
             phase = 3;
             CHECK( descriptor.surface_id != first.surface_id );
             auto invalid = semantic_action_request{ descriptor.run_id, first.surface_id,
-                           first.frame_id, "stale-original", "inventory.cancel", std::nullopt, {} };
+                                                    first.frame_id, "stale-original", "inventory.cancel", std::nullopt, {} };
             REQUIRE( owner.submit_request( invalid ) );
             CHECK_FALSE( owner.consume_top_request() );
             invalid.surface_id = descriptor.surface_id;
@@ -304,7 +308,7 @@ TEST_CASE( "queued pickup after Wield owns a fresh native cancel and World succe
             REQUIRE( owner.submit_request( invalid ) );
             CHECK_FALSE( owner.consume_top_request() );
             CHECK_FALSE( owner.submit_request( { first.run_id, first.surface_id, first.frame_id,
-                                                "wield-once", "inventory.wield", large_uid, {} } ) );
+                                                 "wield-once", "inventory.wield", large_uid, {} } ) );
             CHECK_FALSE( owner.has_pending_request() );
             submit( "reopened-cancel", "inventory.cancel" );
         } else if( descriptor.kind == "world" && phase >= 2 && phase < 5 ) {
@@ -313,7 +317,7 @@ TEST_CASE( "queued pickup after Wield owns a fresh native cancel and World succe
             submit( second_turn ? "world-next-turn" : "world-successor", "world.pause" );
         }
     };
-    const auto receipt = [&]( const semantic_action_receipt &value ) {
+    const auto receipt = [&]( const semantic_action_receipt & value ) {
         receipts[value.request_id] = value;
     };
     manager.set_descriptor_observer( observe );
@@ -364,15 +368,15 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
 {
     const bool retained_session = GENERATE( false, true );
     const std::string choice = GENERATE( std::string( "drop" ), std::string( "cancel" ),
-                                        std::string( "steal-no" ), std::string( "steal-drop" ),
-                                        std::string( "off-drop" ) );
+                                         std::string( "steal-no" ), std::string( "steal-drop" ),
+                                         std::string( "off-drop" ) );
     const bool stealing = choice == "steal-no" || choice == "steal-drop";
     const bool off_mode = choice == "off-drop";
     const bool semantic_disposal = choice != "steal-no" && ( !off_mode || retained_session );
     const bool changed_weapon = choice == "drop" || choice == "steal-drop" || off_mode;
     CAPTURE( retained_session, choice );
     const std::string run = std::string( retained_session ? "disposal-enclosing-" :
-                                       "disposal-native-" ) + choice;
+                                         "disposal-native-" ) + choice;
     pickup_environment run_env( "OPENCLAW_HARNESS_RUN_ID", run );
     pickup_environment bound_env( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run );
     pickup_environment request_env( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", "" );
@@ -393,11 +397,13 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     override_option autosave( "AUTOSAVE", "false" );
     restore_on_out_of_scope<time_point> restore_turn( calendar::turn );
-    restore_on_out_of_scope<decltype( g->uquit )> restore_quit( g->uquit );
+    restore_on_out_of_scope < decltype( g->uquit ) > restore_quit( g->uquit );
     g->uquit = QUIT_NO;
     const std::string locale = std::setlocale( LC_CTYPE, nullptr );
     REQUIRE( std::setlocale( LC_CTYPE, "en_US.UTF-8" ) );
-    on_out_of_scope restore_locale( [&]() { std::setlocale( LC_CTYPE, locale.c_str() ); } );
+    on_out_of_scope restore_locale( [&]() {
+        std::setlocale( LC_CTYPE, locale.c_str() );
+    } );
     if( !imclient ) {
         catacurses::init_interface();
         catacurses::resizeterm();
@@ -440,7 +446,7 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
     if( const char *path = std::getenv( "CAOL_R067_DISPOSAL_EVIDENCE" ) ) {
         evidence.open( path, std::ios::app );
     }
-    const auto record = [&]( const std::string &stage, const std::string &detail ) {
+    const auto record = [&]( const std::string & stage, const std::string & detail ) {
         if( evidence ) {
             evidence << run << " " << stage << " " << detail << "\n";
             evidence.flush();
@@ -452,21 +458,22 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
     int accepted_disposals = 0;
     int guards = 0;
     std::map<std::string, semantic_action_receipt> receipts;
-    const auto receipt = [&]( const semantic_action_receipt &value ) {
+    const auto receipt = [&]( const semantic_action_receipt & value ) {
         receipts[value.request_id] = value;
         if( value.request_id == "dispose-choice" && value.accepted ) {
             ++accepted_disposals;
         }
-        record( "receipt", value.request_id + " accepted=" + ( value.accepted ? "true" : "false" ) + " reason=" + value.rejection_reason );
+        record( "receipt", value.request_id + " accepted=" + ( value.accepted ? "true" : "false" ) +
+                " reason=" + value.rejection_reason );
     };
-    const auto observe = [&]( const semantic_surface_descriptor &descriptor ) {
+    const auto observe = [&]( const semantic_surface_descriptor & descriptor ) {
         record( "descriptor", descriptor.kind + " " + descriptor.surface_id + " " + descriptor.frame_id );
         auto *owner = active_semantic_surface_manager();
         REQUIRE( owner != nullptr );
-        const auto submit = [&]( const std::string &id, const std::string &action,
-                                 std::optional<std::string> stable = std::nullopt ) {
+        const auto submit = [&]( const std::string & id, const std::string & action,
+        std::optional<std::string> stable = std::nullopt ) {
             REQUIRE( owner->submit_request( { run, descriptor.surface_id, descriptor.frame_id,
-                                               id, action, stable, {} } ) );
+                                              id, action, stable, {} } ) );
         };
         if( descriptor.kind == "world" && phase == 0 ) {
             phase = 1;
@@ -491,7 +498,7 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
             CHECK( owner == ( retained_session ? &enclosing : &manager ) );
             CHECK( descriptor.payload.at( "text" ).find( "stealing" ) != std::string::npos );
             const auto answer = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [&]( const semantic_action_descriptor &action ) {
+            [&]( const semantic_action_descriptor & action ) {
                 return action.id == "prompt.choose" && action.enabled &&
                        action.label == ( choice == "steal-no" ? "NO" : "YES" );
             } );
@@ -502,7 +509,7 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
             CHECK( owner == ( retained_session ? &enclosing : &manager ) );
             CHECK( descriptor.payload.at( "text" ).find( "Stop wielding" ) != std::string::npos );
             const auto drop = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) {
+            []( const semantic_action_descriptor & action ) {
                 return action.id == "menu.choose" && action.enabled &&
                        action.label.find( "Drop item" ) != std::string::npos;
             } );
@@ -519,7 +526,7 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
             reject( { run, descriptor.surface_id, "stale-frame", "stale-disposal",
                       drop->id, drop->stable_id, {} } );
             const auto store = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) {
+            []( const semantic_action_descriptor & action ) {
                 return action.id == "menu.choose" && !action.enabled &&
                        action.label.find( "Store in inventory" ) != std::string::npos;
             } );
@@ -582,10 +589,14 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
     CHECK( you.get_wielded_item()->typeId() == itype_id( "m240" ) );
     CHECK( ( you.get_wielded_item()->uid().get_value() != old_uid ) == changed_weapon );
     CHECK( std::none_of( here.i_at( position ).begin(), here.i_at( position ).end(),
-    [&]( const item &it ) { return it.uid().get_value() == new_uid; } ) == changed_weapon );
+    [&]( const item & it ) {
+        return it.uid().get_value() == new_uid;
+    } ) == changed_weapon );
     CHECK( you.activity.is_null() );
     CHECK( std::count_if( here.i_at( position ).begin(), here.i_at( position ).end(),
-    [&]( const item &it ) { return it.typeId() == itype_id( "m240" ); } ) == 1 );
+    [&]( const item & it ) {
+        return it.typeId() == itype_id( "m240" );
+    } ) == 1 );
     if( phase == 2 ) {
         REQUIRE( uistate.open_menu );
         phase = 3;
@@ -604,8 +615,8 @@ TEST_CASE( "pickup wield activity publishes its native disposal successor outsid
         auto &owner = retained_session ? enclosing : manager;
         const auto &accepted = receipts.at( "dispose-choice" );
         CHECK_FALSE( owner.submit_request( { run, accepted.requested_surface_id,
-                                            accepted.requested_frame_id, "dispose-choice",
-                                            "menu.cancel", std::nullopt, {} } ) );
+                                             accepted.requested_frame_id, "dispose-choice",
+                                             "menu.cancel", std::nullopt, {} } ) );
         CHECK_FALSE( owner.has_pending_request() );
         CHECK( receipts.at( "foreign-disposal" ).rejection_reason == "wrong_run" );
         CHECK( receipts.at( "stale-disposal" ).rejection_reason == "stale_frame" );

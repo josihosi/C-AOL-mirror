@@ -42,11 +42,11 @@ void native_journal_json_location( const JsonError &error, native_journal_failur
     // JsonError seeks its input to EOF. Its fixed, inputless source header
     // retains the location; copying what() would also copy the failed record.
     if( std::sscanf( error.what(),
-                    "Json error: file <unknown source file>, at line %d, character %d:",
-                    &failure.line, &failure.column ) != 2 &&
+                     "Json error: file <unknown source file>, at line %d, character %d:",
+                     &failure.line, &failure.column ) != 2 &&
         std::sscanf( error.what(),
-                    "::error file=<unknown source file>,line=%d,col=%d::",
-                    &failure.line, &failure.column ) != 2 ) {
+                     "::error file=<unknown source file>,line=%d,col=%d::",
+                     &failure.line, &failure.column ) != 2 ) {
         failure.line = failure.column = -1;
     }
 }
@@ -171,7 +171,7 @@ class native_semantic_journal
                     pins[kind] = row;
                 } else if( kind == "receipt" ) {
                     pins[action.compare( 0, 5, "wait." ) == 0 ? "duration_receipt" :
-                         "movement_receipt"] = row;
+                                         "movement_receipt"] = row;
                 }
             }
             recent.push_back( row );
@@ -239,7 +239,7 @@ class native_semantic_journal
                 }
             }
             rows.insert( rows.end(), recent.begin(), recent.end() );
-            std::sort( rows.begin(), rows.end(), []( const auto &left, const auto &right ) {
+            std::sort( rows.begin(), rows.end(), []( const auto & left, const auto & right ) {
                 return left->sequence < right->sequence;
             } );
             const std::string temporary = path + ".next";
@@ -370,11 +370,11 @@ bool write_native_event( const std::string &event, native_record_format format )
     }
     if( !written && !failure_reported ) {
         DebugLog( D_ERROR, DC_ALL ) << "Native semantic journal publication failed for run " << run
-                << " stage=" << failure.stage << " field=" << failure.field
-                << " line=" << failure.line << " column=" << failure.column
-                << " error_code=" << failure.error_code
-                << " error_category=" << failure.error_category
-                << " stream_state=" << static_cast<unsigned>( failure.stream_state );
+                                    << " stage=" << failure.stage << " field=" << failure.field
+                                    << " line=" << failure.line << " column=" << failure.column
+                                    << " error_code=" << failure.error_code
+                                    << " error_category=" << failure.error_category
+                                    << " stream_state=" << static_cast<unsigned>( failure.stream_state );
     } else if( written && failure_reported ) {
         DebugLog( D_INFO, DC_ALL ) << "Native semantic journal publication resumed for run " << run;
     }
@@ -394,7 +394,8 @@ bool write_native_diagnostic_event( const std::string &event )
     return write_native_event( event, native_record_format::diagnostic );
 }
 
-semantic_surface_manager::semantic_surface_manager( std::string run_id ) : run_id_( std::move( run_id ) )
+semantic_surface_manager::semantic_surface_manager( std::string run_id ) : run_id_( std::move(
+                run_id ) )
 {
 }
 
@@ -412,7 +413,7 @@ std::string semantic_surface_manager::push( const std::string &kind, const std::
     for( auto owner = withheld_parent_surface_ids_.begin();
          owner != withheld_parent_surface_ids_.end(); ) {
         const bool owner_is_gone = std::none_of( stack_.begin(), stack_.end(),
-        [&owner]( const surface_state &surface ) {
+        [&owner]( const surface_state & surface ) {
             return surface.descriptor.surface_id == *owner;
         } );
         if( owner_is_gone ) {
@@ -458,8 +459,8 @@ std::string semantic_surface_manager::push( const std::string &kind, const std::
 }
 
 bool semantic_surface_manager::publish( const std::string &surface_id,
-        std::map<std::string, std::string> payload,
-        std::vector<semantic_action_descriptor> valid_actions )
+                                        std::map<std::string, std::string> payload,
+                                        std::vector<semantic_action_descriptor> valid_actions )
 {
     if( !is_top( surface_id ) ) {
         return false;
@@ -471,8 +472,8 @@ bool semantic_surface_manager::publish( const std::string &surface_id,
     stack_.back().descriptor.payload = std::move( payload );
     stack_.back().descriptor.valid_actions = std::move( valid_actions );
     const bool withheld_owner_is_gone = std::any_of( withheld_parent_surface_ids_.begin(),
-                                         withheld_parent_surface_ids_.end(), [this]( const std::string &owner ) {
-        return std::none_of( stack_.begin(), stack_.end(), [&owner]( const surface_state &surface ) {
+    withheld_parent_surface_ids_.end(), [this]( const std::string & owner ) {
+        return std::none_of( stack_.begin(), stack_.end(), [&owner]( const surface_state & surface ) {
             return surface.descriptor.surface_id == owner;
         } );
     } );
@@ -496,8 +497,8 @@ bool semantic_surface_manager::pop( const std::string &surface_id )
         activity_poll_.reset();
     }
     const bool withheld_parent_is_next = stack_.size() > 1 &&
-                                        withheld_parent_surface_ids_.count(
-                                            stack_[stack_.size() - 2].descriptor.surface_id ) != 0;
+                                         withheld_parent_surface_ids_.count(
+                                                 stack_[stack_.size() - 2].descriptor.surface_id ) != 0;
     const bool popping_withheld_parent = withheld_parent_surface_ids_.count( surface_id ) != 0;
     if( withheld_parent_is_next || popping_withheld_parent ) {
         stack_.pop_back();
@@ -697,7 +698,7 @@ bool semantic_surface_manager::consume_top_request()
         receipt.rejection_reason = "stale_frame";
     } else {
         const auto action = std::find_if( top_->valid_actions.begin(), top_->valid_actions.end(),
-        [&request]( const semantic_action_descriptor &candidate ) {
+        [&request]( const semantic_action_descriptor & candidate ) {
             return candidate.id == request.action_id && candidate.enabled;
         } );
         if( action == top_->valid_actions.end() ) {
@@ -921,9 +922,11 @@ semantic_surface_scope::semantic_surface_scope( semantic_surface_manager &manage
     }
     try {
         surface_id_ = manager.push( kind, breadcrumb, std::move( payload ),
-                                   std::move( valid_actions ), std::move( consumer ) );
+                                    std::move( valid_actions ), std::move( consumer ) );
     } catch( ... ) {
-        if( interrupted_action_ ) { abort_interruption(); }
+        if( interrupted_action_ ) {
+            abort_interruption();
+        }
         throw;
     }
 }
@@ -990,7 +993,8 @@ bool semantic_surface_scope::close()
 bool semantic_surface_scope::publish( std::map<std::string, std::string> payload,
                                       std::vector<semantic_action_descriptor> valid_actions )
 {
-    return manager_ && manager_->publish( surface_id_, std::move( payload ), std::move( valid_actions ) );
+    return manager_ &&
+           manager_->publish( surface_id_, std::move( payload ), std::move( valid_actions ) );
 }
 
 bool semantic_surface_scope::consume_request()

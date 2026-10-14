@@ -739,7 +739,7 @@ static decltype( auto ) transfer_contents_item( Item &it )
 
 template<typename Input>
 void item_contents::combine_impl( Input &read_input, const bool convert,
-                                 const bool into_bottom, bool restack_charges, bool ignore_contents )
+                                  const bool into_bottom, bool restack_charges, bool ignore_contents )
 {
     using pocket_type_t = std::conditional_t<std::is_const_v<Input>, const item_pocket, item_pocket>;
     std::vector<pocket_type_t *> mismatched_pockets;
@@ -821,7 +821,7 @@ void item_contents::combine_impl( Input &read_input, const bool convert,
         const pocket_type mismatched_type = convert ? pocket.get_pocket_data()->type : pocket.saved_type();
         for( auto *it : pocket.all_items_top() ) {
             const ret_val<item *> inserted = insert_item( transfer_contents_item( *it ), mismatched_type,
-                                               ignore_contents, false, restack_charges );
+                                             ignore_contents, false, restack_charges );
             if( !inserted.success() ) {
                 debugmsg( "error: item %s cannot fit into any pocket while loading: %s",
                           it->typeId().str(), inserted.str() );
@@ -950,7 +950,8 @@ ret_val<item *> item_contents::insert_item_impl( Item &&it,
         return ret_val<item *>::make_failure( nullptr, pocket.str() );
     }
 
-    ret_val<item *> inserted = pocket.value()->insert_item( std::forward<Item>( it ), false, restack_charges, ignore_contents );
+    ret_val<item *> inserted = pocket.value()->insert_item( std::forward<Item>( it ), false,
+                               restack_charges, ignore_contents );
     if( inserted.success() ) {
         if( unseal_pockets ) {
             pocket.value()->unseal();
@@ -969,7 +970,8 @@ ret_val<item *> item_contents::insert_item( const item &it, pocket_type pk_type,
 ret_val<item *> item_contents::insert_item( item &&it, pocket_type pk_type,
         bool ignore_contents, const bool unseal_pockets, bool restack_charges )
 {
-    return insert_item_impl( std::move( it ), pk_type, ignore_contents, unseal_pockets, restack_charges );
+    return insert_item_impl( std::move( it ), pk_type, ignore_contents, unseal_pockets,
+                             restack_charges );
 }
 
 void item_contents::force_insert_item( const item &it, pocket_type pk_type )

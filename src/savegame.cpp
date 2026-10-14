@@ -1576,8 +1576,9 @@ void overmap::serialize( std::ostream &fout ) const
     for( const auto &placement : overmap_special_placements ) {
         const auto origin_it = overmap_special_placement_origins.find( placement.first );
         const tripoint_om_omt placement_origin = origin_it != overmap_special_placement_origins.end() ?
-                                                 origin_it->second : placement.first;
-        condensed_overmap_special_placements[placement.second][placement_origin].emplace_back( placement.first );
+                origin_it->second : placement.first;
+        condensed_overmap_special_placements[placement.second][placement_origin].emplace_back(
+            placement.first );
     }
 
     json.member( "overmap_special_placements" );

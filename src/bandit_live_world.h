@@ -640,7 +640,9 @@ struct scout_watch_interruption {
     int watch_started_minutes = -1;
     int resumed_minutes = -1;
 
-    bool pending() const { return resumed_minutes < 0; }
+    bool pending() const {
+        return resumed_minutes < 0;
+    }
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &jo );
 };
@@ -1124,74 +1126,74 @@ enum class response_denial_resolution {
 };
 
 struct site_record {
-    int schema_version = 12;
-    std::string site_id;
-    anchor_source_kind source_kind = anchor_source_kind::none;
-    owned_site_kind site_kind = owned_site_kind::none;
-    hostile_site_profile profile = hostile_site_profile::none;
-    std::string source_id;
-    tripoint_abs_omt anchor;
-    int living_total = 0;
-    int supply_units = 0;
-    int supply_last_update_minutes = -1;
-    int supply_accounted_living_total = 0;
-    int supply_member_minute_remainder = 0;
-    int routine_unmet_need_since_minutes = -1;
-    int routine_activated_minutes = -1;
-    int last_routine_resolved_minutes = -1;
-    int next_routine_dispatch_eligible_minutes = -1;
-    int routine_no_candidate_streak = 0;
-    std::vector<tripoint_abs_omt> footprint;
-    std::vector<member_record> members;
-    std::vector<spawn_tile_record> spawn_tiles;
-    int next_outing_generation = 1;
-    int applied_return_generation = 0;
-    int applied_report_generation = 0;
-    int applied_cargo_generation = 0;
-    std::string last_cargo_application_key;
-    std::string last_hostile_shakedown_aftermath_key;
-    std::string last_hostile_shakedown_operation_id;
-    std::string last_hostile_shakedown_report_key;
-    int last_hostile_shakedown_generation = 0;
-    int applied_resource_generation = 0;
-    std::string last_resource_application_key;
-    int last_resource_claimed_units = 0;
-    scout_report_record current_scout_report;
-    camp_decision_record camp_decision;
-    std::vector<acted_report_summary> acted_reports;
-    sortie_cargo returned_cargo_stock;
-    active_outing_state active_outing;
-    hostile_operation_state active_hostile_operation;
-    std::string remembered_target_or_mark;
-    int remembered_threat_estimate = 0;
-    int remembered_bounty_estimate = 0;
-    int remembered_retreat_bias = 0;
-    int remembered_return_clock = 0;
-    bandit_pursuit_handoff::remaining_return_pressure_state remembered_pressure =
-        bandit_pursuit_handoff::remaining_return_pressure_state::ample;
-    std::vector<std::string> known_recent_marks;
-    camp_intelligence_map intelligence_map;
-    std::string last_shakedown_outcome;
-    int shakedown_last_demanded_value = 0;
-    int shakedown_last_surrendered_value = 0;
-    int shakedown_last_reachable_value = 0;
-    int shakedown_loot_value = 0;
-    int shakedown_defender_losses = 0;
-    int shakedown_bandit_losses = 0;
-    int shakedown_anger = 0;
-    int shakedown_caution = 0;
-    int shakedown_basecamp_defenders_at_fight = 0;
-    bool shakedown_basecamp_defender_observation_pending = false;
-    bool shakedown_reopen_available = false;
-    bool shakedown_reopen_used = false;
-    origin_disposition origin = origin_disposition::active_hostile;
-    int origin_changed_minutes = -1;
-    std::string origin_summary;
-    bool retired_empty_site = false;
-    std::string retirement_summary;
+        int schema_version = 12;
+        std::string site_id;
+        anchor_source_kind source_kind = anchor_source_kind::none;
+        owned_site_kind site_kind = owned_site_kind::none;
+        hostile_site_profile profile = hostile_site_profile::none;
+        std::string source_id;
+        tripoint_abs_omt anchor;
+        int living_total = 0;
+        int supply_units = 0;
+        int supply_last_update_minutes = -1;
+        int supply_accounted_living_total = 0;
+        int supply_member_minute_remainder = 0;
+        int routine_unmet_need_since_minutes = -1;
+        int routine_activated_minutes = -1;
+        int last_routine_resolved_minutes = -1;
+        int next_routine_dispatch_eligible_minutes = -1;
+        int routine_no_candidate_streak = 0;
+        std::vector<tripoint_abs_omt> footprint;
+        std::vector<member_record> members;
+        std::vector<spawn_tile_record> spawn_tiles;
+        int next_outing_generation = 1;
+        int applied_return_generation = 0;
+        int applied_report_generation = 0;
+        int applied_cargo_generation = 0;
+        std::string last_cargo_application_key;
+        std::string last_hostile_shakedown_aftermath_key;
+        std::string last_hostile_shakedown_operation_id;
+        std::string last_hostile_shakedown_report_key;
+        int last_hostile_shakedown_generation = 0;
+        int applied_resource_generation = 0;
+        std::string last_resource_application_key;
+        int last_resource_claimed_units = 0;
+        scout_report_record current_scout_report;
+        camp_decision_record camp_decision;
+        std::vector<acted_report_summary> acted_reports;
+        sortie_cargo returned_cargo_stock;
+        active_outing_state active_outing;
+        hostile_operation_state active_hostile_operation;
+        std::string remembered_target_or_mark;
+        int remembered_threat_estimate = 0;
+        int remembered_bounty_estimate = 0;
+        int remembered_retreat_bias = 0;
+        int remembered_return_clock = 0;
+        bandit_pursuit_handoff::remaining_return_pressure_state remembered_pressure =
+            bandit_pursuit_handoff::remaining_return_pressure_state::ample;
+        std::vector<std::string> known_recent_marks;
+        camp_intelligence_map intelligence_map;
+        std::string last_shakedown_outcome;
+        int shakedown_last_demanded_value = 0;
+        int shakedown_last_surrendered_value = 0;
+        int shakedown_last_reachable_value = 0;
+        int shakedown_loot_value = 0;
+        int shakedown_defender_losses = 0;
+        int shakedown_bandit_losses = 0;
+        int shakedown_anger = 0;
+        int shakedown_caution = 0;
+        int shakedown_basecamp_defenders_at_fight = 0;
+        bool shakedown_basecamp_defender_observation_pending = false;
+        bool shakedown_reopen_available = false;
+        bool shakedown_reopen_used = false;
+        origin_disposition origin = origin_disposition::active_hostile;
+        int origin_changed_minutes = -1;
+        std::string origin_summary;
+        bool retired_empty_site = false;
+        std::string retirement_summary;
 
-    void serialize( JsonOut &json ) const;
-    void deserialize( const JsonObject &jo );
+        void serialize( JsonOut &json ) const;
+        void deserialize( const JsonObject &jo );
 
     private:
         friend struct world_state;
@@ -1199,21 +1201,21 @@ struct site_record {
                           const std::vector<hostile_target_opportunity_record> &claims );
 
     public:
-    bool has_member( character_id npc_id ) const;
-    member_record *find_member( character_id npc_id );
-    const member_record *find_member( character_id npc_id ) const;
-    spawn_tile_record *find_spawn_tile( const tripoint_abs_ms &tile );
-    const spawn_tile_record *find_spawn_tile( const tripoint_abs_ms &tile ) const;
-    int count_members_in_state( member_state state ) const;
-    int count_live_members() const;
-    roster_view roster() const;
-    int active_outing_survivor_count() const;
-    int count_home_side_signals() const;
-    int dispatchable_member_capacity() const;
-    bool has_active_outside_pressure() const;
-    bool eligible_for_empty_site_retirement() const;
-    active_outing_state *active_external_outing();
-    const active_outing_state *active_external_outing() const;
+        bool has_member( character_id npc_id ) const;
+        member_record *find_member( character_id npc_id );
+        const member_record *find_member( character_id npc_id ) const;
+        spawn_tile_record *find_spawn_tile( const tripoint_abs_ms &tile );
+        const spawn_tile_record *find_spawn_tile( const tripoint_abs_ms &tile ) const;
+        int count_members_in_state( member_state state ) const;
+        int count_live_members() const;
+        roster_view roster() const;
+        int active_outing_survivor_count() const;
+        int count_home_side_signals() const;
+        int dispatchable_member_capacity() const;
+        bool has_active_outside_pressure() const;
+        bool eligible_for_empty_site_retirement() const;
+        active_outing_state *active_external_outing();
+        const active_outing_state *active_external_outing() const;
 };
 
 // A crossing is historical evidence for this exact operation/owner epoch.
@@ -1941,7 +1943,7 @@ std::string make_terrain_opportunity_lead_id( const std::string &site_id,
 bool structural_bounty_memory_suppresses_refresh( const camp_intelligence_map &intelligence_map,
         const tripoint_abs_omt &omt, const std::string &terrain_class );
 bool upsert_structural_bounty_lead( site_record &site, const tripoint_abs_omt &omt,
-                                   const structural_bounty_read &read, int now_minutes );
+                                    const structural_bounty_read &read, int now_minutes );
 bool upsert_terrain_opportunity_lead( site_record &site, const tripoint_abs_omt &omt,
                                       const structural_bounty_read &read, int now_minutes );
 bool record_camp_resource_estimate( site_record &site, const std::string &lead_id,
@@ -1957,7 +1959,7 @@ structural_outing_plan plan_structural_bounty_outing( const site_record &site, i
 structural_outing_plan plan_frontier_outing( const site_record &site, int now_minutes );
 // Refine the canonical plan with actual production route and watch geography.
 bool refine_structural_outing_route( const site_record &site, int now_minutes,
-                                    const structural_route_read &read, structural_outing_plan &plan );
+                                     const structural_route_read &read, structural_outing_plan &plan );
 bool apply_structural_bounty_outing_plan( site_record &site, const structural_outing_plan &plan,
         int now_minutes );
 std::optional<int> release_matching_external_reservation( site_record &site,
@@ -1986,7 +1988,8 @@ abstract_threat_resolution resolve_structural_abstract_threat( site_record &site
         const tripoint_abs_omt &current_omt, const abstract_threat_read &read,
         int now_minutes );
 structural_outing_result advance_structural_bounty_outings( world_state &state, int now_minutes,
-        const std::function<structural_threat_read( const site_record &, const camp_map_lead & )> &threat_lookup,
+        const std::function<structural_threat_read( const site_record &, const camp_map_lead & )>
+        &threat_lookup,
         const std::function<abstract_threat_read( const site_record &, const active_outing_state &,
                 const structural_threat_observer_request & )> &abstract_threat_lookup = {},
         const std::function<std::vector<structural_signal_read>( const site_record &,
@@ -2021,7 +2024,8 @@ sortie_observation_effect record_physically_observed_player_opportunity(
 structural_bounty_maintenance_result advance_structural_bounty_maintenance( world_state &state,
         int now_minutes, int scan_budget, int dispatch_cap,
         const std::function<std::optional<std::string>( const tripoint_abs_omt & )> &terrain_lookup,
-        const std::function<structural_threat_read( const site_record &, const camp_map_lead & )> &threat_lookup,
+        const std::function<structural_threat_read( const site_record &, const camp_map_lead & )>
+        &threat_lookup,
         const std::function<structural_route_read( const site_record &,
                 const structural_outing_plan & )> &route_lookup = {},
         const std::function<abstract_threat_read( const site_record &, const active_outing_state &,
@@ -2034,7 +2038,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         &response_member_read_lookup = {},
         const std::function<int( world_state &, std::size_t )> &materialize_for_response = {},
         const std::function<std::optional<canonical_hostile_operation_route>(
-        const site_record & )> &hostile_route_lookup = {},
+            const site_record & )> &hostile_route_lookup = {},
         const std::function<bool( site_record &, const authorized_hostile_operation_plan & )>
         &hostile_operation_apply = {},
         const std::function<bool( const site_record &, const site_record & )> &projection_commit = {},
@@ -2125,7 +2129,7 @@ sight_avoid_decision choose_sight_avoid_reposition( const tripoint_abs_ms &curre
 const site_record *active_operation_duty_site_for( const world_state &state,
         character_id npc_id );
 std::optional<simulation_advance_cursor> current_external_simulation_cursor(
-        const site_record &site );
+    const site_record &site );
 local_projection_reconciliation_result reconcile_loaded_local_projections(
     world_state &state, const std::vector<local_projection_claim> &claims,
     std::vector<character_id> *retired_stale_leases = nullptr,
@@ -2279,17 +2283,18 @@ bool record_hostile_operation_approach_progress( site_record &site,
 hostile_operation_plan plan_hostile_operation( const site_record &site,
         hostile_operation_kind operation_kind, const std::vector<tripoint_abs_omt> &route,
         const tripoint_abs_omt &rally_omt, int current_minutes );
-authorized_hostile_operation_plan plan_hostile_operation_with_authorized_response( const site_record &site,
-        hostile_operation_kind operation_kind, const response_party_selection_result &selection,
-        const std::vector<tripoint_abs_omt> &route, const tripoint_abs_omt &rally_omt,
-        int current_minutes );
+authorized_hostile_operation_plan plan_hostile_operation_with_authorized_response(
+    const site_record &site,
+    hostile_operation_kind operation_kind, const response_party_selection_result &selection,
+    const std::vector<tripoint_abs_omt> &route, const tripoint_abs_omt &rally_omt,
+    int current_minutes );
 std::optional<canonical_hostile_operation_route> canonicalize_hostile_operation_route(
-            const std::vector<tripoint_abs_omt> &target_to_origin_path,
-            const tripoint_abs_omt &anchor, const tripoint_abs_omt &target_omt );
+    const std::vector<tripoint_abs_omt> &target_to_origin_path,
+    const tripoint_abs_omt &anchor, const tripoint_abs_omt &target_omt );
 std::optional<canonical_hostile_operation_route> canonicalize_hostile_operation_route(
-            const std::vector<tripoint_abs_omt> &approach_to_origin_path,
-            const tripoint_abs_omt &anchor, const tripoint_abs_omt &approach_omt,
-            const tripoint_abs_omt &reported_target_omt );
+    const std::vector<tripoint_abs_omt> &approach_to_origin_path,
+    const tripoint_abs_omt &anchor, const tripoint_abs_omt &approach_omt,
+    const tripoint_abs_omt &reported_target_omt );
 bool apply_hostile_operation_plan( site_record &site, const hostile_operation_plan &plan );
 bool apply_hostile_operation_plan_with_authorized_response( site_record &site,
         const authorized_hostile_operation_plan &authorized_plan );
@@ -2412,7 +2417,9 @@ struct covert_scout_egress_candidate {
         hard_danger( candidate_hard_danger ), soft_danger( candidate_soft_danger ),
         route_cost( candidate_route_cost ),
         route_omts( candidate_route_omts.empty() && candidate_reachable ?
-                    std::vector<tripoint_abs_omt> { candidate_omt } : candidate_route_omts ) {}
+                    std::vector<tripoint_abs_omt> {
+        candidate_omt
+    } : candidate_route_omts ) {}
 };
 enum class covert_scout_burn_result {
     rejected,
@@ -2564,7 +2571,7 @@ std::string render_local_gate_semantic_event( const site_record &site,
         const local_gate_input &input, const local_gate_decision &decision,
         const std::string &run_id, int game_minutes, int game_turn );
 void record_local_gate_semantic_event( const site_record &site,
-        const local_gate_input &input, const local_gate_decision &decision );
+                                       const local_gate_input &input, const local_gate_decision &decision );
 std::string render_shakedown_surface_report( const site_record &site,
         const shakedown_surface &surface );
 } // namespace bandit_live_world

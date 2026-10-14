@@ -1213,7 +1213,7 @@ int Character::sight_range( float light_level, float observer_light_level ) cons
      */
 
     int range = static_cast<int>( -std::log( get_vision_threshold( observer_light_level ) /
-                                      light_level ) / LIGHT_TRANSPARENCY_OPEN_AIR );
+                                  light_level ) / LIGHT_TRANSPARENCY_OPEN_AIR );
 
     // Clamp to [1, sight_max].
     return clamp( range, 1, sight_max );
@@ -3790,7 +3790,8 @@ float Character::active_light() const
     float lumination = 0.0f;
 
     int maxlum = 0;
-    cache_visit_items_with( "is_emissive", &item::is_emissive, [this, &maxlum]( const item_location & it ) {
+    cache_visit_items_with( "is_emissive", &item::is_emissive, [this,
+    &maxlum]( const item_location & it ) {
         const int lumit = it->getlight_emit( this );
         if( maxlum < lumit ) {
             maxlum = lumit;

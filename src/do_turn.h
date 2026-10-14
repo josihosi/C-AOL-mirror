@@ -63,14 +63,15 @@ bool live_bandit_scout_watch_order_pending( const npc &member );
 // Shared declarations for existing production-backed test seams.
 std::map<character_id, tripoint_abs_omt> live_bandit_elevated_recovery_orders_for_test();
 std::map<character_id, std::pair<tripoint_abs_ms, tripoint_abs_ms>>
-live_bandit_elevated_recovery_boundary_for_test();
+        live_bandit_elevated_recovery_boundary_for_test();
 std::map<character_id, std::pair<tripoint_abs_ms, tripoint_abs_ms>>
-live_bandit_ingress_boundary_steps_for_test();
+        live_bandit_ingress_boundary_steps_for_test();
 void live_bandit_elevated_recovery_npc_turn_for_test( bool overmap_step );
 int record_live_bandit_stationary_watch_signals_for_test( bandit_live_world::world_state &state,
         const std::vector<live_bandit_signal_observation> &signals, bool cadence_due );
 int advance_live_bandit_local_scout_assessments_for_test();
-bool persist_live_bandit_local_projection_leases_for_test( const bandit_live_world::site_record &site );
+bool persist_live_bandit_local_projection_leases_for_test( const bandit_live_world::site_record
+        &site );
 bool persist_live_bandit_local_progress_for_test( const bandit_live_world::site_record &before,
         const bandit_live_world::site_record &after );
 bool record_live_bandit_structural_member_returns_for_test();
@@ -87,7 +88,8 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_structural_si
     const bandit_live_world::site_record &site,
     const bandit_live_world::active_outing_state &outing,
     const bandit_live_world::structural_threat_observer_request &request );
-std::vector<bandit_live_world::structural_signal_read> live_bandit_staffed_camp_signal_reads_for_test(
+std::vector<bandit_live_world::structural_signal_read>
+live_bandit_staffed_camp_signal_reads_for_test(
     const std::vector<live_bandit_signal_observation> &signals,
     const bandit_live_world::site_record &site,
     character_id observer_id );
@@ -126,7 +128,8 @@ bool consume_explicit_bandit_shakedown_fight_for_test( bandit_live_world::site_r
         int generation, character_id receiver_id );
 bool establish_bandit_shakedown_communication_for_test( bandit_live_world::site_record &site );
 bool handle_bandit_shakedown_contact_for_test( bandit_live_world::site_record &site );
-std::optional<character_id> bandit_shakedown_speaker_id_for_test( const bandit_live_world::site_record &site );
+std::optional<character_id> bandit_shakedown_speaker_id_for_test( const
+        bandit_live_world::site_record &site );
 bandit_live_world::shakedown_goods_pool bandit_encounter_goods_pool_for_test(
     const bandit_live_world::local_gate_input &input, Character &receiver );
 std::optional<bandit_live_world::canonical_hostile_operation_route>

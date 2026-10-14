@@ -162,7 +162,9 @@ TEST_CASE( "predator abstract owner rejects a duplicate handoff identity", "[hor
     horde_map test_horde;
     test_horde.set_location( point_abs_om( 42, 42 ) );
 
-    for( const mtype_id &type : { mon_writhing_stalker, mon_zombie_rider } ) {
+    for( const mtype_id &type : {
+             mon_writhing_stalker, mon_zombie_rider
+         } ) {
         monster source( type );
         const std::string actor_id = source.predator_state().actor_id;
         const tripoint_abs_ms first = random_abs_location( test_horde );
@@ -194,7 +196,9 @@ TEST_CASE( "predator failed local handoff leaves its abstract owner uncommitted"
     horde_map test_horde;
     test_horde.set_location( point_abs_om( 42, 42 ) );
 
-    for( const mtype_id &type : { mon_writhing_stalker, mon_zombie_rider } ) {
+    for( const mtype_id &type : {
+             mon_writhing_stalker, mon_zombie_rider
+         } ) {
         const tripoint_abs_ms source = random_abs_location( test_horde );
         const tripoint_abs_ms destination = source + point_rel_ms( 1, 0 );
         monster original( type );
@@ -385,7 +389,7 @@ TEST_CASE( "horde_map_light_interest_uses_a_source_envelope_without_sound_signal
     }
 
     int candidates = 0;
-    const auto visible = [&occluded]( const tripoint_abs_ms &position ) {
+    const auto visible = [&occluded]( const tripoint_abs_ms & position ) {
         return position != occluded;
     };
     CHECK( test_horde.attract_entities_to_light( source, 6, 4, "light@40", calendar::turn,

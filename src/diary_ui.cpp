@@ -333,10 +333,10 @@ void diary::show_diary_ui( diary *c_diary )
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "diary", _( "Diary" ),
-        std::map<std::string, std::string>{ { "native_owner", "DIARY" } },
-        std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "native_owner", "DIARY" } },
+        std::vector<semantic_action_descriptor> {
             { "diary.close", "", _( "Close diary" ), true }
-        }, [&semantic_action]( const semantic_action_request &request ) {
+        }, [&semantic_action]( const semantic_action_request & request ) {
             if( request.action_id != "diary.close" || request.stable_id.has_value() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }

@@ -1715,7 +1715,7 @@ void overmap::move_hordes()
                     } else {
                         placed_monster = acting->monster_data->is_caol_predator() ?
                                          g->place_critter_at( make_shared_fast<monster>( *acting->monster_data ),
-                                                 local ) :
+                                                              local ) :
                                          g->place_critter_around( make_shared_fast<monster>( *acting->monster_data ),
                                                  local, 1 );
                     }
@@ -1948,7 +1948,7 @@ void overmap::signal_hordes( const tripoint_abs_ms &p, const int sig_power )
 int overmap::attract_hordes_to_light( const tripoint_abs_ms &source, const int intensity,
                                       const int observer_radius_sm, const std::string &sample_id,
                                       const time_point &observed, const std::function<bool(
-                                              const tripoint_abs_ms &)> &visible, int *candidate_count )
+                                              const tripoint_abs_ms & )> &visible, int *candidate_count )
 {
     return hordes.attract_entities_to_light( source, intensity, observer_radius_sm, sample_id,
             observed, visible, candidate_count );
@@ -3237,7 +3237,7 @@ std::vector<tripoint_om_omt> overmap::place_special(
         joins_used[join.first] = join.second;
     }
     const tripoint_om_omt placement_origin = result.placement_origin == tripoint_om_omt::invalid ? p :
-                                             result.placement_origin;
+            result.placement_origin;
     for( const tripoint_om_omt &location : result.omts_used ) {
         overmap_special_placements[location] = special.id;
         overmap_special_placement_origins[location] = placement_origin;

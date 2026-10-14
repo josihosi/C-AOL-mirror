@@ -3029,8 +3029,10 @@ target_handler::trajectory target_ui::run()
             { "target.move_cursor", "northeast", _( "Move cursor northeast" ), true },
             { "target.move_cursor", "southwest", _( "Move cursor southwest" ), true },
             { "target.move_cursor", "southeast", _( "Move cursor southeast" ), true },
-            { "target.choose", "coordinate:destination", _( "Choose destination" ),
-              status == Status::Good },
+            {
+                "target.choose", "coordinate:destination", _( "Choose destination" ),
+                status == Status::Good
+            },
             { "target.cancel", "", _( "Cancel" ), true }
         };
         if( fov_3d_z_range > 0 ) {
@@ -3069,8 +3071,8 @@ target_handler::trajectory target_ui::run()
     if( semantic_manager != nullptr ) {
         const std::vector<semantic_action_descriptor> actions = semantic_actions();
         semantic_scope.emplace( *semantic_manager, "target", uitext_title(), semantic_payload(), actions,
-        [this, &here, &semantic_candidates, &semantic_native_action](
-        const semantic_action_request &request ) {
+                                [this, &here, &semantic_candidates, &semantic_native_action](
+        const semantic_action_request & request ) {
             const std::string stable_id = request.stable_id.value_or( "" );
             if( request.action_id == "target.cancel" && stable_id.empty() ) {
                 semantic_native_action = "QUIT";

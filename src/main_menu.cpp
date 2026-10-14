@@ -137,7 +137,7 @@ bool main_menu::create_harness_world( const harness_world_options &options )
         // are not valid before that lifecycle point.
         const string_id<scenario> scenario_type( options.scenario_id );
         if( !options.scenario_id.empty() && ( !scenario_type.is_valid() ||
-                                             !scenario_type->can_pick().success() ) ) {
+                                              !scenario_type->can_pick().success() ) ) {
             discard_world();
             return false;
         }
@@ -770,14 +770,14 @@ bool main_menu::opening_screen()
         ui_manager::redraw();
         if( semantic_manager != nullptr && !semantic_scope ) {
             semantic_scope.emplace( *semantic_manager, "main_menu", "Main menu",
-            std::map<std::string, std::string>{
+            std::map<std::string, std::string> {
                 { "selected_menu", std::to_string( sel1 ) },
                 { "selected_item", std::to_string( sel2 ) },
                 { "scroll_offset", std::to_string( sel_line ) }
             },
-            std::vector<semantic_action_descriptor>{
+            std::vector<semantic_action_descriptor> {
                 { "main_menu.quit", "", _( "Quit" ), true }
-            }, [ &semantic_action]( const semantic_action_request &request ) {
+            }, [ &semantic_action]( const semantic_action_request & request ) {
                 if( request.action_id != "main_menu.quit" || request.stable_id.has_value() ) {
                     return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
                 }

@@ -225,7 +225,8 @@ static std::optional<tripoint_bub_ms> openclaw_harness_fixture_lamp_probe_positi
     std::optional<tripoint_bub_ms> found;
     for( const tripoint_bub_ms &point : here.points_in_radius( player.pos_bub(), 20 ) ) {
         const bool powered_fixture_terrain = here.ter( point )->id == ter_str_id( "t_utility_light" );
-        const bool powered_fixture_furniture = here.furn( point ).obj().id == furn_str_id( "f_caol_powered_exposed_lamp" );
+        const bool powered_fixture_furniture = here.furn( point ).obj().id ==
+                                               furn_str_id( "f_caol_powered_exposed_lamp" );
         const bool legacy_fixture_furniture = here.furn( point ).obj().id == furn_str_id( "f_exodii_lamp" );
         if( !powered_fixture_terrain && !powered_fixture_furniture && !legacy_fixture_furniture ) {
             continue;
@@ -430,7 +431,7 @@ static std::string openclaw_harness_live_hostile_operation_snapshot()
             snapshot << ',';
         }
         const auto found = std::find_if( site->members.begin(), site->members.end(),
-        [&member_id]( const bandit_live_world::member_record &member ) {
+        [&member_id]( const bandit_live_world::member_record & member ) {
             return member.npc_id == member_id;
         } );
         snapshot << "{\"id\":" << member_id.get_value()
@@ -520,23 +521,23 @@ static void openclaw_harness_semantic_surface_receipt(
           << openclaw_harness_quote_action_value( run_id ) << openclaw_harness_semantic_event_clock()
           << ",\"request_id\":" << openclaw_harness_quote_action_value( receipt.request_id )
           << ",\"requested_run_id\":" << openclaw_harness_quote_action_value(
-                receipt.requested_run_id )
+              receipt.requested_run_id )
           << ",\"requested_surface_id\":" << openclaw_harness_quote_action_value(
-                receipt.requested_surface_id )
+              receipt.requested_surface_id )
           << ",\"requested_frame_id\":" << openclaw_harness_quote_action_value(
-                receipt.requested_frame_id )
+              receipt.requested_frame_id )
           << ",\"consuming_surface_id\":" << openclaw_harness_quote_action_value(
-                receipt.consuming_surface_id )
+              receipt.consuming_surface_id )
           << ",\"consuming_frame_id\":" << openclaw_harness_quote_action_value(
-                receipt.consuming_frame_id )
+              receipt.consuming_frame_id )
           << ",\"action_id\":" << openclaw_harness_quote_action_value( receipt.action_id )
           << ",\"accepted\":" << ( receipt.accepted ? "true" : "false" )
           << ",\"rejection_reason\":" << openclaw_harness_quote_action_value(
-                receipt.rejection_reason )
+              receipt.rejection_reason )
           << ",\"resulting_frame_id\":" << openclaw_harness_quote_action_value(
-                receipt.resulting_frame_id )
+              receipt.resulting_frame_id )
           << ",\"outcome\":" << openclaw_harness_quote_action_value(
-                receipt.outcome ) << '}';
+              receipt.outcome ) << '}';
     openclaw_harness_write_semantic_step_event( event.str() );
 }
 
@@ -570,7 +571,7 @@ static void openclaw_harness_semantic_save_quit_completion(
           << ",\"requested_frame_id\":" << openclaw_harness_quote_action_value( request.frame_id )
           << ",\"action_id\":\"world.save_quit\""
           << ",\"serializer_result\":" << openclaw_harness_quote_action_value(
-                 g == nullptr ? "unavailable" : g->last_save_result() )
+              g == nullptr ? "unavailable" : g->last_save_result() )
           << ",\"save_succeeded\":" << ( saved ? "true" : "false" )
           << ",\"world_name\":" << openclaw_harness_quote_action_value( world_name )
           << ",\"player_save_id\":" << openclaw_harness_quote_action_value( player.get_save_id() )
@@ -933,7 +934,7 @@ static std::string openclaw_harness_visible_entities( avatar &viewer )
         }
         return "unknown";
     };
-    const auto point_json = []( const tripoint_abs_ms &point ) {
+    const auto point_json = []( const tripoint_abs_ms & point ) {
         std::ostringstream value;
         value << '[' << point.x() << ',' << point.y() << ',' << point.z() << ']';
         return value.str();
@@ -968,7 +969,8 @@ static std::string openclaw_harness_visible_entities( avatar &viewer )
                  << openclaw_harness_quote_action_value( creature->disp_name() ) << ",\"attitude\":"
                  << openclaw_harness_quote_action_value( openclaw_harness_attitude( viewer, *creature ) )
                  << ",\"dx\":" << relative.x() << ",\"dy\":" << relative.y();
-        entities << ",\"absolute_ms\":[" << absolute.x() << ',' << absolute.y() << ',' << absolute.z() << ']';
+        entities << ",\"absolute_ms\":[" << absolute.x() << ',' << absolute.y() << ',' << absolute.z() <<
+                 ']';
         entities << ",\"health\":{\"hp\":" << creature->get_hp()
                  << ",\"maximum_hp\":" << creature->get_hp_max()
                  << ",\"dead\":" << ( creature->is_dead_state() ? "true" : "false" )
@@ -981,10 +983,10 @@ static std::string openclaw_harness_visible_entities( avatar &viewer )
             const bool destination_is_viewer = monster->get_dest() == viewer.pos_abs();
             entities << ",\"fixture_actor_id\":"
                      << openclaw_harness_quote_action_value(
-                            monster->get_value( "caol_fixture_actor_id" ).str() )
+                         monster->get_value( "caol_fixture_actor_id" ).str() )
                      << ",\"debug_setup_run_id\":"
                      << openclaw_harness_quote_action_value(
-                            monster->get_value( "caol_debug_setup_stalker_run_id" ).str() )
+                         monster->get_value( "caol_debug_setup_stalker_run_id" ).str() )
                      << ",\"typeid\":"
                      << openclaw_harness_quote_action_value( monster->type->id.str() )
                      << ",\"faction\":"
@@ -1138,35 +1140,35 @@ static std::string openclaw_harness_diagnostic_active_monsters()
             const writhing_stalker::persistent_state &state = critter.writhing_stalker_state();
             const tripoint_abs_ms absolute = critter.pos_abs();
             entities << "{\"identity\":{\"kind\":\"monster\",\"id\":"
-                      << openclaw_harness_quote_action_value( harness_creature_identity( critter ) )
-                      << "},\"kind\":\"monster\",\"typeid\":\"mon_writhing_stalker\""
-                      << ",\"fixture_actor_id\":"
-                      << openclaw_harness_quote_action_value( fixture_actor_id )
-                      << ",\"predator_actor_id\":"
-                      << openclaw_harness_quote_action_value( critter.predator_state().actor_id )
-                      << ",\"debug_setup_run_id\":"
-                      << openclaw_harness_quote_action_value( debug_setup_run_id )
-                      << ",\"absolute_ms\":[" << absolute.x() << ',' << absolute.y() << ','
-                      << absolute.z() << "]"
-                      << ",\"provenance\":\"native_active_monster_state\""
-                      << ",\"knowledge_scope\":\"read_only_diagnostic_not_player_knowledge\""
-                      << ",\"writhing_stalker_state\":{\"direct_evidence_active\":"
-                      << ( state.has_direct_evidence( observed_turn ) ? "true" : "false" )
-                      << ",\"light_interest_active\":"
-                      << ( state.light_interest_active( observed_turn ) ? "true" : "false" )
-                      << ",\"has_light_observed_position\":"
-                      << ( state.has_light_observed_position ? "true" : "false" )
-                      << ",\"light_observed_position_ms\":[" << state.light_observed_position.x()
-                      << ',' << state.light_observed_position.y() << ',' << state.light_observed_position.z() << ']'
-                      << ",\"light_observed_turn\":" << state.light_observed_turn
-                      << ",\"light_expires_turn\":" << state.light_expires_turn
-                      << ",\"light_sample_id\":"
-                      << openclaw_harness_quote_action_value( state.light_sample_id )
-                      << ",\"has_committed_waypoint\":"
-                      << ( state.has_committed_waypoint ? "true" : "false" )
-                      << ",\"committed_waypoint_ms\":[" << state.committed_waypoint.x() << ','
-                      << state.committed_waypoint.y() << ',' << state.committed_waypoint.z() << "]}"
-                      << '}';
+                     << openclaw_harness_quote_action_value( harness_creature_identity( critter ) )
+                     << "},\"kind\":\"monster\",\"typeid\":\"mon_writhing_stalker\""
+                     << ",\"fixture_actor_id\":"
+                     << openclaw_harness_quote_action_value( fixture_actor_id )
+                     << ",\"predator_actor_id\":"
+                     << openclaw_harness_quote_action_value( critter.predator_state().actor_id )
+                     << ",\"debug_setup_run_id\":"
+                     << openclaw_harness_quote_action_value( debug_setup_run_id )
+                     << ",\"absolute_ms\":[" << absolute.x() << ',' << absolute.y() << ','
+                     << absolute.z() << "]"
+                     << ",\"provenance\":\"native_active_monster_state\""
+                     << ",\"knowledge_scope\":\"read_only_diagnostic_not_player_knowledge\""
+                     << ",\"writhing_stalker_state\":{\"direct_evidence_active\":"
+                     << ( state.has_direct_evidence( observed_turn ) ? "true" : "false" )
+                     << ",\"light_interest_active\":"
+                     << ( state.light_interest_active( observed_turn ) ? "true" : "false" )
+                     << ",\"has_light_observed_position\":"
+                     << ( state.has_light_observed_position ? "true" : "false" )
+                     << ",\"light_observed_position_ms\":[" << state.light_observed_position.x()
+                     << ',' << state.light_observed_position.y() << ',' << state.light_observed_position.z() << ']'
+                     << ",\"light_observed_turn\":" << state.light_observed_turn
+                     << ",\"light_expires_turn\":" << state.light_expires_turn
+                     << ",\"light_sample_id\":"
+                     << openclaw_harness_quote_action_value( state.light_sample_id )
+                     << ",\"has_committed_waypoint\":"
+                     << ( state.has_committed_waypoint ? "true" : "false" )
+                     << ",\"committed_waypoint_ms\":[" << state.committed_waypoint.x() << ','
+                     << state.committed_waypoint.y() << ',' << state.committed_waypoint.z() << "]}"
+                     << '}';
         }
     }
     entities << ']';
@@ -1227,7 +1229,7 @@ static std::string openclaw_harness_diagnostic_zombie_rider_light_memory()
             first = false;
             result << "{\"fixture_actor_id\":"
                    << openclaw_harness_quote_action_value(
-                          critter.get_value( "caol_fixture_actor_id" ).str() )
+                       critter.get_value( "caol_fixture_actor_id" ).str() )
                    << ",\"absolute_ms\":[" << critter.pos_abs().x() << ',' << critter.pos_abs().y()
                    << ',' << critter.pos_abs().z() << ']';
             const std::optional<zombie_rider_overmap_ai::rider_camp_pressure_intent> intent =
@@ -1238,7 +1240,7 @@ static std::string openclaw_harness_diagnostic_zombie_rider_light_memory()
             }
             result << ",\"light_intent\":{\"posture\":"
                    << openclaw_harness_quote_action_value(
-                          zombie_rider_overmap_ai::to_string( intent->posture ) )
+                       zombie_rider_overmap_ai::to_string( intent->posture ) )
                    << ",\"source_ms\":[" << intent->source.x() << ',' << intent->source.y() << ','
                    << intent->source.z() << "],\"formation_slot\":" << intent->formation_slot
                    << ",\"turns_remaining\":" << intent->turns_remaining << "}}";
@@ -1271,8 +1273,8 @@ static std::string openclaw_harness_diagnostic_zombie_rider_bands()
 {
     const char *scenario = std::getenv( "OPENCLAW_HARNESS_SCENARIO" );
     if( scenario == nullptr || ( std::string( scenario ) !=
-        "zombie_rider.live_native_band_continuity_mcw" && std::string( scenario ) !=
-        "zombie_rider.live_native_band_sight_pressure_mcw" ) ) {
+                                 "zombie_rider.live_native_band_continuity_mcw" && std::string( scenario ) !=
+                                 "zombie_rider.live_native_band_sight_pressure_mcw" ) ) {
         return "{\"schema\":\"caol-zombie-rider-bands-v1\",\"available\":false}";
     }
     std::ostringstream result;
@@ -1295,11 +1297,11 @@ static std::string openclaw_harness_diagnostic_zombie_rider_bands()
                 critter.zombie_rider_pursuit_state();
             result << "{\"fixture_actor_id\":" << openclaw_harness_quote_action_value( fixture_id )
                    << ",\"actor_id\":" << openclaw_harness_quote_action_value(
-                          critter.predator_state().actor_id )
+                       critter.predator_state().actor_id )
                    << ",\"absolute_ms\":[" << critter.pos_abs().x() << ',' << critter.pos_abs().y()
                    << ',' << critter.pos_abs().z() << ']'
                    << ",\"band_reference\":" << openclaw_harness_quote_action_value(
-                          critter.predator_state().band_reference )
+                       critter.predator_state().band_reference )
                    << ",\"band_revision\":" << critter.predator_state().band_revision_cache
                    << ",\"pursuit\":{\"phase\":" << static_cast<int>( pursuit.phase )
                    << ",\"has_last_observed_position\":"
@@ -1308,9 +1310,9 @@ static std::string openclaw_harness_diagnostic_zombie_rider_bands()
                    << pursuit.last_observed_position.y() << ',' << pursuit.last_observed_position.z()
                    << "] ,\"last_observed_turn\":" << pursuit.last_observed_turn
                    << ",\"evidence_source_actor_id\":" << openclaw_harness_quote_action_value(
-                          pursuit.evidence_source_actor_id )
+                       pursuit.evidence_source_actor_id )
                    << ",\"evidence_provenance\":" << openclaw_harness_quote_action_value(
-                          pursuit.evidence_provenance )
+                       pursuit.evidence_provenance )
                    << ",\"search_until_turn\":" << pursuit.search_until_turn << "}}";
         }
     }
@@ -1443,8 +1445,10 @@ static std::string openclaw_harness_structural_outing_owner_snapshot(
                << ( outing.local_handoff.cohesion_abort_return ? "true" : "false" );
         if( outing.waypoint_index >= 0 &&
             static_cast<std::size_t>( outing.waypoint_index ) < outing.shared_route.size() ) {
-            const tripoint_abs_omt waypoint = outing.shared_route[static_cast<std::size_t>( outing.waypoint_index )];
-            result << ",\"waypoint_omt\":[" << waypoint.x() << ',' << waypoint.y() << ',' << waypoint.z() << ']';
+            const tripoint_abs_omt waypoint = outing.shared_route[static_cast<std::size_t>
+                                              ( outing.waypoint_index )];
+            result << ",\"waypoint_omt\":[" << waypoint.x() << ',' << waypoint.y() << ',' << waypoint.z() <<
+                   ']';
         }
         const std::optional<bandit_live_world::simulation_advance_cursor> cursor =
             bandit_live_world::current_external_simulation_cursor( *selected );
@@ -1545,9 +1549,9 @@ std::string openclaw_harness_site_outing_snapshot()
         result << openclaw_harness_quote_action_value( site.site_id ) << ":{\"site_id\":"
                << openclaw_harness_quote_action_value( site.site_id )
                << ",\"outing\":" << ( structural ?
-                   openclaw_harness_structural_outing_owner_snapshot( &site, true ) : "{\"present\":false}" )
+                                      openclaw_harness_structural_outing_owner_snapshot( &site, true ) : "{\"present\":false}" )
                << ",\"contact\":" << ( contact ?
-                   openclaw_harness_hostile_contact_member_snapshot( &site, true ) : "{\"present\":false}" ) << '}';
+                                       openclaw_harness_hostile_contact_member_snapshot( &site, true ) : "{\"present\":false}" ) << '}';
     }
     result << "}}";
     return result.str();
@@ -1774,7 +1778,7 @@ static std::string openclaw_harness_structural_signal_dispatch_snapshot()
                << ",\"force_due\":"
                << ( evaluation.force_due ? "true" : "false" )
                << ",\"drive_eligible\":" << ( evaluation.drive >=
-                       bandit_live_world::hostile_camp_routine_dispatch_threshold() ? "true" : "false" )
+                                              bandit_live_world::hostile_camp_routine_dispatch_threshold() ? "true" : "false" )
                << ",\"time_dependent\":"
                << ( evaluation.force_due || evaluation.drive <
                     bandit_live_world::hostile_camp_routine_dispatch_threshold() ? "true" : "false" )
@@ -1975,7 +1979,7 @@ static std::string openclaw_harness_semantic_step_frame(
 }
 
 std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
-    const input_context &context )
+            const input_context &context )
 {
     static const std::vector<std::pair<std::string, std::string>> action_ids = {
         { "world.pause", "pause" },
@@ -2023,7 +2027,8 @@ std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
     return result;
 }
 
-void openclaw_harness_semantic_initial_world_frame_if_ready( const input_context *active_input_context,
+void openclaw_harness_semantic_initial_world_frame_if_ready( const input_context
+        *active_input_context,
         const bool no_activity_owns_turn, const bool no_auto_move_owns_turn,
         const bool no_dead_watch_owns_turn )
 {
@@ -2051,7 +2056,7 @@ void openclaw_harness_semantic_initial_world_frame_if_ready( const input_context
     }
 
     const std::vector<std::pair<std::string, std::string>> actions =
-        openclaw_harness_world_actions( *active_input_context );
+                openclaw_harness_world_actions( *active_input_context );
     if( actions.empty() ) {
         return;
     }
@@ -2072,7 +2077,7 @@ static std::vector<npc_ptr> openclaw_harness_basecamp_mission_candidates()
     const auto append_unique = [&result]( const npc_ptr & candidate ) {
         if( candidate && std::none_of( result.begin(), result.end(),
         [&candidate]( const npc_ptr & existing ) {
-            return existing && existing->getID() == candidate->getID();
+        return existing && existing->getID() == candidate->getID();
         } ) ) {
             result.push_back( candidate );
         }
@@ -2111,7 +2116,7 @@ static std::vector<npc_ptr> openclaw_harness_basecamp_mission_candidates()
 static std::string openclaw_harness_world_messages()
 {
     const std::vector<std::pair<std::string, std::string>> messages =
-        Messages::recent_messages( Messages::size() );
+                Messages::recent_messages( Messages::size() );
     std::ostringstream result;
     result << '[';
     for( size_t index = 0; index < messages.size(); ++index ) {
@@ -2167,18 +2172,24 @@ static std::map<std::string, std::string> openclaw_harness_world_payload()
         { "current_site_camp_storage", openclaw_harness_current_site_camp_storage( player ) },
         { "visible_entities", openclaw_harness_visible_entities( player ) },
         { "diagnostic_active_monsters", openclaw_harness_diagnostic_active_monsters() },
-        { "diagnostic_zombie_rider_light_memory",
-          openclaw_harness_diagnostic_zombie_rider_light_memory() },
+        {
+            "diagnostic_zombie_rider_light_memory",
+            openclaw_harness_diagnostic_zombie_rider_light_memory()
+        },
         { "diagnostic_zombie_rider_bands", openclaw_harness_diagnostic_zombie_rider_bands() },
         { "visible_zones", openclaw_harness_visible_zones( here, avatar_pos ) },
         { "messages", openclaw_harness_world_messages() },
         { "world_mode", player.current_movement_mode().str() },
         { "last_save_result", g == nullptr ? "unavailable" : g->last_save_result() },
-        { "last_save_checkpoint", std::string( "{\"confirmed_turn\":" ) +
-          ( g != nullptr && g->last_confirmed_save_turn() ?
-            std::to_string( *g->last_confirmed_save_turn() ) : "null" ) + "}" },
-        { "last_debug_intervention", harness_last_debug_creature_intervention(
-                openclaw_harness_bound_semantic_run_id() ) }
+        {
+            "last_save_checkpoint", std::string( "{\"confirmed_turn\":" ) +
+            ( g != nullptr &&g->last_confirmed_save_turn() ?
+              std::to_string( *g->last_confirmed_save_turn() ) : "null" ) + "}"
+        },
+        {
+            "last_debug_intervention", harness_last_debug_creature_intervention(
+                openclaw_harness_bound_semantic_run_id() )
+        }
     };
 }
 
@@ -2241,7 +2252,7 @@ void openclaw_harness_semantic_world_after_activity_distraction()
     // World descriptor is published later by the scoped owner in
     // game::handle_action, or a new native query publishes its own owner.
     openclaw_harness_pending_world_frame = openclaw_harness_semantic_step_frame(
-                    "activity_resumed", {} );
+            "activity_resumed", {} );
 
     // The prompt selection has a real native successor even though IGNORE
     // resumes an activity rather than entering a World input loop.  Publish
@@ -2263,7 +2274,7 @@ void openclaw_harness_semantic_world_after_auto_move_cancel()
     // handle_action frame so the prompt receipt cannot be stranded on its
     // unwinding owner.
     openclaw_harness_pending_world_frame = openclaw_harness_semantic_step_frame(
-                    "auto_move_canceled", {} );
+            "auto_move_canceled", {} );
     // query_popup owns the semantic manager only for its query loop.  Its
     // selected action returns here after that scope unwinds, so reattach the
     // run-bound manager long enough to flush the deferred receipt onto this
@@ -2516,9 +2527,9 @@ input_context game::get_player_input( std::string &action )
                     ( ctxt.first_keyboard_character_for_action( "wait" ) ? "yes" : "no" );
         }
         const std::vector<std::pair<std::string, std::string>> semantic_actions =
-            openclaw_harness_world_actions( ctxt );
+                    openclaw_harness_world_actions( ctxt );
         openclaw_harness_pending_world_frame = openclaw_harness_semantic_step_frame(
-                    "world", semantic_actions );
+                "world", semantic_actions );
     }
 
     const visibility_variables &cache = here.get_visibility_variables_cache();
@@ -3510,7 +3521,7 @@ static void wait()
             std::optional<semantic_surface_scope> semantic_scope;
             if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
                 semantic_scope.emplace( *manager, "unsupported", "Wait unavailable",
-                                        std::map<std::string, std::string>{
+                std::map<std::string, std::string> {
                     { "stop_reason", "moving vehicle wait prompt lacks semantic bindings" }
                 } );
                 semantic_scope->consume_request();
@@ -3643,14 +3654,15 @@ static void wait()
             semantic_surface_actions( semantic_actions );
         std::map<std::string, int> semantic_action_retvals;
         for( const auto &entry : semantic_hotkeys ) {
-            semantic_action_retvals.emplace( openclaw_harness_wait_duration_action( setting_alarm, entry.first ),
+            semantic_action_retvals.emplace( openclaw_harness_wait_duration_action( setting_alarm,
+                                             entry.first ),
                                              entry.first );
         }
         semantic_scope.emplace( *manager, "menu", setting_alarm ? "Set alarm" : "Wait duration",
-                                std::map<std::string, std::string>{},
+                                std::map<std::string, std::string> {},
                                 semantic_actions_descriptor,
-        [ &as_m, semantic_action_retvals ]
-        ( const semantic_action_request &request ) {
+                                [ &as_m, semantic_action_retvals ]
+        ( const semantic_action_request & request ) {
             const auto selected = semantic_action_retvals.find( request.action_id );
             if( selected == semantic_action_retvals.end() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
@@ -3667,9 +3679,10 @@ static void wait()
     }
 
     const auto dur_iter = durations.find( as_m.ret );
-    const std::string semantic_action = openclaw_harness_wait_duration_action( setting_alarm, as_m.ret );
+    const std::string semantic_action = openclaw_harness_wait_duration_action( setting_alarm,
+                                        as_m.ret );
     openclaw_harness_trace_wait_menu_selection( semantic_action,
-                                                dur_iter != durations.end() && !semantic_action.empty() );
+            dur_iter != durations.end() && !semantic_action.empty() );
     openclaw_harness_semantic_step_receipt( semantic_frame, semantic_action,
                                             dur_iter != durations.end() && !semantic_action.empty() );
     if( dur_iter == durations.end() ) {
@@ -4783,8 +4796,7 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
         case ACTION_MOVE_BACK:
         case ACTION_MOVE_BACK_LEFT:
         case ACTION_MOVE_LEFT:
-        case ACTION_MOVE_FORTH_LEFT:
-        {
+        case ACTION_MOVE_FORTH_LEFT: {
             const std::string semantic_action = openclaw_harness_semantic_movement_action_id( act );
             if( player_character.maybe_get_value( "remote_controlling" ) &&
                 ( player_character.has_active_item( itype_radiocontrol ) ||
@@ -4833,7 +4845,7 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
                 const tripoint_bub_ms dest_tile = pos_before +
                                                   tripoint_rel_ms( dest_delta, 0 );
                 const tripoint_abs_ms expected_abs = pos_before_abs +
-                                                      tripoint_rel_ms( dest_delta, 0 );
+                                                     tripoint_rel_ms( dest_delta, 0 );
                 const ter_id ter_before = here.ter( dest_tile );
                 const furn_id furn_before = here.furn( dest_tile );
                 int veh_door_part_before = -1;
@@ -4878,7 +4890,7 @@ bool game::do_regular_action( action_id &act, avatar &player_character,
                         movement_frame, movement_semantic_action, pos_before_abs, expected_abs,
                         pos_after_abs, here, pos_after, move_handled, melee_performed );
                     openclaw_harness_pending_world_frame = openclaw_harness_semantic_step_frame(
-                                "world", {}, "post_step" );
+                            "world", {}, "post_step" );
                 }
                 if( !move_handled ) {
                     // auto-move should be canceled due to a failed move or obstacle
@@ -5721,13 +5733,13 @@ bool game::handle_action()
             semantic_session.emplace( semantic_manager );
             if( uquit == QUIT_WATCH && player_character.is_dead_state() ) {
                 world_semantic_scope.emplace( semantic_manager, "death_camera", "Death camera",
-                                              std::map<std::string, std::string>{
+                std::map<std::string, std::string> {
                     { "native_owner", "DEFAULTMODE" },
                     { "actual_death", "true" }
-                }, std::vector<semantic_action_descriptor>{
+                }, std::vector<semantic_action_descriptor> {
                     { "death_camera.close", "", _( "Accept your fate" ), true }
                 }, [ &semantic_death_camera_close, &semantic_manager ](
-                const semantic_action_request &request ) {
+                    const semantic_action_request & request ) {
                     if( request.action_id != "death_camera.close" ) {
                         return semantic_action_dispatch_result{ false, "no_native_binding", "" };
                     }
@@ -5738,7 +5750,7 @@ bool game::handle_action()
             } else {
                 input_context world_context = get_default_mode_input_context();
                 const std::vector<std::pair<std::string, std::string>> native_world_actions =
-                    openclaw_harness_world_actions( world_context );
+                            openclaw_harness_world_actions( world_context );
                 std::vector<semantic_action_descriptor> semantic_actions =
                     semantic_surface_actions( native_world_actions );
                 const std::vector<npc_ptr> basecamp_mission_candidates =
@@ -5761,12 +5773,12 @@ bool game::handle_action()
                 world_semantic_scope.emplace( semantic_manager, "world", "World",
                                               openclaw_harness_world_payload(),
                                               semantic_actions,
-                [ &act, &semantic_manager, &semantic_npc_inspection_actor,
-                  &semantic_camp_npc_inspection_actor,
-                  &semantic_basecamp_mission_actor, &semantic_debug_creature_killed,
-                  &semantic_fixture_lamp_turned_off, &semantic_fixture_lamp_position,
-                  &semantic_fixture_lamp_bashed,
-                  basecamp_mission_candidates ]( const semantic_action_request &request ) {
+                                              [ &act, &semantic_manager, &semantic_npc_inspection_actor,
+                                                      &semantic_camp_npc_inspection_actor,
+                                                      &semantic_basecamp_mission_actor, &semantic_debug_creature_killed,
+                                                      &semantic_fixture_lamp_turned_off, &semantic_fixture_lamp_position,
+                                                      &semantic_fixture_lamp_bashed,
+                      basecamp_mission_candidates ]( const semantic_action_request & request ) {
                     if( request.action_id == "world.pause" ) {
                         // Pause is an ordinary native one-turn action.  It
                         // reaches do_turn without opening the alarm-clock
@@ -5816,7 +5828,7 @@ bool game::handle_action()
                         semantic_debug_creature_killed = true;
                     } else if( request.action_id == "world.fixture_lamp_turn_off" ) {
                         semantic_fixture_lamp_position = openclaw_harness_fixture_lamp_position(
-                                                                get_avatar() );
+                                                             get_avatar() );
                         if( !semantic_fixture_lamp_position.has_value() ) {
                             return semantic_action_dispatch_result{ false, "fixture_lamp_unavailable", "" };
                         }
@@ -5833,7 +5845,7 @@ bool game::handle_action()
                         semantic_fixture_lamp_turned_off = true;
                     } else if( request.action_id == "world.fixture_lamp_bash" ) {
                         semantic_fixture_lamp_position = openclaw_harness_fixture_lamp_position(
-                                                                get_avatar() );
+                                                             get_avatar() );
                         if( !semantic_fixture_lamp_position.has_value() ) {
                             return semantic_action_dispatch_result{ false, "fixture_lamp_unavailable", "" };
                         }
@@ -5858,14 +5870,14 @@ bool game::handle_action()
                         semantic_npc_inspection_actor = actor->getID();
                     } else if( request.action_id == "world.inspect_camp_npc" ) {
                         const std::optional<basecamp *> camp = overmap_buffer.find_camp(
-                            get_avatar().pos_abs_omt().xy() );
+                                get_avatar().pos_abs_omt().xy() );
                         if( !camp || *camp == nullptr || !( *camp )->allowed_access_by( get_avatar() ) ) {
                             return semantic_action_dispatch_result{ false, "unavailable_camp", "" };
                         }
                         const std::string requested_id = request.stable_id.value_or( "" );
                         const std::vector<npc_ptr> workers = ( *camp )->get_npcs_assigned();
                         const auto worker = std::find_if( workers.begin(), workers.end(),
-                        [&requested_id]( const npc_ptr &candidate ) {
+                        [&requested_id]( const npc_ptr & candidate ) {
                             return candidate && !candidate->is_dead() &&
                                    requested_id == npc_inspection_actor_id( *candidate );
                         } );
@@ -5880,7 +5892,7 @@ bool game::handle_action()
                     } else if( request.action_id == "world.basecamp_missions" ) {
                         const std::string candidate_id = request.stable_id.value_or( "" );
                         const auto candidate = std::find_if( basecamp_mission_candidates.begin(),
-                        basecamp_mission_candidates.end(), [ &candidate_id ]( const npc_ptr &candidate ) {
+                        basecamp_mission_candidates.end(), [ &candidate_id ]( const npc_ptr & candidate ) {
                             return candidate && std::to_string( candidate->getID().get_value() ) == candidate_id;
                         } );
                         if( candidate == basecamp_mission_candidates.end() ) {

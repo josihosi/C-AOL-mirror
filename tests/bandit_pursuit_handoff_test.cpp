@@ -96,7 +96,8 @@ TEST_CASE( "bandit_pursuit_handoff_builds_a_bounded_scout_entry_packet", "[bandi
     lead.threat_penalty = 1;
     lead.hard_blocked_jobs = { bandit_dry_run::job_template::scavenge,
                                bandit_dry_run::job_template::steal,
-                               bandit_dry_run::job_template::raid };
+                               bandit_dry_run::job_template::raid
+                             };
     lead.validity_notes = { "Thin smoke is a scouting clue, not loot permission." };
 
     const bandit_dry_run::evaluation_result evaluation = bandit_dry_run::evaluate( camp, { lead } );
@@ -142,7 +143,8 @@ TEST_CASE( "bandit_pursuit_handoff_guards_return_application_by_generation_and_k
     lead.threat_penalty = 1;
     lead.hard_blocked_jobs = { bandit_dry_run::job_template::scavenge,
                                bandit_dry_run::job_template::steal,
-                               bandit_dry_run::job_template::raid };
+                               bandit_dry_run::job_template::raid
+                             };
 
     const bandit_dry_run::evaluation_result evaluation = bandit_dry_run::evaluate( camp, { lead } );
     const bandit_pursuit_handoff::abstract_group_state source_group = make_group();
@@ -239,9 +241,9 @@ TEST_CASE( "bandit_pursuit_handoff_component_keys_do_not_collide_across_operatio
     const std::string report_key = bandit_pursuit_handoff::make_operation_component_key(
                                        "ridge_pack", 7, "report" );
     const std::string next_generation_key = bandit_pursuit_handoff::make_operation_component_key(
-                                                "ridge_pack", 8, "return" );
+            "ridge_pack", 8, "return" );
     const std::string other_operation_key = bandit_pursuit_handoff::make_operation_component_key(
-                                                "river_pack", 7, "return" );
+            "river_pack", 7, "return" );
     const std::string leader_receipt = bandit_pursuit_handoff::make_operation_component_key(
                                            "ridge_pack", 7, "return", "leader_marta" );
     const std::string scout_receipt = bandit_pursuit_handoff::make_operation_component_key(
@@ -255,7 +257,8 @@ TEST_CASE( "bandit_pursuit_handoff_component_keys_do_not_collide_across_operatio
     CHECK( leader_receipt != scout_receipt );
 }
 
-TEST_CASE( "bandit_pursuit_handoff_keeps_return_consequences_explicit_and_applied", "[bandit][handoff]" )
+TEST_CASE( "bandit_pursuit_handoff_keeps_return_consequences_explicit_and_applied",
+           "[bandit][handoff]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -270,7 +273,8 @@ TEST_CASE( "bandit_pursuit_handoff_keeps_return_consequences_explicit_and_applie
     lead.threat_penalty = 1;
     lead.hard_blocked_jobs = { bandit_dry_run::job_template::scavenge,
                                bandit_dry_run::job_template::steal,
-                               bandit_dry_run::job_template::raid };
+                               bandit_dry_run::job_template::raid
+                             };
 
     const bandit_dry_run::evaluation_result evaluation = bandit_dry_run::evaluate( camp, { lead } );
     const bandit_pursuit_handoff::entry_payload entry =
@@ -328,7 +332,8 @@ TEST_CASE( "bandit_pursuit_handoff_keeps_return_consequences_explicit_and_applie
     CHECK( report.find( "ridge_smoke_cabin_edge" ) != std::string::npos );
 }
 
-TEST_CASE( "bandit_pursuit_handoff_uses_shadow_for_moving_carriers_unless_return_pressure_collapses", "[bandit][handoff]" )
+TEST_CASE( "bandit_pursuit_handoff_uses_shadow_for_moving_carriers_unless_return_pressure_collapses",
+           "[bandit][handoff]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -346,11 +351,11 @@ TEST_CASE( "bandit_pursuit_handoff_uses_shadow_for_moving_carriers_unless_return
     REQUIRE( winner( evaluation ).job == bandit_dry_run::job_template::stalk );
 
     CHECK( bandit_pursuit_handoff::choose_entry_mode( winner( evaluation ),
-                                                      bandit_pursuit_handoff::contact_certainty::localized,
-                                                      bandit_pursuit_handoff::return_pressure_state::normal ) ==
+            bandit_pursuit_handoff::contact_certainty::localized,
+            bandit_pursuit_handoff::return_pressure_state::normal ) ==
            bandit_pursuit_handoff::entry_mode::shadow );
     CHECK( bandit_pursuit_handoff::choose_entry_mode( winner( evaluation ),
-                                                      bandit_pursuit_handoff::contact_certainty::localized,
-                                                      bandit_pursuit_handoff::return_pressure_state::withdraw_now ) ==
+            bandit_pursuit_handoff::contact_certainty::localized,
+            bandit_pursuit_handoff::return_pressure_state::withdraw_now ) ==
            bandit_pursuit_handoff::entry_mode::withdrawal );
 }

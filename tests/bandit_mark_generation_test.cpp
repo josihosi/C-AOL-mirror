@@ -21,8 +21,10 @@ TEST_CASE( "bandit_mark_generation_refresh_and_cooling_are_tiered", "[bandit][ma
         0,
         0.55,
         bandit_dry_run::threat_gate::discount_only,
-        { bandit_dry_run::job_template::scavenge, bandit_dry_run::job_template::steal,
-          bandit_dry_run::job_template::raid },
+        {
+            bandit_dry_run::job_template::scavenge, bandit_dry_run::job_template::steal,
+            bandit_dry_run::job_template::raid
+        },
         false,
         true,
         { "Thin smoke should stay a scouting clue." }
@@ -384,12 +386,16 @@ TEST_CASE( "bandit_mark_generation_visible_light_horde_bridge_stays_bounded",
         bandit_mark_generation::adapt_light_packet( searchlight_packet );
 
     REQUIRE( exposed_projection.viable );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( exposed_projection ) == 18 );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( daylight_projection ) == 0 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               exposed_projection ) == 18 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               daylight_projection ) == 0 );
     REQUIRE( screened_projection.viable );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( screened_projection ) == 0 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               screened_projection ) == 0 );
     REQUIRE( searchlight_projection.viable );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( searchlight_projection ) == 26 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               searchlight_projection ) == 26 );
 }
 
 TEST_CASE( "bandit_mark_generation_local_field_adapter_preserves_smoke_light_and_horde_seams",
@@ -502,9 +508,11 @@ TEST_CASE( "bandit_mark_generation_local_field_adapter_accepts_non_fire_light_so
     REQUIRE( window_projection.has_light_packet );
     REQUIRE( window_projection.light.viable );
     CHECK( window_projection.light.packet.source_strength == 2 );
-    CHECK( window_projection.light.packet.exposure == bandit_mark_generation::light_exposure_band::screened );
+    CHECK( window_projection.light.packet.exposure ==
+           bandit_mark_generation::light_exposure_band::screened );
     CHECK( window_projection.light.signal.kind == "light" );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( window_projection.light ) == 0 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               window_projection.light ) == 0 );
 
     bandit_mark_generation::local_field_signal_reading exposed_searchlight = window_light;
     exposed_searchlight.light_id = "road_searchlight";
@@ -519,11 +527,13 @@ TEST_CASE( "bandit_mark_generation_local_field_adapter_accepts_non_fire_light_so
 
     REQUIRE( searchlight_projection.has_light_packet );
     REQUIRE( searchlight_projection.light.viable );
-    CHECK( searchlight_projection.light.packet.exposure == bandit_mark_generation::light_exposure_band::exposed );
+    CHECK( searchlight_projection.light.packet.exposure ==
+           bandit_mark_generation::light_exposure_band::exposed );
     CHECK( searchlight_projection.light.signal.kind == "searchlight" );
     CHECK( searchlight_projection.light.signal.threat_add == 1 );
     CHECK( searchlight_projection.light.signal.bounty_add == 0 );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( searchlight_projection.light ) > 0 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               searchlight_projection.light ) > 0 );
 }
 
 TEST_CASE( "bandit_mark_generation_portal_storm_light_keeps_bright_exposed_leaks_legible_but_bounded",
@@ -570,11 +580,13 @@ TEST_CASE( "bandit_mark_generation_portal_storm_light_keeps_bright_exposed_leaks
     CHECK( exposed_projection.viable );
     CHECK( exposed_projection.projected_range_omt == 10 );
     CHECK( exposed_projection.review_summary.find( "weather=portal_storm" ) != std::string::npos );
-    CHECK( exposed_projection.review_summary.find( "storm_bright_light_preserved=yes" ) != std::string::npos );
+    CHECK( exposed_projection.review_summary.find( "storm_bright_light_preserved=yes" ) !=
+           std::string::npos );
     CHECK_FALSE( contained_projection.viable );
     CHECK( contained_projection.review_summary.find( "weather=portal_storm" ) != std::string::npos );
     CHECK( contained_projection.review_summary.find( "verdict=blocked" ) != std::string::npos );
-    CHECK( contained_projection.review_summary.find( "storm_bright_light_preserved=no" ) != std::string::npos );
+    CHECK( contained_projection.review_summary.find( "storm_bright_light_preserved=no" ) !=
+           std::string::npos );
 }
 
 TEST_CASE( "bandit_mark_generation_elevated_exposed_light_outruns_hidden_ground_light_without_global_sight",
@@ -627,8 +639,10 @@ TEST_CASE( "bandit_mark_generation_elevated_exposed_light_outruns_hidden_ground_
     CHECK_FALSE( hidden_projection.viable );
     CHECK( elevated_projection.viable );
     CHECK( elevated_projection.projected_range_omt > hidden_projection.projected_range_omt );
-    CHECK( elevated_projection.review_summary.find( "nearby_cross_z_visible=yes" ) != std::string::npos );
-    CHECK( elevated_projection.review_summary.find( "elevated_exposure_extended=yes" ) != std::string::npos );
+    CHECK( elevated_projection.review_summary.find( "nearby_cross_z_visible=yes" ) !=
+           std::string::npos );
+    CHECK( elevated_projection.review_summary.find( "elevated_exposure_extended=yes" ) !=
+           std::string::npos );
     CHECK( elevated_projection.review_summary.find( "elevation_bonus=2" ) != std::string::npos );
     CHECK( hidden_projection.review_summary.find( "nearby_cross_z_visible=no" ) != std::string::npos );
 }
@@ -675,7 +689,8 @@ TEST_CASE( "bandit_mark_generation_vertical_smoke_stays_nearby_visible_without_g
     CHECK( ground_projection.viable );
     CHECK( vertical_projection.viable );
     CHECK( vertical_projection.projected_range_omt == ground_projection.projected_range_omt );
-    CHECK( vertical_projection.review_summary.find( "nearby_cross_z_visible=yes" ) != std::string::npos );
+    CHECK( vertical_projection.review_summary.find( "nearby_cross_z_visible=yes" ) !=
+           std::string::npos );
     CHECK( vertical_projection.review_summary.find( "vertical_range_bonus=0" ) != std::string::npos );
     CHECK( ground_projection.review_summary.find( "nearby_cross_z_visible=no" ) != std::string::npos );
 }
@@ -819,7 +834,8 @@ TEST_CASE( "bandit_mark_generation_human_route_adapter_keeps_sightings_mobile_an
     CHECK( corroborated_site_projection.viable );
     CHECK( corroborated_site_projection.projected_family == bandit_dry_run::lead_family::site );
     CHECK( corroborated_site_projection.signal.bounty_add == 2 );
-    CHECK( corroborated_site_projection.signal.hard_blocked_jobs == std::vector<bandit_dry_run::job_template>( {
+    CHECK( corroborated_site_projection.signal.hard_blocked_jobs ==
+    std::vector<bandit_dry_run::job_template>( {
         bandit_dry_run::job_template::scavenge,
         bandit_dry_run::job_template::steal,
         bandit_dry_run::job_template::raid,
@@ -899,10 +915,10 @@ TEST_CASE( "bandit_mark_generation_repeated_site_reinforcement_needs_mixed_signa
     bandit_mark_generation::ledger_state weak_state;
     bandit_mark_generation::advance_state( weak_state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { smoke_signal } );
+    { smoke_signal } );
     bandit_mark_generation::advance_state( weak_state, 20,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { smoke_signal } );
+    { smoke_signal } );
     REQUIRE( weak_state.marks.size() == 1 );
     CHECK( weak_state.marks[0].repeated_site_reinforcement.total_site_hits == 2 );
     CHECK( weak_state.marks[0].repeated_site_reinforcement.distinct_signal_count == 1 );
@@ -914,10 +930,10 @@ TEST_CASE( "bandit_mark_generation_repeated_site_reinforcement_needs_mixed_signa
     bandit_mark_generation::ledger_state mixed_state;
     bandit_mark_generation::advance_state( mixed_state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { smoke_signal } );
+    { smoke_signal } );
     bandit_mark_generation::advance_state( mixed_state, 20,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { light_signal } );
+    { light_signal } );
     REQUIRE( mixed_state.marks.size() == 1 );
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.total_site_hits == 2 );
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.distinct_signal_count == 2 );
@@ -928,7 +944,7 @@ TEST_CASE( "bandit_mark_generation_repeated_site_reinforcement_needs_mixed_signa
 
     bandit_mark_generation::advance_state( mixed_state, 40,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { route_signal } );
+    { route_signal } );
     REQUIRE( mixed_state.marks.size() == 1 );
     CHECK( mixed_state.marks[0].kind == "route_activity" );
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.total_site_hits == 3 );
@@ -937,25 +953,29 @@ TEST_CASE( "bandit_mark_generation_repeated_site_reinforcement_needs_mixed_signa
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.bounty_bonus == 2 );
     CHECK( mixed_state.marks[0].bounty_add == 3 );
 
-    const int bounded_confidence_bonus = mixed_state.marks[0].repeated_site_reinforcement.confidence_bonus;
+    const int bounded_confidence_bonus =
+        mixed_state.marks[0].repeated_site_reinforcement.confidence_bonus;
     const int bounded_bounty_bonus = mixed_state.marks[0].repeated_site_reinforcement.bounty_bonus;
     const int bounded_bounty_add = mixed_state.marks[0].bounty_add;
     bandit_mark_generation::advance_state( mixed_state, 60,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { smoke_signal } );
+    { smoke_signal } );
     REQUIRE( mixed_state.marks.size() == 1 );
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.total_site_hits == 4 );
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.distinct_signal_count == 3 );
-    CHECK( mixed_state.marks[0].repeated_site_reinforcement.confidence_bonus == bounded_confidence_bonus );
+    CHECK( mixed_state.marks[0].repeated_site_reinforcement.confidence_bonus ==
+           bounded_confidence_bonus );
     CHECK( mixed_state.marks[0].repeated_site_reinforcement.bounty_bonus == bounded_bounty_bonus );
     CHECK( mixed_state.marks[0].bounty_add == bounded_bounty_add );
 
-    const std::vector<bandit_dry_run::lead_input> leads = bandit_mark_generation::emit_leads( mixed_state );
+    const std::vector<bandit_dry_run::lead_input> leads = bandit_mark_generation::emit_leads(
+                mixed_state );
     REQUIRE( leads.size() == 1 );
     CHECK( leads[0].hard_blocked_jobs == blocked_extraction_jobs );
 }
 
-TEST_CASE( "bandit_mark_generation_emits_existing_pressure_and_coherence_for_scoring", "[bandit][marks]" )
+TEST_CASE( "bandit_mark_generation_emits_existing_pressure_and_coherence_for_scoring",
+           "[bandit][marks]" )
 {
     bandit_mark_generation::ledger_state state;
 
@@ -982,7 +1002,7 @@ TEST_CASE( "bandit_mark_generation_emits_existing_pressure_and_coherence_for_sco
 
     bandit_mark_generation::advance_state( state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { pressured_route } );
+    { pressured_route } );
     const std::vector<bandit_dry_run::lead_input> leads = bandit_mark_generation::emit_leads( state );
 
     REQUIRE( leads.size() == 1 );
@@ -1003,7 +1023,8 @@ TEST_CASE( "bandit_mark_generation_emits_existing_pressure_and_coherence_for_sco
     CHECK( found_pressure_note );
 }
 
-TEST_CASE( "bandit_mark_generation_moving_leads_persist_briefly_and_narrow_on_refresh", "[bandit][marks]" )
+TEST_CASE( "bandit_mark_generation_moving_leads_persist_briefly_and_narrow_on_refresh",
+           "[bandit][marks]" )
 {
     bandit_mark_generation::ledger_state state;
 
@@ -1030,7 +1051,7 @@ TEST_CASE( "bandit_mark_generation_moving_leads_persist_briefly_and_narrow_on_re
 
     bandit_mark_generation::advance_state( state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { trader_column } );
+    { trader_column } );
     REQUIRE( state.marks.size() == 1 );
     CHECK( state.marks[0].moving_memory.active );
     CHECK( state.marks[0].moving_memory.last_known_region_id == "north_road" );
@@ -1068,7 +1089,7 @@ TEST_CASE( "bandit_mark_generation_moving_leads_persist_briefly_and_narrow_on_re
 
     bandit_mark_generation::advance_state( state, 60,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { narrowed_column } );
+    { narrowed_column } );
     REQUIRE( state.marks.size() == 1 );
     CHECK( state.marks[0].moving_memory.active );
     CHECK( state.marks[0].moving_memory.last_known_region_id == "east_road" );
@@ -1099,8 +1120,10 @@ TEST_CASE( "bandit_mark_generation_structural_sites_do_not_gain_chase_memory", "
         0,
         0.60,
         bandit_dry_run::threat_gate::discount_only,
-        { bandit_dry_run::job_template::scavenge, bandit_dry_run::job_template::steal,
-          bandit_dry_run::job_template::raid },
+        {
+            bandit_dry_run::job_template::scavenge, bandit_dry_run::job_template::steal,
+            bandit_dry_run::job_template::raid
+        },
         false,
         true,
         { "Structural smoke should stay on site state, not grow little pursuit legs." }
@@ -1108,7 +1131,7 @@ TEST_CASE( "bandit_mark_generation_structural_sites_do_not_gain_chase_memory", "
 
     bandit_mark_generation::advance_state( state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { farmhouse_smoke } );
+    { farmhouse_smoke } );
     REQUIRE( state.marks.size() == 1 );
     CHECK_FALSE( state.marks[0].moving_memory.active );
     CHECK( state.marks[0].moving_memory.source_family == bandit_dry_run::lead_family::none );
@@ -1123,7 +1146,8 @@ TEST_CASE( "bandit_mark_generation_structural_sites_do_not_gain_chase_memory", "
     CHECK( report.find( "moving_memory=active=no" ) != std::string::npos );
 }
 
-TEST_CASE( "bandit_mark_generation_moving_memory_drops_cleanly_when_contact_goes_stale", "[bandit][marks]" )
+TEST_CASE( "bandit_mark_generation_moving_memory_drops_cleanly_when_contact_goes_stale",
+           "[bandit][marks]" )
 {
     bandit_mark_generation::ledger_state state;
 
@@ -1150,7 +1174,7 @@ TEST_CASE( "bandit_mark_generation_moving_memory_drops_cleanly_when_contact_goes
 
     bandit_mark_generation::advance_state( state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { caravan_route } );
+    { caravan_route } );
     REQUIRE( state.marks.size() == 1 );
     CHECK( state.marks[0].moving_memory.active );
     CHECK( state.marks[0].moving_memory.leash_turns_remaining == 120 );
@@ -1169,7 +1193,8 @@ TEST_CASE( "bandit_mark_generation_moving_memory_drops_cleanly_when_contact_goes
 
     const std::string expired_report = bandit_mark_generation::render_report( state, &expired.leads );
     CHECK( expired_report.find( "last_transition=dropped" ) != std::string::npos );
-    CHECK( expired_report.find( "drop_reason=leash expired without fresh moving contact" ) != std::string::npos );
+    CHECK( expired_report.find( "drop_reason=leash expired without fresh moving contact" ) !=
+           std::string::npos );
     CHECK( expired_report.find( "review_pending=yes" ) != std::string::npos );
 
     bandit_mark_generation::advance_state( state, 131,
@@ -1196,8 +1221,10 @@ TEST_CASE( "bandit_mark_generation_keeps_confirmed_threat_sticky", "[bandit][mar
         0,
         0.60,
         bandit_dry_run::threat_gate::hard_veto,
-        { bandit_dry_run::job_template::scavenge, bandit_dry_run::job_template::steal,
-          bandit_dry_run::job_template::raid },
+        {
+            bandit_dry_run::job_template::scavenge, bandit_dry_run::job_template::steal,
+            bandit_dry_run::job_template::raid
+        },
         true,
         true,
         { "Confirmed ugly loss should freeze until a later real rewrite." }
@@ -1205,7 +1232,7 @@ TEST_CASE( "bandit_mark_generation_keeps_confirmed_threat_sticky", "[bandit][mar
 
     bandit_mark_generation::advance_state( state, 0,
                                            bandit_mark_generation::cadence_tier::nearby_active,
-                                           { confirmed_loss } );
+    { confirmed_loss } );
     REQUIRE( state.marks.size() == 1 );
     const int original_threat = state.marks[0].threat_add;
     REQUIRE( state.heat.size() == 1 );

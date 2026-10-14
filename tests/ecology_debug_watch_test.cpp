@@ -346,7 +346,7 @@ TEST_CASE( "ecology_watch_identity_policy_and_json_are_stable",
              ecology_debug::trigger_disposition::fail
          } ) {
         ecology_debug::watch_spec phase_spec = spec(
-                    ecology_debug::watch_preset::selected_phase_change );
+                ecology_debug::watch_preset::selected_phase_change );
         phase_spec.disposition = disposition;
         CHECK( ecology_debug::evaluate_watch( phase_spec, input ).disposition == disposition );
     }

@@ -442,7 +442,7 @@ class item_pocket
     private:
         template<typename Item>
         ret_val<item *> insert_item_impl( Item &&it, bool into_bottom,
-                                         bool restack_charges, bool ignore_contents );
+                                          bool restack_charges, bool ignore_contents );
         // the type of pocket, saved to json
         pocket_type _saved_type = pocket_type::LAST; // NOLINT(cata-serialize)
         bool _saved_sealed = false; // NOLINT(cata-serialize)

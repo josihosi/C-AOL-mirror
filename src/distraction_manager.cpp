@@ -144,11 +144,11 @@ void distraction_manager_gui::show()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "distraction_manager", _( "Distractions manager" ),
-        std::map<std::string, std::string>{
+        std::map<std::string, std::string> {
             { "native_owner", "DISTRACTION_MANAGER" }, { "configuration_scope", "global" }
-        }, std::vector<semantic_action_descriptor>{
+        }, std::vector<semantic_action_descriptor> {
             { "distraction_manager.close", "", _( "Close distractions manager" ), true }
-        }, [&semantic_action]( const semantic_action_request &request ) {
+        }, [&semantic_action]( const semantic_action_request & request ) {
             if( request.action_id != "distraction_manager.close" || request.stable_id.has_value() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }

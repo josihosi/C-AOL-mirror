@@ -123,8 +123,8 @@ bool crossing_actor_copies_match( const bandit_live_world::site_record &site )
         }
         const auto actor = overmap_buffer.find_npc( id );
         const auto persistent = overmap_buffer.get_overmap_npcs();
-        if( std::count_if( persistent.begin(), persistent.end(), [id]( const auto &copy ) {
-            return copy && copy->getID() == id;
+        if( std::count_if( persistent.begin(), persistent.end(), [id]( const auto & copy ) {
+        return copy && copy->getID() == id;
         } ) != 1 ) {
             return false;
         }
@@ -154,7 +154,9 @@ bool crossing_actor_copies_match( const bandit_live_world::site_record &site )
             outing->local_handoff.is_abstract_resume() ) {
             const auto &members = outing->local_handoff.members;
             const auto snapshot = std::find_if( members.begin(), members.end(),
-            [id]( const auto &member ) { return member.npc_id == id; } );
+            [id]( const auto & member ) {
+                return member.npc_id == id;
+            } );
             if( snapshot == members.end() || snapshot->dead ||
                 snapshot->exit_position != actor->pos_abs() ||
                 snapshot->hp_percent != actor->hp_percentage() ) {
@@ -233,8 +235,8 @@ reconcile_loaded_bandit_live_world_projections()
     std::vector<character_id> retired_old_leases;
     std::vector<character_id> refreshed_local_leases;
     auto result = bandit_live_world::reconcile_loaded_local_projections(
-                            overmap_buffer.global_state.bandit_live_world, claims,
-                            &retired_old_leases, &refreshed_local_leases );
+                      overmap_buffer.global_state.bandit_live_world, claims,
+                      &retired_old_leases, &refreshed_local_leases );
     // Output IDs belong only to fully validated, committed operations, even
     // when another operation failed.  Propagate those repairs to all save copies.
     for( const character_id id : refreshed_local_leases ) {
@@ -489,8 +491,9 @@ bool game::admit_world( const std::string &world, bool &restored )
         popup( _( "Death retirement did not complete. Entering this world was canceled; a living fallback will not be restored." ) );
         return false;
     }
-    if( !save_continuity::prepare_load( world_generator->get_world( selected_world )->folder_path().get_unrelative_path(),
-                                      restored ) ) {
+    if( !save_continuity::prepare_load( world_generator->get_world(
+                                            selected_world )->folder_path().get_unrelative_path(),
+                                        restored ) ) {
         return false;
     }
     if( restored ) {
@@ -517,7 +520,8 @@ void game::await_retirement_protection()
         session.emplace( openclaw_harness_semantic_surface_manager() );
     }
     while( !save_continuity::retirement_refusal_persisted( path ) ) {
-        if( query_yn( _( "Death retirement failed and no durable refusal could be written. Closing now could restore this character's living save. Resolve the storage failure, then retry retirement? No keeps this pending without advancing play." ) ) ) {
+        if( query_yn(
+                _( "Death retirement failed and no durable refusal could be written. Closing now could restore this character's living save. Resolve the storage failure, then retry retirement? No keeps this pending without advancing play." ) ) ) {
             turn_handler::cleanup_at_end();
             if( can_load_world_after_retirement( world ) ) {
                 return; // Actual completed retirement, not refusal credit.
@@ -526,7 +530,8 @@ void game::await_retirement_protection()
             popup( _( "Retry canceled. The unresolved retirement remains in memory; ordinary menu disposal and successful close are unavailable until refusal or retirement is persisted." ) );
         }
     }
-    popup( _( "Death retirement is still incomplete (%s), but its refusal is persisted. Closing is now safe; no saved turn or retirement success was confirmed. The living fallback remains unavailable." ), last_save_result_ );
+    popup( _( "Death retirement is still incomplete (%s), but its refusal is persisted. Closing is now safe; no saved turn or retirement success was confirmed. The living fallback remains unavailable." ),
+           last_save_result_ );
 }
 
 void game::load_master()
@@ -585,7 +590,8 @@ bool game::load( const save_t &name )
     // Refuse a changed boundary rather than asking a second recovery question
     // after setup has already consumed this world's options/mod definitions.
     if( !can_load_world_after_retirement( world_generator->active_world->world_name ) ||
-        save_continuity::incomplete( world_generator->active_world->folder_path().get_unrelative_path() ) ) {
+        save_continuity::incomplete(
+            world_generator->active_world->folder_path().get_unrelative_path() ) ) {
         return false;
     }
     if( !world_generator->active_world->save_exists( selected_save ) ) {
@@ -1105,24 +1111,24 @@ bool game::save()
         world_generator->save_last_world_info();
         world_generator->active_world->add_save( save_t::from_save_id( u.get_save_id() ) );
         write_to_file( PATH_INFO::world_base_save_path() / ( base64_encode(
-            u.get_save_id() ) + ".pt" ), [&total_time_played]( std::ostream & fout ) {
-                fout.imbue( std::locale::classic() );
-                fout << total_time_played.count();
-            } );
+        u.get_save_id() ) + ".pt" ), [&total_time_played]( std::ostream & fout ) {
+            fout.imbue( std::locale::classic() );
+            fout << total_time_played.count();
+        } );
         // Global state and NPCs were written with the same acknowledgment.
         // Existing complete-generation publication is their single commit point.
         save_continuity::publish_complete( PATH_INFO::world_base_save_path().get_unrelative_path(),
-                                          to_turns<int>( calendar::turn - calendar::turn_zero ), u.get_save_id() );
+                                           to_turns<int>( calendar::turn - calendar::turn_zero ), u.get_save_id() );
         complete_published = true;
         // The certification digest must describe the completed ordinary
         // save, including any persisted crossing acknowledgement above.
         bandit_live_world_probe::record_certification_save_receipt(
-                to_turns<int>( calendar::turn - calendar::turn_zero ),
-                PATH_INFO::world_base_save_path().get_unrelative_path().string() );
+            to_turns<int>( calendar::turn - calendar::turn_zero ),
+            PATH_INFO::world_base_save_path().get_unrelative_path().string() );
 #if defined(EMSCRIPTEN)
-            // This will allow the window to be closed without a prompt, until do_turn()
-            // is called.
-            EM_ASM( window.game_unsaved = false; );
+        // This will allow the window to be closed without a prompt, until do_turn()
+        // is called.
+        EM_ASM( window.game_unsaved = false; );
 #endif
         last_save_result_ = "saved";
         last_confirmed_save_turn_ = to_turns<int>( calendar::turn - calendar::turn_zero );
@@ -1261,9 +1267,9 @@ bool game::quicksave()
     const char *const r027_cleanup = std::getenv( "OPENCLAW_HARNESS_R027_ONFIRE_CLEANUP_REQUEST" );
     const char *const r027_scenario = std::getenv( "OPENCLAW_HARNESS_SCENARIO" );
     const bool r027_onfire_cleanup = r027_cleanup != nullptr && r027_scenario != nullptr &&
-                                    std::string_view( r027_cleanup ) == "remove_onfire" &&
-                                    std::string_view( r027_scenario ) ==
-                                    "bandit.r027_avatar_onfire_cleanup_bootstrap_v001_mcw";
+                                     std::string_view( r027_cleanup ) == "remove_onfire" &&
+                                     std::string_view( r027_scenario ) ==
+                                     "bandit.r027_avatar_onfire_cleanup_bootstrap_v001_mcw";
     if( r027_onfire_cleanup ) {
         u.remove_effect( efftype_id( "onfire" ) );
     }

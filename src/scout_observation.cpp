@@ -51,9 +51,15 @@ class vehicle_footprint_index
             part_reads += parts.size();
             return cells.emplace( pos, parts ).first->second;
         }
-        size_t query_count() const { return queries; }
-        size_t part_count() const { return part_reads; }
-        size_t scan_count() const { return 0; }
+        size_t query_count() const {
+            return queries;
+        }
+        size_t part_count() const {
+            return part_reads;
+        }
+        size_t scan_count() const {
+            return 0;
+        }
 };
 
 // A bounded read-only window over existing submaps. Missing cells are opaque placeholders,
@@ -86,7 +92,9 @@ class existing_view : public map
             ignored.set_all_ter( ter_str_id( "t_open_air" ) );
             lighting_view = native_lighting;
             lighting_center = project_to<coords::sm>( origin );
-            if( footprint ) { lighting_footprint = *footprint; }
+            if( footprint ) {
+                lighting_footprint = *footprint;
+            }
             const tripoint_abs_sm first = native_lighting ?
                                           lighting_center - point( MAPSIZE / 2, MAPSIZE / 2 ) :
                                           project_to<coords::sm>( tripoint_abs_ms(
@@ -102,7 +110,9 @@ class existing_view : public map
                         const tripoint_abs_sm pos( first.x() + x, first.y() + y, z );
                         const auto omt = project_to<coords::omt>( pos );
                         const bool in_site = !footprint || std::any_of( footprint->begin(), footprint->end(),
-                        [&]( const auto &tile ) { return tile.xy() == omt.xy(); } );
+                        [&]( const auto & tile ) {
+                            return tile.xy() == omt.xy();
+                        } );
                         submap *sm = in_site && z >= low && z <= high ?
                                      MAPBUFFER.lookup_submap_existing( pos ) : nullptr;
                         // Geometry admission indexes physical vehicle parts independently of
@@ -124,13 +134,21 @@ class existing_view : public map
                     for( int y = 0; y < size; ++y ) {
                         const auto omt = project_to<coords::omt>( tripoint_abs_sm( first.x() + x, first.y() + y, z ) );
                         if( footprint && std::none_of( footprint->begin(), footprint->end(),
-                            [&]( const auto &tile ) { return tile.xy() == omt.xy(); } ) ) { continue; }
+                        [&]( const auto & tile ) {
+                        return tile.xy() == omt.xy();
+                        } ) ) {
+                            continue;
+                        }
                         for( const auto &part : vehicles.at( tripoint_abs_sm( first.x() + x,
-                                first.y() + y, z ) ) ) {
+                                                             first.y() + y, z ) ) ) {
                             auto &cache = const_cast<level_cache &>( get_cache_ref( z ) );
                             const auto part_omt = project_to<coords::omt>( part.second );
                             if( footprint && std::none_of( footprint->begin(), footprint->end(),
-                                [&]( const auto &tile ) { return tile.xy() == part_omt.xy(); } ) ) { continue; }
+                            [&]( const auto & tile ) {
+                            return tile.xy() == part_omt.xy();
+                            } ) ) {
+                                continue;
+                            }
                             cache.vehicle_list.insert( part.first );
                             remote_vehicle_parts |= !get_map().inbounds( part.second );
                         }
@@ -148,7 +166,9 @@ class existing_view : public map
                             const auto absolute = get_abs_sub() + tripoint( x, y, z - get_abs_sub().z() );
                             const auto omt = project_to<coords::omt>( absolute );
                             if( !lighting_footprint.empty() && std::none_of( lighting_footprint.begin(),
-                                lighting_footprint.end(), [&]( const auto &tile ) { return tile.xy() == omt.xy(); } ) ) {
+                            lighting_footprint.end(), [&]( const auto & tile ) {
+                            return tile.xy() == omt.xy();
+                            } ) ) {
                                 continue;
                             }
                             if( !available.count( absolute ) ) {
@@ -304,16 +324,16 @@ scout_observation::visibility_read read_visibility( const Character &observer,
         return { true, false, "optical_range" };
     }
     const auto target_omt = project_to<coords::omt>( target );
-    if( std::none_of( footprint.begin(), footprint.end(), [&]( const auto &tile ) {
-        return tile.xy() == target_omt.xy();
+    if( std::none_of( footprint.begin(), footprint.end(), [&]( const auto & tile ) {
+    return tile.xy() == target_omt.xy();
     } ) ) {
         // A caller may supply a previously identified adjacent site leaver. Its
         // current target-local cell is checked too; this never selects identities.
         footprint.push_back( target_omt );
     }
-    const auto checked = [&]( const tripoint_abs_ms &p ) {
+    const auto checked = [&]( const tripoint_abs_ms & p ) {
         const auto omt = project_to<coords::omt>( p );
-        return std::any_of( footprint.begin(), footprint.end(), [&]( const auto &tile ) {
+        return std::any_of( footprint.begin(), footprint.end(), [&]( const auto & tile ) {
             return tile.xy() == omt.xy();
         } );
     };
@@ -332,7 +352,10 @@ scout_observation::visibility_read read_visibility( const Character &observer,
         // Borrow only target-local physical cells. Missing corridor/lookout cells
         // are deliberately irrelevant and never fetched to solve this sightline.
         for( const auto &candidate : views ) {
-            if( candidate->covers( *entry, target ) && candidate->scope_matches( &footprint ) ) { view = candidate.get(); break; }
+            if( candidate->covers( *entry, target ) && candidate->scope_matches( &footprint ) ) {
+                view = candidate.get();
+                break;
+            }
         }
         if( !view ) {
             auto owned = std::make_unique<existing_view>( vehicles, *entry, target, true, false,
@@ -350,10 +373,12 @@ scout_observation::visibility_read read_visibility( const Character &observer,
                 }
                 if( point.z() != previous.z() ) {
                     const int high = std::max( point.z(), previous.z() );
-                    for( const auto &xy : {point.xy(), previous.xy()} ) {
+                    for( const auto &xy : {
+                             point.xy(), previous.xy()
+                         } ) {
                         const tripoint_abs_ms top( xy, high );
                         if( checked( top ) && ( !view->has_geometry( top ) ||
-                            !view->has_geometry( top - tripoint( 0, 0, 1 ) ) ) ) {
+                                                !view->has_geometry( top - tripoint( 0, 0, 1 ) ) ) ) {
                             return { false, false, "geometry_unavailable" };
                         }
                     }
@@ -365,7 +390,7 @@ scout_observation::visibility_read read_visibility( const Character &observer,
                        actor->has_effect( efftype_id( "all_fours" ) ) ) ) {
             const int high = std::max( origin.z(), target.z() );
             for( const auto &point : scout_observation::site_sightline( tripoint_abs_ms( origin.xy(), high ),
-                                           tripoint_abs_ms( target.xy(), high ) ) ) {
+                    tripoint_abs_ms( target.xy(), high ) ) ) {
                 if( checked( point ) && !view->has_geometry( point ) ) {
                     return { false, false, "geometry_unavailable" };
                 }
@@ -387,7 +412,9 @@ scout_observation::visibility_read read_visibility( const Character &observer,
     if( !target_light ) {
         return { false, false, "lighting_geometry_unavailable" };
     }
-    if( view ) { set_view_ambient( *view, target, *target_light ); }
+    if( view ) {
+        set_view_ambient( *view, target, *target_light );
+    }
     // Site-only range uses the native outdoor environmental illumination at the
     // actual scout height, without inspecting ignored lookout/corridor terrain.
     const float observer_light = g->natural_light_level( origin.z() );
@@ -408,20 +435,24 @@ scout_observation::visibility_read read_visibility( const Character &observer,
 namespace scout_observation
 {
 std::vector<tripoint_abs_ms> site_sightline( const tripoint_abs_ms &origin,
-                                          const tripoint_abs_ms &target )
+        const tripoint_abs_ms &target )
 {
     const auto delta = target - origin;
     const int steps = std::max( { std::abs( delta.x() ), std::abs( delta.y() ),
-                                 std::abs( delta.z() ) } );
-    if( steps > MAX_VIEW_DISTANCE * 2 ) { return {}; }
-    if( steps == 0 ) { return { target }; }
+                                  std::abs( delta.z() ) } );
+    if( steps > MAX_VIEW_DISTANCE * 2 ) {
+        return {};
+    }
+    if( steps == 0 ) {
+        return { target };
+    }
     std::vector<tripoint_abs_ms> result;
     result.reserve( steps );
     for( int i = 1; i <= steps; ++i ) {
         result.push_back( origin + tripoint_rel_ms(
-            static_cast<int>( std::lround( static_cast<double>( delta.x() ) * i / steps ) ),
-            static_cast<int>( std::lround( static_cast<double>( delta.y() ) * i / steps ) ),
-            static_cast<int>( std::lround( static_cast<double>( delta.z() ) * i / steps ) ) ) );
+                              static_cast<int>( std::lround( static_cast<double>( delta.x() ) * i / steps ) ),
+                              static_cast<int>( std::lround( static_cast<double>( delta.y() ) * i / steps ) ),
+                              static_cast<int>( std::lround( static_cast<double>( delta.z() ) * i / steps ) ) ) );
     }
     return result;
 }
@@ -439,14 +470,14 @@ visibility_read site_reader::read( const Character &observer, const tripoint_abs
                             footprint );
 }
 visibility_read site_reader::read_character( const Character &observer, const Character &target,
-                                             const std::vector<tripoint_abs_omt> &footprint )
+        const std::vector<tripoint_abs_omt> &footprint )
 {
     return read_visibility( observer, observer.pos_abs(), target.pos_abs(), &target, &impl->views,
                             &impl->vehicles, footprint );
 }
 visibility_read site_reader::read_signal( const Character &observer, const tripoint_abs_ms &origin,
-                                          const tripoint_abs_ms &target,
-                                          const std::vector<tripoint_abs_omt> &footprint )
+        const tripoint_abs_ms &target,
+        const std::vector<tripoint_abs_omt> &footprint )
 {
     return read_visibility( observer, origin, target, nullptr, &impl->views, &impl->vehicles,
                             footprint );
@@ -458,9 +489,9 @@ size_t site_reader::cached_view_count() const
 // Immediate physical safety is observer-relative, independent of exact/fallback
 // acquisition rules. Reuse the decision's existing geometry and lighting views.
 static bool watch_position_safe_impl( const npc &observer,
-                                     vehicle_footprint_index &vehicles,
-                                     std::vector<std::unique_ptr<existing_view>> &lighting_views,
-                                     std::string *reason )
+                                      vehicle_footprint_index &vehicles,
+                                      std::vector<std::unique_ptr<existing_view>> &lighting_views,
+                                      std::string *reason )
 {
     const auto refuse = [reason]( const char *why ) {
         if( reason ) {
@@ -691,7 +722,7 @@ bool site_reader::watching_member( const bandit_live_world::site_record &site, c
     return watching_member( site, observer, nullptr );
 }
 bool site_reader::watching_member( const bandit_live_world::site_record &site, const npc &observer,
-                                  std::string *reason )
+                                   std::string *reason )
 {
     return watching_member_impl( site, observer, impl->vehicles, impl->views, reason );
 }

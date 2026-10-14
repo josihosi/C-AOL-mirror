@@ -6699,8 +6699,9 @@ character_id map::place_npc( const point_bub_ms &p, const string_id<npc_template
     bandit_live_world::claim_tracked_spawn( overmap_buffer.global_state.bandit_live_world,
                                             type.str(), temp->getID(), spawn_abs,
                                             overmap_special_string, map_extra_id,
-                                            [&]( const tripoint_abs_omt & candidate ) -> std::optional<std::string> {
-        if( const auto candidate_special = overmap_buffer.overmap_special_at( candidate ) ) {
+    [&]( const tripoint_abs_omt & candidate ) -> std::optional<std::string> {
+        if( const auto candidate_special = overmap_buffer.overmap_special_at( candidate ) )
+        {
             return candidate_special->str();
         }
         return std::nullopt;

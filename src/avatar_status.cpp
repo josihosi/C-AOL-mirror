@@ -25,10 +25,12 @@ std::map<std::string, std::string> avatar_status_payload( const avatar &viewer )
     json.member( "observed_turn", turn );
     json.member( "provenance" );
     json.start_object();
-    json.member( "health", "Native Character body-part HP getters used by sidebar widgets; exact native values, not a claim that the current medical view displays numbers." );
+    json.member( "health",
+                 "Native Character body-part HP getters used by sidebar widgets; exact native values, not a claim that the current medical view displays numbers." );
     json.member( "stamina", "Character::get_stamina/get_stamina_max, as used by sidebar widgets." );
     json.member( "needs", "Native display::*_text_color labels and colors; blank text remains blank." );
-    json.member( "weapon", "Character::get_wielded_item and weapname_simple/mode/ammo; ammo text preserves native firing-mode and pocket handling." );
+    json.member( "weapon",
+                 "Character::get_wielded_item and weapname_simple/mode/ammo; ammo text preserves native firing-mode and pocket handling." );
     json.end_object();
     json.member( "health" );
     json.start_object();
@@ -53,7 +55,7 @@ std::map<std::string, std::string> avatar_status_payload( const avatar &viewer )
     json.end_object();
     json.member( "needs" );
     json.start_object();
-    const auto label = [&]( const std::string &name, const std::pair<std::string, nc_color> &value ) {
+    const auto label = [&]( const std::string & name, const std::pair<std::string, nc_color> &value ) {
         json.member( name );
         json.start_object();
         json.member( "text", value.first );
@@ -107,7 +109,8 @@ std::map<std::string, std::string> avatar_status_payload( const avatar &viewer )
     effect_json.member( "schema", "caol-avatar-named-effects-v1" );
     effect_json.member( "actor_id", actor_id );
     effect_json.member( "observed_turn", turn );
-    effect_json.member( "provenance", "Creature::get_effects with nonempty effect::disp_name, disp_desc and disp_mod_source_info, as read by player info. Named current effects only; excludes synthesized Effects-tab entries." );
+    effect_json.member( "provenance",
+                        "Creature::get_effects with nonempty effect::disp_name, disp_desc and disp_mod_source_info, as read by player info. Named current effects only; excludes synthesized Effects-tab entries." );
     effect_json.member( "entries", effects );
     effect_json.end_object();
     return { { "avatar_status", status.str() }, { "avatar_effects", effect_text.str() } };

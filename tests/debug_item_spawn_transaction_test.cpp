@@ -17,14 +17,12 @@ namespace
 class scoped_r022_environment
 {
     public:
-        scoped_r022_environment()
-        {
+        scoped_r022_environment() {
             save( "OPENCLAW_HARNESS_RUN_ID", run_id_, had_run_id_ );
             save( "OPENCLAW_HARNESS_R022_TRANSACTION_ID", transaction_id_, had_transaction_id_ );
         }
 
-        ~scoped_r022_environment()
-        {
+        ~scoped_r022_environment() {
             restore( "OPENCLAW_HARNESS_RUN_ID", run_id_, had_run_id_ );
             restore( "OPENCLAW_HARNESS_R022_TRANSACTION_ID", transaction_id_, had_transaction_id_ );
             debug_menu::reset_harness_item_setup();
@@ -105,7 +103,7 @@ TEST_CASE( "r022_harness_item_setup_is_run_scoped_and_receipted",
     CHECK( cleanup_failure->cleanup.failure == "declared destination is outside the loaded map" );
 
     const auto retained_cleanup_failure = debug_menu::process_harness_item_setup(
-                                            get_avatar().pos_bub() );
+            get_avatar().pos_bub() );
     REQUIRE( retained_cleanup_failure );
     CHECK_FALSE( retained_cleanup_failure->transaction.accepted );
     CHECK_FALSE( retained_cleanup_failure->cleanup.accepted );
@@ -228,7 +226,8 @@ TEST_CASE( "debug_item_spawn_transaction_rejects_frozen_negative_controls",
     CHECK( here.i_at( destination ).size() == 1 );
 
     const tripoint_bub_ms empty_destination = destination + tripoint::east;
-    debug_menu::debug_item_spawn_request invalid_type = make_request( empty_destination, "r022-invalid" );
+    debug_menu::debug_item_spawn_request invalid_type = make_request( empty_destination,
+            "r022-invalid" );
     invalid_type.type = itype_id( "r022_missing_item_type" );
     const debug_menu::debug_item_spawn_receipt invalid_type_receipt =
         debug_menu::debug_item_spawn_transaction( invalid_type );

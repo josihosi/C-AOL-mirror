@@ -117,9 +117,9 @@ struct attack_callback_snapshot {
 std::optional<attack_callback_snapshot> record_attack_callback_entry(
     const npc &victim, const Creature &attacker );
 void record_attack_callback_outcome( const std::optional<attack_callback_snapshot> &entry,
-                                    const npc &victim, bool shakedown_released,
-                                    bool active_covert_scout, std::string_view anger_branch,
-                                    bool alarm_invoked, bool alarm_raised );
+                                     const npc &victim, bool shakedown_released,
+                                     bool active_covert_scout, std::string_view anger_branch,
+                                     bool alarm_invoked, bool alarm_raised );
 void record_applied_damage( const Creature *source, const Creature &victim,
                             std::string_view body_part, int hp_before, int hp_after );
 void record_confirmed_death( const Creature &victim, const Creature *killer );
@@ -141,8 +141,8 @@ struct scout_threat_read {
     std::string_view reason;
 };
 void record_scout_threat_read( const npc &observer, const Creature &creature,
-                              const bandit_live_world::site_record &site,
-                              std::string_view caller, const scout_threat_read &read );
+                               const bandit_live_world::site_record &site,
+                               std::string_view caller, const scout_threat_read &read );
 
 struct scout_alarm_response_read {
     std::optional<bool> source_available;

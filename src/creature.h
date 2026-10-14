@@ -260,7 +260,7 @@ class creature_identity
     public:
         creature_identity();
         creature_identity( const creature_identity & );
-        creature_identity( creature_identity && other ) noexcept : value_( other.value_ ) {}
+        creature_identity( creature_identity &&other ) noexcept : value_( other.value_ ) {}
         creature_identity &operator=( const creature_identity & ) noexcept {
             return *this;
         }
@@ -435,8 +435,8 @@ class Creature : public viewer
         // Explicit optical observation; ordinary combat perception remains unchanged.
         bool sees_with_optics( const map &here, const Creature &critter, float magnification ) const;
         bool sees_site_with_optics( const map &here, const Creature &critter, float magnification,
-                                   const std::vector<tripoint_abs_omt> &footprint,
-                                   float observer_light ) const;
+                                    const std::vector<tripoint_abs_omt> &footprint,
+                                    float observer_light ) const;
         /*@}*/
 
         /**

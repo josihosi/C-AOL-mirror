@@ -475,7 +475,7 @@ class item_contents
                            bool restack_charges, bool ignore_contents );
         template<typename Item>
         ret_val<item *> insert_item_impl( Item &&it, pocket_type pk_type,
-                                         bool ignore_contents, bool unseal_pockets, bool restack_charges );
+                                          bool ignore_contents, bool unseal_pockets, bool restack_charges );
         template<typename Item>
         void add_pocket_impl( Item &&pocket_item );
         /**

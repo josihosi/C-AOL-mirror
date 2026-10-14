@@ -81,7 +81,7 @@ class horde_map
         int attract_entities_to_light( const tripoint_abs_ms &origin, int intensity,
                                        int observer_radius_sm, const std::string &sample_id,
                                        const time_point &observed, const std::function<bool(
-                                                   const tripoint_abs_ms &)> &visible = {},
+                                           const tripoint_abs_ms & )> &visible = {},
                                        int *candidate_count = nullptr );
         // Called from the existing ordinary horde tick.  Expired light-only
         // interest must return to the idle spatial bucket rather than remain

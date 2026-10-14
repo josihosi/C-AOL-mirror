@@ -2494,7 +2494,7 @@ std::vector<uint32_t> renderer_recovery_test_support::read_display_pixels( const
     }
     std::vector<uint32_t> pixels( rect.w * rect.h );
     if( !RenderReadPixels( renderer, &rect, SDL_PIXELFORMAT_ARGB8888, pixels.data(),
-                          rect.w * sizeof( uint32_t ) ) ) {
+                           rect.w * sizeof( uint32_t ) ) ) {
         throw std::runtime_error( "Software fixture pixel read failed" );
     }
     return pixels;
@@ -5929,7 +5929,7 @@ static void CheckMessages()
                 case CATA_TEXTINPUT:
                     if( openclaw_harness_wait_input_trace_enabled() ) {
                         openclaw_harness_trace_wait_sdl_event( "textinput",
-                                CataKeysym{ 0, 0, SDL_SCANCODE_UNKNOWN }, ev.text.text );
+                                                               CataKeysym{ 0, 0, SDL_SCANCODE_UNKNOWN }, ev.text.text );
                     }
                     if( !add_alt_code( *ev.text.text ) ) {
                         if( strlen( ev.text.text ) > 0 ) {

@@ -1068,7 +1068,7 @@ void talk_function::remove_stolen_status( npc &p )
     // it may no longer designate a live held item after a return/removal.
     // Historical witnessed-pickup facts remain, but no longer authorize a new
     // accusation after this property's native old-owner status is settled.
-    get_player_character().visit_items( [&]( item *goods, item * ) {
+    get_player_character().visit_items( [&]( item * goods, item * ) {
         if( goods == p.known_stolen_item && goods->is_old_owner( p ) ) {
             goods->remove_old_owner();
         }

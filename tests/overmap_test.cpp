@@ -139,7 +139,7 @@ TEST_CASE( "predator cross-overmap handoff cannot advance twice in one turn",
     REQUIRE( destination_om != nullptr );
 
     const tripoint_abs_ms source = project_combine( source_om_pos,
-                                     tripoint_om_ms( OMAPX * 2 * SEEX - 1, 20 * SEEX, 0 ) );
+                                   tripoint_om_ms( OMAPX * 2 * SEEX - 1, 20 * SEEX, 0 ) );
     const tripoint_abs_ms handoff = source + point_rel_ms( 1, 0 );
     const tripoint_abs_ms goal = handoff + point_rel_ms( 1, 0 );
     REQUIRE( project_to<coords::om>( handoff ).xy() == destination_om_pos );
@@ -160,8 +160,10 @@ TEST_CASE( "predator cross-overmap handoff cannot advance twice in one turn",
             }
         }
     }
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         // A short-lived alert horde supplies a native active-map node.  Its
         // public extraction/insertion API lets this test put the predator
         // representation into that same production scheduler bucket without
@@ -275,7 +277,7 @@ TEST_CASE( "just-evolved predator uses transactional ownership handoff",
     REQUIRE( destination_om != nullptr );
 
     const tripoint_abs_ms source = project_combine( source_om_pos,
-                                     tripoint_om_ms( OMAPX * 2 * SEEX - 1, 20 * SEEX, 0 ) );
+                                   tripoint_om_ms( OMAPX * 2 * SEEX - 1, 20 * SEEX, 0 ) );
     const tripoint_abs_ms handoff = source + point_rel_ms( 1, 0 );
     REQUIRE( project_to<coords::om>( handoff ).xy() == destination_om_pos );
     REQUIRE_FALSE( get_map().inbounds( handoff ) );
@@ -569,7 +571,8 @@ TEST_CASE( "overmap_special_instance_origins_roundtrip", "[overmap][save]" )
     CHECK( collect_origin_counts( *reloaded ) == live_origin_counts );
 }
 
-TEST_CASE( "horde_light_interest_save_roundtrip_and_legacy_entry", "[overmap][save][hordes][light]" )
+TEST_CASE( "horde_light_interest_save_roundtrip_and_legacy_entry",
+           "[overmap][save][hordes][light]" )
 {
     const point_abs_om origin{};
     const tripoint_om_ms local_position( 60, 60, 0 );

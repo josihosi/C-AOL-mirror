@@ -446,7 +446,8 @@ void npc::begin_llm_action( llm_action_kind kind,
     }
     state.active_status.kind = kind;
     state.active_status.phase = llm_action_phase::requested;
-    state.active_status.request_id = request_id_override.empty() ? state.request_id : request_id_override;
+    state.active_status.request_id = request_id_override.empty() ? state.request_id :
+                                     request_id_override;
     state.active_status.serial = state.next_action_serial++;
     state.active_status.target_hint = target_hint;
     state.active_status.target_name = target_name;
@@ -604,15 +605,15 @@ void npc::emit_llm_action_status( llm_action_status &status ) const
     }
     const std::string facts = join_debug_facts( status.debug_facts );
     llm_intent::log_event( string_format(
-                              "action_status npc=\"%s\" kind=\"%s\" phase=\"%s\" reason=\"%s\" request=\"%s\" target_hint=\"%s\" target=\"%s\" facts=\"%s\"",
-                              debug_menu::capture_json_escape( get_name() ),
-                              debug_menu::capture_json_escape( llm_action_kind_name( status.kind ) ),
-                              debug_menu::capture_json_escape( llm_action_phase_name( status.phase ) ),
-                              debug_menu::capture_json_escape( status.reason_code ),
-                              debug_menu::capture_json_escape( status.request_id ),
-                              debug_menu::capture_json_escape( status.target_hint ),
-                              debug_menu::capture_json_escape( status.target_name ),
-                              debug_menu::capture_json_escape( facts ) ) );
+                               "action_status npc=\"%s\" kind=\"%s\" phase=\"%s\" reason=\"%s\" request=\"%s\" target_hint=\"%s\" target=\"%s\" facts=\"%s\"",
+                               debug_menu::capture_json_escape( get_name() ),
+                               debug_menu::capture_json_escape( llm_action_kind_name( status.kind ) ),
+                               debug_menu::capture_json_escape( llm_action_phase_name( status.phase ) ),
+                               debug_menu::capture_json_escape( status.reason_code ),
+                               debug_menu::capture_json_escape( status.request_id ),
+                               debug_menu::capture_json_escape( status.target_hint ),
+                               debug_menu::capture_json_escape( status.target_name ),
+                               debug_menu::capture_json_escape( facts ) ) );
 
     if( get_option<bool>( "DEBUG_LLM_INTENT_UI" ) ) {
         std::string ui = string_format( "LLM %s %s", llm_action_kind_name( status.kind ),
@@ -1580,8 +1581,8 @@ void npc::travel_overmap( const tripoint_abs_ms &position )
     const tripoint_abs_omt pos = project_to<coords::omt>( position );
     const point_abs_om pos_om_old = project_to<coords::om>( pos_abs_omt().xy() );
     const bool completes_assigned_route = is_travelling() && pos == goal &&
-                                         pos != pos_abs_omt() && !omt_path.empty() && omt_path.front() == goal &&
-                                         omt_path.back() == pos;
+                                          pos != pos_abs_omt() && !omt_path.empty() && omt_path.front() == goal &&
+                                          omt_path.back() == pos;
     spawn_at_precise( position );
     const point_abs_om pos_om_new = project_to<coords::om>( pos_abs_omt().xy() );
     if( pos_abs_omt() == goal ) {
@@ -2236,8 +2237,8 @@ npc_opinion npc::get_opinion_values( const Character &you ) const
     return npc_values;
 }
 
-const struct bandit_live_world_projection_lease &npc::get_bandit_live_world_projection_lease() const
-{
+const struct bandit_live_world_projection_lease &npc::get_bandit_live_world_projection_lease()
+const {
     return bandit_live_world_projection_lease;
 }
 
@@ -2278,7 +2279,7 @@ std::vector<npc *> bandit_live_world_projection_lease_copies( npc &member )
 void sync_bandit_live_world_projection_lease_copies(
     npc &member, const bandit_live_world_projection_lease &lease )
 {
-    const auto apply = [&lease]( npc &target ) {
+    const auto apply = [&lease]( npc & target ) {
         if( lease.present ) {
             target.set_bandit_live_world_projection_lease( lease );
         } else {
@@ -2393,7 +2394,7 @@ void npc::on_attacked( const Creature &attacker )
     hallucination_die( &here, nullptr );
 
     const bool theft_conflict_attack = attacker.is_npc() &&
-        attacker.as_npc()->knows_property_theft_by( getID() );
+                                       attacker.as_npc()->knows_property_theft_by( getID() );
     if( theft_conflict_attack && !is_dead() ) {
         property_conflict_attackers.insert( attacker.as_npc()->getID() );
     }
@@ -2447,8 +2448,10 @@ void npc_taken_property::serialize( JsonOut &json ) const
 
 void npc_taken_property::deserialize( const JsonObject &json )
 {
-    json.read( "source_uid", source_uid ); json.read( "type", type );
-    json.read( "quantity", quantity ); json.read( "owner", owner );
+    json.read( "source_uid", source_uid );
+    json.read( "type", type );
+    json.read( "quantity", quantity );
+    json.read( "owner", owner );
     json.read( "position", position );
 }
 
@@ -2459,47 +2462,64 @@ bool npc_property_theft::valid() const
            !property.empty() && !culprit_ids.empty() &&
            ( voluntary_pickup || ( !site_id.empty() && !operation_id.empty() && generation > 0 &&
                                    collector_id.is_valid() && receiver_id.is_valid() ) ) &&
-           std::all_of( culprit_ids.begin(), culprit_ids.end(), [&]( character_id id ) {
-               return id.is_valid() && unique.insert( id ).second;
-           } ) && std::all_of( property.begin(), property.end(), [&]( const auto &goods ) {
-               return goods.source_uid != 0 && goods.type.is_valid() && goods.quantity > 0 &&
-                      goods.owner == wronged_faction;
-           } );
+    std::all_of( culprit_ids.begin(), culprit_ids.end(), [&]( character_id id ) {
+        return id.is_valid() && unique.insert( id ).second;
+    } ) &&std::all_of( property.begin(), property.end(), [&]( const auto & goods ) {
+        return goods.source_uid != 0 && goods.type.is_valid() && goods.quantity > 0 &&
+               goods.owner == wronged_faction;
+    } );
 }
 
 void npc_property_theft::serialize( JsonOut &json ) const
 {
     json.start_object();
-    json.member( "incident_key", incident_key ); json.member( "site_id", site_id );
-    json.member( "operation_id", operation_id ); json.member( "generation", generation );
-    json.member( "collector_id", collector_id ); json.member( "receiver_id", receiver_id );
-    json.member( "wronged_faction", wronged_faction ); json.member( "culprit_ids", culprit_ids );
-    json.member( "property", property ); json.member( "when", when );
+    json.member( "incident_key", incident_key );
+    json.member( "site_id", site_id );
+    json.member( "operation_id", operation_id );
+    json.member( "generation", generation );
+    json.member( "collector_id", collector_id );
+    json.member( "receiver_id", receiver_id );
+    json.member( "wronged_faction", wronged_faction );
+    json.member( "culprit_ids", culprit_ids );
+    json.member( "property", property );
+    json.member( "when", when );
     json.member( "voluntary_pickup", voluntary_pickup );
     json.end_object();
 }
 
 void npc_property_theft::deserialize( const JsonObject &json )
 {
-    json.read( "incident_key", incident_key ); json.read( "site_id", site_id );
-    json.read( "operation_id", operation_id ); json.read( "generation", generation );
-    json.read( "collector_id", collector_id ); json.read( "receiver_id", receiver_id );
-    json.read( "wronged_faction", wronged_faction ); json.read( "culprit_ids", culprit_ids );
-    json.read( "property", property ); json.read( "when", when );
+    json.read( "incident_key", incident_key );
+    json.read( "site_id", site_id );
+    json.read( "operation_id", operation_id );
+    json.read( "generation", generation );
+    json.read( "collector_id", collector_id );
+    json.read( "receiver_id", receiver_id );
+    json.read( "wronged_faction", wronged_faction );
+    json.read( "culprit_ids", culprit_ids );
+    json.read( "property", property );
+    json.read( "when", when );
     json.read( "voluntary_pickup", voluntary_pickup );
-    if( !valid() ) { json.throw_error( "Invalid witnessed property theft" ); }
+    if( !valid() ) {
+        json.throw_error( "Invalid witnessed property theft" );
+    }
 }
 
 void npc::remember_witnessed_pickup( const item &goods, const Character &thief )
 {
     if( is_blind() || in_sleep_state() || has_effect( efftype_id( "narcosis" ) ) ||
-        has_effect( effect_npc_suspend ) ) { return; }
+        has_effect( effect_npc_suspend ) ) {
+        return;
+    }
     npc_property_theft fact;
     fact.incident_key = "pickup:" + std::to_string( goods.uid().get_value() );
     fact.wronged_faction = goods.get_owner();
     fact.culprit_ids = { thief.getID() };
-    fact.property = { { goods.uid().get_value(), goods.typeId(),
-        goods.count_by_charges() ? goods.charges : 1, goods.get_owner(), thief.pos_abs() } };
+    fact.property = { {
+            goods.uid().get_value(), goods.typeId(),
+            goods.count_by_charges() ? goods.charges : 1, goods.get_owner(), thief.pos_abs()
+        }
+    };
     fact.when = calendar::turn;
     fact.voluntary_pickup = true;
     learn_property_theft( fact );
@@ -2511,7 +2531,8 @@ bool npc::learn_property_theft( const npc_property_theft &theft )
         is_hallucination() ) {
         return false;
     }
-    auto existing = std::find_if( known_property_thefts.begin(), known_property_thefts.end(), [&]( const auto &known ) {
+    auto existing = std::find_if( known_property_thefts.begin(),
+    known_property_thefts.end(), [&]( const auto & known ) {
         return known.incident_key == theft.incident_key && known.wronged_faction == theft.wronged_faction;
     } );
     if( existing == known_property_thefts.end() ) {
@@ -2521,30 +2542,41 @@ bool npc::learn_property_theft( const npc_property_theft &theft )
     if( existing->site_id != theft.site_id || existing->operation_id != theft.operation_id ||
         existing->generation != theft.generation || existing->collector_id != theft.collector_id ||
         existing->receiver_id != theft.receiver_id || existing->when != theft.when ||
-        existing->voluntary_pickup != theft.voluntary_pickup ) { return false; }
+        existing->voluntary_pickup != theft.voluntary_pickup ) {
+        return false;
+    }
     npc_property_theft merged = *existing;
     bool changed = false;
     for( const auto &source : theft.property ) {
-        const auto previous = std::find_if( merged.property.begin(), merged.property.end(), [&]( const auto &known ) {
+        const auto previous = std::find_if( merged.property.begin(),
+        merged.property.end(), [&]( const auto & known ) {
             return known.source_uid == source.source_uid;
         } );
         if( previous == merged.property.end() ) {
-            merged.property.push_back( source ); changed = true;
+            merged.property.push_back( source );
+            changed = true;
         } else if( previous->owner != source.owner || previous->quantity != source.quantity ||
-                   previous->position != source.position || previous->type != source.type ) { return false; }
-    }
-    for( const auto id : theft.culprit_ids ) {
-        if( std::find( merged.culprit_ids.begin(), merged.culprit_ids.end(), id ) == merged.culprit_ids.end() ) {
-            merged.culprit_ids.push_back( id ); changed = true;
+                   previous->position != source.position || previous->type != source.type ) {
+            return false;
         }
     }
-    if( changed ) { *existing = std::move( merged ); }
+    for( const auto id : theft.culprit_ids ) {
+        if( std::find( merged.culprit_ids.begin(), merged.culprit_ids.end(),
+                       id ) == merged.culprit_ids.end() ) {
+            merged.culprit_ids.push_back( id );
+            changed = true;
+        }
+    }
+    if( changed ) {
+        *existing = std::move( merged );
+    }
     return changed;
 }
 
 bool npc::knows_property_theft_by( character_id culprit ) const
 {
-    return std::any_of( known_property_thefts.begin(), known_property_thefts.end(), [&]( const auto &known ) {
+    return std::any_of( known_property_thefts.begin(),
+    known_property_thefts.end(), [&]( const auto & known ) {
         return !known.voluntary_pickup && known.wronged_faction == get_fac_id() &&
                std::find( known.culprit_ids.begin(), known.culprit_ids.end(), culprit ) != known.culprit_ids.end();
     } );
@@ -2553,13 +2585,17 @@ bool npc::knows_property_theft_by( character_id culprit ) const
 void npc::announce_property_theft( const std::string &incident_key )
 {
     if( is_dead() || is_fake() || is_mute() || is_hallucination() || in_sleep_state() ||
-        has_effect( efftype_id( "narcosis" ) ) || has_effect( effect_npc_suspend ) ) { return; }
+        has_effect( efftype_id( "narcosis" ) ) || has_effect( effect_npc_suspend ) ) {
+        return;
+    }
     const auto fact = std::find_if( known_property_thefts.begin(), known_property_thefts.end(),
-    [&]( const auto &known ) {
+    [&]( const auto & known ) {
         return known.incident_key == incident_key && !known.voluntary_pickup &&
                known.wronged_faction == get_fac_id() && known.valid();
     } );
-    if( fact == known_property_thefts.end() ) { return; }
+    if( fact == known_property_thefts.end() ) {
+        return;
+    }
     const auto utterance = std::make_shared<const npc_property_theft>( *fact );
     // say owns the actual native voice event. Only an emitted event carries
     // this immutable utterance through ordinary hearing, independent of later
@@ -2606,9 +2642,9 @@ std::string npc::faction_alarm_group() const
     for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
         using namespace bandit_live_world;
         if( site.retired_empty_site || ( site.site_kind != owned_site_kind::bandit_camp &&
-                                      site.site_kind != owned_site_kind::bandit_work_camp &&
-                                      site.site_kind != owned_site_kind::bandit_cabin &&
-                                      site.site_kind != owned_site_kind::cannibal_camp ) ) {
+                                         site.site_kind != owned_site_kind::bandit_work_camp &&
+                                         site.site_kind != owned_site_kind::bandit_cabin &&
+                                         site.site_kind != owned_site_kind::cannibal_camp ) ) {
             continue;
         }
         const member_record *member = site.find_member( getID() );
@@ -2658,7 +2694,8 @@ bool npc::faction_alarm_requires_response() const
     }
     const bandit_live_world::site_record *site = bandit_live_world::active_operation_duty_site_for(
                 overmap_buffer.global_state.bandit_live_world, getID() );
-    if( site == nullptr || site->active_outing.kind != bandit_live_world::outing_kind::structural_sortie ||
+    if( site == nullptr ||
+        site->active_outing.kind != bandit_live_world::outing_kind::structural_sortie ||
         site->active_outing.job_type != "scout" ) {
         return true;
     }
@@ -2689,9 +2726,9 @@ bool npc::faction_alarm_requires_response() const
         return finish( true, "source is incapacitated" );
     }
     read.source_flight = source->get_attitude() == NPCATT_FLEE ||
-                        source->get_attitude() == NPCATT_FLEE_TEMP ||
-                        source->has_effect( effect_npc_flee_player ) ||
-                        source->has_effect( efftype_id( "npc_run_away" ) );
+                         source->get_attitude() == NPCATT_FLEE_TEMP ||
+                         source->has_effect( effect_npc_flee_player ) ||
+                         source->has_effect( efftype_id( "npc_run_away" ) );
     if( *read.source_flight ) {
         return finish( true, "source is in native flight" );
     }
@@ -2785,7 +2822,7 @@ bool npc::scouting_creature_requires_response( const Creature &creature,
                 read.special_range = gun->get_max_range();
                 const auto ammunition = critter.ammo.find( gun->ammo_type );
                 const bool in_range = std::any_of( gun->ranges.begin(), gun->ranges.end(),
-                [distance]( const auto &range ) {
+                [distance]( const auto & range ) {
                     return distance >= range.first.first && distance <= range.first.second;
                 } );
                 if( in_range && critter.sees( here, *member ) &&
@@ -2804,7 +2841,7 @@ bool npc::scouting_creature_requires_response( const Creature &creature,
                     if( !ray.empty() ) {
                         ray.pop_back();
                     }
-                    const bool blocked = std::any_of( ray.begin(), ray.end(), [&]( const auto &point ) {
+                    const bool blocked = std::any_of( ray.begin(), ray.end(), [&]( const auto & point ) {
                         return ( point != critter.pos_bub() && get_creature_tracker().creature_at( point ) ) ||
                                ( here.impassable( point ) &&
                                  !here.has_flag( ter_furn_flag::TFLAG_THIN_OBSTACLE, point ) );
@@ -2821,7 +2858,8 @@ bool npc::scouting_creature_requires_response( const Creature &creature,
         }
         if( !critter.has_flag( mon_flag_IMMOBILE ) && !critter.has_flag( json_flag_CANNOT_MOVE ) &&
             critter.can_reach_to( member->pos_bub() ) && critter.type->melee_dice > 0 ) {
-            read.route_reachable = !here.route( critter, pathfinding_target::point( member->pos_bub() ) ).empty();
+            read.route_reachable = !here.route( critter,
+                                                pathfinding_target::point( member->pos_bub() ) ).empty();
             if( *read.route_reachable ) {
                 return finish( true, "native attack approach has a physical route" );
             }
@@ -2845,8 +2883,8 @@ bool npc::raise_faction_alarm( const tripoint_abs_ms &incident, const bool recei
     const time_point until = active ? faction_alarm->until : calendar::turn + 30_minutes;
     faction_alarm = npc_alarm{ group, getID(), incident, until, received_attack };
     raid_decision_trace::record_alarm_edge( *this, *faction_alarm,
-                                          received_attack ? "received_attack" : "perceived",
-                                          in_sleep_state() );
+                                            received_attack ? "received_attack" : "perceived",
+                                            in_sleep_state() );
     sounds::sound( pos_bub(), get_shout_volume(), sounds::sound_t::alert,
                    _( "To arms!" ), *faction_alarm );
     return true;
@@ -2901,8 +2939,8 @@ void npc::reconcile_alarm_response()
         interrupt_ordinary_sleep_for_duty();
         if( was_sleeping && !in_sleep_state() ) {
             raid_decision_trace::record_sleep_edge( *this, "duty_alarm_wake",
-                has_active_faction_alarm() ? faction_alarm->group :
-                "basecamp:" + assigned_camp->to_string() );
+                                                    has_active_faction_alarm() ? faction_alarm->group :
+                                                    "basecamp:" + assigned_camp->to_string() );
         }
     }
 }
@@ -3999,7 +4037,7 @@ bool npc::is_enemy() const
 bool npc::has_ecology_covert_noncombat_relationship( const Character &other ) const
 {
     if( hit_by_player || ( !other.is_avatar() &&
-                          !( other.is_npc() && other.as_npc()->is_player_ally() ) ) ) {
+                           !( other.is_npc() && other.as_npc()->is_player_ally() ) ) ) {
         return false;
     }
     return has_ecology_covert_player_camp_assignment();
@@ -4817,7 +4855,7 @@ time_duration npc::catch_up_body()
                 // Bulk aging must obey the same permanence/freeze contract as
                 // Creature::process_effects. The final native turns own removal.
                 if( e.is_permanent() || ( has_flag( json_flag_FREEZE_EFFECTS ) &&
-                                         !e.has_flag( json_flag_FREEZE_EFFECTS ) ) ) {
+                                          !e.has_flag( json_flag_FREEZE_EFFECTS ) ) ) {
                     continue;
                 }
                 const time_duration &time_left = e.get_duration();

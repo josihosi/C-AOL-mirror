@@ -113,10 +113,10 @@ TEST_CASE( "debug_overmap_spawn_groups_resolve_requested_monsters", "[debug_menu
         counts_by_option.emplace( option.id, spawn_counts_for_option( option ) );
     }
 
-    CHECK( counts_by_option.at( "medium_horde_5_omt" ) == std::map<mtype_id, int>{ { mon_zombie, 30 } } );
-    CHECK( counts_by_option.at( "medium_horde_10_omt" ) == std::map<mtype_id, int>{ { mon_zombie, 30 } } );
-    CHECK( counts_by_option.at( "writhing_stalker_5_omt" ) == std::map<mtype_id, int>{ { mon_writhing_stalker, 1 } } );
-    CHECK( counts_by_option.at( "writhing_stalker_10_omt" ) == std::map<mtype_id, int>{ { mon_writhing_stalker, 1 } } );
-    CHECK( counts_by_option.at( "zombie_rider_5_omt" ) == std::map<mtype_id, int>{ { mon_zombie_rider, 1 } } );
-    CHECK( counts_by_option.at( "zombie_rider_10_omt" ) == std::map<mtype_id, int>{ { mon_zombie_rider, 1 } } );
+    CHECK( counts_by_option.at( "medium_horde_5_omt" ) == std::map<mtype_id, int> { { mon_zombie, 30 } } );
+    CHECK( counts_by_option.at( "medium_horde_10_omt" ) == std::map<mtype_id, int> { { mon_zombie, 30 } } );
+    CHECK( counts_by_option.at( "writhing_stalker_5_omt" ) == std::map<mtype_id, int> { { mon_writhing_stalker, 1 } } );
+    CHECK( counts_by_option.at( "writhing_stalker_10_omt" ) == std::map<mtype_id, int> { { mon_writhing_stalker, 1 } } );
+    CHECK( counts_by_option.at( "zombie_rider_5_omt" ) == std::map<mtype_id, int> { { mon_zombie_rider, 1 } } );
+    CHECK( counts_by_option.at( "zombie_rider_10_omt" ) == std::map<mtype_id, int> { { mon_zombie_rider, 1 } } );
 }

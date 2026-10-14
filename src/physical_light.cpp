@@ -384,7 +384,7 @@ escape evaluate_escape( map &here, const tripoint_bub_ms &source )
 
 smoke_support evaluate_smoke_support( map &here, const tripoint_bub_ms &source )
 {
-    const auto known = [&here]( const tripoint_bub_ms &p ) {
+    const auto known = [&here]( const tripoint_bub_ms & p ) {
         return here.inbounds( p ) &&
                MAPBUFFER.lookup_submap_cached( project_to<coords::sm>( here.get_abs( p ) ) ) &&
                here.ter( p ) != ter_str_id::NULL_ID();
@@ -419,7 +419,7 @@ smoke_support evaluate_smoke_support( map &here, const tripoint_bub_ms &source )
         // equal the lower terrain's default roof, but solid rock/walls are not
         // ordinary building floors or roof decks. Never search for a LOS win.
         if( building_plume && ( !here.ter( below )->roof ||
-                               here.move_cost( above ) <= 0 || !here.is_transparent( above ) ) ) {
+                                here.move_cost( above ) <= 0 || !here.is_transparent( above ) ) ) {
             return { std::nullopt, "unsupported_roof_geometry" };
         }
         if( building_plume && exterior ) {

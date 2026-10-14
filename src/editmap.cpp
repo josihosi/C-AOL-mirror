@@ -434,11 +434,13 @@ void editmap_ui::handle_action()
         return actions;
     };
     const auto make_semantic_scope = [&]() -> std::optional<semantic_surface_scope> {
-        if( semantic_manager == nullptr ) {
+        if( semantic_manager == nullptr )
+        {
             return std::nullopt;
         }
         return std::optional<semantic_surface_scope>( std::in_place, *semantic_manager, "map_editor", "Map editor", semantic_payload(),
-        semantic_actions(), [&brush, &semantic_native_action]( const semantic_action_request &request ) {
+                semantic_actions(), [&brush, &semantic_native_action]( const semantic_action_request & request )
+        {
             static const std::map<std::string, std::string> action_map = {
                 { "editmap.confirm", "CONFIRM" },
                 { "editmap.close", "QUIT" },
@@ -1603,7 +1605,7 @@ void editmap_ui::mapgen_retarget()
         };
         semantic_scope.emplace( *semantic_manager, "map_editor_retarget", "Mapgen retarget",
                                 semantic_payload, semantic_actions,
-        [&semantic_native_action]( const semantic_action_request &request ) {
+        [&semantic_native_action]( const semantic_action_request & request ) {
             if( request.action_id == "editmap.retarget" ) {
                 const std::string target_id = request.stable_id.value_or( "" );
                 if( target_id == "north" ) {

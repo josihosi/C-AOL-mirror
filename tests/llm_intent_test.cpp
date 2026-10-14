@@ -83,10 +83,12 @@ TEST_CASE( "llm_intent_snapshot_includes_attitude_and_lettered_targets", "[llm_i
     CAPTURE( neutral_npc.disp_name() );
     CAPTURE( zombie.disp_name() );
 
-    const std::string snapshot = llm_intent::build_snapshot_for_test( listener, "Hold there.", "req-snapshot" );
+    const std::string snapshot = llm_intent::build_snapshot_for_test( listener, "Hold there.",
+                                 "req-snapshot" );
 
     CHECK( snapshot.find( "creature legend with attitude and threat level:" ) != std::string::npos );
-    CHECK( snapshot.find( "map axes: +x east/right, -x west/left, +y north/up, -y south/down" ) != std::string::npos );
+    CHECK( snapshot.find( "map axes: +x east/right, -x west/left, +y north/up, -y south/down" ) !=
+           std::string::npos );
     CHECK( snapshot.find( "-20" ) != std::string::npos );
     CHECK( snapshot.find( "+20" ) != std::string::npos );
     CHECK( snapshot.find( "|.........|.........|.........|.........|" ) != std::string::npos );
@@ -104,7 +106,8 @@ TEST_CASE( "llm_intent_prompt_explicitly_allows_lettered_targets", "[llm_intent]
     const std::string prompt = llm_intent::build_action_prompt_for_test( "Listener NPC",
                                "Do it.", "snapshot" );
 
-    CHECK( prompt.find( "Any creature with a map letter is a valid explicit target handle, including the player, friendlies, neutrals, and hostiles." ) != std::string::npos );
+    CHECK( prompt.find( "Any creature with a map letter is a valid explicit target handle, including the player, friendlies, neutrals, and hostiles." )
+           != std::string::npos );
     CHECK( prompt.find( "attack=a" ) != std::string::npos );
     CHECK( prompt.find( "attack=b" ) != std::string::npos );
 }
@@ -115,7 +118,8 @@ TEST_CASE( "llm_intent_prompt_uses_delta_move_contract", "[llm_intent]" )
                                "Move there.", "snapshot" );
 
     CHECK( prompt.find( "move=<dx>,<dy> <state>" ) != std::string::npos );
-    CHECK( prompt.find( "Positive x is east/right, negative x is west/left, positive y is north/up, and negative y is south/down." ) != std::string::npos );
+    CHECK( prompt.find( "Positive x is east/right, negative x is west/left, positive y is north/up, and negative y is south/down." )
+           != std::string::npos );
     CHECK( prompt.find( "dx column markers and dy row labels" ) != std::string::npos );
     CHECK( prompt.find( "move=0,-5 hold_position" ) != std::string::npos );
     CHECK( prompt.find( "move: S S S S S hold_position" ) == std::string::npos );
@@ -133,17 +137,17 @@ TEST_CASE( "llm_intent_can_parse_delta_move_fields", "[llm_intent]" )
     std::string error;
 
     CHECK( llm_intent::parse_move_field_for_test( "move=4,-2 hold_position", delta,
-           terminal_state, error ) );
+            terminal_state, error ) );
     CHECK( delta == point( 4, -2 ) );
     CHECK( terminal_state == "hold_position" );
 
     CHECK( llm_intent::parse_move_field_for_test( "move=-1,3 wait_here", delta,
-           terminal_state, error ) );
+            terminal_state, error ) );
     CHECK( delta == point( -1, 3 ) );
     CHECK( terminal_state == "wait_here" );
 
     CHECK( llm_intent::parse_move_field_for_test( "MOVE= -20,+20 WAIT_HERE", delta,
-           terminal_state, error ) );
+            terminal_state, error ) );
     CHECK( delta == point( -20, 20 ) );
     CHECK( terminal_state == "wait_here" );
 
@@ -164,7 +168,7 @@ TEST_CASE( "llm_intent_can_parse_delta_move_fields", "[llm_intent]" )
     CHECK( error == "Move field delta must stay within the snapshot map (-20..20)." );
 
     CHECK( llm_intent::parse_move_field_for_test( "move=1,0 wait_here", delta,
-           terminal_state, error ) );
+            terminal_state, error ) );
     CHECK( error.empty() );
 
     CHECK_FALSE( llm_intent::parse_move_field_for_test( "move=-2147483648,0 wait_here", delta,
@@ -183,7 +187,7 @@ TEST_CASE( "llm_intent_action_csv_applies_move_and_attack_contract", "[llm_inten
     CHECK( llm_intent::parse_action_csv_for_test(
                "On it|move=4,-2 wait_here|equip_gun", actions, attack_target,
                move_delta, terminal_state, error ) );
-    CHECK( actions == std::vector<std::string>{ "move=4,-2 wait_here", "equip_gun" } );
+    CHECK( actions == std::vector<std::string> { "move=4,-2 wait_here", "equip_gun" } );
     CHECK( attack_target.empty() );
     CHECK( move_delta == point( 4, -2 ) );
     CHECK( terminal_state == "wait_here" );
@@ -191,7 +195,7 @@ TEST_CASE( "llm_intent_action_csv_applies_move_and_attack_contract", "[llm_inten
     CHECK( llm_intent::parse_action_csv_for_test(
                " | Inspecting inventory... I'm carrying a sharpened rebar. | equip_melee",
                actions, attack_target, move_delta, terminal_state, error ) );
-    CHECK( actions == std::vector<std::string>{ "equip_melee" } );
+    CHECK( actions == std::vector<std::string> { "equip_melee" } );
     CHECK( attack_target.empty() );
     CHECK_FALSE( move_delta.has_value() );
     CHECK( llm_intent::parse_action_csv_speech_for_test(
@@ -216,7 +220,7 @@ TEST_CASE( "llm_intent_action_csv_applies_move_and_attack_contract", "[llm_inten
     CHECK( llm_intent::parse_action_csv_for_test(
                "Engaging|attack=a|equip_gun|follow_close panic_off", actions, attack_target,
                move_delta, terminal_state, error ) );
-    CHECK( actions == std::vector<std::string>{ "equip_gun", "follow_close", "panic_off" } );
+    CHECK( actions == std::vector<std::string> { "equip_gun", "follow_close", "panic_off" } );
     CHECK( attack_target == "a" );
     CHECK_FALSE( move_delta.has_value() );
 
@@ -269,13 +273,13 @@ TEST_CASE( "llm_intent_leading_separator_reaches_visible_speech_and_action_route
         " | Inspecting inventory... I'm carrying a sharpened rebar. | equip_melee" );
 
     const std::vector<std::pair<std::string, std::string>> messages =
-        Messages::recent_messages( 0 );
+                Messages::recent_messages( 0 );
     REQUIRE_FALSE( messages.empty() );
     CHECK( messages.back().second ==
            "Listener NPC says: \"Inspecting inventory... I'm carrying a sharpened rebar.\"" );
     CHECK( listener.has_llm_intent_actions() );
     CHECK( listener.get_llm_intent_actions_for_test() ==
-           std::vector<llm_intent_action>{ llm_intent_action::equip_melee } );
+           std::vector<llm_intent_action> { llm_intent_action::equip_melee } );
     CHECK_FALSE( llm_intent::has_request_state_for_test( listener, "req-leading-separator" ) );
 
     const std::vector<npc::llm_intent_memory_entry> memory = listener.get_llm_intent_memory();
@@ -283,7 +287,7 @@ TEST_CASE( "llm_intent_leading_separator_reaches_visible_speech_and_action_route
     CHECK( memory.back().player_utterance == "What are you carrying?" );
     CHECK( memory.back().npc_response ==
            "Inspecting inventory... I'm carrying a sharpened rebar." );
-    CHECK( memory.back().actions == std::vector<std::string>{ "equip_melee" } );
+    CHECK( memory.back().actions == std::vector<std::string> { "equip_melee" } );
 }
 
 TEST_CASE( "llm_intent_machine_event_log_preserves_utf8_json_punctuation", "[llm_intent]" )
@@ -304,9 +308,10 @@ TEST_CASE( "llm_intent_look_around_filters_and_caps_selected_items", "[llm_inten
     CHECK( llm_intent::look_around_selection_limit_for_test() == 4 );
 
     const std::vector<std::string> selected = llm_intent::parse_look_around_response_for_test(
-                "item_1:2, unknown, item_2, item_3, item_4, item_5, item_1",
-                { "adhesive bandage", "9x19mm JHP, reloaded",
-                    "Glock 9x19mm 15-round magazine", "small plastic bag", "combat knife" } );
+    "item_1:2, unknown, item_2, item_3, item_4, item_5, item_1", {
+        "adhesive bandage", "9x19mm JHP, reloaded",
+        "Glock 9x19mm 15-round magazine", "small plastic bag", "combat knife"
+    } );
     REQUIRE( selected.size() == 4 );
     CHECK( selected[0] == "adhesive bandage" );
     CHECK( selected[1] == "9x19mm JHP, reloaded" );
@@ -567,8 +572,8 @@ TEST_CASE( "llm_debug_logging_is_opt_in", "[llm_intent][logging]" )
 {
     const std::filesystem::path previous = PATH_INFO::base_path().get_unrelative_path();
     const std::filesystem::path temporary = std::filesystem::temp_directory_path() /
-            ( "caol-llm-log-test-" + std::to_string(
-                  std::chrono::steady_clock::now().time_since_epoch().count() ) );
+                                            ( "caol-llm-log-test-" + std::to_string(
+                                                    std::chrono::steady_clock::now().time_since_epoch().count() ) );
     struct restore_paths {
         std::filesystem::path previous;
         std::filesystem::path temporary;
@@ -621,7 +626,7 @@ TEST_CASE( "recorded_panic_reply_preserves_action_through_lenient_parse", "[llm_
     listener.set_fac( faction_your_followers );
     llm_intent::process_response_for_test( listener, "recorded-panic", "panic and flee", reply );
     CHECK( listener.get_llm_intent_actions_for_test() ==
-           std::vector<llm_intent_action>{ llm_intent_action::panic_on } );
+           std::vector<llm_intent_action> { llm_intent_action::panic_on } );
 }
 
 TEST_CASE( "llm_response_error_diagnostics_are_categorized_and_sanitized", "[llm_intent][logging]" )
@@ -632,7 +637,8 @@ TEST_CASE( "llm_response_error_diagnostics_are_categorized_and_sanitized", "[llm
     const std::string sanitized = llm_intent::sanitize_response_error_for_test( error );
     CHECK( sanitized == "Runner process exited (signal=13)." );
     CHECK( sanitized.find( "private prompt" ) == std::string::npos );
-    CHECK( llm_intent::classify_response_error_for_test( "Failed to write to runner stdin (Broken pipe)." ) ==
+    CHECK( llm_intent::classify_response_error_for_test( "Failed to write to runner stdin (Broken pipe)." )
+           ==
            "runner_stdin_write" );
     CHECK( llm_intent::classify_response_error_for_test( "Runner stdout closed (still_running)." ) ==
            "runner_stdout_eof" );

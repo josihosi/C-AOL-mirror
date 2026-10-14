@@ -721,8 +721,8 @@ class map
         bool sees_with_optics( const tripoint_bub_ms &origin, const tripoint_bub_ms &target,
                                int range, float magnification ) const;
         bool sees_site_with_optics( const tripoint_bub_ms &origin, const tripoint_bub_ms &target,
-                                   int range, float magnification,
-                                   const std::vector<tripoint_abs_omt> &footprint ) const;
+                                    int range, float magnification,
+                                    const std::vector<tripoint_abs_omt> &footprint ) const;
     private:
         /**
          * Don't expose the slope adjust outside map functions.

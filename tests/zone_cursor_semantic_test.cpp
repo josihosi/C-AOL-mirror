@@ -71,10 +71,10 @@ TEST_CASE( "native bounds cursor publishes movement before confirm or cancel",
     semantic_surface_scope parent( manager, "world", "World" );
     int publications = 0;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "look_cursor" ) {
             return;
         }
@@ -119,14 +119,14 @@ TEST_CASE( "empty native zone manager offers creation and closes",
     semantic_surface_manager_session session( manager );
     semantic_surface_scope parent( manager, "world", "World" );
     bool saw_empty = false;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "zone_manager" ) {
             return;
         }
         saw_empty = true;
         CHECK( descriptor.payload.at( "zones" ) == "[]" );
         CHECK( std::any_of( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-        []( const semantic_action_descriptor &action ) {
+        []( const semantic_action_descriptor & action ) {
             return action.id == "zone.create" && action.enabled;
         } ) );
         REQUIRE( manager.submit_request( { "empty-zone-run", descriptor.surface_id, descriptor.frame_id,
@@ -154,8 +154,8 @@ TEST_CASE( "native zone creation and editing use menus names and both corners",
     int sequence = 0;
     int corner_moves = 0;
     std::string zone_id;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        auto submit = [&]( const std::string &action, const std::optional<std::string> &id = std::nullopt,
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        auto submit = [&]( const std::string & action, const std::optional<std::string> &id = std::nullopt,
         const std::map<std::string, std::string> &parameters = {} ) {
             REQUIRE( manager.submit_request( { "zone-run", descriptor.surface_id, descriptor.frame_id,
                                                std::to_string( ++sequence ), action, id, parameters } ) );
@@ -191,12 +191,12 @@ TEST_CASE( "native zone creation and editing use menus names and both corners",
             const std::string desired = current == stage::editing ? "Edit name" :
                                         zones.get_name_from_type( zone_type_id( "CAMP_STORAGE" ) );
             auto selected = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [&]( const semantic_action_descriptor &action ) {
+            [&]( const semantic_action_descriptor & action ) {
                 return action.id == "menu.choose" && action.label == desired && action.enabled;
             } );
             if( selected == descriptor.valid_actions.end() ) {
                 selected = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-                [&]( const semantic_action_descriptor &action ) {
+                [&]( const semantic_action_descriptor & action ) {
                     return action.id == "menu.select" && action.label == desired && action.enabled;
                 } );
             }
@@ -224,7 +224,7 @@ TEST_CASE( "native zone creation and editing use menus names and both corners",
         } else if( descriptor.kind == "prompt" ) {
             const bool saving = current == stage::closing;
             const auto choice = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [&]( const semantic_action_descriptor &action ) {
+            [&]( const semantic_action_descriptor & action ) {
                 return action.id == "prompt.choose" && action.label == ( saving ? "YES" : "NO" );
             } );
             REQUIRE( choice != descriptor.valid_actions.end() );
@@ -262,8 +262,8 @@ TEST_CASE( "adding a camp storage zone redraws safely with existing zones",
     stage current = stage::create;
     int sequence = 0;
     int cursor_moves = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        const auto submit = [&]( const std::string &action,
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        const auto submit = [&]( const std::string & action,
                                  const std::optional<std::string> &id = std::nullopt,
         const std::map<std::string, std::string> &parameters = {} ) {
             REQUIRE( manager.submit_request( { "existing-zone-storage-run", descriptor.surface_id,
@@ -292,12 +292,12 @@ TEST_CASE( "adding a camp storage zone redraws safely with existing zones",
             REQUIRE( current == stage::naming );
             const std::string desired = zones.get_name_from_type( zone_type_id( "CAMP_STORAGE" ) );
             auto selected = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [&]( const semantic_action_descriptor &action ) {
+            [&]( const semantic_action_descriptor & action ) {
                 return action.id == "menu.choose" && action.label == desired && action.enabled;
             } );
             if( selected == descriptor.valid_actions.end() ) {
                 selected = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-                [&]( const semantic_action_descriptor &action ) {
+                [&]( const semantic_action_descriptor & action ) {
                     return action.id == "menu.select" && action.label == desired && action.enabled;
                 } );
             }
@@ -320,9 +320,9 @@ TEST_CASE( "adding a camp storage zone redraws safely with existing zones",
         } else if( descriptor.kind == "prompt" ) {
             // The parent zone manager can publish its refreshed frame while
             // the nested Smart Zone prompt is still unwinding.
-            CHECK(( current == stage::corners || current == stage::closing ));
+            CHECK( ( current == stage::corners || current == stage::closing ) );
             const auto decline = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) {
+            []( const semantic_action_descriptor & action ) {
                 return action.id == "prompt.choose" && action.label == "NO";
             } );
             REQUIRE( decline != descriptor.valid_actions.end() );
@@ -358,8 +358,8 @@ TEST_CASE( "zone selection uses stable identity and faction changes only the fil
     semantic_surface_scope parent( manager, "world", "World" );
     int state = 0;
     int requests = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        const auto submit = [&]( const std::string &action,
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        const auto submit = [&]( const std::string & action,
                                  const std::optional<std::string> &id = std::nullopt,
         const std::map<std::string, std::string> &parameters = {} ) {
             REQUIRE( manager.submit_request( { "zone-selection-run", descriptor.surface_id,

@@ -28,7 +28,7 @@ TEST_CASE( "semantic World advertises the registered native Tab autoattack",
     REQUIRE( context.is_registered_action( "autoattack" ) );
     CHECK( look_up_action( "autoattack" ) == ACTION_AUTOATTACK );
     const std::vector<std::pair<std::string, std::string>> actions =
-        openclaw_harness_world_actions( context );
+                openclaw_harness_world_actions( context );
     const auto offered = std::find_if( actions.begin(), actions.end(),
     []( const std::pair<std::string, std::string> &action ) {
         return action.first == "world.autoattack";
@@ -68,7 +68,7 @@ TEST_CASE( "native autoattack excludes a non-enemy NPC from target selection",
     avatar &you = get_avatar();
     map &here = get_map();
     const character_id id = here.place_npc( you.pos_bub( here ).xy() + point( 1, 0 ),
-                            string_id<npc_template>( "test_talker" ) );
+                                            string_id<npc_template>( "test_talker" ) );
     g->load_npcs();
     npc *neighbor = g->find_npc( id );
     REQUIRE( neighbor != nullptr );

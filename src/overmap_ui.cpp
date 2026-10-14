@@ -154,7 +154,7 @@ static std::optional<tripoint_abs_omt> openclaw_harness_native_preview_start(
         return std::nullopt;
     }
     const char *serialized_requests = std::getenv(
-            "OPENCLAW_HARNESS_NATIVE_PREVIEW_SEGMENT_REQUESTS" );
+                                          "OPENCLAW_HARNESS_NATIVE_PREVIEW_SEGMENT_REQUESTS" );
     if( serialized_requests == nullptr || serialized_requests[0] == '\0' ) {
         return std::nullopt;
     }
@@ -520,9 +520,9 @@ static ecology_debug::query_region ecology_query_region( const tripoint_abs_omt 
     ecology_debug::query_region region;
     region.enabled = true;
     region.minimum = tripoint_abs_omt( center.x() - horizontal_radius,
-                                      center.y() - vertical_radius, center.z() );
+                                       center.y() - vertical_radius, center.z() );
     region.maximum = tripoint_abs_omt( center.x() + horizontal_radius,
-                                      center.y() + vertical_radius, center.z() );
+                                       center.y() + vertical_radius, center.z() );
     return region;
 }
 
@@ -2817,7 +2817,7 @@ static void edit_selected_ecology_dispatch_impl( overmap_ui::overmap_draw_data_t
     if( selected->marker.kind != ecology_debug::entity_kind::bandit_dispatch &&
         selected->marker.kind != ecology_debug::entity_kind::cannibal_dispatch ) {
         popup( string_format( _( "%s (%s) is read-only.  V0 mutations apply only to loaded "
-                                  "members of structural local dispatches." ),
+                                 "members of structural local dispatches." ),
                               selected->marker.alias, ecology_debug::to_string( selected->marker.kind ) ) );
         return;
     }
@@ -2904,7 +2904,7 @@ static void edit_selected_ecology_dispatch_impl( overmap_ui::overmap_draw_data_t
     if( action_menu.ret == 1 ) {
         target_hp = std::min( 50, guard.hp_percent - 1 );
         if( target_hp < 1 || !query_int( target_hp, true,
-                                        _( "Set every body part to which HP percentage (1-99)?" ) ) ||
+                                         _( "Set every body part to which HP percentage (1-99)?" ) ) ||
             target_hp < 1 || target_hp > 99 || target_hp >= guard.hp_percent ) {
             popup( _( "Wound cancelled: target HP must be from 1 to 99 and below current HP." ) );
             return;
@@ -2923,12 +2923,12 @@ static void edit_selected_ecology_dispatch_impl( overmap_ui::overmap_draw_data_t
                                        std::to_string( target_hp ) + "%" :
                                        ecology_debug::to_string( edit_action );
     const std::string confirmation = string_format(
-            _( "Confirm DEBUG intervention?\n\nDispatch: %s\nGeneration: %d\nMember: %s "
-               "[npc:%d]\nMember OMT: %s\nCurrent HP: %d%%\nAction: %s\n\n"
-               "This uses the authoritative NPC and outing cleanup path and cannot be undone." ),
-            guard.entity.canonical_id, guard.entity.generation, member_name,
-            guard.member_id.get_value(), guard.member_omt.to_string(), guard.hp_percent,
-            target_summary );
+                                         _( "Confirm DEBUG intervention?\n\nDispatch: %s\nGeneration: %d\nMember: %s "
+                                            "[npc:%d]\nMember OMT: %s\nCurrent HP: %d%%\nAction: %s\n\n"
+                                            "This uses the authoritative NPC and outing cleanup path and cannot be undone." ),
+                                         guard.entity.canonical_id, guard.entity.generation, member_name,
+                                         guard.member_id.get_value(), guard.member_omt.to_string(), guard.hp_percent,
+                                         target_summary );
     if( !query_yn( confirmation ) ) {
         return;
     }
@@ -2992,7 +2992,7 @@ static void edit_selected_ecology_dispatch_impl( overmap_ui::overmap_draw_data_t
     if( edit_action == ecology_debug::dispatch_member_edit_action::kill ) {
         const bandit_live_world::site_record &after_site = world.sites[*authority_index];
         if( std::find( after_site.active_outing.casualty_ids.begin(),
-                      after_site.active_outing.casualty_ids.end(), guard.member_id ) ==
+                       after_site.active_outing.casualty_ids.end(), guard.member_id ) ==
             after_site.active_outing.casualty_ids.end() ) {
             authoritative_result = false;
             npc *after_member = g->find_npc( guard.member_id );
@@ -3040,10 +3040,10 @@ static void edit_selected_ecology_dispatch_impl( overmap_ui::overmap_draw_data_t
         return;
     }
     const std::string trace_message = string_format(
-            "ecology intervention seq=%d id=%s action=%s before_hp=%d after_hp=%d "
-            "debug_intervention=true", static_cast<int>( intervention_sequence ),
-            guard.entity.canonical_id, ecology_debug::to_string( edit_action ),
-            guard.hp_percent, after_hp );
+                                          "ecology intervention seq=%d id=%s action=%s before_hp=%d after_hp=%d "
+                                          "debug_intervention=true", static_cast<int>( intervention_sequence ),
+                                          guard.entity.canonical_id, ecology_debug::to_string( edit_action ),
+                                          guard.hp_percent, after_hp );
     if( debug_menu::debug_capture::is_initialized() ) {
         debug_menu::debug_capture::instance().push_debug_log( debugmode::DF_MONITOR,
                 trace_message );
@@ -3132,14 +3132,14 @@ static std::vector<tripoint_abs_omt> get_overmap_path_to( const tripoint_abs_omt
     }
     // literal "edge" case: the vehicle may be in a different OMT than the player
     const tripoint_abs_omt start_omt_pos = native_preview_start ? *native_preview_start :
-                                             ( driving ? player_veh->pos_abs_omt() : player_omt_pos );
+                                           ( driving ? player_veh->pos_abs_omt() : player_omt_pos );
     if( dest == player_omt_pos || dest == start_omt_pos ) {
         openclaw_harness_trace_overmap_route( "constructed", dest, 0, false, nullptr,
                                               native_preview_start );
         return {};
     } else {
         std::vector<tripoint_abs_omt> path = overmap_buffer.get_travel_path( start_omt_pos,
-                dest, params ).points;
+                                             dest, params ).points;
         openclaw_harness_trace_overmap_route( "constructed", dest, path.size(), false, &path,
                                               native_preview_start );
         return path;
@@ -3393,7 +3393,8 @@ static tripoint_abs_omt display()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_manager != nullptr ) {
         semantic_scope.emplace( *semantic_manager, "overmap", "Overmap", semantic_payload(),
-        semantic_actions(), [&semantic_native_action, &cursor_stable_id]( const semantic_action_request &request ) {
+                                semantic_actions(), [&semantic_native_action,
+        &cursor_stable_id]( const semantic_action_request & request ) {
             const std::string stable_id = request.stable_id.value_or( "" );
             if( request.action_id == "overmap.move_cursor" ) {
                 if( stable_id == "north" ) {
@@ -3592,7 +3593,7 @@ static tripoint_abs_omt display()
             const std::optional<tripoint_abs_omt> native_preview_start =
                 openclaw_harness_native_preview_start( curs );
             std::vector<tripoint_abs_omt> path = get_overmap_path_to( curs, driving, direct,
-                                                   native_preview_start );
+                                                 native_preview_start );
             if( native_preview_start ) {
                 // This harness-only request calls the production pathfinder from
                 // the declared segment start but never swaps player omt_path,

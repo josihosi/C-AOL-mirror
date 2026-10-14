@@ -814,7 +814,8 @@ bool game::start_game()
     // New Game's owning menu admits the selected world before setup/create.
     // A later changed boundary must not be read as a successful new start.
     if( !can_load_world_after_retirement( world_generator->active_world->world_name ) ||
-        save_continuity::incomplete( world_generator->active_world->folder_path().get_unrelative_path() ) ) {
+        save_continuity::incomplete(
+            world_generator->active_world->folder_path().get_unrelative_path() ) ) {
         return false;
     }
     if( !gamemode ) {
@@ -1182,7 +1183,7 @@ namespace
 bool abstract_scout_owns_npc( const character_id id )
 {
     const auto &sites = overmap_buffer.global_state.bandit_live_world.sites;
-    return std::any_of( sites.begin(), sites.end(), [&id]( const auto &site ) {
+    return std::any_of( sites.begin(), sites.end(), [&id]( const auto & site ) {
         const auto &outing = site.active_outing;
         return outing.is_active() &&
                outing.kind == bandit_live_world::outing_kind::structural_sortie &&
@@ -1628,14 +1629,16 @@ bool game::cancel_activity_or_ignore_query( const distraction_type type, const s
         semantic_surface_manager &semantic_manager = openclaw_harness_semantic_surface_manager();
         semantic_session.emplace( semantic_manager );
         semantic_scope.emplace( semantic_manager, "activity_distraction", "Activity distraction",
-                                std::map<std::string, std::string>{ { "distraction_type",
-                                        native_distraction_type } },
-                                std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "distraction_type",
+                native_distraction_type
+            }
+        },
+        std::vector<semantic_action_descriptor> {
             { "activity.stop", "", "activity.stop", true },
             { "activity.continue", "", "activity.continue", true },
             { "activity.manage", "", "activity.manage", true },
             { "activity.ignore", "", "activity.ignore", true },
-        }, [ &semantic_action ]( const semantic_action_request &request ) {
+        }, [ &semantic_action ]( const semantic_action_request & request ) {
             const std::map<std::string, std::string> actions = {
                 { "activity.stop", "YES" }, { "activity.continue", "NO" },
                 { "activity.manage", "MANAGER" }, { "activity.ignore", "IGNORE" },
@@ -1661,21 +1664,22 @@ bool game::cancel_activity_or_ignore_query( const distraction_type type, const s
         }
     }
     const std::string action = semantic_action.empty() ? query_popup()
-                                .preferred_keyboard_mode( keyboard_mode::keycode )
-                                .context( "CANCEL_ACTIVITY_OR_IGNORE_QUERY" )
-                                .semantic_payload( { { "distraction_type", native_distraction_type } } )
-                                .message( force_uc && !is_keycode_mode_supported() ?
-                                          pgettext( "cancel_activity_or_ignore_query",
-                                                  "<color_light_red>%s %s (Case Sensitive)</color>" ) :
-                                          pgettext( "cancel_activity_or_ignore_query",
-                                                  "<color_light_red>%s %s</color>" ),
-                                          text, u.activity.get_stop_phrase() )
-                                .option( "YES", allow_key )
-                                .option( "NO", allow_key )
-                                .option( "MANAGER", allow_key )
-                                .option( "IGNORE", allow_key )
-                                .query()
-                                .action : semantic_action;
+                               .preferred_keyboard_mode( keyboard_mode::keycode )
+                               .context( "CANCEL_ACTIVITY_OR_IGNORE_QUERY" )
+    .semantic_payload( { { "distraction_type", native_distraction_type } } )
+    .message( force_uc && !is_keycode_mode_supported() ?
+              pgettext( "cancel_activity_or_ignore_query",
+                        "<color_light_red>%s %s (Case Sensitive)</color>" ) :
+              pgettext( "cancel_activity_or_ignore_query",
+                        "<color_light_red>%s %s</color>" ),
+              text, u.activity.get_stop_phrase() )
+    .option( "YES", allow_key )
+    .option( "NO", allow_key )
+    .option( "MANAGER", allow_key )
+    .option( "IGNORE", allow_key )
+    .query()
+    .action :
+    semantic_action;
     openclaw_harness_trace_activity_query( "return", type, text, action );
 
     if( action == "YES" ) {
@@ -2311,12 +2315,12 @@ int game::inventory_item_menu( item_location locThisItem,
                 return;
             }
             semantic_scope.emplace( *semantic_manager, "inventory_item_menu", semantic_item_name,
-            std::map<std::string, std::string>{
+            std::map<std::string, std::string> {
                 { "item_uid", semantic_item_uid },
                 { "item_name", semantic_item_name }
             }, semantic_actions,
             [&action_menu, &semantic_action_ids, &semantic_menu_choice,
-             &semantic_recreate_after_item_use]( const semantic_action_request &request ) {
+                           &semantic_recreate_after_item_use]( const semantic_action_request & request ) {
                 if( request.action_id == "inventory.item_menu.cancel" ) {
                     semantic_menu_choice = UILIST_CANCEL;
                     return semantic_action_dispatch_result{ true, "", "" };
@@ -2333,7 +2337,7 @@ int game::inventory_item_menu( item_location locThisItem,
                         semantic_menu_choice = entry.retval;
                         semantic_recreate_after_item_use = entry.retval == 'a';
                         return semantic_action_dispatch_result{ true, "", "",
-                                                               semantic_recreate_after_item_use };
+                                                                semantic_recreate_after_item_use };
                     }
                 }
                 return semantic_action_dispatch_result{ false, "invalid_stable_id", "" };
@@ -3442,10 +3446,10 @@ void game::disp_NPCs()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "npc_viewer", _( "NPC viewer" ),
-        std::map<std::string, std::string>{ { "native_owner", "DISP_NPCS" } },
-        std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "native_owner", "DISP_NPCS" } },
+        std::vector<semantic_action_descriptor> {
             { "npc_viewer.close", "", _( "Close NPC viewer" ), true }
-        }, [&semantic_action]( const semantic_action_request &request ) {
+        }, [&semantic_action]( const semantic_action_request & request ) {
             if( request.action_id != "npc_viewer.close" || request.stable_id.has_value() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }
@@ -3792,16 +3796,19 @@ void game::draw_panels( bool force_draw )
                     }
                     const ::widget_id &panel_widget = panel.get_widget();
                     const auto contains_widget = []( const ::widget_id & widget_id,
-                    const std::initializer_list<std::string_view> & expected_ids,
+                                                     const std::initializer_list<std::string_view> &expected_ids,
                     const auto & self ) -> std::string {
-                        if( widget_id.is_null() || !widget_id.is_valid() ) {
+                        if( widget_id.is_null() || !widget_id.is_valid() )
+                        {
                             return {};
                         }
                         const std::string id = widget_id.str();
-                        if( std::find( expected_ids.begin(), expected_ids.end(), id ) != expected_ids.end() ) {
+                        if( std::find( expected_ids.begin(), expected_ids.end(), id ) != expected_ids.end() )
+                        {
                             return id;
                         }
-                        for( const ::widget_id &child : widget_id.obj()._widgets ) {
+                        for( const ::widget_id &child : widget_id.obj()._widgets )
+                        {
                             const std::string found = self( child, expected_ids, self );
                             if( !found.empty() ) {
                                 return found;
@@ -3811,11 +3818,11 @@ void game::draw_panels( bool force_draw )
                     };
                     if( rendered_move_widget.empty() ) {
                         rendered_move_widget = contains_widget( panel_widget,
-                                               { "move_num", "move_count_mode_desc" }, contains_widget );
+                        { "move_num", "move_count_mode_desc" }, contains_widget );
                     }
                     if( rendered_wield_widget.empty() ) {
                         rendered_wield_widget = contains_widget( panel_widget,
-                                                { "wielding_desc", "wielding_simple_desc" }, contains_widget );
+                        { "wielding_desc", "wielding_simple_desc" }, contains_widget );
                     }
                 }
                 if( show_panel_adm ) {
@@ -6626,7 +6633,7 @@ look_around_result game::look_around(
         if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
             const tripoint_abs_ms absolute = here.get_abs( lp );
             const tripoint_rel_ms relative = lp - u.pos_bub();
-            const auto coordinates = []( const auto &position ) {
+            const auto coordinates = []( const auto & position ) {
                 return string_format( "[%d,%d,%d]", position.x(), position.y(), position.z() );
             };
             std::map<std::string, std::string> payload = {
@@ -6663,7 +6670,7 @@ look_around_result game::look_around(
             }
             if( !semantic_scope ) {
                 semantic_scope.emplace( *manager, "look_cursor", _( "Select map position" ), payload,
-                actions, [&]( const semantic_action_request &request ) {
+                actions, [&]( const semantic_action_request & request ) {
                     if( request.action_id == "cursor.extended_description" ) {
                         const Creature *const creature =
                             get_creature_tracker().creature_at( lp, true );

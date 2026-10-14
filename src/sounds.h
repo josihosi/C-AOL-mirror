@@ -74,7 +74,7 @@ struct property_theft_report {
 // Attach knowledge to the speaker's just-emitted native speech event; this
 // never emits another sound or recomputes a recipient's hearing.
 void attach_property_theft_report( const tripoint_bub_ms &speaker,
-                                 const property_theft_report &report );
+                                   const property_theft_report &report );
 
 // Methods for recording sound events.
 /**

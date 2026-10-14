@@ -130,7 +130,8 @@ curses_wait_result wait_for_curses_input_or_semantic_wake( const int timeout_ms 
             return static_cast<HANDLE>( nullptr );
         }
         return OpenEventA( SYNCHRONIZE, FALSE, name );
-    }();
+    }
+    ();
     if( wake_handle == nullptr ) {
         return curses_wait_result::use_curses_input;
     }

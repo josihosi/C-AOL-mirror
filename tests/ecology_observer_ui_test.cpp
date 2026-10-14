@@ -226,7 +226,7 @@ TEST_CASE( "ecology_observer_export_uses_the_process_local_overmap_filter",
     overmap_ui::restore_ecology_observer_controls( saved_controls );
 
     const auto check_export = []( overmap_ui::ecology_filter_mode filter,
-    bool camps_enabled, bool dispatches_enabled, const std::string &primary_label ) {
+    bool camps_enabled, bool dispatches_enabled, const std::string & primary_label ) {
         overmap_ui::overmap_draw_data_t controls;
         controls.ecology_filter = filter;
         overmap_ui::remember_ecology_observer_controls( controls );

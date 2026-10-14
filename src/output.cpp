@@ -501,10 +501,10 @@ void scrollable_text( const std::function<catacurses::window()> &init_window,
         // This screen can be an NPC/faction epilogue, not a process exit.
         // Paging and timeout polls retain the same native close capability.
         semantic_scope.emplace( *manager, "scrollable_text", title,
-        std::map<std::string, std::string>{ { "native_owner", "SCROLLABLE_TEXT" } },
-        std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "native_owner", "SCROLLABLE_TEXT" } },
+        std::vector<semantic_action_descriptor> {
             { "scrollable_text.close", "", _( "Close" ), true }
-        }, [&semantic_action]( const semantic_action_request &request ) {
+        }, [&semantic_action]( const semantic_action_request & request ) {
             if( request.action_id != "scrollable_text.close" || request.stable_id.has_value() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }

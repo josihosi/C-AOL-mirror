@@ -68,14 +68,14 @@ fireplace_menu_observation examine_brazier_menu( avatar &you, const tripoint_bub
     semantic_surface_manager_session session( manager );
     fireplace_menu_observation result;
     manager.set_descriptor_observer( [&manager, &result, choose_extinguish](
-    const semantic_surface_descriptor &descriptor ) {
+    const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "menu" || descriptor.payload.find( "text" ) == descriptor.payload.end() ||
             descriptor.payload.at( "text" ) != "Select an action" ) {
             return;
         }
         result.actions = descriptor.valid_actions;
         const auto extinguish = std::find_if( descriptor.valid_actions.begin(),
-        descriptor.valid_actions.end(), []( const semantic_action_descriptor &action ) {
+        descriptor.valid_actions.end(), []( const semantic_action_descriptor & action ) {
             return action.id == "menu.choose" && action.label == "Extinguish fire";
         } );
         result.extinguish_advertised = extinguish != descriptor.valid_actions.end();
@@ -88,7 +88,7 @@ fireplace_menu_observation examine_brazier_menu( avatar &you, const tripoint_bub
             choice = &*extinguish;
         } else {
             const auto cancel = std::find_if( descriptor.valid_actions.begin(),
-            descriptor.valid_actions.end(), []( const semantic_action_descriptor &action ) {
+            descriptor.valid_actions.end(), []( const semantic_action_descriptor & action ) {
                 return action.id == "menu.cancel";
             } );
             if( cancel != descriptor.valid_actions.end() ) {
@@ -115,7 +115,7 @@ TEST_CASE( "semantic World advertises native Examine registered in DEFAULTMODE",
     const input_context context = get_default_mode_input_context();
     REQUIRE( context.is_registered_action( "examine" ) );
     const std::vector<std::pair<std::string, std::string>> actions =
-        openclaw_harness_world_actions( context );
+                openclaw_harness_world_actions( context );
     const auto examine = std::find_if( actions.begin(), actions.end(),
     []( const std::pair<std::string, std::string> &action ) {
         return action.first == "world.examine";
@@ -153,7 +153,7 @@ TEST_CASE( "brazier semantic Examine uses the native fire menu and state",
         REQUIRE( here.add_field( brazier, fd_fire, 1 ) );
         const fireplace_menu_observation menu = examine_brazier_menu( you, brazier, false );
         const auto disabled = std::find_if( menu.actions.begin(), menu.actions.end(),
-        []( const semantic_action_descriptor &action ) {
+        []( const semantic_action_descriptor & action ) {
             return action.id == "menu.choose" && action.label == "Extinguish fire (bashing item required)";
         } );
         REQUIRE( disabled != menu.actions.end() );
@@ -177,13 +177,13 @@ TEST_CASE( "native Examine direction selection cannot reach a non-adjacent brazi
     semantic_surface_manager_session session( manager );
     bool direction_selected = false;
     manager.set_descriptor_observer( [&manager, &direction_selected](
-    const semantic_surface_descriptor &descriptor ) {
+    const semantic_surface_descriptor & descriptor ) {
         if( direction_selected || descriptor.kind != "direction" ) {
             return;
         }
         direction_selected = true;
         const auto east = std::find_if( descriptor.valid_actions.begin(),
-        descriptor.valid_actions.end(), []( const semantic_action_descriptor &action ) {
+        descriptor.valid_actions.end(), []( const semantic_action_descriptor & action ) {
             return action.id == "direction.choose" && action.stable_id == "east" && action.enabled;
         } );
         REQUIRE( east != descriptor.valid_actions.end() );
@@ -193,7 +193,7 @@ TEST_CASE( "native Examine direction selection cannot reach a non-adjacent brazi
 
     const std::optional<tripoint_bub_ms> selected = choose_adjacent_highlight( here, player,
             "Examine terrain or furniture where?", "There is nothing that can be examined nearby.",
-    [&remote_brazier]( const tripoint_bub_ms &candidate ) {
+    [&remote_brazier]( const tripoint_bub_ms & candidate ) {
         return candidate == remote_brazier;
     }, false, false );
     CHECK( direction_selected );

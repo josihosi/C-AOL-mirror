@@ -167,7 +167,8 @@ TEST_CASE( "zone_data_serialization_preserves_owner_authored_basecamp_name", "[z
     CHECK( loaded.get_name() == "Basecamp owner label" );
 }
 
-TEST_CASE( "zone_data_legacy_deserialization_assigns_identity_and_unknown_revision", "[zones][identity]" )
+TEST_CASE( "zone_data_legacy_deserialization_assigns_identity_and_unknown_revision",
+           "[zones][identity]" )
 {
     zone_data loaded;
     loaded.deserialize( json_loader::from_string( R"({
@@ -3652,7 +3653,8 @@ const zone_data *find_zone_at( const zone_type_id &type, const tripoint_abs_ms &
                                const std::string &filter = {} )
 {
     const zone_data *found = nullptr;
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         const zone_data &zone = zone_ref.get();
         if( zone.get_type() != type || !zone.has_inside( p ) ) {
             continue;
@@ -3674,7 +3676,8 @@ const zone_data *find_zone_at( const zone_type_id &type, const tripoint_abs_ms &
 const zone_data *find_single_zone( const zone_type_id &type, const std::string &filter = {} )
 {
     const zone_data *found = nullptr;
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         const zone_data &zone = zone_ref.get();
         if( zone.get_type() != type ) {
             continue;
@@ -3747,7 +3750,8 @@ bool smart_zone_overlap_is_allowed( const zone_data &lhs, const zone_data &rhs )
 void check_no_unplanned_smart_zone_overlaps()
 {
     std::vector<const zone_data *> zones;
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         zones.push_back( &zone_ref.get() );
     }
     for( size_t i = 0; i < zones.size(); ++i ) {
@@ -3765,7 +3769,8 @@ void check_no_unplanned_smart_zone_overlaps()
 std::vector<std::string> snapshot_zone_layout()
 {
     std::vector<std::string> snapshot;
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         const zone_data &zone = zone_ref.get();
         std::string filter;
         if( const auto *loot = dynamic_cast<const loot_options *>( &zone.get_options() ) ) {
@@ -3787,7 +3792,8 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
     const smart_zone_fixture fixture = build_basecamp_smart_zone_fixture();
     map &here = get_map();
 
-    const basecamp_smart_zone_result result = auto_place_basecamp_smart_zones( fixture.start, fixture.end );
+    const basecamp_smart_zone_result result = auto_place_basecamp_smart_zones( fixture.start,
+            fixture.end );
     REQUIRE( result.success );
 
     CHECK( find_zone_at( zone_type_SOURCE_FIREWOOD, fixture.fire_anchor ) != nullptr );
@@ -3797,7 +3803,7 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
     CHECK( find_zone_at( zone_type_LOOT_CUSTOM, fixture.bed_tile, "blanket" ) != nullptr );
     CHECK( find_zone_at( zone_type_LOOT_CUSTOM, fixture.bed_tile, "quilt" ) != nullptr );
 
-    const auto has_zone_adjacent = [&]( const tripoint_abs_ms &origin, const zone_type_id &type,
+    const auto has_zone_adjacent = [&]( const tripoint_abs_ms & origin, const zone_type_id & type,
     const std::string &filter = {} ) {
         static const std::array<tripoint, 4> dirs = {
             tripoint::east, tripoint::south, tripoint::west, tripoint::north
@@ -3852,7 +3858,7 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
             CHECK( crafting_supports[i]->get_center_point() != crafting_supports[j]->get_center_point() );
         }
     }
-    const auto fire_dist = [&]( const tripoint_abs_ms &point ) {
+    const auto fire_dist = [&]( const tripoint_abs_ms & point ) {
         return std::abs( point.x() - fixture.fire_anchor.x() ) +
                std::abs( point.y() - fixture.fire_anchor.y() );
     };
@@ -3860,7 +3866,8 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
     CHECK( fire_dist( find_single_zone( zone_type_LOOT_DRUGS )->get_center_point() ) >= 2 );
 
     const zone_data *weapon_magazines = nullptr;
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         const zone_data &zone = zone_ref.get();
         if( zone.get_type() == zone_type_LOOT_MAGAZINES ) {
             CHECK( zone.get_name() == "Smartzone weapon magazines" );
@@ -3870,7 +3877,8 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
     REQUIRE( weapon_magazines != nullptr );
 
     const std::vector<std::string> generated_layout = snapshot_zone_layout();
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         const zone_data &zone = zone_ref.get();
         CHECK( zone.get_name().compare( 0, 10, "Smartzone " ) == 0 );
     }
@@ -3905,7 +3913,8 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
     zone_manager::get_manager().deserialize( jsin );
 
     CHECK( snapshot_zone_layout() == generated_layout );
-    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones( your_fac ) ) {
+    for( const zone_manager::ref_const_zone_data zone_ref : zone_manager::get_manager().get_zones(
+             your_fac ) ) {
         CHECK( zone_ref.get().get_name().compare( 0, 10, "Smartzone " ) == 0 );
     }
 
@@ -3916,7 +3925,7 @@ TEST_CASE( "basecamp_smart_zoning_places_expected_layout", "[zones][smart_zone][
     const zone_data *reloaded_auto_eat = find_single_zone( zone_type_AUTO_EAT );
     REQUIRE( reloaded_auto_eat != nullptr );
     const auto *reloaded_eat_options = dynamic_cast<const ignorable_options *>(
-            &reloaded_auto_eat->get_options() );
+                                           &reloaded_auto_eat->get_options() );
     REQUIRE( reloaded_eat_options != nullptr );
     CHECK( !reloaded_eat_options->get_ignore_contents() );
     const zone_data *reloaded_auto_drink = find_single_zone( zone_type_AUTO_DRINK );
@@ -3964,7 +3973,7 @@ TEST_CASE( "basecamp_smart_zoning_rejects_too_small_zone", "[zones][smart_zone][
     REQUIRE( here.furn_set( center, furn_id( "f_brazier" ) ) );
 
     const basecamp_smart_zone_result result = auto_place_basecamp_smart_zones( here.get_abs( center ),
-                                                                               here.get_abs( center ) );
+            here.get_abs( center ) );
     CHECK( !result.success );
     CHECK( result.placed_zones == 0 );
     CHECK( find_single_zone( zone_type_SOURCE_FIREWOOD ) == nullptr );
@@ -3976,7 +3985,8 @@ TEST_CASE( "basecamp_smart_zoning_stays_non_destructive_when_bed_is_already_zone
     const smart_zone_fixture fixture = build_basecamp_smart_zone_fixture();
     create_tile_zone( "Already sorted", zone_type_LOOT_FOOD, fixture.bed_tile );
 
-    const basecamp_smart_zone_result result = auto_place_basecamp_smart_zones( fixture.start, fixture.end );
+    const basecamp_smart_zone_result result = auto_place_basecamp_smart_zones( fixture.start,
+            fixture.end );
     CHECK( !result.success );
     CHECK( find_zone_at( zone_type_LOOT_FOOD, fixture.bed_tile ) != nullptr );
     CHECK( find_zone_at( zone_type_SOURCE_FIREWOOD, fixture.fire_anchor ) == nullptr );

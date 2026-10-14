@@ -1908,8 +1908,8 @@ TEST_CASE( "bt_camp_resident_goals", "[npc][behavior]" )
     SECTION( "away from camp: return_to_camp" ) {
         std::optional<tripoint_bub_ms> away_local;
         for( const tripoint &dir : std::array<tripoint, 4> {
-                 tripoint::east, tripoint::west, tripoint::north, tripoint::south
-             } ) {
+        tripoint::east, tripoint::west, tripoint::north, tripoint::south
+    } ) {
             const tripoint_abs_omt away_omt = camp_omt + dir;
             const tripoint_abs_ms away_center =
                 project_to<coords::ms>( away_omt ) + tripoint{ SEEX, SEEY, 0 };

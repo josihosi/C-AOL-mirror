@@ -69,7 +69,9 @@ TEST_CASE( "NPC inspection reads patrol cache without initializing or refreshing
     clear_map();
     clear_creatures();
     zone_manager::get_manager().clear();
-    on_out_of_scope clear_zones( []() { zone_manager::get_manager().clear(); } );
+    on_out_of_scope clear_zones( []() {
+        zone_manager::get_manager().clear();
+    } );
 
     map &here = get_map();
     const tripoint_abs_ms patrol_abs = here.get_abs( tripoint_bub_ms{ 10, 10, 0 } );
@@ -263,14 +265,14 @@ TEST_CASE( "NPC inspection opens actor bound item details and restores World wit
     semantic_surface_manager manager( "inspection-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World", {}, world_actions );
     const std::string world_frame = manager.top()->frame_id;
     int inspector_publications = 0;
     std::string inspection_frame;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "npc_inspection" ) {
             CHECK( descriptor.payload.at( "actor_id" ) == identity );
             CHECK( descriptor.valid_actions.size() == 2 );
@@ -279,13 +281,13 @@ TEST_CASE( "NPC inspection opens actor bound item details and restores World wit
                 inspection_frame = descriptor.frame_id;
                 REQUIRE( manager.submit_request( { "inspection-run", descriptor.surface_id,
                                                    descriptor.frame_id, "invalid-item", "npc_inspection.item_details",
-                                                   std::nullopt, { { "item_uid", "missing-uid" } } } ) );
+                std::nullopt, { { "item_uid", "missing-uid" } } } ) );
                 CHECK_FALSE( manager.consume_top_request() );
                 REQUIRE_FALSE( receipts.empty() );
                 CHECK( receipts.back().rejection_reason == "stale_actor_item_uid" );
                 REQUIRE( manager.submit_request( { "inspection-run", descriptor.surface_id,
                                                    descriptor.frame_id, "details", "npc_inspection.item_details",
-                                                   std::nullopt, { { "item_uid", uid } } } ) );
+                std::nullopt, { { "item_uid", uid } } } ) );
             } else {
                 REQUIRE( inspector_publications == 2 );
                 CHECK( descriptor.frame_id != inspection_frame );
@@ -332,7 +334,9 @@ TEST_CASE( "outing object diagnostic distinguishes current tracker and persisten
     clear_avatar();
     clear_map();
     clear_creatures();
-    on_out_of_scope cleanup( []() { clear_creatures(); } );
+    on_out_of_scope cleanup( []() {
+        clear_creatures();
+    } );
     restore_on_out_of_scope restore_turn( calendar::turn );
     npc &actor = spawn_npc( tripoint_bub_ms{ 6, 5, 0 }.xy(), "thug" );
     const character_id id = actor.getID();
@@ -354,7 +358,8 @@ TEST_CASE( "outing object diagnostic distinguishes current tracker and persisten
     SECTION( "pointer distinct position body clock and lease disagreement are exposed" ) {
         REQUIRE( overmap_buffer.remove_npc( id ) == persistent );
         auto stored = make_shared_fast<npc>();
-        stored->deserialize( json_loader::from_string( r067_diagnostic_actor_bytes( actor ) ).get_object() );
+        stored->deserialize( json_loader::from_string( r067_diagnostic_actor_bytes(
+                                 actor ) ).get_object() );
         overmap_buffer.insert_npc( stored );
         stored->spawn_at_precise( actor.pos_abs() + point( 24, 0 ) );
         calendar::turn += 1_minutes;
@@ -384,7 +389,8 @@ TEST_CASE( "outing object diagnostic distinguishes current tracker and persisten
         CHECK( turn_before == calendar::turn );
     }
     SECTION( "neither object available has no invented position or agreement" ) {
-        auto row = json_loader::from_string( npc_outing_member_diagnostic( character_id( -999 ) ) ).get_object();
+        auto row = json_loader::from_string( npc_outing_member_diagnostic( character_id(
+                -999 ) ) ).get_object();
         row.allow_omitted_members();
         CHECK_FALSE( row.get_bool( "persistent_object_available" ) );
         CHECK_FALSE( row.get_bool( "tracker_objects_available" ) );
@@ -419,7 +425,9 @@ TEST_CASE( "retained R5 overmap arrival refusal is observable without fabricatin
     restore_on_out_of_scope restore_start( calendar::start_of_cataclysm );
     on_out_of_scope cleanup( [&]() {
         clear_creatures();
-        for( int id : { 4, 5 } ) {
+        for( int id : {
+                 4, 5
+             } ) {
             overmap_buffer.remove_npc( character_id( id ) );
         }
         overmap_buffer.global_state.bandit_live_world = old_world;
@@ -445,12 +453,15 @@ TEST_CASE( "retained R5 overmap arrival refusal is observable without fabricatin
     REQUIRE( outing.owner == bandit_live_world::simulation_owner::abstract );
     REQUIRE( outing.waypoint_index == 1 );
     REQUIRE( outing.actor_route_waypoint == 1 );
-    for( int id : { 4, 5 } ) {
+    for( int id : {
+             4, 5
+         } ) {
         auto actor = overmap_buffer.find_npc( character_id( id ) );
         REQUIRE( actor );
         CHECK( actor->pos_abs_omt() == outing.selected_watch_omt );
         CHECK( actor->goal == npc::no_goal_point );
-        const auto row = json_loader::from_string( npc_outing_member_diagnostic( character_id( id ) ) ).get_object();
+        const auto row = json_loader::from_string( npc_outing_member_diagnostic( character_id(
+                             id ) ) ).get_object();
         row.allow_omitted_members();
         CHECK( row.get_bool( "persistent_object_available" ) );
         CHECK_FALSE( row.get_bool( "tracker_objects_available" ) );
@@ -460,7 +471,9 @@ TEST_CASE( "retained R5 overmap arrival refusal is observable without fabricatin
     // boundary; neither variant is native arrival credit or a production repair.
     const int route_control = GENERATE( 0, 1, 2, 3, 4 );
     if( route_control > 0 ) {
-        for( int id : { 4, 5 } ) {
+        for( int id : {
+                 4, 5
+             } ) {
             auto actor = overmap_buffer.find_npc( character_id( id ) );
             actor->goal = outing.selected_watch_omt;
             if( route_control == 3 ) {
@@ -490,7 +503,9 @@ TEST_CASE( "retained R5 overmap arrival refusal is observable without fabricatin
         process_overmap_npc_move_for_test();
     }
     if( route_control == 3 ) {
-        for( int id : { 4, 5 } ) {
+        for( int id : {
+                 4, 5
+             } ) {
             auto actor = overmap_buffer.find_npc( character_id( id ) );
             CHECK( actor->pos_abs_omt() == outing.selected_watch_omt );
             CHECK( actor->goal == npc::no_goal_point );
@@ -503,7 +518,8 @@ TEST_CASE( "retained R5 overmap arrival refusal is observable without fabricatin
     CHECK( rng_before == rng_get_engine() );
     CHECK( outing.waypoint_index == ( route_control == 1 || route_control == 3 ? 2 : 1 ) );
     CHECK( outing.actor_route_waypoint == ( route_control == 1 || route_control == 3 ? 2 : 1 ) );
-    CHECK( outing.assessment.observation_started_minutes == ( route_control == 1 || route_control == 3 ? 9159 : -1 ) );
+    CHECK( outing.assessment.observation_started_minutes == ( route_control == 1 ||
+            route_control == 3 ? 9159 : -1 ) );
     CHECK( outing.observations.empty() );
     if( trace ) {
         const auto &events = trace->result().transition_events;
@@ -520,10 +536,12 @@ TEST_CASE( "retained R5 overmap arrival refusal is observable without fabricatin
             }
             ++arrival_events;
             CHECK( event.outcome == ( route_control == 1 || route_control == 3 ? "applied" : "rejected" ) );
-            const bool confirmed_reason = event.reason.find( route_control == 0 ? "goal_matches=0 lease_present=0" :
-                                      route_control == 1 || route_control == 3 ? "goal_matches=1 lease_present=0" :
-                                      "goal_matches=1 lease_present=1" ) != std::string::npos ||
-                   ( route_control == 4 && event.reason.find( "goal_matches=0 lease_present=1" ) != std::string::npos );
+            const bool confirmed_reason = event.reason.find( route_control == 0 ?
+                                          "goal_matches=0 lease_present=0" :
+                                          route_control == 1 || route_control == 3 ? "goal_matches=1 lease_present=0" :
+                                          "goal_matches=1 lease_present=1" ) != std::string::npos ||
+                                          ( route_control == 4 &&
+                                            event.reason.find( "goal_matches=0 lease_present=1" ) != std::string::npos );
             CHECK( confirmed_reason );
             CHECK( event.reason.find( "attempted=1" ) != std::string::npos );
         }
@@ -546,7 +564,9 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
     restore_on_out_of_scope restore_start( calendar::start_of_cataclysm );
     on_out_of_scope cleanup( [&]() {
         clear_creatures();
-        for( int id : { 4, 5 } ) {
+        for( int id : {
+                 4, 5
+             } ) {
             overmap_buffer.remove_npc( character_id( id ) );
         }
         overmap_buffer.global_state.bandit_live_world = old_world;
@@ -564,7 +584,7 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
         auto actor = make_shared_fast<npc>();
         actor->deserialize( record );
         actor->spawn_at_precise( project_to<coords::ms>( site.active_outing.shared_route[1] ) +
-                                point( actor->getID().get_value(), 12 ) );
+                                 point( actor->getID().get_value(), 12 ) );
         actor->goal = site.active_outing.selected_watch_omt;
         actor->omt_path = { actor->goal };
         actor->set_mission( NPC_MISSION_TRAVELLING );
@@ -600,10 +620,13 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
         // order; no arrival bit, synthetic cursor or restored goal is supplied.
         const auto saved_site = site_bytes();
         const auto saved_second = r067_diagnostic_actor_bytes( *second );
-        for( int id : { 4, 5 } ) {
+        for( int id : {
+                 4, 5
+             } ) {
             overmap_buffer.remove_npc( character_id( id ) );
             auto loaded = make_shared_fast<npc>();
-            loaded->deserialize( json_loader::from_string( id == 4 ? arrived_bytes : saved_second ).get_object() );
+            loaded->deserialize( json_loader::from_string( id == 4 ? arrived_bytes :
+                                 saved_second ).get_object() );
             overmap_buffer.insert_npc( loaded );
         }
         world.sites.front().deserialize( json_loader::from_string( saved_site ).get_object() );
@@ -632,7 +655,8 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
         CHECK( bandit_live_world::advance_structural_scout_assessment(
                    world.sites.front(), current.activity_id, current.generation,
                    current.target_lead_revision, 9640 ) != bandit_live_world::scout_assessment_result::rejected );
-        CHECK( world.sites.front().active_outing.phase == bandit_live_world::scout_phase::returning_report );
+        CHECK( world.sites.front().active_outing.phase ==
+               bandit_live_world::scout_phase::returning_report );
         prepare_live_bandit_abstract_scout_travel_for_test();
         REQUIRE( first->is_travelling() );
         REQUIRE_FALSE( first->omt_path.empty() );
@@ -678,7 +702,8 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
         second->remove_effect( efftype_id( "narcosis" ) );
         second->remove_effect( efftype_id( "downed" ) );
         second->set_attitude( NPCATT_NULL );
-        CAPTURE( first->pos_abs().to_string(), second->pos_abs().to_string(), first->goal.to_string(), second->goal.to_string() );
+        CAPTURE( first->pos_abs().to_string(), second->pos_abs().to_string(), first->goal.to_string(),
+                 second->goal.to_string() );
         prepare_live_bandit_abstract_scout_travel_for_test();
         CHECK( world.sites.front().active_outing.assessment.observation_started_minutes == 9159 );
     }
@@ -704,8 +729,12 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
         CAPTURE( invalidation );
         auto &outing = world.sites.front().active_outing;
         switch( invalidation ) {
-            case 0: outing.clear(); break;
-            case 1: outing.phase = bandit_live_world::scout_phase::burned_withdrawal; break;
+            case 0:
+                outing.clear();
+                break;
+            case 1:
+                outing.phase = bandit_live_world::scout_phase::burned_withdrawal;
+                break;
             case 2:
                 second->set_part_hp_cur( bodypart_id( "torso" ), 0 );
                 REQUIRE( second->is_dead() );
@@ -718,10 +747,18 @@ TEST_CASE( "actual watch motor retains only its unconsumed pair order",
                 first->set_bandit_live_world_projection_lease( lease );
                 break;
             }
-            case 4: world.sites.push_back( world.sites.front() ); break;
-            case 5: outing.selected_watch_omt += point( 1, 0 ); break;
-            case 6: outing.local_projection_reconciliation_rejected = true; break;
-            case 7: second->goal += point( 1, 0 ); break;
+            case 4:
+                world.sites.push_back( world.sites.front() );
+                break;
+            case 5:
+                outing.selected_watch_omt += point( 1, 0 );
+                break;
+            case 6:
+                outing.local_projection_reconciliation_rejected = true;
+                break;
+            case 7:
+                second->goal += point( 1, 0 );
+                break;
             case 8: {
                 auto &hostile = world.sites.front().active_hostile_operation;
                 hostile.operation_kind = bandit_live_world::hostile_operation_kind::raid;
@@ -787,7 +824,9 @@ TEST_CASE( "R8 saved abstract return leaves its intermediate waypoint on the nex
     std::map<tripoint_abs_omt, oter_id> old_terrain;
     on_out_of_scope cleanup( [&]() {
         clear_creatures();
-        for( int id : { 4, 5 } ) {
+        for( int id : {
+                 4, 5
+             } ) {
             overmap_buffer.remove_npc( character_id( id ) );
         }
         for( const auto &entry : old_terrain ) {
@@ -822,7 +861,8 @@ TEST_CASE( "R8 saved abstract return leaves its intermediate waypoint on the nex
     REQUIRE( first );
     REQUIRE( second );
     REQUIRE( world.sites.front().active_outing.actor_route_waypoint == 3 );
-    REQUIRE( world.sites.front().active_outing.phase == bandit_live_world::scout_phase::returning_report );
+    REQUIRE( world.sites.front().active_outing.phase ==
+             bandit_live_world::scout_phase::returning_report );
     REQUIRE_FALSE( first->is_travelling() );
     REQUIRE( first->goal == tripoint_abs_omt( 129, 145, 0 ) );
     REQUIRE( first->omt_path.empty() );
@@ -840,7 +880,9 @@ TEST_CASE( "R8 saved abstract return leaves its intermediate waypoint on the nex
     CHECK( world.sites.front().active_outing.actor_route_waypoint == 3 );
     CHECK( world.sites.front().active_outing.member_return_receipts.empty() );
     CHECK_FALSE( world.sites.front().current_scout_report.is_present() );
-    for( int minute : { 8050, 8055, 8060 } ) {
+    for( int minute : {
+             8050, 8055, 8060
+         } ) {
         calendar::turn += 5_minutes;
         process_overmap_npc_move_for_test();
         CAPTURE( minute, first->pos_abs_omt(), second->pos_abs_omt() );
@@ -868,7 +910,7 @@ TEST_CASE( "R8 saved abstract return leaves its intermediate waypoint on the nex
     const auto &report = world.sites.front().current_scout_report;
     CHECK( report.is_present() );
     CHECK( report.source_generation == 1 );
-    CHECK( report.carrier_ids == std::vector<character_id>{ character_id( 4 ), character_id( 5 ) } );
+    CHECK( report.carrier_ids == std::vector<character_id> { character_id( 4 ), character_id( 5 ) } );
     CHECK( report.delivered_minutes == 8100 );
 }
 
@@ -881,7 +923,9 @@ TEST_CASE( "site scoped outing catalog preserves the requested retained body and
     const auto old_world = overmap_buffer.global_state.bandit_live_world;
     on_out_of_scope cleanup( [&]() {
         clear_creatures();
-        for( int id : { 2, 3, 4, 5, 6, 7, 8, 9 } ) {
+        for( int id : {
+                 2, 3, 4, 5, 6, 7, 8, 9
+             } ) {
             overmap_buffer.remove_npc( character_id( id ) );
         }
         overmap_buffer.global_state.bandit_live_world = old_world;
@@ -897,7 +941,7 @@ TEST_CASE( "site scoped outing catalog preserves the requested retained body and
         actor->deserialize( record );
         overmap_buffer.insert_npc( actor );
     }
-    const auto object = []( const JsonObject &parent, const std::string &key ) {
+    const auto object = []( const JsonObject & parent, const std::string & key ) {
         auto child = parent.get_object( key );
         child.allow_omitted_members();
         return child;
@@ -906,7 +950,8 @@ TEST_CASE( "site scoped outing catalog preserves the requested retained body and
     REQUIRE( world.sites.front().site_id == "overmap_special:bandit_cabin@103,167,0" );
     REQUIRE( world.sites.back().site_id == requested );
     SECTION( "first cabin does not replace requested camp or unknown site" ) {
-        const auto catalog = json_loader::from_string( openclaw_harness_site_outing_snapshot() ).get_object();
+        const auto catalog = json_loader::from_string(
+                                 openclaw_harness_site_outing_snapshot() ).get_object();
         catalog.allow_omitted_members();
         const auto sites = object( catalog, "by_site" );
         sites.allow_omitted_members();
@@ -952,7 +997,8 @@ TEST_CASE( "site scoped outing catalog preserves the requested retained body and
         world.serialize( before_json );
         const auto turn_before = calendar::turn;
         const auto rng_before = rng_get_engine();
-        const auto catalog = json_loader::from_string( openclaw_harness_site_outing_snapshot() ).get_object();
+        const auto catalog = json_loader::from_string(
+                                 openclaw_harness_site_outing_snapshot() ).get_object();
         catalog.allow_omitted_members();
         auto contact = object( object( object( catalog, "by_site" ), requested ), "contact" );
         contact.allow_omitted_members();
@@ -979,7 +1025,8 @@ TEST_CASE( "site scoped outing catalog preserves the requested retained body and
     }
     SECTION( "known inactive site has no substituted active operation" ) {
         world.sites.back().active_outing.clear();
-        const auto catalog = json_loader::from_string( openclaw_harness_site_outing_snapshot() ).get_object();
+        const auto catalog = json_loader::from_string(
+                                 openclaw_harness_site_outing_snapshot() ).get_object();
         catalog.allow_omitted_members();
         auto site = object( object( catalog, "by_site" ), requested );
         site.allow_omitted_members();

@@ -3024,11 +3024,12 @@ void options_manager::add_options_llm()
     add_empty_line();
 
     add( "LLM_INTENT_BACKEND", "llm", to_translation( "LLM backend" ),
-         to_translation( "Choose how NPC LLM requests are handled." ),
-         { { "openvino", to_translation( "OpenVINO (advanced local)" ) },
-           { "api", to_translation( "API via any-llm" ) },
-           { "ollama", to_translation( "Ollama (local, recommended)" ) } },
-         "openvino"
+    to_translation( "Choose how NPC LLM requests are handled." ), {
+        { "openvino", to_translation( "OpenVINO (advanced local)" ) },
+        { "api", to_translation( "API via any-llm" ) },
+        { "ollama", to_translation( "Ollama (local, recommended)" ) }
+    },
+    "openvino"
        );
 
     add( "LLM_INTENT_OLLAMA_URL", "llm", to_translation( "Ollama URL" ),
@@ -3062,12 +3063,13 @@ void options_manager::add_options_llm()
        );
 
     add( "LLM_INTENT_DEVICE", "llm", to_translation( "OpenVINO device" ),
-         to_translation( "OpenVINO device for local inference. AUTO is the normal default." ),
-         { { "AUTO", to_translation( "AUTO" ) },
-           { "GPU", to_translation( "GPU" ) },
-           { "CPU", to_translation( "CPU" ) },
-           { "NPU", to_translation( "NPU" ) } },
-         "AUTO"
+    to_translation( "OpenVINO device for local inference. AUTO is the normal default." ), {
+        { "AUTO", to_translation( "AUTO" ) },
+        { "GPU", to_translation( "GPU" ) },
+        { "CPU", to_translation( "CPU" ) },
+        { "NPU", to_translation( "NPU" ) }
+    },
+    "AUTO"
        );
 
     add( "LLM_INTENT_MAX_PROMPT_LEN", "llm", to_translation( "Max prompt length (advanced)" ),
@@ -3115,11 +3117,11 @@ void options_manager::add_options_llm()
 
     add( "LLM_SUMMARY_BACKEND", "llm", to_translation( "Summary backend" ),
          to_translation( "Backend used for build-time background summaries.  Ollama is recommended for simple local summary generation." ),
-         {
-             { "ollama", to_translation( "Ollama" ) },
-             { "openvino", to_translation( "OpenVINO" ) },
-         },
-         default_summary_backend
+    {
+        { "ollama", to_translation( "Ollama" ) },
+        { "openvino", to_translation( "OpenVINO" ) },
+    },
+    default_summary_backend
        );
 
     add( "LLM_SUMMARY_OLLAMA_URL", "llm", to_translation( "Summary Ollama URL" ),

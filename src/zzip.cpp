@@ -385,7 +385,7 @@ std::optional<zzip> zzip::load(
 }
 
 std::optional<zzip> zzip::load_impl( std::shared_ptr<mmap_file> file,
-        const std::filesystem::path &dictionary_path, const std::filesystem::path &path )
+                                     const std::filesystem::path &dictionary_path, const std::filesystem::path &path )
 {
     flexbuffers::Reference root;
     std::shared_ptr<parsed_flexbuffer> flexbuffer;
@@ -1238,7 +1238,8 @@ void zzip::invalidate_world_cache( const std::filesystem::path &world )
     const auto root = std::filesystem::absolute( world ).lexically_normal();
     for( auto it = cached_contexts.begin(); it != cached_contexts.end(); ) {
         if( !it->first.empty() ) {
-            const auto relative = std::filesystem::absolute( std::filesystem::u8path( it->first ) ).lexically_normal().lexically_relative( root );
+            const auto relative = std::filesystem::absolute( std::filesystem::u8path(
+                                      it->first ) ).lexically_normal().lexically_relative( root );
             if( !relative.empty() && !relative.is_absolute() && *relative.begin() != ".." ) {
                 it = cached_contexts.erase( it );
                 continue;

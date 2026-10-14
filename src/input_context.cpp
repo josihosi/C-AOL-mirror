@@ -196,7 +196,7 @@ std::optional<semantic_surface_scope> unsupported_semantic_input_owner( const in
         return std::nullopt;
     }
     return semantic_surface_scope( *manager, "unsupported",
-                                   string_format( "Unsupported input owner: %s", ctxt.get_category() ), {
+    string_format( "Unsupported input owner: %s", ctxt.get_category() ), {
         { "owner", ctxt.get_category() },
         { "reason", "unclassified_native_input_owner" }
     } );
@@ -205,7 +205,8 @@ std::optional<semantic_surface_scope> unsupported_semantic_input_owner( const in
 void openclaw_harness_trace_wait_input_resolution( const input_context &ctxt,
         const input_event &input, const std::string &resolved_action )
 {
-    if( !openclaw_harness_wait_input_trace_enabled() || !openclaw_harness_is_wait_probe_input( input ) ) {
+    if( !openclaw_harness_wait_input_trace_enabled() ||
+        !openclaw_harness_is_wait_probe_input( input ) ) {
         return;
     }
 
@@ -251,7 +252,8 @@ void openclaw_harness_trace_wait_input_resolution( const input_context &ctxt,
             << " raw_text=\"" << input.text << "\""
             << " candidate_type=" << ( candidate == nullptr ? -1 : static_cast<int>( candidate->type ) )
             << " candidate_code=" << ( candidate == nullptr ? 0 : candidate->get_first_input() )
-            << " candidate_shift=" << ( candidate != nullptr && candidate->modifiers.count( keymod_t::shift ) ? "yes" : "no" )
+            << " candidate_shift=" << ( candidate != nullptr &&
+                                        candidate->modifiers.count( keymod_t::shift ) ? "yes" : "no" )
             << " resolved_action=\"" << resolved_action << "\""
             << " rejection_reason=" << rejection;
 }

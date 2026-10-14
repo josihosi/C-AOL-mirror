@@ -436,7 +436,7 @@ TEST_CASE( "EOC_dimension_travel_resolves_gameplay_return_routes", "[eoc][dimens
 
     SECTION( "legacy empty Closetland return state falls back to default" ) {
         const cata_path closetland_path = PATH_INFO::base_path() / "data" / "mods" /
-                                         "BombasticPerks" / "perkdata" / "closetland.json";
+                                          "BombasticPerks" / "perkdata" / "closetland.json";
         JsonObject closetland_return = find_eoc_definition(
                                            closetland_path,
                                            "EOC_BOMBASTIC_PERKS_CLOSET_STORAGE_TRAVEL_BACK_FROM_CLOSETLAND" );
@@ -449,7 +449,7 @@ TEST_CASE( "EOC_dimension_travel_resolves_gameplay_return_routes", "[eoc][dimens
         REQUIRE( !closetland_dimension_travel.empty() );
         const effect_on_condition_id closetland_return_route = load_dimension_route_eoc(
                     "EOC_TEST_ACTUAL_CLOSETLAND_RETURN_ROUTE",
-                    { legacy_fallback, closetland_dimension_travel } );
+        { legacy_fallback, closetland_dimension_travel } );
         REQUIRE( closetland_return_route.is_valid() );
 
         globvars.set_global_value( "closetland_last_dimension", "" );

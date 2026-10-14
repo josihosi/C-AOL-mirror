@@ -24,7 +24,7 @@ TEST_CASE( "target cursor boundary is rejected without stranding the owner",
     std::string initial_cursor;
     std::string moved_frame;
     int publications = 0;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
         if( receipt.request_id == "boundary" ) {
             CHECK_FALSE( receipt.accepted );
@@ -36,7 +36,7 @@ TEST_CASE( "target cursor boundary is rejected without stranding the owner",
                                                "cancel", "target.cancel", std::nullopt, {} } ) );
         }
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "target" ) {
             return;
         }

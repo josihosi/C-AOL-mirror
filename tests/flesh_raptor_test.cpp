@@ -154,7 +154,8 @@ TEST_CASE( "flesh_raptor_orbit_corridor_falls_back_when_no_readable_arc", "[fles
     CHECK( response.reason == "no_readable_lateral_orbit" );
 }
 
-TEST_CASE( "flesh_raptor_live_plan_consumes_orbit_scorer_for_spawn_raptor", "[flesh_raptor][monster][map]" )
+TEST_CASE( "flesh_raptor_live_plan_consumes_orbit_scorer_for_spawn_raptor",
+           "[flesh_raptor][monster][map]" )
 {
     clear_map_without_vision();
     clear_avatar();
@@ -183,7 +184,8 @@ TEST_CASE( "flesh_raptor_live_plan_consumes_orbit_scorer_for_spawn_raptor", "[fl
     clear_map_without_vision();
 }
 
-TEST_CASE( "flesh_raptor_live_plan_is_independent_of_diagnostic_filter", "[flesh_raptor][monster][map][debug]" )
+TEST_CASE( "flesh_raptor_live_plan_is_independent_of_diagnostic_filter",
+           "[flesh_raptor][monster][map][debug]" )
 {
     struct plan_state {
         tripoint_abs_ms destination;
@@ -215,7 +217,7 @@ TEST_CASE( "flesh_raptor_live_plan_is_independent_of_diagnostic_filter", "[flesh
         raptor.plan();
 
         return plan_state{ raptor.get_dest(), raptor.wander_pos, raptor.wandf, raptor.get_moves(),
-                            raptor.anger, raptor.aggro_character };
+                           raptor.anger, raptor.aggro_character };
     };
 
     const plan_state enabled = run_plan( true );
@@ -232,7 +234,8 @@ TEST_CASE( "flesh_raptor_live_plan_is_independent_of_diagnostic_filter", "[flesh
     clear_map_without_vision();
 }
 
-TEST_CASE( "flesh_raptor_live_plan_does_not_rewrite_other_hit_and_run_monsters", "[flesh_raptor][monster][map]" )
+TEST_CASE( "flesh_raptor_live_plan_does_not_rewrite_other_hit_and_run_monsters",
+           "[flesh_raptor][monster][map]" )
 {
     clear_map_without_vision();
     clear_avatar();

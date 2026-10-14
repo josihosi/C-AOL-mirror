@@ -453,15 +453,15 @@ const std::string &string_input_popup::query_string( const bool loop, const bool
     if( semantic_surface_manager *manager = draw_only ? nullptr : active_semantic_surface_manager() ) {
         const std::string semantic_breadcrumb = _title.empty() ? _( "Text input" ) : _title;
         semantic_scope.emplace( *manager, "string_prompt", semantic_breadcrumb,
-        std::map<std::string, std::string>{
+        std::map<std::string, std::string> {
             { "title", _title }, { "text", ret.str() }, { "description", _description },
             { "max_length", std::to_string( _max_length ) },
             { "only_digits", _only_digits ? "true" : "false" }
-        }, std::vector<semantic_action_descriptor>{
+        }, std::vector<semantic_action_descriptor> {
             { "prompt.submit", "", _( "Submit" ), true },
             { "prompt.cancel", "", _( "Cancel" ), true }
         },
-        [this, &semantic_submitted_text, &semantic_canceled]( const semantic_action_request &request ) {
+        [this, &semantic_submitted_text, &semantic_canceled]( const semantic_action_request & request ) {
             if( request.action_id == "prompt.cancel" ) {
                 semantic_canceled = true;
                 return semantic_action_dispatch_result{ true, "", "" };

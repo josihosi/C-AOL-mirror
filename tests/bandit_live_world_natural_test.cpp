@@ -154,8 +154,9 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
     const unsigned int original_game_seed = g->get_seed();
     on_out_of_scope clear_generated_state( [&generated_npc_ids,
                                             original_zones = std::move( original_zones ),
-                                            original_game_seed]() mutable {
-        for( const character_id &id : generated_npc_ids ) {
+    original_game_seed]() mutable {
+        for( const character_id &id : generated_npc_ids )
+        {
             shared_ptr_fast<npc> generated_npc = overmap_buffer.remove_npc( id );
             if( generated_npc && generated_npc->get_faction() ) {
                 generated_npc->get_faction()->remove_member( id );
@@ -249,7 +250,9 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
     oracle.sites.push_back( *bandit_site );
     int watch_path_budget = 8;
     std::vector<bandit_live_world::structural_bounty_scan_result> scans;
-    for( const int now_minutes : { 0, 60, 120 } ) {
+    for( const int now_minutes : {
+             0, 60, 120
+         } ) {
         scans.push_back( bandit_live_world::advance_structural_bounty_scan(
                              oracle, now_minutes, 4, natural_terrain_lookup ) );
     }
@@ -277,7 +280,7 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
     int rejected = 0;
     for( std::size_t index = 0; index < production_candidates.size(); ++index ) {
         const std::string record = live_bandit_structural_route_analyzer_record_for_test(
-                                        oracle_site, production_candidates[index], "non_frontier", reads[index] );
+                                       oracle_site, production_candidates[index], "non_frontier", reads[index] );
         route_records.push_back( record );
         if( record.find( " outcome=selected " ) != std::string::npos ) {
             selected++;
@@ -353,7 +356,7 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
                 continue;
             }
             const std::vector<tripoint_om_omt> placed = generated.place_special(
-                    blind, local, om_direction::type::north, cit, false, false );
+                        blind, local, om_direction::type::north, cit, false, false );
             if( placed.size() == 1 ) {
                 blind_omt = project_combine( origin, placed.front() );
             }
@@ -363,9 +366,9 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     const tripoint_abs_omt blind_pos = *blind_omt;
     const tripoint_abs_omt target( blind_pos.x(), blind_pos.y() + 3, blind_pos.z() );
     CHECK( overmap_buffer.ter( tripoint_abs_omt( blind_pos.x(), blind_pos.y() + 1,
-             blind_pos.z() ) ).id().str() == "field" );
+                               blind_pos.z() ) ).id().str() == "field" );
     CHECK( overmap_buffer.ter( tripoint_abs_omt( blind_pos.x(), blind_pos.y() + 2,
-             blind_pos.z() ) ).id().str() == "field" );
+                               blind_pos.z() ) ).id().str() == "field" );
     CHECK( overmap_buffer.ter( target ).id().str() == "field" );
 
     bandit_live_world::world_state world;
@@ -392,14 +395,15 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     world.sites.push_back( site );
     world.sites.front().intelligence_map.terrain_scan_cursor = 6;
 
-    const auto terrain_lookup = []( const tripoint_abs_omt &omt ) -> std::optional<std::string> {
-        if( !overmap_buffer.ter_existing( omt ).is_valid() ) {
+    const auto terrain_lookup = []( const tripoint_abs_omt & omt ) -> std::optional<std::string> {
+        if( !overmap_buffer.ter_existing( omt ).is_valid() )
+        {
             return std::nullopt;
         }
         return overmap_buffer.ter( omt ).id().str();
     };
-    const auto route_lookup = []( const bandit_live_world::site_record &owned,
-                                  const bandit_live_world::structural_outing_plan &plan ) {
+    const auto route_lookup = []( const bandit_live_world::site_record & owned,
+    const bandit_live_world::structural_outing_plan & plan ) {
         int budget = 64;
         return live_bandit_structural_route_read_for_test( owned, plan, budget );
     };
@@ -425,7 +429,7 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     CHECK( routed.active_outing.target_footprint.front() == target );
     CHECK( routed.active_outing.shared_route.front() == routed.anchor );
     const auto selected_watch_route_iter = std::find( routed.active_outing.shared_route.begin(),
-            routed.active_outing.shared_route.end(), routed.active_outing.selected_watch_omt );
+                                           routed.active_outing.shared_route.end(), routed.active_outing.selected_watch_omt );
     REQUIRE( selected_watch_route_iter != routed.active_outing.shared_route.end() );
     CHECK( std::count( routed.active_outing.shared_route.begin(),
                        routed.active_outing.shared_route.end(),
@@ -439,9 +443,9 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
 
     bandit_live_world::site_record &mutable_site = world.sites.front();
     mutable_site.active_outing.waypoint_index = static_cast<int>( std::distance(
-            mutable_site.active_outing.shared_route.cbegin(), selected_watch_route_iter ) );
+                mutable_site.active_outing.shared_route.cbegin(), selected_watch_route_iter ) );
     CHECK( mutable_site.active_outing.shared_route[static_cast<std::size_t>(
-              mutable_site.active_outing.waypoint_index )] == mutable_site.active_outing.selected_watch_omt );
+                mutable_site.active_outing.waypoint_index )] == mutable_site.active_outing.selected_watch_omt );
     mutable_site.active_outing.phase = bandit_live_world::scout_phase::observing;
     mutable_site.active_outing.last_advanced_minutes = 1000;
     REQUIRE( mutable_site.active_outing.member_ids.size() == 2 );
@@ -465,7 +469,7 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     } );
     const tripoint_abs_omt production_route_edge =
         mutable_site.active_outing.shared_route[static_cast<std::size_t>(
-            mutable_site.active_outing.waypoint_index )];
+                    mutable_site.active_outing.waypoint_index )];
     g->place_player_overmap( production_route_edge );
     const tripoint_abs_ms player_position =
         project_to<coords::ms>( production_route_edge ) + point( SEEX, SEEY );
@@ -515,9 +519,9 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         [&live_site]( const character_id id ) {
             const shared_ptr_fast<npc> member = overmap_buffer.find_npc( id );
             const auto snapshot = std::find_if(
-                                       live_site.active_outing.local_handoff.members.begin(),
-                                       live_site.active_outing.local_handoff.members.end(),
-            [id]( const bandit_live_world::local_handoff_member_snapshot &candidate ) {
+                                      live_site.active_outing.local_handoff.members.begin(),
+                                      live_site.active_outing.local_handoff.members.end(),
+            [id]( const bandit_live_world::local_handoff_member_snapshot & candidate ) {
                 return candidate.npc_id == id;
             } );
             return member && snapshot != live_site.active_outing.local_handoff.members.end() &&
@@ -579,8 +583,8 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     CHECK( live_site.active_outing.local_handoff.is_abstract_resume() );
 
     const int persisted_resume_floor = std::max(
-        live_site.active_outing.last_advanced_minutes,
-        live_site.active_outing.local_handoff.committed_minutes );
+                                           live_site.active_outing.last_advanced_minutes,
+                                           live_site.active_outing.local_handoff.committed_minutes );
     const int current_minutes = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
     CAPTURE( persisted_resume_floor, current_minutes,
              live_site.active_outing.last_advanced_minutes,
@@ -605,7 +609,8 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
             result.emplace( id, member->pos_abs() );
         }
         return result;
-    }();
+    }
+    ();
     process_overmap_npc_move_for_test();
     CHECK( live_site.active_outing.owner == bandit_live_world::simulation_owner::local );
     for( const auto &entry : positions_before_generic_travel ) {
@@ -669,7 +674,8 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     REQUIRE( invalid_arrival_omt != live_site.anchor );
     const int invalid_moves_before = overmap_buffer.find_npc( invalid_id )->get_moves();
     const int camp_moves_before = overmap_buffer.find_npc( camp_id )->get_moves();
-    overmap_buffer.find_npc( invalid_id )->setpos( project_to<coords::ms>( invalid_arrival_omt ), false );
+    overmap_buffer.find_npc( invalid_id )->setpos( project_to<coords::ms>( invalid_arrival_omt ),
+            false );
     overmap_buffer.find_npc( camp_id )->setpos( project_to<coords::ms>( live_site.anchor ), false );
     overmap_buffer.find_npc( invalid_id )->set_moves( 0 );
     overmap_buffer.find_npc( camp_id )->set_moves( 0 );
@@ -681,14 +687,15 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     CHECK( overmap_buffer.find_npc( invalid_id )->is_active() );
     CHECK( overmap_buffer.find_npc( invalid_id )->pos_abs_omt() != live_site.anchor );
     CHECK( overmap_buffer.find_npc( camp_id )->is_active() );
-    overmap_buffer.find_npc( invalid_id )->setpos( positions_before_generic_travel.at( invalid_id ), false );
+    overmap_buffer.find_npc( invalid_id )->setpos( positions_before_generic_travel.at( invalid_id ),
+            false );
     overmap_buffer.find_npc( camp_id )->setpos( positions_before_generic_travel.at( camp_id ), false );
     overmap_buffer.find_npc( invalid_id )->set_moves( invalid_moves_before );
     overmap_buffer.find_npc( camp_id )->set_moves( camp_moves_before );
 
     const std::size_t homeward_turn_bound = get_map().points_on_zlevel(
-        live_site.active_outing.local_handoff.route_position.z() ).size() *
-        live_site.active_outing.shared_route.size();
+            live_site.active_outing.local_handoff.route_position.z() ).size() *
+                                            live_site.active_outing.shared_route.size();
     std::size_t homeward_turns = 0;
     while( live_site.active_outing.owner == bandit_live_world::simulation_owner::local &&
            homeward_turns < homeward_turn_bound ) {
@@ -704,8 +711,8 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     CHECK( live_site.active_outing.resolved_member_ids == generated_ids );
     for( const character_id id : generated_ids ) {
         const auto receipt = std::find_if(
-            live_site.active_outing.member_return_receipts.begin(),
-            live_site.active_outing.member_return_receipts.end(),
+                                 live_site.active_outing.member_return_receipts.begin(),
+                                 live_site.active_outing.member_return_receipts.end(),
         [id]( const bandit_live_world::structural_member_return_receipt & candidate ) {
             return candidate.member_id == id;
         } );
@@ -718,7 +725,7 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
 
     const int report_revision_before = live_site.current_scout_report.revision;
     const int current_minutes_before_report = to_minutes<int>(
-        calendar::turn - calendar::start_of_cataclysm );
+                calendar::turn - calendar::start_of_cataclysm );
     const int next_structural_cadence = current_minutes_before_report +
                                         ( 60 - current_minutes_before_report % 60 );
     calendar::turn += ( next_structural_cadence - current_minutes_before_report ) * 1_minutes;

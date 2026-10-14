@@ -842,7 +842,7 @@ action_id handle_action_menu( map &here )
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "unsupported", "Action menu",
-                                std::map<std::string, std::string>{
+        std::map<std::string, std::string> {
             { "stop_reason", "action menu lacks semantic bindings" }
         } );
     }
@@ -1254,25 +1254,25 @@ std::optional<tripoint_rel_ms> choose_direction( const std::string &message,
     semantic_surface_manager *const semantic_manager = active_semantic_surface_manager();
     const auto semantic_actions = [allow_vertical]() {
         std::vector<semantic_action_descriptor> actions = {
-                { "direction.choose", "north", _( "North" ), true },
-                { "direction.choose", "south", _( "South" ), true },
-                { "direction.choose", "west", _( "West" ), true },
-                { "direction.choose", "east", _( "East" ), true },
-                { "direction.choose", "northwest", _( "Northwest" ), true },
-                { "direction.choose", "northeast", _( "Northeast" ), true },
-                { "direction.choose", "southwest", _( "Southwest" ), true },
-                { "direction.choose", "southeast", _( "Southeast" ), true },
-                { "direction.choose", "pause", _( "Here (current tile)" ), true },
-                { "direction.cancel", "", _( "Cancel" ), true }
-            };
-            if( allow_vertical ) {
-                actions.emplace_back( semantic_action_descriptor{
-                    "direction.choose", "up", _( "Up" ), true
-                } );
-                actions.emplace_back( semantic_action_descriptor{
-                    "direction.choose", "down", _( "Down" ), true
-                } );
-            }
+            { "direction.choose", "north", _( "North" ), true },
+            { "direction.choose", "south", _( "South" ), true },
+            { "direction.choose", "west", _( "West" ), true },
+            { "direction.choose", "east", _( "East" ), true },
+            { "direction.choose", "northwest", _( "Northwest" ), true },
+            { "direction.choose", "northeast", _( "Northeast" ), true },
+            { "direction.choose", "southwest", _( "Southwest" ), true },
+            { "direction.choose", "southeast", _( "Southeast" ), true },
+            { "direction.choose", "pause", _( "Here (current tile)" ), true },
+            { "direction.cancel", "", _( "Cancel" ), true }
+        };
+        if( allow_vertical ) {
+            actions.emplace_back( semantic_action_descriptor{
+                "direction.choose", "up", _( "Up" ), true
+            } );
+            actions.emplace_back( semantic_action_descriptor{
+                "direction.choose", "down", _( "Down" ), true
+            } );
+        }
         return actions;
     };
     if( semantic_manager != nullptr ) {
@@ -1281,8 +1281,8 @@ std::optional<tripoint_rel_ms> choose_direction( const std::string &message,
         };
         semantic_scope.emplace( *semantic_manager, "direction", message,
                                 semantic_payload,
-        semantic_actions(), [&semantic_native_action, allow_vertical](
-        const semantic_action_request &request ) {
+                                semantic_actions(), [&semantic_native_action, allow_vertical](
+        const semantic_action_request & request ) {
             const std::string stable_id = request.stable_id.value_or( "" );
             if( request.action_id == "direction.cancel" && stable_id.empty() ) {
                 semantic_native_action = "QUIT";
@@ -1331,7 +1331,7 @@ std::optional<tripoint_rel_ms> choose_direction( const std::string &message,
                                               semantic_manager->has_pending_request();
         if( semantic_scope ) {
             semantic_scope->publish( { { "prompt", message },
-                                       { "allow_vertical", allow_vertical ? "true" : "false" } },
+                { "allow_vertical", allow_vertical ? "true" : "false" } },
             semantic_actions() );
         }
         if( semantic_request_pending ) {

@@ -88,8 +88,10 @@ std::string load( const char *filename,
 {
     seed_llm_prompt_override_files( seed_filenames );
 
-    for( const std::filesystem::path &path : { llm_prompt_override_dir_path() / filename,
-                                               bundled_llm_prompt_dir_path() / filename } ) {
+    for( const std::filesystem::path &path : {
+             llm_prompt_override_dir_path() / filename,
+             bundled_llm_prompt_dir_path() / filename
+         } ) {
         if( !file_exist( path ) ) {
             continue;
         }

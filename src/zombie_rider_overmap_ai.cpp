@@ -100,7 +100,8 @@ std::vector<std::string> rider_band_registry::malformed_references() const
     return issues;
 }
 
-std::string rider_band_registry::encounter_key( const std::string &first, const std::string &second ) const
+std::string rider_band_registry::encounter_key( const std::string &first,
+        const std::string &second ) const
 {
     return first < second ? first + "\n" + second : second + "\n" + first;
 }
@@ -181,7 +182,8 @@ bool rider_band_registry::share_observation( const std::string &from_actor_id,
     rider_band_observation relayed = source->second;
     relayed.provenance = "relayed_direct_rider_sight";
     const auto destination = observations.find( to_actor_id );
-    if( destination != observations.end() && !observation_is_stronger( relayed, destination->second ) ) {
+    if( destination != observations.end() &&
+        !observation_is_stronger( relayed, destination->second ) ) {
         return false;
     }
     observations[to_actor_id] = relayed;
@@ -200,8 +202,9 @@ void rider_band_registry::observe( const std::string &actor_id,
     }
 }
 
-std::optional<rider_band_observation> rider_band_registry::observation_for( const std::string &actor_id,
-        const int turn ) const
+std::optional<rider_band_observation> rider_band_registry::observation_for(
+    const std::string &actor_id,
+    const int turn ) const
 {
     const auto found = observations.find( actor_id );
     return found != observations.end() && found->second.valid_at( turn ) ?
@@ -214,7 +217,7 @@ std::string rider_band_registry::band_for( const std::string &actor_id ) const
 }
 
 bool rider_band_registry::in_same_band( const std::string &first_actor_id,
-        const std::string &second_actor_id ) const
+                                        const std::string &second_actor_id ) const
 {
     const std::string first = root_for( first_actor_id );
     return !first.empty() && first == root_for( second_actor_id );
@@ -333,9 +336,9 @@ void rider_band_registry::deserialize( const JsonObject &json )
             entry.read( "target_identity", observation.target_identity );
             entry.read( "position", observation.position );
             entry.read( "observed_turn", observation.observed_turn );
-        entry.read( "expires_at_turn", observation.expires_at_turn );
-        entry.read( "source_actor_id", observation.source_actor_id );
-        entry.read( "provenance", observation.provenance );
+            entry.read( "expires_at_turn", observation.expires_at_turn );
+            entry.read( "source_actor_id", observation.source_actor_id );
+            entry.read( "provenance", observation.provenance );
             entry.read( "uncertainty", observation.uncertainty );
             observe( actor_id, observation );
         }
@@ -579,7 +582,8 @@ rider_light_interest evaluate_light_attraction(
     interest.should_investigate = true;
     interest.reason = projection.concealment.elevated_exposure_extended ?
                       "elevated_bright_light" : "exposed_bright_light";
-    interest.interest_score = std::clamp( horde_signal_power / 10 + projection.visibility_score / 4, 1, 6 );
+    interest.interest_score = std::clamp( horde_signal_power / 10 + projection.visibility_score / 4, 1,
+                                          6 );
     interest.memory_turns = std::clamp( 60 + horde_signal_power * 4, 90, 300 );
     const int desired_riders = interest.interest_score >= 5 ? max_riders_drawn_by_light : 1;
     interest.max_riders_drawn = std::min( eligible_riders_nearby, desired_riders );

@@ -81,13 +81,15 @@ void iteminfo_window::execute()
             { "item_name", data.get_item_name() },
             { "type_name", data.get_type_name() },
             { "item_info_text", format_item_info( data.get_item_display(), data.get_item_compare() ) },
-            { "item_info_text_source",
-              "format_item_info(item_info_data::get_item_display(), item_info_data::get_item_compare())" }
+            {
+                "item_info_text_source",
+                "format_item_info(item_info_data::get_item_display(), item_info_data::get_item_compare())"
+            }
         };
         semantic_scope.emplace( *manager, "item_info", _( "Item info" ),
-        semantic_facts, std::vector<semantic_action_descriptor>{
+        semantic_facts, std::vector<semantic_action_descriptor> {
             { "item_info.close", "", _( "Close" ), true }
-        }, [&semantic_input]( const semantic_action_request &request ) {
+        }, [&semantic_input]( const semantic_action_request & request ) {
             if( request.action_id != "item_info.close" ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }
@@ -99,7 +101,7 @@ void iteminfo_window::execute()
     while( true ) {
         ui_manager::redraw();
         if( semantic_scope ) {
-            semantic_scope->publish( semantic_facts, std::vector<semantic_action_descriptor>{
+            semantic_scope->publish( semantic_facts, std::vector<semantic_action_descriptor> {
                 { "item_info.close", "", _( "Close" ), true }
             } );
             semantic_scope->consume_request();

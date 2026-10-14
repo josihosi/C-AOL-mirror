@@ -4,7 +4,8 @@
 
 namespace
 {
-const bandit_dry_run::candidate_debug *find_candidate( const bandit_dry_run::evaluation_result &result,
+const bandit_dry_run::candidate_debug *find_candidate( const bandit_dry_run::evaluation_result
+        &result,
         bandit_dry_run::job_template job,
         const std::string &envelope_id = std::string() )
 {
@@ -139,7 +140,8 @@ TEST_CASE( "bandit_dry_run_need_pressure_can_rescue_a_mediocre_real_lead", "[ban
     CHECK( report.find( "need_override_bonus=2" ) != std::string::npos );
 }
 
-TEST_CASE( "bandit_dry_run_explicit_bounded_explore_can_beat_hold_chill_without_real_leads", "[bandit][dry_run]" )
+TEST_CASE( "bandit_dry_run_explicit_bounded_explore_can_beat_hold_chill_without_real_leads",
+           "[bandit][dry_run]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -160,11 +162,14 @@ TEST_CASE( "bandit_dry_run_explicit_bounded_explore_can_beat_hold_chill_without_
     CHECK( result.candidates[result.winner_index].envelope_id == "bounded_explore" );
 
     const std::string report = bandit_dry_run::render_report( result );
-    CHECK( report.find( "explicit bounded scout/explore outing for map uncovering" ) != std::string::npos );
-    CHECK( report.find( "not a no_path fallback and not accidental random wandering" ) != std::string::npos );
+    CHECK( report.find( "explicit bounded scout/explore outing for map uncovering" ) !=
+           std::string::npos );
+    CHECK( report.find( "not a no_path fallback and not accidental random wandering" ) !=
+           std::string::npos );
 }
 
-TEST_CASE( "bandit_dry_run_unreachable_targets_do_not_mint_explore_without_explicit_greenlight", "[bandit][dry_run]" )
+TEST_CASE( "bandit_dry_run_unreachable_targets_do_not_mint_explore_without_explicit_greenlight",
+           "[bandit][dry_run]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -180,11 +185,13 @@ TEST_CASE( "bandit_dry_run_unreachable_targets_do_not_mint_explore_without_expli
 
     const bandit_dry_run::evaluation_result result = bandit_dry_run::evaluate( camp, { lead } );
 
-    CHECK( find_candidate( result, bandit_dry_run::job_template::scout, "bounded_explore" ) == nullptr );
+    CHECK( find_candidate( result, bandit_dry_run::job_template::scout,
+                           "bounded_explore" ) == nullptr );
     CHECK( result.candidates[result.winner_index].job == bandit_dry_run::job_template::hold_chill );
 }
 
-TEST_CASE( "bandit_dry_run_explicit_bounded_explore_stays_secondary_to_strong_real_leads", "[bandit][dry_run]" )
+TEST_CASE( "bandit_dry_run_explicit_bounded_explore_stays_secondary_to_strong_real_leads",
+           "[bandit][dry_run]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -214,7 +221,8 @@ TEST_CASE( "bandit_dry_run_explicit_bounded_explore_stays_secondary_to_strong_re
     CHECK( result.candidates[result.winner_index].job == bandit_dry_run::job_template::scavenge );
 }
 
-TEST_CASE( "bandit_dry_run_strong_targets_stay_deferred_without_a_real_opening", "[bandit][dry_run]" )
+TEST_CASE( "bandit_dry_run_strong_targets_stay_deferred_without_a_real_opening",
+           "[bandit][dry_run]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -245,7 +253,8 @@ TEST_CASE( "bandit_dry_run_strong_targets_stay_deferred_without_a_real_opening",
     CHECK( report.find( "opportunism_bonus=0" ) != std::string::npos );
 }
 
-TEST_CASE( "bandit_dry_run_target_distraction_opens_a_bounded_opportunistic_window", "[bandit][dry_run]" )
+TEST_CASE( "bandit_dry_run_target_distraction_opens_a_bounded_opportunistic_window",
+           "[bandit][dry_run]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -280,11 +289,14 @@ TEST_CASE( "bandit_dry_run_target_distraction_opens_a_bounded_opportunistic_wind
     CHECK( report.find( "target_coherence_bonus=1" ) != std::string::npos );
     CHECK( report.find( "effective_threat_penalty=3" ) != std::string::npos );
     CHECK( report.find( "opportunism_bonus=2" ) != std::string::npos );
-    CHECK( report.find( "danger collapse: raw threat 6 minus monster pressure 2 and coherence break 1 -> effective threat 3" ) != std::string::npos );
-    CHECK( report.find( "opportunism window: degraded target coherence adds a bounded push" ) != std::string::npos );
+    CHECK( report.find( "danger collapse: raw threat 6 minus monster pressure 2 and coherence break 1 -> effective threat 3" )
+           != std::string::npos );
+    CHECK( report.find( "opportunism window: degraded target coherence adds a bounded push" ) !=
+           std::string::npos );
 }
 
-TEST_CASE( "bandit_dry_run_soft_veto_clamps_extraction_but_keeps_pressure_jobs", "[bandit][dry_run]" )
+TEST_CASE( "bandit_dry_run_soft_veto_clamps_extraction_but_keeps_pressure_jobs",
+           "[bandit][dry_run]" )
 {
     bandit_dry_run::camp_input camp;
     camp.available_manpower = 2;
@@ -317,7 +329,8 @@ TEST_CASE( "bandit_dry_run_soft_veto_clamps_extraction_but_keeps_pressure_jobs",
 
     const std::string report = bandit_dry_run::render_report( result );
     CHECK( report.find( "threat_gate=soft_veto" ) != std::string::npos );
-    CHECK( report.find( "soft_veto: pure extraction collapses back to hold / chill" ) != std::string::npos );
+    CHECK( report.find( "soft_veto: pure extraction collapses back to hold / chill" ) !=
+           std::string::npos );
 }
 
 TEST_CASE( "bandit_dry_run_metrics_expose_lead_filtering_and_churn", "[bandit][dry_run]" )
@@ -346,7 +359,7 @@ TEST_CASE( "bandit_dry_run_metrics_expose_lead_filtering_and_churn", "[bandit][d
     no_envelope.has_real_envelope = false;
 
     const bandit_dry_run::evaluation_result result = bandit_dry_run::evaluate( camp,
-            { accepted, duplicate, invalid, no_envelope } );
+    { accepted, duplicate, invalid, no_envelope } );
 
     CHECK( result.metrics.input_lead_count == 4 );
     CHECK( result.metrics.accepted_lead_count == 1 );

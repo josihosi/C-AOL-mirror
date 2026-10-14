@@ -502,8 +502,12 @@ class zone_data
         void set_is_vehicle( bool is_vehicle_arg );
 
         static std::string new_identity();
-        const std::string &get_identity() const { return identity; }
-        std::optional<int64_t> get_semantic_revision() const { return semantic_revision; }
+        const std::string &get_identity() const {
+            return identity;
+        }
+        std::optional<int64_t> get_semantic_revision() const {
+            return semantic_revision;
+        }
 
         static std::string make_type_hash( const zone_type_id &_type, const faction_id &_fac ) {
             return _type.c_str() + type_fac_hash_str + _fac.c_str();
@@ -760,9 +764,9 @@ class zone_manager_ui
 };
 
 struct basecamp_smart_zone_result {
-        bool success = false;
-        std::string message;
-        int placed_zones = 0;
+    bool success = false;
+    std::string message;
+    int placed_zones = 0;
 };
 
 basecamp_smart_zone_result auto_place_basecamp_smart_zones(

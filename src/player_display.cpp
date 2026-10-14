@@ -1973,8 +1973,10 @@ void Character::disp_info( bool customize_character )
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         std::map<std::string, std::string> facts = {
             { "name", disp_name() },
-            { "attributes", string_format( "Strength %d; Dexterity %d; Intelligence %d; Perception %d",
-                                          get_str(), get_dex(), get_int(), get_per() ) }
+            {
+                "attributes", string_format( "Strength %d; Dexterity %d; Intelligence %d; Perception %d",
+                                             get_str(), get_dex(), get_int(), get_per() )
+            }
         };
         for( const HeaderSkill &entry : skillslist ) {
             if( !entry.is_header ) {
@@ -1990,9 +1992,9 @@ void Character::disp_info( bool customize_character )
             facts["effects"] += effect.first + ": " + effect.second + "\n";
         }
         semantic_scope.emplace( *manager, "character_info", _( "Abilities" ), std::move( facts ),
-                                std::vector<semantic_action_descriptor>{
+        std::vector<semantic_action_descriptor> {
             { "character_info.close", "", _( "Close" ), true }
-        }, [&done]( const semantic_action_request &request ) {
+        }, [&done]( const semantic_action_request & request ) {
             if( request.action_id != "character_info.close" ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }
@@ -2004,11 +2006,12 @@ void Character::disp_info( bool customize_character )
     do {
         ui_manager::redraw_invalidated();
 
-        const bool physical_done = handle_player_display_action( *this, line, info_line, curtab, ctxt, ui_tip, ui_info,
-                                             ui_stats, ui_encumb, ui_speed, ui_traits, ui_bionics, ui_effects,
-                                             ui_skills, ui_proficiencies, speedlist, traitslist, bionicslist,
-                                             effect_name_and_text, skillslist, customize_character,
-                                             windows, w_tip, tip_btn_highlight );
+        const bool physical_done = handle_player_display_action( *this, line, info_line, curtab, ctxt,
+                                   ui_tip, ui_info,
+                                   ui_stats, ui_encumb, ui_speed, ui_traits, ui_bionics, ui_effects,
+                                   ui_skills, ui_proficiencies, speedlist, traitslist, bionicslist,
+                                   effect_name_and_text, skillslist, customize_character,
+                                   windows, w_tip, tip_btn_highlight );
         done = done || physical_done;
     } while( !done );
 }

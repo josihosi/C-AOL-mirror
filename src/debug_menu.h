@@ -94,7 +94,7 @@ debug_item_spawn_receipt debug_item_spawn_transaction( const debug_item_spawn_re
 debug_item_spawn_cleanup_receipt debug_item_spawn_transaction_cleanup(
     const debug_item_spawn_request &request );
 std::optional<debug_item_spawn_setup_receipt> process_harness_item_setup(
-            const tripoint_bub_ms &player_pos );
+    const tripoint_bub_ms &player_pos );
 void reset_harness_item_setup();
 // Shows a menu to debug item groups. Spawns items if test is false, otherwise displays would be spawned items.
 void wishitemgroup( bool test );

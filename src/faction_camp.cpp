@@ -1711,7 +1711,7 @@ static void log_camp_request_heard( const npc &speaker, const std::string &utter
         return;
     }
     llm_intent::log_event( string_format( "camp heard %1$s (%2$d)\nutterance=%3$s",
-                          speaker.disp_name(), speaker.getID().get_value(), utterance ) );
+                                          speaker.disp_name(), speaker.getID().get_value(), utterance ) );
 }
 
 static void log_camp_request_reply( const npc &speaker, std::string_view utterance,
@@ -1721,8 +1721,8 @@ static void log_camp_request_reply( const npc &speaker, std::string_view utteran
         return;
     }
     llm_intent::log_event( basecamp_ai::format_camp_reply_log_packet(
-                              reply_kind, utterance, speaker.disp_name(),
-                              speaker.getID().get_value(), reply_text ) );
+                               reply_kind, utterance, speaker.disp_name(),
+                               speaker.getID().get_value(), reply_text ) );
 }
 
 [[maybe_unused]] static std::string camp_request_queue_bark( const camp_llm_request &request )
@@ -1759,7 +1759,8 @@ static void log_camp_request_reply( const npc &speaker, std::string_view utteran
 
 static std::string camp_request_cancel_bark( const camp_llm_request &request )
 {
-    return string_format( _( "All right.  Took %s off the board." ), camp_request_bark_subject( request ) );
+    return string_format( _( "All right.  Took %s off the board." ),
+                          camp_request_bark_subject( request ) );
 }
 
 static std::string camp_request_clear_bark( const camp_llm_request &request )
@@ -1795,8 +1796,9 @@ static std::string camp_craft_ambiguous_bark( std::string_view query,
 
 static std::string camp_craft_no_match_bark( std::string_view query )
 {
-    return string_format( _( "Heard craft order for \"%s\", but the camp could not match it to a known recipe." ),
-                          std::string( query ) );
+    return string_format(
+               _( "Heard craft order for \"%s\", but the camp could not match it to a known recipe." ),
+               std::string( query ) );
 }
 
 static std::string camp_craft_resolution_outcome_name(
@@ -1840,14 +1842,15 @@ static void log_camp_craft_trace( const std::string &utterance,
     const std::string top_matches = join_trace( resolution.match.score_notes );
     const std::string blocker_text = join_trace( blockers );
     DebugLog( D_INFO, DC_ALL ) << string_format(
-        "camp_craft_trace heard=\"%1$s\" parsed_query=\"%2$s\" count=%3$d known_recipe_count=%4$d search_recipe_count=%5$d fallback_query=\"%6$s\" top_matches=%7$s resolved_recipe=\"%8$s\" outcome=%9$s blockers=%10$s request_id=%11$d request_status=\"%12$s\"",
-        utterance, parsed.item_query, parsed.count,
-        static_cast<int>( known_recipe_count ), static_cast<int>( search_recipe_count ),
-        resolution.match.fallback_query.empty() ? "none" : resolution.match.fallback_query,
-        top_matches,
-        resolved_recipe.empty() && resolution.choice.has_value() ? resolution.choice->subject : resolved_recipe,
-        camp_craft_resolution_outcome_name( outcome ), blocker_text, request_id,
-        request_status.empty() ? "none" : request_status );
+                                   "camp_craft_trace heard=\"%1$s\" parsed_query=\"%2$s\" count=%3$d known_recipe_count=%4$d search_recipe_count=%5$d fallback_query=\"%6$s\" top_matches=%7$s resolved_recipe=\"%8$s\" outcome=%9$s blockers=%10$s request_id=%11$d request_status=\"%12$s\"",
+                                   utterance, parsed.item_query, parsed.count,
+                                   static_cast<int>( known_recipe_count ), static_cast<int>( search_recipe_count ),
+                                   resolution.match.fallback_query.empty() ? "none" : resolution.match.fallback_query,
+                                   top_matches,
+                                   resolved_recipe.empty() &&
+                                   resolution.choice.has_value() ? resolution.choice->subject : resolved_recipe,
+                                   camp_craft_resolution_outcome_name( outcome ), blocker_text, request_id,
+                                   request_status.empty() ? "none" : request_status );
 }
 
 static std::string camp_request_not_found_bark( std::string_view query )
@@ -1858,9 +1861,9 @@ static std::string camp_request_not_found_bark( std::string_view query )
 static std::string camp_request_details( const camp_llm_request &request )
 {
     std::string details = string_format( _( "Crafting request #%1$d\n"
-                                           "Kind: %2$s\n"
-                                           "Craft order: %3$s\n"
-                                           "Status: %4$s\n" ),
+                                            "Kind: %2$s\n"
+                                            "Craft order: %3$s\n"
+                                            "Status: %4$s\n" ),
                                          request.request_id,
                                          camp_request_kind_label( request ),
                                          camp_request_subject( request ),
@@ -1892,7 +1895,8 @@ static std::string camp_request_details( const camp_llm_request &request )
             details += string_format( "- %s\n", blocker );
         }
     }
-    if( const std::string handoff = basecamp_ai::camp_request_handoff_snapshot( request ); !handoff.empty() ) {
+    if( const std::string handoff = basecamp_ai::camp_request_handoff_snapshot( request );
+        !handoff.empty() ) {
         details += _( "Deterministic handoff:\n" );
         details += handoff;
     }
@@ -1917,7 +1921,8 @@ static std::string camp_request_subject_list( const std::vector<std::string> &su
         joined += subjects[idx];
     }
     if( subjects.size() > max_listed_subjects ) {
-        joined += string_format( _( ", and %d more" ), static_cast<int>( subjects.size() - max_listed_subjects ) );
+        joined += string_format( _( ", and %d more" ),
+                                 static_cast<int>( subjects.size() - max_listed_subjects ) );
     }
     return joined;
 }
@@ -2088,7 +2093,8 @@ static bool camp_request_is_archived( const camp_llm_request &request )
 
 camp_llm_request *basecamp::find_camp_request( int request_id )
 {
-    auto it = std::find_if( camp_requests.begin(), camp_requests.end(), [request_id]( const camp_llm_request & request ) {
+    auto it = std::find_if( camp_requests.begin(),
+    camp_requests.end(), [request_id]( const camp_llm_request & request ) {
         return request.request_id == request_id;
     } );
     return it == camp_requests.end() ? nullptr : &*it;
@@ -2097,7 +2103,8 @@ camp_llm_request *basecamp::find_camp_request( int request_id )
 camp_llm_request *basecamp::find_active_crafting_request( const mission_id &miss_id,
         const character_id &worker_id )
 {
-    auto it = std::find_if( camp_requests.rbegin(), camp_requests.rend(), [&]( const camp_llm_request & request ) {
+    auto it = std::find_if( camp_requests.rbegin(),
+    camp_requests.rend(), [&]( const camp_llm_request & request ) {
         return request.status == "in_progress" && request.assigned_worker_npc_id == worker_id &&
                is_equal( request.active_mission_id, miss_id );
     } );
@@ -2170,7 +2177,8 @@ npc_ptr basecamp::resolve_crafting_worker( const recipe &making, int batch_size,
         if( reason.empty() ) {
             return;
         }
-        if( std::find( rejection_reasons.begin(), rejection_reasons.end(), reason ) == rejection_reasons.end() ) {
+        if( std::find( rejection_reasons.begin(), rejection_reasons.end(),
+                       reason ) == rejection_reasons.end() ) {
             rejection_reasons.push_back( reason );
         }
     };
@@ -2215,7 +2223,8 @@ npc_ptr basecamp::resolve_crafting_worker( const recipe &making, int batch_size,
     }
 
     if( preferred_eligible ) {
-        auto preferred_it = std::find_if( candidates.begin(), candidates.end(), []( const worker_candidate & candidate ) {
+        auto preferred_it = std::find_if( candidates.begin(),
+        candidates.end(), []( const worker_candidate & candidate ) {
             return candidate.preferred;
         } );
         if( preferred_it != candidates.end() ) {
@@ -2223,7 +2232,8 @@ npc_ptr basecamp::resolve_crafting_worker( const recipe &making, int batch_size,
         }
     }
 
-    auto best_it = std::min_element( candidates.begin(), candidates.end(), []( const worker_candidate & lhs,
+    auto best_it = std::min_element( candidates.begin(),
+                                     candidates.end(), []( const worker_candidate & lhs,
     const worker_candidate & rhs ) {
         if( lhs.duration != rhs.duration ) {
             return lhs.duration < rhs.duration;
@@ -2238,14 +2248,16 @@ npc_ptr basecamp::resolve_crafting_worker( const recipe &making, int batch_size,
     if( preferred_worker_id.is_valid() && resolution_note != nullptr ) {
         if( !preferred_seen ) {
             if( preferred_name.empty() ) {
-                *resolution_note = string_format( _( "%s took over the work order." ), best_it->worker->disp_name() );
+                *resolution_note = string_format( _( "%s took over the work order." ),
+                                                  best_it->worker->disp_name() );
             } else {
                 *resolution_note = string_format( _( "%1$s was gone, so %2$s took over the work order." ),
                                                   preferred_name, best_it->worker->disp_name() );
             }
         } else if( !preferred_name.empty() ) {
-            *resolution_note = string_format( _( "%1$s could not take the order, so %2$s picked it up instead." ),
-                                              preferred_name, best_it->worker->disp_name() );
+            *resolution_note = string_format(
+                                   _( "%1$s could not take the order, so %2$s picked it up instead." ),
+                                   preferred_name, best_it->worker->disp_name() );
         }
     }
 
@@ -2271,7 +2283,8 @@ std::vector<std::string> basecamp::release_crafting_tools( const recipe &making,
         }
         req = &req_it->second.consolidated_reqs;
     } else {
-        req = making.deduped_requirements().select_alternative( player_character, _inv, filter, batch_size );
+        req = making.deduped_requirements().select_alternative( player_character, _inv, filter,
+                batch_size );
     }
     if( req == nullptr ) {
         return {};
@@ -2346,7 +2359,7 @@ std::vector<std::string> basecamp::release_crafting_tools( const recipe &making,
             const std::string released_name = released.tname();
             target_map.add_item_or_charges( drop_pos, std::move( released ) );
             released_notes.push_back( string_format( _( "%1$s turned over %2$s to camp stock." ),
-                                                     guy->disp_name(), released_name ) );
+                                      guy->disp_name(), released_name ) );
             released_any = true;
             released_this_round = true;
             form_crafting_inventory( target_map );
@@ -2407,7 +2420,8 @@ static bool consume_camp_request_prefix( std::string &text, const std::string_vi
 
 static bool strip_camp_request_suffix( std::string &text, const std::string_view suffix )
 {
-    if( text.size() < suffix.size() || text.compare( text.size() - suffix.size(), suffix.size(), suffix ) != 0 ) {
+    if( text.size() < suffix.size() ||
+        text.compare( text.size() - suffix.size(), suffix.size(), suffix ) != 0 ) {
         return false;
     }
     text.erase( text.size() - suffix.size() );
@@ -2489,7 +2503,7 @@ static std::optional<int> parse_camp_request_id_reference( std::string text )
         return std::nullopt;
     }
     if( !std::all_of( text.begin(), text.end(), []( const char ch ) {
-        return std::isdigit( static_cast<unsigned char>( ch ) );
+    return std::isdigit( static_cast<unsigned char>( ch ) );
     } ) ) {
         return std::nullopt;
     }
@@ -2549,7 +2563,8 @@ struct camp_job_report_debounce_entry {
 
 static constexpr time_duration camp_job_report_debounce_window = 30_minutes;
 
-static std::unordered_map<std::string, camp_job_report_debounce_entry> &camp_job_report_debounce_cache()
+static std::unordered_map<std::string, camp_job_report_debounce_entry>
+&camp_job_report_debounce_cache()
 {
     static std::unordered_map<std::string, camp_job_report_debounce_entry> cache;
     return cache;
@@ -2629,7 +2644,8 @@ std::string camp_request_subject_for_display( const camp_llm_request &request,
     }
 
     if( include_resolved_recipe && !request.requested_item_query.empty() &&
-        !request.chosen_recipe_name.empty() && request.chosen_recipe_name != request.requested_item_query ) {
+        !request.chosen_recipe_name.empty() &&
+        request.chosen_recipe_name != request.requested_item_query ) {
         subject += string_format( _( " (matched %s)" ), request.chosen_recipe_name );
     }
 
@@ -5578,42 +5594,43 @@ void basecamp::job_assignment_ui()
                 while( true ) {
                     uilist smenu;
                     smenu.text = _( "Assign job priority (0 to disable)" );
-                    int count = 0;
-                    std::vector<activity_id> job_vec = cur_npc->job.get_prioritised_vector();
-                    smenu.addentry( count++, true, 'C', _( "Clear all priorities" ) );
-                    smenu.addentry( count++, true, 'S', _( "Set all priorities" ) );
-                    for( const activity_id &elem : job_vec ) {
-                        player_activity test_act = player_activity( elem );
-                        const int priority = cur_npc->job.get_priority_of_job( elem );
-                        smenu.addentry( count, true, MENU_AUTOASSIGN, string_format( _( "%s : %s" ), test_act.get_verb(),
-                                        std::to_string( priority ) ) );
-                        count++;
-                    }
-                    smenu.query();
-                    if( smenu.ret == UILIST_CANCEL ) {
-                        break;
-                    }
-                    if( smenu.ret == 0 ) {
-                        cur_npc->job.clear_all_priorities();
-                    } else if( smenu.ret == 1 ) {
-                        int priority = 0;
-                        query_int( priority, false, _( "Priority for all jobs " ) );
-                        cur_npc->job.set_all_priorities( priority );
-                    } else if( smenu.ret > 1 && smenu.ret <= static_cast<int>( job_vec.size() ) + 1 ) {
-                        activity_id sel_job = job_vec[size_t( smenu.ret - 2 )];
-                        player_activity test_act = player_activity( sel_job );
-                        int priority = 0;
-                        query_int( priority, false, _( "Priority for %s " ), test_act.get_verb() );
-                        cur_npc->job.set_task_priority( sel_job, priority );
-                    } else {
-                        break;
-                    }
-                }
-            }
-        } else if( action == "QUIT" ) {
-            break;
-        }
+    int count = 0;
+    std::vector<activity_id> job_vec = cur_npc->job.get_prioritised_vector();
+    smenu.addentry( count++, true, 'C', _( "Clear all priorities" ) );
+    smenu.addentry( count++, true, 'S', _( "Set all priorities" ) );
+for( const activity_id &elem : job_vec ) {
+    player_activity test_act = player_activity( elem );
+        const int priority = cur_npc->job.get_priority_of_job( elem );
+        smenu.addentry( count, true, MENU_AUTOASSIGN, string_format( _( "%s : %s" ), test_act.get_verb(),
+                        std::to_string( priority ) ) );
+        count++;
     }
+    smenu.query();
+    if( smenu.ret == UILIST_CANCEL ) {
+    break;
+}
+if( smenu.ret == 0 ) {
+    cur_npc->job.clear_all_priorities();
+    } else if( smenu.ret == 1 ) {
+    int priority = 0;
+    query_int( priority, false, _( "Priority for all jobs " ) );
+        cur_npc->job.set_all_priorities( priority );
+    } else if( smenu.ret > 1 && smenu.ret <= static_cast<int>( job_vec.size() ) + 1 ) {
+        activity_id sel_job = job_vec[size_t( smenu.ret - 2 )];
+        player_activity test_act = player_activity( sel_job );
+        int priority = 0;
+        query_int( priority, false, _( "Priority for %s " ), test_act.get_verb() );
+        cur_npc->job.set_task_priority( sel_job, priority );
+    } else {
+        break;
+    }
+}
+}
+} else if( action == "QUIT" )
+{
+    break;
+}
+}
 }
 
 void basecamp::start_menial_labor()
@@ -7185,7 +7202,7 @@ npc_ptr basecamp::emergency_recall( const mission_id &miss_id )
         if( active_mission.id == Camp_Crafting ) {
             cancel_crafting_request( active_mission, *comp,
                                      string_format( _( "%s was recalled before the craft order was finished." ),
-                                             comp->disp_name() ) );
+                                                    comp->disp_name() ) );
         }
     }
     return comp;

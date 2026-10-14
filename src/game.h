@@ -49,10 +49,11 @@ class input_context;
 
 input_context get_default_mode_input_context();
 std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
-    const input_context &context );
+            const input_context &context );
 
 void openclaw_harness_semantic_wait_activity_complete();
-void openclaw_harness_semantic_initial_world_frame_if_ready( const input_context *active_input_context,
+void openclaw_harness_semantic_initial_world_frame_if_ready( const input_context
+        *active_input_context,
         bool no_activity_owns_turn, bool no_auto_move_owns_turn, bool no_dead_watch_owns_turn );
 void openclaw_harness_semantic_activity_distraction();
 void openclaw_harness_semantic_world_after_activity_distraction();

@@ -114,7 +114,8 @@ class mapbuffer
             std::set<tripoint_abs_sm> cells;
         };
         // Destroy submaps first: vehicle destructors unregister while these exist.
-        std::map<tripoint_abs_sm, std::vector<vehicle_part_position>> vehicle_cells; // NOLINT(cata-serialize)
+        std::map<tripoint_abs_sm, std::vector<vehicle_part_position>>
+                vehicle_cells; // NOLINT(cata-serialize)
         std::map<vehicle *, indexed_vehicle> indexed_vehicles; // NOLINT(cata-serialize)
         submap_map_t submaps; // NOLINT(cata-serialize)
 };

@@ -863,8 +863,10 @@ TEST_CASE( "predator occupied exact handoff retains abstract owner", "[monster][
     restore_on_out_of_scope restore_calendar_turn( calendar::turn );
     calendar::turn = calendar::turn_zero;
 
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         clear_overmaps();
         clear_map_and_put_player_underground();
         map &here = get_map();
@@ -946,13 +948,13 @@ TEST_CASE( "predator blocked cross overmap route retains the exact abstract owne
     REQUIRE( source_om != nullptr );
     REQUIRE( destination_om != nullptr );
     const tripoint_abs_ms source = project_combine( source_om_pos,
-                                     tripoint_om_ms( OMAPX * 2 * SEEX - 1, 12 * SEEX, 0 ) );
+                                   tripoint_om_ms( OMAPX * 2 * SEEX - 1, 12 * SEEX, 0 ) );
     const tripoint_abs_ms destination = source + point_rel_ms( 1, 0 );
     REQUIRE( project_to<coords::om>( destination ).xy() == destination_om_pos );
     point_abs_om transfer_destination_om;
     tripoint_om_sm ignored_transfer_sm;
     std::tie( transfer_destination_om, ignored_transfer_sm ) = project_remain<coords::om>(
-                                                            project_to<coords::sm>( destination ) );
+                project_to<coords::sm>( destination ) );
     REQUIRE( transfer_destination_om == destination_om_pos );
     REQUIRE( overmap_buffer.get_existing( transfer_destination_om ) == destination_om );
     REQUIRE_FALSE( get_map().inbounds( destination ) );
@@ -965,8 +967,10 @@ TEST_CASE( "predator blocked cross overmap route retains the exact abstract owne
     tripoint_om_ms source_local;
     std::tie( ignored_om, source_local ) = project_remain<coords::om>( source );
 
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         monster original( type );
         original.set_moves( 47 );
         original.set_dest( destination );
@@ -1023,7 +1027,9 @@ TEST_CASE( "predator blocked cross overmap route retains the exact abstract owne
         CHECK( retained->monster_data->predator_state().actor_id == actor_id );
         CHECK( retained->monster_data->predator_state().handoff_epoch == epoch );
         int predator_owner_count = 0;
-        for( horde_map *const hordes : { &source_after->hordes, &destination_after->hordes } ) {
+        for( horde_map *const hordes : {
+                 &source_after->hordes, &destination_after->hordes
+             } ) {
             for( std::pair<const tripoint_abs_ms, horde_entity> &entry : hordes->get_view(
                      horde_map_flavors::active | horde_map_flavors::idle |
                      horde_map_flavors::dormant | horde_map_flavors::immobile ) ) {
@@ -1059,7 +1065,7 @@ TEST_CASE( "predator duplicate cross overmap handoff retains source authority",
     REQUIRE( source_om != nullptr );
     REQUIRE( destination_om != nullptr );
     const tripoint_abs_ms source = project_combine( source_om_pos,
-                                     tripoint_om_ms( OMAPX * 2 * SEEX - 1, 14 * SEEX, 0 ) );
+                                   tripoint_om_ms( OMAPX * 2 * SEEX - 1, 14 * SEEX, 0 ) );
     const tripoint_abs_ms destination = source + point_rel_ms( 1, 0 );
     const tripoint_abs_ms stale_destination_copy = destination + point_rel_ms( 0, 1 );
     REQUIRE_FALSE( get_map().inbounds( destination ) );
@@ -1074,8 +1080,10 @@ TEST_CASE( "predator duplicate cross overmap handoff retains source authority",
     point_abs_om ignored_destination_om;
     tripoint_om_ms destination_local;
     std::tie( ignored_destination_om, destination_local ) = project_remain<coords::om>( destination );
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         monster original( type );
         original.set_moves( 47 );
         original.set_dest( destination );
@@ -1098,7 +1106,8 @@ TEST_CASE( "predator duplicate cross overmap handoff retains source authority",
         stale_copy.predator_state().handoff_epoch = 4;
         REQUIRE( destination_om->hordes.spawn_entity( stale_destination_copy, stale_copy ) );
         tripoint_om_ms stale_local;
-        std::tie( ignored_destination_om, stale_local ) = project_remain<coords::om>( stale_destination_copy );
+        std::tie( ignored_destination_om,
+                  stale_local ) = project_remain<coords::om>( stale_destination_copy );
         REQUIRE( stale_local != destination_local );
         horde_entity *stale = destination_om->entity_at( stale_local );
         REQUIRE( stale != nullptr );
@@ -1138,7 +1147,9 @@ TEST_CASE( "predator duplicate cross overmap handoff retains source authority",
         CHECK( stale_after->monster_data->predator_state().handoff_epoch == 4 );
 
         int authoritative_owner_count = 0;
-        for( horde_map *const hordes : { &source_after->hordes, &destination_after->hordes } ) {
+        for( horde_map *const hordes : {
+                 &source_after->hordes, &destination_after->hordes
+             } ) {
             for( std::pair<const tripoint_abs_ms, horde_entity> &entry : hordes->get_view(
                      horde_map_flavors::active | horde_map_flavors::idle |
                      horde_map_flavors::dormant | horde_map_flavors::immobile ) ) {
@@ -1174,9 +1185,9 @@ TEST_CASE( "predator missing adjacent overmap retains the exact abstract owner",
     clear_map_and_put_player_underground();
 
     const point_abs_om unloaded_om_pos = project_to<coords::om>(
-                                              get_player_character().pos_abs() ).xy() + point( 20, 20 );
+            get_player_character().pos_abs() ).xy() + point( 20, 20 );
     const tripoint_abs_ms candidate = project_combine( unloaded_om_pos,
-                                        tripoint_om_ms( 0, 0, 0 ) );
+                                      tripoint_om_ms( 0, 0, 0 ) );
 
     // Candidate admission is the gate before a horde node can be extracted
     // for migration.  An unloaded neighbor must stay absent: probing it and
@@ -1194,8 +1205,10 @@ TEST_CASE( "predator submap-load handoff rejects an existing local owner",
     restore_on_out_of_scope restore_calendar_turn( calendar::turn );
     calendar::turn = calendar::turn_zero;
 
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         clear_overmaps();
         clear_map_and_put_player_underground();
         map &here = get_map();
@@ -1242,8 +1255,10 @@ TEST_CASE( "predator local abstract local transfer retains its authoritative pay
     restore_on_out_of_scope restore_calendar_turn( calendar::turn );
     calendar::turn = calendar::turn_zero + 40_turns;
 
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         clear_overmaps();
         clear_map_and_put_player_underground();
         map &here = get_map();
@@ -1340,8 +1355,10 @@ TEST_CASE( "predator repeated production handoffs survive a save reload",
     restore_on_out_of_scope restore_calendar_turn( calendar::turn );
     calendar::turn = calendar::turn_zero + 60_turns;
 
-    for( const mtype_id &type : { mtype_id( "mon_writhing_stalker" ),
-                                  mtype_id( "mon_zombie_rider" ) } ) {
+    for( const mtype_id &type : {
+             mtype_id( "mon_writhing_stalker" ),
+             mtype_id( "mon_zombie_rider" )
+         } ) {
         clear_overmaps();
         clear_map_and_put_player_underground();
         map &here = get_map();
@@ -1983,7 +2000,8 @@ TEST_CASE( "falling_monster_completes_fall_without_safe_adjacent_tile", "[monste
     CHECK( falling->pos_bub( here ) == blocked_landing );
 }
 
-TEST_CASE( "falling_monster_relocation_requires_supported_compatible_terrain", "[monster][falling]" )
+TEST_CASE( "falling_monster_relocation_requires_supported_compatible_terrain",
+           "[monster][falling]" )
 {
     clear_map_without_vision();
     map &here = get_map();

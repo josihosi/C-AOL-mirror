@@ -325,8 +325,10 @@ TEST_CASE( "writhing_stalker_live_plan_consumes_quiet_side_cutoff_seam",
 
     monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), stalker_start );
     monster &pressure_a = spawn_test_monster( mon_zombie.str(), center + point::east * 3 );
-    monster &pressure_b = spawn_test_monster( mon_zombie.str(), center + point::east * 4 + point::north );
-    monster &pressure_c = spawn_test_monster( mon_zombie.str(), center + point::east * 2 + point::south );
+    monster &pressure_b = spawn_test_monster( mon_zombie.str(),
+                          center + point::east * 4 + point::north );
+    monster &pressure_c = spawn_test_monster( mon_zombie.str(),
+                          center + point::east * 2 + point::south );
     // Pressure is target-directed evidence, not mere proximity.  Give the
     // fixture the same target commitment that the live resolver observes.
     pressure_a.set_dest( you.pos_abs() );
@@ -456,7 +458,7 @@ TEST_CASE( "writhing_stalker_latch_is_bounded_and_refresh_requires_evidence",
     human_ctx.recent_human_evidence = true;
     human_ctx.evidence_age_minutes = 3;
     latch_update latched = advance_latch( latch_context{ latch_state{},
-            evaluate_interest( human_ctx ), 0, 12, false } );
+                                          evaluate_interest( human_ctx ), 0, 12, false } );
 
     REQUIRE( latched.state.active );
     CHECK( latched.next == decision::shadow );
@@ -464,13 +466,13 @@ TEST_CASE( "writhing_stalker_latch_is_bounded_and_refresh_requires_evidence",
     CHECK( latched.reason == "latch_created_by_believable_evidence" );
 
     latch_update continuing = advance_latch( latch_context{ latched.state,
-            interest_report{}, 12, 20, false } );
+                              interest_report{}, 12, 20, false } );
     CHECK( continuing.state.active );
     CHECK( continuing.state.age_minutes == 12 );
     CHECK( continuing.reason == "latch_continues_without_refresh" );
 
     latch_update timed_out = advance_latch( latch_context{ continuing.state,
-            interest_report{}, 20, 20, false } );
+                                            interest_report{}, 20, 20, false } );
     CHECK_FALSE( timed_out.state.active );
     CHECK( timed_out.next == decision::cooling_off );
     CHECK( timed_out.state.cooldown_minutes > 0 );
@@ -478,7 +480,7 @@ TEST_CASE( "writhing_stalker_latch_is_bounded_and_refresh_requires_evidence",
 
     human_ctx.evidence_age_minutes = 90;
     latch_update stale = advance_latch( latch_context{ latch_state{},
-            evaluate_interest( human_ctx ), 0, 10, false } );
+                                        evaluate_interest( human_ctx ), 0, 10, false } );
     CHECK_FALSE( stale.state.active );
     CHECK( stale.next == decision::interested );
     CHECK( stale.reason == "interest_without_latch" );
@@ -692,7 +694,8 @@ TEST_CASE( "writhing_stalker_observed_attack_identity_survives_deletion_and_reus
     CHECK( writhing_stalker::observed_attack_count( &observer, &*attacker, &target, resolution ) == 1 );
     attacker.reset();
     attacker.emplace( mon_zombie );
-    CHECK_FALSE( writhing_stalker::has_recent_observed_attack( &observer, &*attacker, &target, 100, 3 ) );
+    CHECK_FALSE( writhing_stalker::has_recent_observed_attack( &observer, &*attacker, &target, 100,
+                 3 ) );
 }
 
 TEST_CASE( "writhing_stalker_creature_copy_gets_fresh_observation_identity",
@@ -921,11 +924,11 @@ TEST_CASE( "writhing_stalker_night_reachable_anti_gnome_resolves_loiter",
     using namespace writhing_stalker;
 
     const live_response not_yet = resolve_anti_gnome( anti_gnome_context{ true, true, true, false,
-            2, 1 } );
+                                  2, 1 } );
     CHECK_FALSE( not_yet.anti_gnome_triggered );
 
     const live_response strike = resolve_anti_gnome( anti_gnome_context{ true, true, true, false,
-            2, 2 } );
+                                 2, 2 } );
     CHECK( strike.anti_gnome_triggered );
     CHECK( strike.next == decision::strike );
     CHECK( strike.writeback_intent == handoff_intent::committed_ambush );
@@ -1308,7 +1311,7 @@ TEST_CASE( "writhing_stalker_pattern_helper_covers_fair_dread_baselines",
     weak_evidence.recent_human_evidence = true;
     weak_evidence.evidence_age_minutes = 25;
     latch_update weak = advance_latch( latch_context{ latch_state{}, evaluate_interest( weak_evidence ),
-            0, 8, false } );
+                                       0, 8, false } );
     REQUIRE( weak.state.active );
     weak = advance_latch( latch_context{ weak.state, interest_report{}, 31, 8, false } );
     CHECK_FALSE( weak.state.active );
@@ -1519,11 +1522,11 @@ TEST_CASE( "writhing_stalker_hidden_target_cannot_refresh_observation_or_route",
     CHECK_FALSE( routed_to_hidden_position );
     if( stalker.has_dest() ) {
         const bool routed_to_recognized_route = stalker.get_dest() == state.committed_waypoint ||
-                stalker.get_dest() == last_seen;
+                                                stalker.get_dest() == last_seen;
         CHECK( routed_to_recognized_route );
     } else {
         const bool bounded_search_or_idle = state.phase == writhing_stalker::lifecycle_phase::searching ||
-                state.phase == writhing_stalker::lifecycle_phase::idle;
+                                            state.phase == writhing_stalker::lifecycle_phase::idle;
         CHECK( bounded_search_or_idle );
     }
     clear_map_without_vision();

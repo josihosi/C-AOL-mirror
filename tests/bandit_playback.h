@@ -39,8 +39,7 @@ struct scenario_frame {
         mark_signals( std::move( mark_signals_ ) ),
         smoke_packets( std::move( smoke_packets_ ) ),
         light_packets( std::move( light_packets_ ) ),
-        human_route_packets( std::move( human_route_packets_ ) )
-    {
+        human_route_packets( std::move( human_route_packets_ ) ) {
     }
 };
 

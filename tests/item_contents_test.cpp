@@ -171,44 +171,57 @@ TEST_CASE( "native nested hydration preserves saved identity while copies and sp
     item inner( itype_id( "box_small" ) );
     REQUIRE( inner.put_in( item( itype_id( "coin_gold" ) ), pocket_type::CONTAINER ).success() );
     REQUIRE( original.put_in( inner, pocket_type::CONTAINER ).success() );
-    const auto identities = []( const item &root ) {
+    const auto identities = []( const item & root ) {
         std::vector<std::int64_t> result;
-        root.visit_items( [&]( const item *it, const item * ) {
-            result.push_back( it->uid().get_value() ); return VisitResponse::NEXT;
+        root.visit_items( [&]( const item * it, const item * ) {
+            result.push_back( it->uid().get_value() );
+            return VisitResponse::NEXT;
         } );
         return result;
     };
-    const auto saved_ids = identities( original ); REQUIRE( saved_ids.size() == 3 );
+    const auto saved_ids = identities( original );
+    REQUIRE( saved_ids.size() == 3 );
     item copied = original;
-    const auto copy_ids = identities( copied ); REQUIRE( copy_ids.size() == saved_ids.size() );
-    for( size_t i = 0; i < saved_ids.size(); ++i ) { CHECK( saved_ids[i] != copy_ids[i] ); }
+    const auto copy_ids = identities( copied );
+    REQUIRE( copy_ids.size() == saved_ids.size() );
+    for( size_t i = 0; i < saved_ids.size(); ++i ) {
+        CHECK( saved_ids[i] != copy_ids[i] );
+    }
     CHECK( original.stacks_with( copied ) );
     for( int repeat = 0; repeat < 3; ++repeat ) {
-        std::ostringstream stream; JsonOut out( stream ); original.serialize( out );
-        item loaded; loaded.deserialize( json_loader::from_string( stream.str() ).get_object() );
+        std::ostringstream stream;
+        JsonOut out( stream );
+        original.serialize( out );
+        item loaded;
+        loaded.deserialize( json_loader::from_string( stream.str() ).get_object() );
         CHECK( identities( loaded ) == saved_ids );
         CHECK( loaded.stacks_with( original ) );
-        original = std::move( loaded ); CHECK( identities( original ) == saved_ids );
+        original = std::move( loaded );
+        CHECK( identities( original ) == saved_ids );
     }
     item ammo( itype_id( "9mm" ), calendar::turn, 40 );
     REQUIRE( ammo.count_by_charges() );
     const auto ammo_uid = ammo.uid().get_value();
     item split = ammo.split( 10 );
-    CHECK( ammo.uid().get_value() == ammo_uid ); CHECK( split.uid().get_value() != ammo_uid );
-    CHECK( ammo.charges == 30 ); CHECK( split.charges == 10 );
-    item ammo_copy = ammo; CHECK( ammo_copy.uid() != ammo.uid() );
+    CHECK( ammo.uid().get_value() == ammo_uid );
+    CHECK( split.uid().get_value() != ammo_uid );
+    CHECK( ammo.charges == 30 );
+    CHECK( split.charges == 10 );
+    item ammo_copy = ammo;
+    CHECK( ammo_copy.uid() != ammo.uid() );
     const auto split_uid = split.uid().get_value();
-    item transferred = std::move( split ); CHECK( transferred.uid().get_value() == split_uid );
+    item transferred = std::move( split );
+    CHECK( transferred.uid().get_value() == split_uid );
 }
 
 TEST_CASE( "hydration keeps mod attached and overflow property identities",
            "[item_contents][item_identity_reload_067]" )
 {
     const std::string mode = GENERATE( std::string( "mod" ), std::string( "attached" ),
-                                      std::string( "overflow" ) );
+                                       std::string( "overflow" ) );
     CAPTURE( mode );
     item original( itype_id( mode == "mod" ? "debug_modular_m4_carbine" :
-                            mode == "attached" ? "backpack" : "purse" ) );
+                             mode == "attached" ? "backpack" : "purse" ) );
     if( mode == "mod" ) {
         REQUIRE( original.put_in( item( itype_id( "shoulder_strap" ) ), pocket_type::MOD ).success() );
     } else if( mode == "attached" ) {
@@ -222,7 +235,7 @@ TEST_CASE( "hydration keeps mod attached and overflow property identities",
     } else {
         original.force_insert_item( item( itype_id( "log" ) ), pocket_type::CONTAINER );
     }
-    const auto identities = []( const item &root ) {
+    const auto identities = []( const item & root ) {
         std::vector<std::pair<std::int64_t, std::string>> result;
         // Generic inventory visitation intentionally excludes MOD/MIGRATION.
         // Inspect every actual pocket for hydration identity, including those.
@@ -244,18 +257,24 @@ TEST_CASE( "hydration keeps mod attached and overflow property identities",
         // identities, and establish the actual mod rather than a guessed count.
         REQUIRE( saved.size() >= 2 );
         const auto mods = original.mods();
-        REQUIRE( std::any_of( mods.begin(), mods.end(), []( const item *it ) {
+        REQUIRE( std::any_of( mods.begin(), mods.end(), []( const item * it ) {
             return it->typeId() == itype_id( "shoulder_strap" );
         } ) );
-    } else { REQUIRE( saved.size() == ( mode == "attached" ? 3 : 2 ) ); }
+    } else {
+        REQUIRE( saved.size() == ( mode == "attached" ? 3 : 2 ) );
+    }
     for( int repeat = 0; repeat < 2; ++repeat ) {
-        std::ostringstream stream; JsonOut out( stream ); original.serialize( out );
+        std::ostringstream stream;
+        JsonOut out( stream );
+        original.serialize( out );
         item loaded;
         capture_debugmsg_during( [&]() {
             loaded.deserialize( json_loader::from_string( stream.str() ).get_object() );
         } );
         CHECK( identities( loaded ) == saved );
-        if( mode == "overflow" ) { CHECK( loaded.get_contents().num_item_stacks() == 1 ); }
+        if( mode == "overflow" ) {
+            CHECK( loaded.get_contents().num_item_stacks() == 1 );
+        }
         original = std::move( loaded );
     }
     item purse( itype_id( "purse" ) ), too_large( itype_id( "log" ) );

@@ -269,7 +269,7 @@ void extended_description_window::show()
             displayed = &veh_app_description;
             target = "vehicle";
         }
-        return std::map<std::string, std::string>{
+        return std::map<std::string, std::string> {
             { "selected_target", target },
             { "displayed_description", description_text( *displayed ) },
             { "displayed_description_source", "Creature::extended_description()" }
@@ -277,9 +277,9 @@ void extended_description_window::show()
     };
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "extended_description", _( "Extended description" ),
-        semantic_payload(), std::vector<semantic_action_descriptor>{
+        semantic_payload(), std::vector<semantic_action_descriptor> {
             { "extended_description.close", "", _( "Close" ), true }
-        }, [&semantic_input]( const semantic_action_request &request ) {
+        }, [&semantic_input]( const semantic_action_request & request ) {
             if( request.action_id != "extended_description.close" ||
                 request.stable_id.value_or( "" ) != "" || !request.parameters.empty() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
@@ -291,7 +291,7 @@ void extended_description_window::show()
     while( true ) {
         ui_manager::redraw_invalidated();
         if( semantic_scope ) {
-            semantic_scope->publish( semantic_payload(), std::vector<semantic_action_descriptor>{
+            semantic_scope->publish( semantic_payload(), std::vector<semantic_action_descriptor> {
                 { "extended_description.close", "", _( "Close" ), true }
             } );
             semantic_scope->consume_request();

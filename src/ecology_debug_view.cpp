@@ -64,7 +64,7 @@ bool is_unresolved_outing_survivor( const bandit_live_world::site_record &site,
 }
 
 bool outing_has_unresolved_survivor( const bandit_live_world::site_record &site,
-                                    const bandit_live_world::active_outing_state &outing )
+                                     const bandit_live_world::active_outing_state &outing )
 {
     return std::any_of( outing.member_ids.begin(), outing.member_ids.end(),
     [&site, &outing]( const character_id & member_id ) {
@@ -89,7 +89,7 @@ tripoint_abs_omt outing_position( const bandit_live_world::active_outing_state &
     }
     if( !outing.shared_route.empty() ) {
         const int index = std::clamp( outing.waypoint_index, 0,
-                                     static_cast<int>( outing.shared_route.size() ) - 1 );
+                                      static_cast<int>( outing.shared_route.size() ) - 1 );
         return outing.shared_route[index];
     }
     return outing.target_omt;
@@ -386,7 +386,7 @@ selected_detail make_selected_detail( const candidate_read &candidate,
             detail.evidence_observed_minutes = latest->observed_minutes;
             if( request.now_minutes >= 0 && latest->observed_minutes >= 0 ) {
                 detail.evidence_age_minutes = std::max( 0,
-                                              request.now_minutes - latest->observed_minutes );
+                                                        request.now_minutes - latest->observed_minutes );
             }
         }
     }
@@ -426,7 +426,7 @@ selected_detail make_selected_detail( const candidate_read &candidate,
             }
             if( !row.hp_percent && candidate.outing->local_handoff.is_active() ) {
                 const auto found = std::find_if( candidate.outing->local_handoff.members.begin(),
-                candidate.outing->local_handoff.members.end(), [&member_id](
+                                                 candidate.outing->local_handoff.members.end(), [&member_id](
                 const bandit_live_world::local_handoff_member_snapshot & snapshot ) {
                     return snapshot.npc_id == member_id;
                 } );
@@ -437,8 +437,8 @@ selected_detail make_selected_detail( const candidate_read &candidate,
             detail.members.push_back( std::move( row ) );
         }
     }
-    std::sort( detail.members.begin(), detail.members.end(), []( const member_detail &lhs,
-    const member_detail &rhs ) {
+    std::sort( detail.members.begin(), detail.members.end(), []( const member_detail & lhs,
+    const member_detail & rhs ) {
         return lhs.npc_id.get_value() < rhs.npc_id.get_value();
     } );
     return detail;
@@ -454,7 +454,7 @@ view_snapshot query_bandit_ecology( const bandit_live_world::world_state &world,
         return result;
     }
     const auto started = std::chrono::steady_clock::now();
-    const auto heap_compare = []( const candidate_read &lhs, const candidate_read &rhs ) {
+    const auto heap_compare = []( const candidate_read & lhs, const candidate_read & rhs ) {
         return candidate_less( lhs, rhs );
     };
     std::priority_queue<candidate_read, std::vector<candidate_read>, decltype( heap_compare )>
@@ -552,7 +552,7 @@ view_snapshot query_bandit_ecology( const bandit_live_world::world_state &world,
         candidates.push_back( std::move( retained_candidates.top() ) );
         retained_candidates.pop();
     }
-    const auto id_is_ambiguous = [&candidate_id_counts]( const std::string &id ) {
+    const auto id_is_ambiguous = [&candidate_id_counts]( const std::string & id ) {
         const auto found = candidate_id_counts.find( id );
         return found != candidate_id_counts.end() && found->second > 1;
     };
@@ -567,8 +567,8 @@ view_snapshot query_bandit_ecology( const bandit_live_world::world_state &world,
     if( selected_candidate &&
         std::none_of( candidates.begin(), candidates.end(), [&selected_candidate](
     const candidate_read & candidate ) {
-        return candidate.id == selected_candidate->id;
-    } ) ) {
+    return candidate.id == selected_candidate->id;
+} ) ) {
         if( candidates.size() == candidate_cap ) {
             candidates.back() = std::move( *selected_candidate );
         } else {

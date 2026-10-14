@@ -55,7 +55,8 @@ static const faction_id faction_your_followers( "your_followers" );
 std::string zone_data::new_identity()
 {
     static std::atomic<uint64_t> next_identity { 0 };
-    return string_format( "zone-%llu", static_cast<unsigned long long>( next_identity.fetch_add( 1 ) + 1 ) );
+    return string_format( "zone-%llu",
+                          static_cast<unsigned long long>( next_identity.fetch_add( 1 ) + 1 ) );
 }
 
 void zone_data::note_semantic_mutation()
@@ -797,7 +798,8 @@ bool zone_data::set_type()
     return false;
 }
 
-bool zone_data::set_type( const zone_type_id &new_type, const shared_ptr_fast<zone_options> &new_options )
+bool zone_data::set_type( const zone_type_id &new_type,
+                          const shared_ptr_fast<zone_options> &new_options )
 {
     if( new_type == type || !new_options ) {
         return false;
@@ -2214,7 +2216,7 @@ std::optional<tripoint_abs_ms> smart_zone_pick_point( const smart_zone_plan_cont
         return std::nullopt;
     }
     std::sort( candidates.begin(), candidates.end(),
-    []( const auto &lhs, const auto &rhs ) {
+    []( const auto & lhs, const auto & rhs ) {
         return lhs.first < rhs.first;
     } );
     return candidates.front().second;
@@ -2239,7 +2241,7 @@ std::optional<tripoint_abs_ms> smart_zone_pick_near( const smart_zone_plan_conte
         const tripoint_abs_ms &origin, int min_dist,
         const std::function<bool( const tripoint_abs_ms & )> &extra_pred = nullptr )
 {
-    return smart_zone_pick_point( ctx, [&]( const tripoint_abs_ms &p ) {
+    return smart_zone_pick_point( ctx, [&]( const tripoint_abs_ms & p ) {
         const int dist = smart_zone_manhattan_dist( origin, p );
         const int min_penalty = dist < min_dist ? 1000 : 0;
         const int pred_penalty = extra_pred && !extra_pred( p ) ? 1000 : 0;
@@ -2248,7 +2250,7 @@ std::optional<tripoint_abs_ms> smart_zone_pick_near( const smart_zone_plan_conte
 }
 
 std::optional<std::pair<tripoint_abs_ms, tripoint_abs_ms>> smart_zone_pick_unsorted_rect(
-    const smart_zone_plan_context &ctx )
+            const smart_zone_plan_context &ctx )
 {
     struct candidate_rect {
         tripoint_abs_ms start;
@@ -2257,7 +2259,7 @@ std::optional<std::pair<tripoint_abs_ms, tripoint_abs_ms>> smart_zone_pick_unsor
         int anchor_dist;
     };
     std::vector<candidate_rect> candidates;
-    auto rect_ok = [&]( const tripoint_abs_ms &rect_start, const tripoint_abs_ms &rect_end ) {
+    auto rect_ok = [&]( const tripoint_abs_ms & rect_start, const tripoint_abs_ms & rect_end ) {
         for( int y = rect_start.y(); y <= rect_end.y(); ++y ) {
             for( int x = rect_start.x(); x <= rect_end.x(); ++x ) {
                 if( !smart_zone_tile_is_claimable( ctx, tripoint_abs_ms( x, y, rect_start.z() ) ) ) {
@@ -2267,7 +2269,7 @@ std::optional<std::pair<tripoint_abs_ms, tripoint_abs_ms>> smart_zone_pick_unsor
         }
         return true;
     };
-    auto push_candidate = [&]( const tripoint_abs_ms &rect_start, const tripoint_abs_ms &rect_end,
+    auto push_candidate = [&]( const tripoint_abs_ms & rect_start, const tripoint_abs_ms & rect_end,
     int shape_order ) {
         if( !rect_ok( rect_start, rect_end ) ) {
             return;
@@ -2308,7 +2310,7 @@ std::optional<std::pair<tripoint_abs_ms, tripoint_abs_ms>> smart_zone_pick_unsor
         return std::nullopt;
     }
     std::sort( candidates.begin(), candidates.end(),
-    []( const candidate_rect &lhs, const candidate_rect &rhs ) {
+    []( const candidate_rect & lhs, const candidate_rect & rhs ) {
         if( lhs.anchor_dist != rhs.anchor_dist ) {
             return lhs.anchor_dist > rhs.anchor_dist;
         }
@@ -2392,7 +2394,7 @@ basecamp_smart_zone_result auto_place_basecamp_smart_zones(
         {}
     };
 
-    const auto pick_fire_anchor = [&]( const tripoint_abs_ms &p ) {
+    const auto pick_fire_anchor = [&]( const tripoint_abs_ms & p ) {
         const tripoint_bub_ms local = here.get_bub( p );
         const std::string id = smart_zone_tile_id( here, p );
         const int rank = here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_FIRE_CONTAINER, local ) ||
@@ -2400,24 +2402,25 @@ basecamp_smart_zone_result auto_place_basecamp_smart_zones(
                          smart_zone_id_has_any( id, { "brazier", "fireplace", "woodstove", "firepit" } ) ? 1 : 10;
         return std::make_tuple( rank, smart_zone_manhattan_dist( ctx.center, p ), p.y(), p.x() );
     };
-    const auto pick_food_anchor = [&]( const tripoint_abs_ms &p ) {
+    const auto pick_food_anchor = [&]( const tripoint_abs_ms & p ) {
         const tripoint_bub_ms local = here.get_bub( p );
         const std::string id = smart_zone_tile_id( here, p );
         const int rank = here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_NO_SPOIL, local ) ? 0 :
                          smart_zone_id_has_any( id, { "fridge", "freezer", "refrigerator", "cooler" } ) ? 1 : 10;
         return std::make_tuple( rank, smart_zone_manhattan_dist( ctx.center, p ), p.y(), p.x() );
     };
-    const auto pick_equipment_anchor = [&]( const tripoint_abs_ms &p ) {
+    const auto pick_equipment_anchor = [&]( const tripoint_abs_ms & p ) {
         const tripoint_bub_ms local = here.get_bub( p );
         const std::string id = smart_zone_tile_id( here, p );
         const int rank = here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_FLAT_SURF, local ) ? 0 :
                          smart_zone_id_has_any( id, { "table", "counter", "workbench", "desk" } ) ? 1 : 10;
         return std::make_tuple( rank, smart_zone_manhattan_dist( ctx.center, p ), p.y(), p.x() );
     };
-    const auto pick_clothing_anchor = [&]( const tripoint_abs_ms &p ) {
+    const auto pick_clothing_anchor = [&]( const tripoint_abs_ms & p ) {
         const tripoint_bub_ms local = here.get_bub( p );
         const std::string id = smart_zone_tile_id( here, p );
-        const int rank = smart_zone_id_has_any( id, { "dresser", "wardrobe", "cupboard", "closet", "locker", "cabinet" } ) ? 0 :
+        const int rank = smart_zone_id_has_any( id, { "dresser", "wardrobe", "cupboard", "closet", "locker", "cabinet" } )
+                         ? 0 :
                          here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_CONTAINER, local ) ? 1 :
                          here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_CAN_SIT, local ) ? 2 : 10;
         return std::make_tuple( rank, smart_zone_manhattan_dist( ctx.center, p ), p.y(), p.x() );
@@ -2430,13 +2433,14 @@ basecamp_smart_zone_result auto_place_basecamp_smart_zones(
     smart_zone_reserve_tile( ctx, *fire_anchor );
     ctx.main_anchors.push_back( *fire_anchor );
 
-    const std::optional<tripoint_abs_ms> splintered_tile = smart_zone_pick_adjacent( ctx, *fire_anchor );
+    const std::optional<tripoint_abs_ms> splintered_tile = smart_zone_pick_adjacent( ctx,
+            *fire_anchor );
     if( !splintered_tile ) {
         return { false, _( "Basecamp inventory zone is too small for Smart Zone Manager v1." ), 0 };
     }
     smart_zone_reserve_tile( ctx, *splintered_tile );
 
-    const auto pick_and_reserve_near = [&]( const tripoint_abs_ms &origin, const int min_dist ) {
+    const auto pick_and_reserve_near = [&]( const tripoint_abs_ms & origin, const int min_dist ) {
         const std::optional<tripoint_abs_ms> picked = smart_zone_pick_near( ctx, origin, min_dist );
         if( picked ) {
             smart_zone_reserve_tile( ctx, *picked );
@@ -2455,7 +2459,8 @@ basecamp_smart_zone_result auto_place_basecamp_smart_zones(
         return { false, _( "Basecamp inventory zone is too small for Smart Zone Manager v1." ), 0 };
     }
 
-    const std::optional<tripoint_abs_ms> equipment_anchor = smart_zone_pick_point( ctx, pick_equipment_anchor );
+    const std::optional<tripoint_abs_ms> equipment_anchor = smart_zone_pick_point( ctx,
+            pick_equipment_anchor );
     if( !equipment_anchor ) {
         return { false, _( "Basecamp inventory zone is too small for Smart Zone Manager v1." ), 0 };
     }
@@ -2466,7 +2471,8 @@ basecamp_smart_zone_result auto_place_basecamp_smart_zones(
         return { false, _( "Basecamp inventory zone is too small for Smart Zone Manager v1." ), 0 };
     }
 
-    const std::optional<tripoint_abs_ms> clothing_anchor = smart_zone_pick_point( ctx, pick_clothing_anchor );
+    const std::optional<tripoint_abs_ms> clothing_anchor = smart_zone_pick_point( ctx,
+            pick_clothing_anchor );
     if( !clothing_anchor ) {
         return { false, _( "Basecamp inventory zone is too small for Smart Zone Manager v1." ), 0 };
     }

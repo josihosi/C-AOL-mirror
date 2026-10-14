@@ -41,7 +41,8 @@ TEST_CASE( "avatar status retains native health needs and named limb effects wit
 
     const JsonObject status = json_loader::from_string( facts.at( "avatar_status" ) );
     status.allow_omitted_members();
-    CHECK( status.get_string( "actor_id" ) == "character:" + std::to_string( you.getID().get_value() ) );
+    CHECK( status.get_string( "actor_id" ) == "character:" + std::to_string(
+               you.getID().get_value() ) );
     CHECK( status.get_int( "observed_turn" ) == to_turns<int>( turn - calendar::turn_zero ) );
     const JsonObject health = status.get_object( "health" );
     CHECK( health.get_string( "unit" ) == "hp" );
@@ -74,7 +75,9 @@ TEST_CASE( "avatar status retains native health needs and named limb effects wit
     const JsonObject entries = effects.get_object( "entries" );
     entries.allow_omitted_members();
     const JsonObject bleeding = entries.get_object( "bleed" );
-    for( const bodypart_id &part : { left, right } ) {
+    for( const bodypart_id &part : {
+             left, right
+         } ) {
         const JsonObject entry = bleeding.get_object( part.id().str() );
         const effect &native = you.get_effect( efftype_id( "bleed" ), part );
         CHECK( entry.get_string( "name" ) == native.disp_name() );
@@ -92,7 +95,7 @@ TEST_CASE( "avatar status follows the actual wielded item and native ammunition 
     clear_map();
     avatar &you = get_avatar();
     const JsonObject unarmed_status = json_loader::from_string(
-                                         avatar_status_payload( you ).at( "avatar_status" ) );
+                                          avatar_status_payload( you ).at( "avatar_status" ) );
     unarmed_status.allow_omitted_members();
     const JsonObject unarmed = unarmed_status.get_object( "weapon" );
     unarmed.allow_omitted_members();
@@ -108,7 +111,7 @@ TEST_CASE( "avatar status follows the actual wielded item and native ammunition 
     REQUIRE( wielded );
     REQUIRE( wielded->ammo_remaining() == 7 );
     const JsonObject armed_status = json_loader::from_string(
-                                       avatar_status_payload( you ).at( "avatar_status" ) );
+                                        avatar_status_payload( you ).at( "avatar_status" ) );
     armed_status.allow_omitted_members();
     const JsonObject armed = armed_status.get_object( "weapon" );
     CHECK( armed.get_string( "item_uid" ) == std::to_string( wielded->uid().get_value() ) );

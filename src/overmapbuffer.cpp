@@ -370,7 +370,7 @@ void overmapbuffer::reconcile_rider_band_encounters()
                 reciprocal = first->rider->sees( here, *second->rider ) &&
                              second->rider->sees( here, *first->rider );
                 reachable = reciprocal && !here.route( *first->rider,
-                            pathfinding_target::point( second->rider->pos_bub() ) ).empty();
+                                                       pathfinding_target::point( second->rider->pos_bub() ) ).empty();
             } else if( same_z ) {
                 // An abstract horde position has neither a creature LOS test
                 // nor a size-aware native route.  Coarse distance and two
@@ -384,7 +384,7 @@ void overmapbuffer::reconcile_rider_band_encounters()
                 reachable = false;
             }
             if( !global_state.zombie_rider_bands.register_encounter( {
-                first->actor_id, second->actor_id, now, reciprocal, reachable } ) ) {
+            first->actor_id, second->actor_id, now, reciprocal, reachable } ) ) {
                 continue;
             }
             // The registry is the sole membership owner.  These are only
@@ -818,7 +818,7 @@ int overmapbuffer::attract_hordes_to_light( const tripoint_abs_ms &source, const
     int candidates = 0;
     const tripoint_abs_omt source_omt = project_to<coords::omt>( source );
     const auto visible = [this, &source_omt, brightness_range_omt, source_exposed](
-    const tripoint_abs_ms &observer ) {
+    const tripoint_abs_ms & observer ) {
         const tripoint_abs_omt observer_omt = project_to<coords::omt>( observer );
         physical_light::route route;
         route.distance_omt = rl_dist( source_omt, observer_omt );
@@ -837,7 +837,8 @@ int overmapbuffer::attract_hordes_to_light( const tripoint_abs_ms &source, const
     };
     // The envelope is centred on the source, not on the avatar or a
     // destination scan.  It remains in memory-only spatial buckets.
-    for( overmap *om : get_loaded_overmaps_near( project_to<coords::sm>( source ).xy(), observer_radius_sm ) ) {
+    for( overmap *om : get_loaded_overmaps_near( project_to<coords::sm>( source ).xy(),
+            observer_radius_sm ) ) {
         int om_candidates = 0;
         attracted += om->attract_hordes_to_light( source, intensity, observer_radius_sm, sample_id,
                      observed, visible, &om_candidates );
@@ -1947,7 +1948,7 @@ std::vector<overmap *> overmapbuffer::get_loaded_overmaps_near( const point_abs_
         }
     }
     const point_abs_om center = project_to<coords::om>( p );
-    std::sort( result.begin(), result.end(), [&center]( const overmap *lhs, const overmap *rhs ) {
+    std::sort( result.begin(), result.end(), [&center]( const overmap * lhs, const overmap * rhs ) {
         return trig_dist( center, lhs->pos() ) < trig_dist( center, rhs->pos() );
     } );
     return result;
@@ -2521,7 +2522,7 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             } else {
                 placed = handoff->monster_data->is_caol_predator() ?
                          g->place_critter_at( make_shared_fast<monster>( *handoff->monster_data ),
-                                               local ) :
+                                              local ) :
                          g->place_critter_around( make_shared_fast<monster>( *handoff->monster_data ),
                                                   local, 1, true );
             }

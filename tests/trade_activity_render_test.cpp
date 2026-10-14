@@ -58,9 +58,9 @@ TEST_CASE( "activity popup is covered by native trade and restored on exit",
            "[tiles][trade][trade_wait_overlay_067]" )
 {
     const std::string exit = GENERATE( std::string( "cancel" ), std::string( "prompt_no" ),
-                                     std::string( "prompt_yes" ) );
+                                       std::string( "prompt_yes" ) );
     const std::string activity = GENERATE( std::string( "wait" ), std::string( "craft" ),
-                                         std::string( "sort" ), std::string( "sleep" ) );
+                                           std::string( "sort" ), std::string( "sleep" ) );
     INFO( exit << " activity=" << activity );
     clear_avatar();
     clear_map();
@@ -88,11 +88,11 @@ TEST_CASE( "activity popup is covered by native trade and restored on exit",
     int sequence = 0;
     int requests = 0;
     int receipts = 0;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         ++receipts;
         REQUIRE( receipt.accepted );
     } );
-    const auto submit = [&]( const semantic_surface_descriptor &descriptor, const std::string &id,
+    const auto submit = [&]( const semantic_surface_descriptor & descriptor, const std::string & id,
     const std::optional<std::string> &stable = std::nullopt ) {
         ++requests;
         REQUIRE( manager.submit_request( { manager.run_id(), descriptor.surface_id,
@@ -123,7 +123,7 @@ TEST_CASE( "activity popup is covered by native trade and restored on exit",
     const SDL_Rect debt_rect{ 320, 32, 320, 16 };
     const SDL_Rect trader_items{ 12, 112, 444, 160 };
     const SDL_Rect player_items{ 492, 112, 444, 160 };
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "inventory" ) {
             ui_manager::redraw();
             ui_manager::redraw();
@@ -137,18 +137,20 @@ TEST_CASE( "activity popup is covered by native trade and restored on exit",
     REQUIRE_FALSE( unobscured_debt.empty() );
     // Actual rendered debt text has foreground pixels, rather than an empty region.
     REQUIRE( std::adjacent_find( unobscured_debt.begin(), unobscured_debt.end(),
-    std::not_equal_to<uint32_t>() ) != unobscured_debt.end() );
+                                 std::not_equal_to<uint32_t>() ) != unobscured_debt.end() );
 
     g->handle_progress_ui();
     ui_manager::redraw();
     ImGuiWindow *const progress = active_progress_popup();
     REQUIRE( progress );
     REQUIRE( progress->Pos.y < 48 );
-    if( activity != "sleep" ) { REQUIRE( progress->Pos.y + progress->Size.y > 32 ); }
+    if( activity != "sleep" ) {
+        REQUIRE( progress->Pos.y + progress->Size.y > 32 );
+    }
     bool trade_drawn = false;
     bool prompt_drawn = false;
     bool prompt_refused = false;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "inventory" && descriptor.kind != "prompt" ) {
             return;
         }
@@ -163,7 +165,7 @@ TEST_CASE( "activity popup is covered by native trade and restored on exit",
             REQUIRE( active_progress_popup() );
             const bool yes = exit == "prompt_yes";
             const auto choice = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [yes]( const semantic_action_descriptor &action ) {
+            [yes]( const semantic_action_descriptor & action ) {
                 return action.id == "prompt.choose" && action.label == ( yes ? "YES" : "NO" );
             } );
             REQUIRE( choice != descriptor.valid_actions.end() );
@@ -173,7 +175,9 @@ TEST_CASE( "activity popup is covered by native trade and restored on exit",
             trade_drawn = true;
             CHECK_FALSE( active_progress_popup() );
             CHECK( ( renderer_recovery_test_support::read_display_pixels( debt_rect ) == unobscured_debt ) );
-            for( const SDL_Rect &pane : { trader_items, player_items } ) {
+            for( const SDL_Rect &pane : {
+                     trader_items, player_items
+                 } ) {
                 const auto pixels = renderer_recovery_test_support::read_display_pixels( pane );
                 CHECK( std::any_of( pixels.begin(), pixels.end(), []( uint32_t pixel ) {
                     return pixel != 0xff000000;
@@ -206,9 +210,10 @@ TEST_CASE( "rendered Trade publishes native letters cells pages and filtered pay
 {
     const bool camp_payer = GENERATE( false, true );
     const bool collapsed = GENERATE( false, true );
-    restore_on_out_of_scope<inventory_selector_save_state> restore_inventory( inventory_ui_default_state );
+    restore_on_out_of_scope<inventory_selector_save_state> restore_inventory(
+        inventory_ui_default_state );
     inventory_ui_default_state.uimode = collapsed ? inventory_selector::uimode::hierarchy :
-                                      inventory_selector::uimode::categories;
+                                        inventory_selector::uimode::categories;
     clear_avatar();
     clear_map();
     avatar &you = get_avatar();
@@ -254,7 +259,8 @@ TEST_CASE( "rendered Trade publishes native letters cells pages and filtered pay
     test_mode = false;
     const int input_timeout = inp_mngr.get_timeout();
     on_out_of_scope restore_timeout( [&] { inp_mngr.set_timeout( input_timeout ); } );
-    inp_mngr.set_timeout( 0 ); // Let synchronous test-only filter submission return to the real redraw loop.
+    inp_mngr.set_timeout(
+        0 ); // Let synchronous test-only filter submission return to the real redraw loop.
     semantic_surface_manager manager( "trade-rows-render" );
     semantic_surface_manager_session session( manager );
     semantic_surface_scope world( manager, "world", "World" );
@@ -262,10 +268,12 @@ TEST_CASE( "rendered Trade publishes native letters cells pages and filtered pay
     const auto before_moves = payer->get_moves();
     int stage = 0;
     int sequence = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        if( descriptor.kind != "inventory" ) { return; }
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        if( descriptor.kind != "inventory" ) {
+            return;
+        }
         JsonArray rows = json_loader::from_string( descriptor.payload.at( "trade_rows" ) );
-        const auto submit = [&]( const std::string &id, std::map<std::string, std::string> params = {} ) {
+        const auto submit = [&]( const std::string & id, std::map<std::string, std::string> params = {} ) {
             REQUIRE( manager.submit_request( { manager.run_id(), descriptor.surface_id,
                                                descriptor.frame_id, std::to_string( ++sequence ), id, std::nullopt, params } ) );
             // A filter has no keyboard action; exercise the same transport-wake return as a real request.
@@ -322,12 +330,15 @@ TEST_CASE( "rendered Trade publishes native letters cells pages and filtered pay
             CHECK( row.get_bool( "on_native_page" ) );
             CHECK( row.get_string( "unit_price" ) == format_money( npc_trading::trading_price( trader, *payer, { ammo, 1 } ) ) );
             const auto pixels = renderer_recovery_test_support::read_display_pixels( SDL_Rect{ 492, 112, 444, 160 } );
-            CHECK( std::any_of( pixels.begin(), pixels.end(), []( uint32_t p ) { return p != 0xff000000; } ) );
+            CHECK( std::any_of( pixels.begin(), pixels.end(), []( uint32_t p ) {
+                return p != 0xff000000;
+            } ) );
             ++stage;
             submit( "inventory.cancel" );
         }
     } );
-    CHECK_FALSE( npc_trading::trade( trader, 1000, "Rendered local payment", 0, 0, nullptr, payer, true ) );
+    CHECK_FALSE( npc_trading::trade( trader, 1000, "Rendered local payment", 0, 0, nullptr, payer,
+                                     true ) );
     CHECK( stage == 3 );
     CHECK( payer->charges_of( itype_id( "9mm" ) ) == 5 );
     CHECK( phone.held_by( trader ) );

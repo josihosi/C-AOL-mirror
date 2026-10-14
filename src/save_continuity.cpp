@@ -185,7 +185,7 @@ retirement_record read_retirement( const JsonObject &json )
     result.captured = json.get_bool( "captured" );
     result.archive_started = json.get_bool( "archive_started", false );
     const fs::path relative_graveyard = result.graveyard.lexically_relative(
-                                          normalized( PATH_INFO::graveyarddir_path().get_unrelative_path() ) );
+                                            normalized( PATH_INFO::graveyarddir_path().get_unrelative_path() ) );
     if( result.character.empty() || result.character_id <= 0 || relative_graveyard.empty() ||
         relative_graveyard.is_absolute() || *relative_graveyard.begin() == ".." ) {
         throw std::runtime_error( "retirement identity or graveyard ownership is invalid" );
@@ -242,7 +242,8 @@ struct generation {
 
 generation read_generation( const fs::path &directory, const fs::path &world )
 {
-    JsonObject json = json_loader::from_string( read_bytes( directory / "manifest.json" ) ).get_object();
+    JsonObject json = json_loader::from_string( read_bytes( directory /
+                      "manifest.json" ) ).get_object();
     if( json.get_string( "world" ) != world.filename().u8string() ) {
         throw std::runtime_error( "save protection belongs to a different world" );
     }
@@ -272,7 +273,9 @@ fs::path trusted_directory( const fs::path &world )
         if( base.empty() ) {
             return {}; // Failed first publication did not create a prior baseline.
         }
-        for( const char *name : { "complete", "previous", "retirement-held" } ) {
+        for( const char *name : {
+                 "complete", "previous", "retirement-held"
+             } ) {
             const fs::path directory = root / name;
             if( fs::exists( directory / "manifest.json" ) &&
                 digest( directory / "manifest.json" ) == base ) {
@@ -498,7 +501,7 @@ void publish_generation( const fs::path &world, int turn, const std::string &cha
         clear_stage( root / "complete" );
     }
     write_intent( root / "publication-base", fs::exists( root / "complete" ) ?
-                 digest( root / "complete" / "manifest.json" ) : std::string() );
+                  digest( root / "complete" / "manifest.json" ) : std::string() );
     if( fs::exists( root / "complete" ) ) {
         // complete is still independently trusted before removing an older
         // rotation leftover; a failure cannot consume the sole fallback.
@@ -759,8 +762,9 @@ bool prepare_load( const fs::path &world, bool &restored )
             popup( _( "This world has an incomplete save and no trusted complete generation. Loading was canceled. The in-memory game can still retry saving if it is running." ) );
             return false;
         }
-        if( !query_yn( _( "This world has an incomplete save. Restore the complete saved point at turn %d (%s)? This rolls back all characters and world-local settings; progress since that point may be lost. Global achievements and last-world hints are not rolled back. No cancels loading." ),
-                       prior->turn, prior->character ) ) {
+        if( !query_yn(
+                _( "This world has an incomplete save. Restore the complete saved point at turn %d (%s)? This rolls back all characters and world-local settings; progress since that point may be lost. Global achievements and last-world hints are not rolled back. No cancels loading." ),
+                prior->turn, prior->character ) ) {
             return false;
         }
         restore_prior( world );

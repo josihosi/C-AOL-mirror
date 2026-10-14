@@ -14,7 +14,8 @@ namespace physical_light
 {
 /** A single source, before any OMT or signal aggregation occurs. */
 enum class source_kind { carried_item, worn_item, weapon_mounted, ground_item,
-                         vehicle_part, luminous_monster, field, furniture, terrain };
+                         vehicle_part, luminous_monster, field, furniture, terrain
+                       };
 
 struct emitter {
     tripoint_abs_ms position;

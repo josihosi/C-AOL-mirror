@@ -128,7 +128,8 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         here.build_map_cache( 0 );
         scout_observation::site_reader target_blocked;
         CHECK_FALSE( target_blocked.read_character( observer, person, footprint ).visible );
-        CHECK_FALSE( target_blocked.read_signal( observer, observer.pos_abs(), person.pos_abs(), footprint ).visible );
+        CHECK_FALSE( target_blocked.read_signal( observer, observer.pos_abs(), person.pos_abs(),
+                     footprint ).visible );
     }
     SECTION( "an unavailable lookout and corridor do not hide an existing target" ) {
         observer.setpos( here.get_abs( tripoint_bub_ms( 156, 66, 0 ) ), false );
@@ -141,7 +142,7 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         CHECK( actual.known );
         CHECK( actual.visible );
         CHECK( reader.read_signal( observer, observer.pos_abs(), person.pos_abs(),
-                                  { person.pos_abs_omt() } ).visible );
+        { person.pos_abs_omt() } ).visible );
         CHECK( reader.cached_view_count() == 0 );
         CHECK( target.pos_abs() == before_player );
         CHECK( MAPBUFFER.lookup_submap_cached( missing ) == nullptr );
@@ -215,14 +216,15 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         here.ter_set( person.pos_bub( here ), ter_str_id( "t_flat_roof" ) );
         here.invalidate_map_cache( roof );
         here.build_map_cache( roof );
-        const auto physical_line = scout_observation::site_sightline( observer.pos_abs(), person.pos_abs() );
+        const auto physical_line = scout_observation::site_sightline( observer.pos_abs(),
+                                   person.pos_abs() );
         REQUIRE( physical_line.size() == 72 );
         CHECK( physical_line.back() == person.pos_abs() );
         const std::vector<tripoint_abs_omt> roof_footprint = { person.pos_abs_omt() };
         const auto roof_person = scout_observation::read_character( observer, person );
         CAPTURE( roof, roof_person.reason, here.ambient_light_at( person.pos_bub( here ) ),
                  here.ledge_coverage( observer, person.pos_bub( here ),
-                     &roof_footprint ) );
+                                      &roof_footprint ) );
         CHECK( roof_person.visible );
         // An intervening solid wall at every ray height blocks the exposed target.
         for( int z = 0; z <= roof; ++z ) {
@@ -291,7 +293,7 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         CHECK_FALSE( scout_observation::read_character( observer, target ).visible );
         scout_observation::site_reader reader;
         CHECK_FALSE( reader.read_signal( observer, observer.pos_abs(), target.pos_abs(),
-                                        { target.pos_abs_omt() } ).visible );
+        { target.pos_abs_omt() } ).visible );
         CHECK( observer.sight_range( 100.0f, 100.0f ) == cached_range );
         CHECK( observer.get_part_hp_cur( bodypart_id( "torso" ) ) == 1 );
         observer.set_mutation( trait_id( "PER_SLIME_OK" ) );
@@ -299,7 +301,7 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         REQUIRE( observer.has_trait( trait_id( "PER_SLIME_OK" ) ) );
         CHECK( scout_observation::read_character( observer, target ).visible );
         CHECK( reader.read_signal( observer, observer.pos_abs(), target.pos_abs(),
-                                  { target.pos_abs_omt() } ).visible );
+        { target.pos_abs_omt() } ).visible );
         CHECK( observer.get_part_hp_cur( bodypart_id( "torso" ) ) == 1 );
         observer.unset_mutation( trait_id( "PER_SLIME_OK" ) );
         observer.recalc_sight_limits();
@@ -325,7 +327,7 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         CHECK_FALSE( scout_observation::read_character( observer, target ).visible );
         scout_observation::site_reader unlit_signal;
         CHECK_FALSE( unlit_signal.read_signal( observer, observer.pos_abs(), target.pos_abs(),
-                                              { target.pos_abs_omt() } ).visible );
+        { target.pos_abs_omt() } ).visible );
         here.add_field( target.pos_bub( here ), field_type_id( "fd_fire" ), 3 );
         here.invalidate_map_cache( 0 );
         here.build_map_cache( 0 );
@@ -333,7 +335,7 @@ TEST_CASE( "stationary binocular optics preserves physical visibility at three O
         scout_observation::site_reader planner;
         CHECK( planner.read( observer, observer.pos_abs(), target.pos_abs() ).visible );
         CHECK( planner.read_signal( observer, observer.pos_abs(), target.pos_abs(),
-                                    { target.pos_abs_omt() } ).visible );
+        { target.pos_abs_omt() } ).visible );
     }
     SECTION( "unavailable geometry stays unknown without map generation" ) {
         observer.setpos( tripoint_abs_ms( 987654, 987654, 0 ), false );
@@ -387,8 +389,10 @@ TEST_CASE( "loaded target remains visible to an abstract scout through existing 
     // Native illumination needs the same full map extent around each remote
     // observer. Generate this explicit test context only; the reader never does.
     std::vector<std::unique_ptr<map>> lighting_context;
-    for( const point &offset : { point( -7, -4 ), point( -7, 4 ),
-                               point( -6, -4 ), point( -6, 4 ) } ) {
+    for( const point &offset : {
+             point( -7, -4 ), point( -7, 4 ),
+             point( -6, -4 ), point( -6, 4 )
+         } ) {
         auto context = std::make_unique<map>();
         context->load( here.get_abs_sub() + offset, false );
         for( int x = 0; x < MAPSIZE * SEEX; ++x ) {
@@ -500,7 +504,9 @@ TEST_CASE( "loaded target remains visible to an abstract scout through existing 
             enemy->set_fac( faction_id( "your_followers" ) );
             enemy->spawn_at_precise( fixture.get_abs( observer.pos_bub( fixture ) + point( 4, 0 ) ) );
             overmap_buffer.insert_npc( enemy );
-            on_out_of_scope remove_resident( [&]() { overmap_buffer.remove_npc( enemy->getID() ); } );
+            on_out_of_scope remove_resident( [&]() {
+                overmap_buffer.remove_npc( enemy->getID() );
+            } );
             REQUIRE_FALSE( enemy->is_active() );
             REQUIRE( observer.attitude_to( *enemy ) == Creature::Attitude::HOSTILE );
             REQUIRE( observer.sees_without_clairvoyance( fixture, *enemy ) );
@@ -917,8 +923,10 @@ TEST_CASE( "target vehicle queries ignore unrelated resident submaps and vehicle
         map fixture;
         fixture.load( here.get_abs_sub() + point( -6, 0 ), false );
         std::vector<std::unique_ptr<map>> lighting_context;
-        for( const point &offset : { point( -7, -4 ), point( -7, 4 ),
-                                    point( -6, -4 ), point( -6, 4 ) } ) {
+        for( const point &offset : {
+                 point( -7, -4 ), point( -7, 4 ),
+                 point( -6, -4 ), point( -6, 4 )
+             } ) {
             auto context = std::make_unique<map>();
             context->load( here.get_abs_sub() + offset, false );
             for( int x = 0; x < MAPSIZE * SEEX; ++x ) {
@@ -1006,9 +1014,9 @@ TEST_CASE( "resident vehicle part index follows native ownership and geometry",
         REQUIRE( rl_dist( cell.xy(), owner.xy() ) >= 39 );
         sm->vehicles.push_back( std::move( body ) );
         REQUIRE( resident.add_submap( owner, sm ) );
-        const auto contains = [&]( const tripoint_abs_sm &at, const tripoint_abs_ms &part_pos ) {
+        const auto contains = [&]( const tripoint_abs_sm & at, const tripoint_abs_ms & part_pos ) {
             const auto &parts = resident.vehicle_parts_at( at );
-            return std::any_of( parts.begin(), parts.end(), [&]( const auto &entry ) {
+            return std::any_of( parts.begin(), parts.end(), [&]( const auto & entry ) {
                 return entry.first == v && entry.second == part_pos;
             } );
         };
@@ -1058,13 +1066,13 @@ TEST_CASE( "resident vehicle part index follows native ownership and geometry",
         clear_map();
         map &here = get_map();
         vehicle *v = here.add_vehicle( vproto_id( "vehicle_camera_test" ),
-                                      tripoint_bub_ms( 60, 60, 0 ), 0_degrees, 0,
-                                      veh_spawn_status::UNDAMAGED );
+                                       tripoint_bub_ms( 60, 60, 0 ), 0_degrees, 0,
+                                       veh_spawn_status::UNDAMAGED );
         REQUIRE( v );
         const auto original = v->abs_part_pos( v->part( 0 ) );
-        const auto count = [&]( const tripoint_abs_ms &pos ) {
+        const auto count = [&]( const tripoint_abs_ms & pos ) {
             const auto &parts = MAPBUFFER.vehicle_parts_at( project_to<coords::sm>( pos ) );
-            return std::count_if( parts.begin(), parts.end(), [&]( const auto &entry ) {
+            return std::count_if( parts.begin(), parts.end(), [&]( const auto & entry ) {
                 return entry.first == v && entry.second == pos;
             } );
         };

@@ -156,7 +156,8 @@ void maybe_offer_basecamp_smart_zoning( const tripoint_abs_ms &start,
                                         const tripoint_abs_ms &end,
                                         const faction_id &fac )
 {
-    const bool accepted = query_yn( _( "Run Smart Zone Manager v1 for this Basecamp inventory zone now?" ) );
+    const bool accepted = query_yn(
+                              _( "Run Smart Zone Manager v1 for this Basecamp inventory zone now?" ) );
     openclaw_harness_trace_smart_zone_prompt( start, end, fac, accepted );
     if( !accepted ) {
         return;
@@ -716,7 +717,7 @@ void zone_manager_ui::display_zone_manager()
             };
             if( !semantic_scope ) {
                 semantic_scope.emplace( *manager, "zone_manager", _( "Zone Manager" ), semantic_payload,
-                semantic_actions, [&]( const semantic_action_request &request ) {
+                semantic_actions, [&]( const semantic_action_request & request ) {
                     const std::map<std::string, std::string> global_actions = {
                         { "zone.close", "QUIT" }, { "zone.create", "ADD_ZONE" },
                         { "zone.filter_faction", "CHANGE_FACTION" }, { "zone.show_all", "SHOW_ALL_ZONES" }
@@ -735,7 +736,7 @@ void zone_manager_ui::display_zone_manager()
                     const std::string target = request.stable_id.value_or( "" );
                     const auto listed = listed_revisions.find( target );
                     const auto current = std::find_if( zones.begin(), zones.end(),
-                    [&]( const zone_manager::ref_zone_data &entry ) {
+                    [&]( const zone_manager::ref_zone_data & entry ) {
                         return entry.get().get_identity() == target;
                     } );
                     if( listed == listed_revisions.end() || current == zones.end() ) {

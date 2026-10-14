@@ -62,7 +62,8 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
 {
     const bool enclosing_session = GENERATE( false, true );
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const std::string &key : keys ) {
         const char *value = std::getenv( key.c_str() );
@@ -70,11 +71,15 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
     }
     on_out_of_scope restore_environment( [&]() {
         for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
     } );
-    const std::string run = std::string( enclosing_session ? "redraw-enclosed-" : "redraw-between-owners-" ) +
+    const std::string run = std::string( enclosing_session ? "redraw-enclosed-" :
+                                         "redraw-between-owners-" ) +
                             std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
     setenv( keys[0].c_str(), run.c_str(), 1 );
     setenv( keys[1].c_str(), run.c_str(), 1 );
@@ -90,27 +95,31 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
         catacurses::resizeterm();
     }
     on_out_of_scope close_renderer( [&]() {
-        if( owns_terminal ) { catacurses::endwin(); }
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
     } );
 #endif
     semantic_surface_manager local_manager( run );
     semantic_surface_manager &manager = enclosing_session ? local_manager :
-                                       openclaw_harness_semantic_surface_manager();
+                                        openclaw_harness_semantic_surface_manager();
     on_out_of_scope clear_observers( [&]() {
         manager.set_descriptor_observer( {} );
         manager.set_receipt_observer( {} );
     } );
     std::optional<semantic_surface_manager_session> session;
-    if( enclosing_session ) { session.emplace( manager ); }
+    if( enclosing_session ) {
+        session.emplace( manager );
+    }
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     int original_dispatches = 0;
     {
         semantic_surface_scope world( manager, "world", "World", {},
         { { "world.move.north", "", "North", true } },
-        [&]( const semantic_action_request &request ) {
+        [&]( const semantic_action_request & request ) {
             ++original_dispatches;
             REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
             return semantic_action_dispatch_result{ true, "", "" };
@@ -123,12 +132,14 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
     REQUIRE_FALSE( manager.top() );
     REQUIRE( receipts.empty() );
     std::vector<semantic_surface_descriptor> prompts;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
         if( owner.payload.count( "native_owner" ) == 0 ||
-            owner.payload.at( "native_owner" ) != "DEBUG_MSG" ) { return; }
+            owner.payload.at( "native_owner" ) != "DEBUG_MSG" ) {
+            return;
+        }
         prompts.push_back( owner );
         CHECK( active_semantic_surface_manager() == &manager );
-        CHECK( std::none_of( receipts.begin(), receipts.end(), []( const auto &receipt ) {
+        CHECK( std::none_of( receipts.begin(), receipts.end(), []( const auto & receipt ) {
             return receipt.request_id == "north";
         } ) );
         CHECK( owner.payload.at( "text" ).find( "controlled redraw error" ) != std::string::npos );
@@ -138,7 +149,7 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
                                            "foreign-continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
         REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
                                            "parameter-continue" + suffix, "prompt.acknowledge", std::nullopt,
-                                           { { "ignore_future_errors", "true" } } } ) );
+        { { "ignore_future_errors", "true" } } } ) );
         REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, "stale-frame",
                                            "stale-continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
         REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
@@ -179,7 +190,9 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
     // needs its own current prompt and acknowledgement.
     REQUIRE( prompts.size() == 2 );
     REQUIRE( receipts.size() == 8 );
-    for( std::size_t offset : { 0, 4 } ) {
+    for( std::size_t offset : {
+             0, 4
+         } ) {
         CHECK_FALSE( receipts[offset].accepted );
         CHECK( receipts[offset].rejection_reason == "wrong_run" );
         CHECK_FALSE( receipts[offset + 1].accepted );
@@ -216,14 +229,18 @@ TEST_CASE( "diagnostic scopes preserve pending child ownership across nested own
     const bool withheld = GENERATE( false, true );
     semantic_surface_manager manager( "interrupted-child" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
     int parent_dispatches = 0;
     int acknowledgements = 0;
     semantic_surface_scope parent( manager, "inventory", "Inventory", {},
     { { "inventory.select", "item:1", "Select", true } },
-    [&]( const semantic_action_request &request ) {
+    [&]( const semantic_action_request & request ) {
         ++parent_dispatches;
-        if( withheld ) { REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) ); }
+        if( withheld ) {
+            REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
+        }
         return semantic_action_dispatch_result{ true, "", "", true };
     } );
     const auto parent_owner = *manager.top();
@@ -270,7 +287,7 @@ TEST_CASE( "diagnostic scopes preserve pending child ownership across nested own
         REQUIRE( manager.top() );
         CHECK( manager.top()->frame_id == parent_owner.frame_id );
         CHECK( parent.publish( { { "redraw", "true" } },
-                              { { "inventory.select", "item:1", "Select", true } } ) );
+        { { "inventory.select", "item:1", "Select", true } } ) );
         CHECK( receipts.size() == 2 );
     }
     {
@@ -336,12 +353,14 @@ TEST_CASE( "failed diagnostic construction restores the pending action and nativ
 {
     semantic_surface_manager manager( "failed-diagnostic" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
     int dispatches = 0;
     {
         semantic_surface_scope world( manager, "world", "World", {},
         { { "world.move.north", "", "North", true } },
-        [&]( const semantic_action_request &request ) {
+        [&]( const semantic_action_request & request ) {
             ++dispatches;
             REQUIRE( manager.withhold_parent_authority_until_recreated( request.surface_id ) );
             return semantic_action_dispatch_result{ true, "", "" };
@@ -383,7 +402,9 @@ TEST_CASE( "diagnostic unwinding never publishes or throws from its destructor",
     const bool unwinding = GENERATE( false, true );
     semantic_surface_manager manager( "diagnostic-unwind" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
     semantic_surface_scope parent( manager, "world", "World", {},
     { { "world.move.north", "", "North", true } }, []( const auto & ) {
         return semantic_action_dispatch_result{ true, "", "" };
@@ -399,7 +420,9 @@ TEST_CASE( "diagnostic unwinding never publishes or throws from its destructor",
         std::fflush( stderr );
         std::_Exit( 86 );
     } );
-    on_out_of_scope restore_terminate( [&]() { std::set_terminate( previous_terminate ); } );
+    on_out_of_scope restore_terminate( [&]() {
+        std::set_terminate( previous_terminate );
+    } );
     const auto native_body = [&]() {
         semantic_surface_scope diagnostic( manager, "prompt", "Debug error", {}, {}, {}, true );
         manager.set_descriptor_observer( []( const auto & ) {
@@ -433,7 +456,9 @@ TEST_CASE( "failed diagnostic close restores custody before the native owner ret
 {
     semantic_surface_manager manager( "failed-close" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const auto &receipt ) { receipts.push_back( receipt ); } );
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
     int dispatches = 0;
     semantic_surface_scope parent( manager, "inventory", "Inventory", {},
     { { "inventory.select", "item:1", "Select", true } }, [&]( const auto & ) {
@@ -445,7 +470,7 @@ TEST_CASE( "failed diagnostic close restores custody before the native owner ret
                                        "select", "inventory.select", "item:1", {} } ) );
     REQUIRE( parent.consume_request() );
     std::optional<semantic_surface_descriptor> failed_owner;
-    manager.set_descriptor_observer( [&]( const auto &descriptor ) {
+    manager.set_descriptor_observer( [&]( const auto & descriptor ) {
         failed_owner = descriptor;
         throw std::runtime_error( "construction observer failed" );
     } );
@@ -487,7 +512,7 @@ TEST_CASE( "failed diagnostic close restores custody before the native owner ret
         REQUIRE( manager.submit_request( { manager.run_id(), prompt.surface_id, prompt.frame_id,
                                            "continue", "prompt.acknowledge", std::nullopt, {} } ) );
         REQUIRE( diagnostic.consume_request() );
-        manager.set_descriptor_observer( [&]( const auto &descriptor ) {
+        manager.set_descriptor_observer( [&]( const auto & descriptor ) {
             failed_owner = descriptor;
             throw std::runtime_error( "parent observer failed" );
         } );
@@ -509,8 +534,10 @@ TEST_CASE( "failed diagnostic close restores custody before the native owner ret
     CHECK_FALSE( parent.consume_request() );
     CHECK( receipts.back().rejection_reason == "stale_frame" );
     CHECK( dispatches == 2 );
-    for( const auto &request_id : { "select", "second-select" } ) {
-        CHECK( std::count_if( receipts.begin(), receipts.end(), [&]( const auto &receipt ) {
+    for( const auto &request_id : {
+             "select", "second-select"
+         } ) {
+        CHECK( std::count_if( receipts.begin(), receipts.end(), [&]( const auto & receipt ) {
             return receipt.request_id == request_id;
         } ) == 1 );
     }
@@ -573,19 +600,22 @@ TEST_CASE( "DebugConsole advertises native close and restores its input parent o
     semantic_surface_scope world( manager, "world", "World" );
     const auto before = *manager.top();
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     bool opened = false;
     semantic_action_request close;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        if( descriptor.kind == "world" || opened ) { return; }
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        if( descriptor.kind == "world" || opened ) {
+            return;
+        }
         opened = true;
         REQUIRE( descriptor.payload.at( "native_owner" ) == "DEBUG_CONSOLE" );
         REQUIRE( descriptor.valid_actions.size() == 1 );
         REQUIRE( descriptor.valid_actions.front().id == "debug_console.close" );
         close = { descriptor.run_id, descriptor.surface_id, descriptor.frame_id,
-                  "close-console", "debug_console.close", std::nullopt, {} };
+                  "close-console", "debug_console.close", std::nullopt, {}
+                };
         auto wrong = close;
         wrong.request_id = "wrong-console";
         wrong.surface_id = before.surface_id;
@@ -637,16 +667,21 @@ TEST_CASE( "native compatibility observations do not duplicate input-owner rende
     fs::create_directories( directory );
     const fs::path trace = directory / "native.jsonl";
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const auto &key : keys ) {
         const char *value = std::getenv( key.c_str() );
         previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
     }
     on_out_of_scope cleanup( [&] {
-        for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+        for( const auto &entry : previous )
+        {
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
         fs::remove_all( directory );
     } );
@@ -724,7 +759,9 @@ TEST_CASE( "native compatibility observations do not duplicate input-owner rende
             CHECK( object.get_string( "frame_id" ) == issued.frame_id );
             ++descriptors;
         }
-        if( object.get_string( "event" ) != "frame" ) { continue; }
+        if( object.get_string( "event" ) != "frame" ) {
+            continue;
+        }
         const auto observation = object.get_object( "observation" );
         observation.allow_omitted_members();
         CHECK( observation.has_member( "visible_local" ) );
@@ -768,7 +805,7 @@ TEST_CASE( "semantic surface scopes hide parent actions and republish after pop"
         } );
         REQUIRE( manager.top() );
         CHECK( manager.top()->kind == "menu" );
-        CHECK( manager.top()->breadcrumbs == std::vector<std::string>{ "World", "Inventory" } );
+        CHECK( manager.top()->breadcrumbs == std::vector<std::string> { "World", "Inventory" } );
         CHECK( manager.top()->valid_actions.front().id == "menu.cancel" );
         CHECK_FALSE( world.publish( {}, { { "world.wait", "", "Wait", true } } ) );
         CHECK( manager.stack().size() == 2 );
@@ -786,17 +823,17 @@ TEST_CASE( "a native child popup does not republish an expired activity owner",
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_surface_descriptor> descriptors;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
     std::optional<semantic_surface_scope> activity;
     activity.emplace( manager, "activity_distraction", "Activity distraction",
-                      std::map<std::string, std::string>{},
-                      std::vector<semantic_action_descriptor>{
+                      std::map<std::string, std::string> {},
+    std::vector<semantic_action_descriptor> {
         { "activity.continue", "", "Continue", true }
     } );
     const std::string activity_surface = manager.top()->surface_id;
@@ -835,7 +872,7 @@ TEST_CASE( "a native child popup does not republish an expired activity owner",
     CHECK( receipts.front().accepted );
     CHECK( receipts.front().resulting_frame_id == return_frame );
     CHECK( std::none_of( descriptors.begin(), descriptors.end(),
-    [&activity_surface]( const semantic_surface_descriptor &descriptor ) {
+    [&activity_surface]( const semantic_surface_descriptor & descriptor ) {
         return descriptor.surface_id == activity_surface &&
                descriptor.frame_id != "test-run:frame:1";
     } ) );
@@ -846,16 +883,16 @@ TEST_CASE( "activity pause receipts publish before the cancellation prompt unwin
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
     std::optional<semantic_surface_scope> activity;
     activity.emplace( manager, "activity_wait", "Activity in progress",
-                      std::map<std::string, std::string>{},
-                      std::vector<semantic_action_descriptor>{
+                      std::map<std::string, std::string> {},
+    std::vector<semantic_action_descriptor> {
         { "activity.pause", "", "Pause activity", true }
-    }, []( const semantic_action_request &request ) {
+    }, []( const semantic_action_request & request ) {
         if( request.action_id != "activity.pause" ) {
             return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
         }
@@ -890,7 +927,7 @@ TEST_CASE( "dialogue semantic receipts are emitted before a native modal",
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World" );
@@ -929,13 +966,13 @@ TEST_CASE( "terminal main menu intent is receipted without a GUI successor",
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     bool native_quit_selected = false;
     semantic_surface_scope menu( manager, "main_menu", "Main menu", {}, {
         { "main_menu.quit", "", "Quit", true }
-    }, [&native_quit_selected]( const semantic_action_request &request ) {
+    }, [&native_quit_selected]( const semantic_action_request & request ) {
         if( request.action_id != "main_menu.quit" || request.stable_id ) {
             return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
         }
@@ -971,7 +1008,7 @@ TEST_CASE( "a repeated overmap destination request receipts without an unchanged
 {
     semantic_surface_manager manager( "repeat-terminal-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
@@ -1010,7 +1047,7 @@ TEST_CASE( "a queued semantic request re-wakes its native owner after FIFO wake 
     semantic_surface_manager manager( "queued-wake-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope overmap( manager, "overmap", "Overmap", {}, {
@@ -1050,9 +1087,11 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
     const bool had_previous_path = previous_path != nullptr;
     const std::string saved_path = had_previous_path ? previous_path : "";
     on_out_of_scope cleanup( [&] {
-        if( had_previous_path ) {
+        if( had_previous_path )
+        {
             setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", saved_path.c_str(), 1 );
-        } else {
+        } else
+        {
             unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
         }
         std::filesystem::remove( transport_path );
@@ -1064,21 +1103,22 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
     std::vector<semantic_request_transport_event> transport_events;
     std::vector<semantic_action_receipt> receipts;
     std::vector<std::string> dispatched;
-    manager.set_transport_observer( [&transport_events]( const semantic_request_transport_event &event ) {
+    manager.set_transport_observer( [&transport_events]( const semantic_request_transport_event &
+    event ) {
         transport_events.push_back( event );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope overmap( manager, "overmap", "Overmap", {}, {
         { "overmap.choose_destination", "omt:1,1,0", "Choose destination", true }
-    }, [&dispatched]( const semantic_action_request &request ) {
+    }, [&dispatched]( const semantic_action_request & request ) {
         dispatched.push_back( request.request_id );
         return semantic_action_dispatch_result{ true, "", "", false, false };
     } );
     const semantic_surface_descriptor first = *manager.top();
-    const auto append_record = [&]( const semantic_surface_descriptor &frame,
-                                   const std::string &request_id, std::size_t body_size ) {
+    const auto append_record = [&]( const semantic_surface_descriptor & frame,
+    const std::string & request_id, std::size_t body_size ) {
         std::string record = "{\"run_id\":\"transport-run\",\"surface_id\":\"" + frame.surface_id +
                              "\",\"frame_id\":\"" + frame.frame_id + "\",\"request_id\":\"" + request_id +
                              "\",\"action_id\":\"overmap.choose_destination\",\"stable_id\":\"omt:1,1,0\"}";
@@ -1096,7 +1136,7 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
     }
     REQUIRE( manager.poll_request_transport() );
     const auto first_record = std::find_if( transport_events.begin(), transport_events.end(),
-    []( const semantic_request_transport_event &event ) {
+    []( const semantic_request_transport_event & event ) {
         return event.event == "jsonl_record" && event.request_id == "first";
     } );
     REQUIRE( first_record != transport_events.end() );
@@ -1117,11 +1157,11 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
     CHECK( receipts.front().requested_surface_id == first.surface_id );
     CHECK( receipts.front().requested_frame_id == first.frame_id );
     CHECK( std::any_of( transport_events.begin(), transport_events.end(),
-    []( const semantic_request_transport_event &event ) {
+    []( const semantic_request_transport_event & event ) {
         return event.event == "wake_marked";
     } ) );
     CHECK( std::any_of( transport_events.begin(), transport_events.end(),
-    []( const semantic_request_transport_event &event ) {
+    []( const semantic_request_transport_event & event ) {
         return event.event == "request_consumed" && event.request_id == "first";
     } ) );
 
@@ -1134,7 +1174,7 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
         REQUIRE( manager.poll_request_transport() );
     }
     const auto second_record = std::find_if( transport_events.begin(), transport_events.end(),
-    []( const semantic_request_transport_event &event ) {
+    []( const semantic_request_transport_event & event ) {
         return event.event == "jsonl_record" && event.request_id == "second";
     } );
     REQUIRE( second_record != transport_events.end() );
@@ -1152,7 +1192,7 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
     CHECK( receipts.back().requested_run_id == second.run_id );
     CHECK( receipts.back().requested_surface_id == second.surface_id );
     CHECK( receipts.back().requested_frame_id == second.frame_id );
-    CHECK( ( dispatched == std::vector<std::string>{ "first", "second" } ) );
+    CHECK( ( dispatched == std::vector<std::string> { "first", "second" } ) );
     CHECK_FALSE( manager.poll_request_transport() );
     CHECK_FALSE( poll_active_semantic_surface_request() );
     CHECK_FALSE( overmap.consume_request() );
@@ -1167,7 +1207,7 @@ TEST_CASE( "item info is a semantic child and restores its selector parent",
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope inventory( manager, "inventory", "Inventory", {}, {
@@ -1193,11 +1233,11 @@ TEST_CASE( "item info is a semantic child and restores its selector parent",
     } );
     std::string details_frame;
     manager.set_descriptor_observer( [&manager, &data, &details_frame](
-    const semantic_surface_descriptor &descriptor ) {
+    const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "item_info" ) {
             return;
         }
-        REQUIRE( descriptor.breadcrumbs == std::vector<std::string>{ "Inventory", "Item info" } );
+        REQUIRE( descriptor.breadcrumbs == std::vector<std::string> { "Inventory", "Item info" } );
         REQUIRE( descriptor.valid_actions.size() == 1 );
         CHECK( descriptor.valid_actions.front().id == "item_info.close" );
         REQUIRE( descriptor.payload.count( "item_info_text" ) == 1 );
@@ -1247,12 +1287,12 @@ TEST_CASE( "inventory selector resolves semantic item controls by live UID", "[s
         { "inventory.toggle", "", "Toggle selection", true }
     } );
     const auto select = std::find_if( actions.begin(), actions.end(), [&selected_id](
-    const semantic_action_descriptor &action ) {
+    const semantic_action_descriptor & action ) {
         return action.id == "inventory.select" && action.stable_id == selected_id;
     } );
     REQUIRE( select != actions.end() );
     CHECK( std::any_of( actions.begin(), actions.end(), [&selected_id](
-    const semantic_action_descriptor &action ) {
+    const semantic_action_descriptor & action ) {
         return action.id == "inventory.toggle" && action.stable_id == selected_id;
     } ) );
 
@@ -1286,7 +1326,8 @@ TEST_CASE( "inventory selector resolves semantic item controls by live UID", "[s
     CHECK_FALSE( native_input );
 }
 
-TEST_CASE( "inventory selector keeps UID controls bound across common actions", "[semantic_surface]" )
+TEST_CASE( "inventory selector keeps UID controls bound across common actions",
+           "[semantic_surface]" )
 {
     Character &avatar = get_player_character();
     clear_avatar();
@@ -1303,13 +1344,16 @@ TEST_CASE( "inventory selector keeps UID controls bound across common actions", 
     avatar.wield( backpack );
     REQUIRE( avatar.get_wielded_item()->uid().is_valid() );
     const std::vector<item_location> live_items = avatar.all_items_loc();
-    const auto live_rock = std::find_if( live_items.begin(), live_items.end(), []( const item_location &location ) {
+    const auto live_rock = std::find_if( live_items.begin(),
+    live_items.end(), []( const item_location & location ) {
         return location && location->typeId() == itype_id( "rock" );
     } );
-    const auto second_rock = std::find_if( std::next( live_rock ), live_items.end(), []( const item_location &location ) {
+    const auto second_rock = std::find_if( std::next( live_rock ),
+    live_items.end(), []( const item_location & location ) {
         return location && location->typeId() == itype_id( "rock" );
     } );
-    const auto live_bottle = std::find_if( live_items.begin(), live_items.end(), []( const item_location &location ) {
+    const auto live_bottle = std::find_if( live_items.begin(),
+    live_items.end(), []( const item_location & location ) {
         return location && location->typeId() == itype_id( "bottle_plastic" );
     } );
     REQUIRE( live_rock != live_items.end() );
@@ -1328,10 +1372,10 @@ TEST_CASE( "inventory selector keeps UID controls bound across common actions", 
         { "inventory.wield", "", "Wield", true },
         { "inventory.wear", "", "Wear", true }
     } );
-    const auto advertised_for = [&actions]( const std::string &action_id,
-    const std::string &stable_id ) {
+    const auto advertised_for = [&actions]( const std::string & action_id,
+    const std::string & stable_id ) {
         return std::any_of( actions.begin(), actions.end(), [&action_id, &stable_id](
-        const semantic_action_descriptor &action ) {
+        const semantic_action_descriptor & action ) {
             return action.id == action_id && action.stable_id == stable_id && action.enabled;
         } );
     };
@@ -1391,13 +1435,13 @@ TEST_CASE( "inventory selector keeps UID controls bound across common actions", 
         { "inventory.wield", "", "Wield", false }
     } );
     CHECK( std::any_of( disabled_actions.begin(), disabled_actions.end(), [&second_rock_id](
-    const semantic_action_descriptor &action ) {
+    const semantic_action_descriptor & action ) {
         return action.id == "inventory.wield" && action.stable_id == second_rock_id && !action.enabled;
     } ) );
 
     std::vector<item_location> item_locations = avatar.all_items_loc();
     auto rock_location = std::find_if( item_locations.begin(), item_locations.end(),
-    [&rock_id]( const item_location &location ) {
+    [&rock_id]( const item_location & location ) {
         return location && std::to_string( location->uid().get_value() ) == rock_id;
     } );
     REQUIRE( rock_location != item_locations.end() );
@@ -1456,10 +1500,10 @@ TEST_CASE( "semantic surface transport observes exact descriptors and rejections
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_surface_descriptor> descriptors;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
@@ -1505,7 +1549,7 @@ TEST_CASE( "only the descriptor-bound top owner consumes a semantic request",
     int actions_consumed = 0;
     semantic_surface_scope world( manager, "world", "World", {}, {
         { "world.wait", "", "Wait", true }
-    }, [&actions_consumed]( const semantic_action_request &request ) {
+    }, [&actions_consumed]( const semantic_action_request & request ) {
         ++actions_consumed;
         return semantic_action_dispatch_result{ true, "", request.frame_id };
     } );
@@ -1516,7 +1560,7 @@ TEST_CASE( "only the descriptor-bound top owner consumes a semantic request",
     CHECK( actions_consumed == 1 );
 
     CHECK( world.publish( { { "state", "updated" } },
-                           { { "world.wait", "", "Wait", true } } ) );
+    { { "world.wait", "", "Wait", true } } ) );
     CHECK( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                      "request-2", "world.wait", std::nullopt, {} } ) );
     CHECK_FALSE( world.consume_request() );
@@ -1537,17 +1581,17 @@ TEST_CASE( "yielded parent frame fails closed while a native child owns input",
     semantic_surface_scope world( manager, "world", "World" );
     std::vector<semantic_action_receipt> receipts;
     std::vector<semantic_surface_descriptor> descriptors;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
 
     std::optional<semantic_surface_scope> editor;
     const auto make_editor = [&manager, &editor]() {
-        editor.emplace( manager, "map_editor", "Map editor", std::map<std::string, std::string>{},
-                        std::vector<semantic_action_descriptor>{
+        editor.emplace( manager, "map_editor", "Map editor", std::map<std::string, std::string> {},
+        std::vector<semantic_action_descriptor> {
             { "editmap.confirm", "", "Confirm", true }
         } );
     };
@@ -1564,7 +1608,7 @@ TEST_CASE( "yielded parent frame fails closed while a native child owns input",
             { "menu.choose", "fd_fire", "fire", true }
         } );
         const semantic_surface_descriptor field_descriptor = *manager.top();
-        CHECK( field_descriptor.breadcrumbs == std::vector<std::string>{ "World", "Select field" } );
+        CHECK( field_descriptor.breadcrumbs == std::vector<std::string> { "World", "Select field" } );
         REQUIRE( manager.submit_request( { "test-run", retired_editor.surface_id,
                                            retired_editor.frame_id, "stale-editor", "editmap.confirm",
                                            std::nullopt, {} } ) );
@@ -1584,7 +1628,7 @@ TEST_CASE( "yielded parent frame fails closed while a native child owns input",
     CHECK_FALSE( manager.top() );
     {
         semantic_surface_scope intensity_menu( manager, "menu", "Select intensity" );
-        CHECK( manager.top()->breadcrumbs == std::vector<std::string>{ "World", "Select intensity" } );
+        CHECK( manager.top()->breadcrumbs == std::vector<std::string> { "World", "Select intensity" } );
         REQUIRE( manager.withhold_parent_authority_until_recreated( intensity_menu.surface_id() ) );
     }
     CHECK_FALSE( manager.top() );
@@ -1595,7 +1639,7 @@ TEST_CASE( "yielded parent frame fails closed while a native child owns input",
     CHECK( manager.top()->kind == "map_editor" );
     CHECK( manager.top()->surface_id != retired_editor.surface_id );
     CHECK( std::none_of( descriptors.begin(), descriptors.end(),
-    []( const semantic_surface_descriptor &descriptor ) {
+    []( const semantic_surface_descriptor & descriptor ) {
         return descriptor.kind == "world" && descriptor.frame_id != "";
     } ) );
 }
@@ -1631,7 +1675,7 @@ TEST_CASE( "accepted semantic receipts bind the native successor frame",
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World", {}, {
@@ -1661,7 +1705,7 @@ TEST_CASE( "zone manager semantic scope keeps a zone mutation bound to its displ
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     const std::string zone_id = "zone-42";
@@ -1670,7 +1714,7 @@ TEST_CASE( "zone manager semantic scope keeps a zone mutation bound to its displ
     bool enabled = false;
     std::string native_action;
     const auto zone_consumer = [&zone_id, &faction, &revision, &enabled, &native_action]
-    ( const semantic_action_request &request ) {
+    ( const semantic_action_request & request ) {
         if( request.stable_id.value_or( "" ) != zone_id ) {
             return semantic_action_dispatch_result{ false, "invalid_zone_id", "" };
         }
@@ -1699,7 +1743,7 @@ TEST_CASE( "zone manager semantic scope keeps a zone mutation bound to its displ
 
     CHECK( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                      "wrong-owner", "zone.enable", zone_id,
-                                     { { "faction", faction }, { "revision", "7" } } } ) );
+    { { "faction", faction }, { "revision", "7" } } } ) );
     {
         semantic_surface_scope other_owner( manager, "menu", "Other" );
         CHECK_FALSE( other_owner.consume_request() );
@@ -1710,30 +1754,30 @@ TEST_CASE( "zone manager semantic scope keeps a zone mutation bound to its displ
 
     CHECK( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                      "bad-id", "zone.enable", "other-zone",
-                                     { { "faction", faction }, { "revision", "7" } } } ) );
+    { { "faction", faction }, { "revision", "7" } } } ) );
     CHECK_FALSE( zone_scope.consume_request() );
     CHECK( receipts.back().rejection_reason == "invalid_zone_id" );
     CHECK( native_action.empty() );
     CHECK( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                      "wrong-faction", "zone.enable", zone_id,
-                                     { { "faction", "other_faction" }, { "revision", "7" } } } ) );
+    { { "faction", "other_faction" }, { "revision", "7" } } } ) );
     CHECK_FALSE( zone_scope.consume_request() );
     CHECK( receipts.back().rejection_reason == "wrong_faction" );
     CHECK( native_action.empty() );
     CHECK( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                      "stale", "zone.enable", zone_id,
-                                     { { "faction", faction }, { "revision", "6" } } } ) );
+    { { "faction", faction }, { "revision", "6" } } } ) );
     CHECK_FALSE( zone_scope.consume_request() );
     CHECK( receipts.back().rejection_reason == "stale_revision" );
     CHECK( native_action.empty() );
     CHECK( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                      "enable", "zone.enable", zone_id,
-                                     { { "faction", faction }, { "revision", "7" } } } ) );
+    { { "faction", faction }, { "revision", "7" } } } ) );
     CHECK( zone_scope.consume_request() );
     CHECK( native_action == "ENABLE_ZONE" );
     CHECK_FALSE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                            "enable", "zone.enable", zone_id,
-                                           { { "faction", faction }, { "revision", "7" } } } ) );
+    { { "faction", faction }, { "revision", "7" } } } ) );
     enabled = true;
     ++revision;
     semantic_surface_scope successor( manager, "zone_manager", "Zone Manager", {
@@ -1746,7 +1790,7 @@ TEST_CASE( "zone manager semantic scope keeps a zone mutation bound to its displ
     const semantic_surface_descriptor successor_descriptor = *manager.top();
     CHECK( manager.submit_request( { "test-run", successor_descriptor.surface_id,
                                      successor_descriptor.frame_id, "already-enabled", "zone.enable", zone_id,
-                                     { { "faction", faction }, { "revision", "8" } } } ) );
+    { { "faction", faction }, { "revision", "8" } } } ) );
     CHECK_FALSE( successor.consume_request() );
     CHECK( receipts.back().rejection_reason == "unadvertised_action" );
     CHECK( native_action == "ENABLE_ZONE" );
@@ -1757,7 +1801,7 @@ TEST_CASE( "top-only request consumption emits an exact rejection without a nati
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope unsupported( manager, "unsupported", "Legacy prompt", {
@@ -1789,14 +1833,15 @@ TEST_CASE( "uilist consumes a stable semantic choice through its native query lo
     semantic_surface_descriptor menu_descriptor;
     bool selection_requested = false;
     bool choice_requested = false;
-    manager.set_descriptor_observer( [&manager, &menu_descriptor, &selection_requested, &choice_requested](
-    const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager, &menu_descriptor, &selection_requested,
+                                                &choice_requested](
+    const semantic_surface_descriptor & descriptor ) {
         menu_descriptor = descriptor;
         if( descriptor.kind != "menu" ) {
             return;
         }
         const auto action = std::find_if( descriptor.valid_actions.begin(),
-        descriptor.valid_actions.end(), []( const semantic_action_descriptor &candidate ) {
+        descriptor.valid_actions.end(), []( const semantic_action_descriptor & candidate ) {
             return candidate.label == "second";
         } );
         REQUIRE( action != descriptor.valid_actions.end() );
@@ -1807,7 +1852,7 @@ TEST_CASE( "uilist consumes a stable semantic choice through its native query lo
                                                "select-second", action->id, action->stable_id, {} } ) );
         } else if( !choice_requested ) {
             const auto action = std::find_if( descriptor.valid_actions.begin(),
-            descriptor.valid_actions.end(), []( const semantic_action_descriptor &candidate ) {
+            descriptor.valid_actions.end(), []( const semantic_action_descriptor & candidate ) {
                 return candidate.id == "menu.choose" && candidate.label == "second";
             } );
             REQUIRE( action != descriptor.valid_actions.end() );
@@ -1836,7 +1881,7 @@ TEST_CASE( "large searchable uilist requires a native semantic filter before cho
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
@@ -1851,7 +1896,7 @@ TEST_CASE( "large searchable uilist requires a native semantic filter before cho
     bool filter_requested = false;
     bool choice_requested = false;
     manager.set_descriptor_observer( [&manager, &stale_requested, &filter_requested, &choice_requested,
-    stale_id]( const semantic_surface_descriptor &descriptor ) {
+              stale_id]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "menu" ) {
             return;
         }
@@ -1859,7 +1904,7 @@ TEST_CASE( "large searchable uilist requires a native semantic filter before cho
         if( filter_required && !stale_requested ) {
             stale_requested = true;
             REQUIRE( std::none_of( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) {
+            []( const semantic_action_descriptor & action ) {
                 return action.id == "menu.choose";
             } ) );
             REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
@@ -1867,10 +1912,10 @@ TEST_CASE( "large searchable uilist requires a native semantic filter before cho
             filter_requested = true;
             REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                                "filter", "menu.filter", std::nullopt,
-                                               { { "text", "opaque barrier" } } } ) );
+            { { "text", "opaque barrier" } } } ) );
         } else if( !filter_required && !choice_requested ) {
             const auto choice = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) {
+            []( const semantic_action_descriptor & action ) {
                 return action.id == "menu.choose" && action.label == "opaque barrier terrain";
             } );
             REQUIRE( choice != descriptor.valid_actions.end() );
@@ -1896,16 +1941,16 @@ TEST_CASE( "uilist can defer a selected receipt to its native child", "[semantic
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World" );
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "menu" ) {
             return;
         }
         const auto action = std::find_if( descriptor.valid_actions.begin(),
-        descriptor.valid_actions.end(), []( const semantic_action_descriptor &candidate ) {
+        descriptor.valid_actions.end(), []( const semantic_action_descriptor & candidate ) {
             return candidate.id == "menu.choose";
         } );
         REQUIRE( action != descriptor.valid_actions.end() );
@@ -1931,7 +1976,7 @@ TEST_CASE( "child-owned receipt ignores a redraw of its selecting owner", "[sema
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World" );
@@ -1947,7 +1992,7 @@ TEST_CASE( "child-owned receipt ignores a redraw of its selecting owner", "[sema
                                            "talker", {} } ) );
         REQUIRE( selector.consume_request() );
         REQUIRE( manager.publish( selector.surface_id(), { { "selected", "talker" } },
-                                  selector_frame.valid_actions ) );
+        selector_frame.valid_actions ) );
         CHECK( receipts.empty() );
     }
 
@@ -1963,16 +2008,16 @@ TEST_CASE( "a deferred World chat receipt resolves only at its child owner",
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
     std::vector<semantic_surface_descriptor> descriptors;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
 
     std::optional<semantic_surface_scope> world;
-    world.emplace( manager, "world", "World", std::map<std::string, std::string>{},
-                   std::vector<semantic_action_descriptor>{
+    world.emplace( manager, "world", "World", std::map<std::string, std::string> {},
+    std::vector<semantic_action_descriptor> {
         { "world.chat", "", "Chat", true }
     }, []( const semantic_action_request & ) {
         return semantic_action_dispatch_result{ true, "", "", true };
@@ -1990,7 +2035,7 @@ TEST_CASE( "a deferred World chat receipt resolves only at its child owner",
     CHECK( receipts.front().accepted );
     CHECK( receipts.front().resulting_frame_id == manager.top()->frame_id );
     CHECK( std::none_of( descriptors.begin(), descriptors.end(),
-    [&world_frame]( const semantic_surface_descriptor &descriptor ) {
+    [&world_frame]( const semantic_surface_descriptor & descriptor ) {
         return descriptor.surface_id == world_frame.surface_id &&
                descriptor.frame_id != world_frame.frame_id;
     } ) );
@@ -2000,15 +2045,15 @@ TEST_CASE( "a sentence prompt receipt survives its nested chat unwind", "[semant
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
     std::optional<semantic_surface_scope> world;
     world.emplace( manager, "world", "World" );
     std::optional<semantic_surface_scope> prompt;
-    prompt.emplace( manager, "string_prompt", "Text input", std::map<std::string, std::string>{},
-                    std::vector<semantic_action_descriptor>{ { "prompt.submit", "", "Submit", true } },
+    prompt.emplace( manager, "string_prompt", "Text input", std::map<std::string, std::string> {},
+    std::vector<semantic_action_descriptor> { { "prompt.submit", "", "Submit", true } },
     []( const semantic_action_request & ) {
         return semantic_action_dispatch_result{ true, "", "", true };
     } );
@@ -2039,7 +2084,7 @@ TEST_CASE( "native intent handoff is single-use and run-bound", "[semantic_surfa
     CHECK( manager.take_native_intent( "main_menu.quit" ) );
     CHECK_FALSE( manager.take_native_intent( "main_menu.quit" ) );
     CHECK_FALSE( manager.queue_native_intent( { "wrong-run", "main-menu", "frame", "stale-request",
-                                                 "main_menu.quit", std::nullopt, {} }, "main_menu.quit" ) );
+                 "main_menu.quit", std::nullopt, {} }, "main_menu.quit" ) );
 }
 
 TEST_CASE( "item-use restoration publishes only its recreated menu owner", "[semantic_surface]" )
@@ -2047,10 +2092,10 @@ TEST_CASE( "item-use restoration publishes only its recreated menu owner", "[sem
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_surface_descriptor> descriptors;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World" );
@@ -2090,7 +2135,8 @@ TEST_CASE( "item-use restoration publishes only its recreated menu owner", "[sem
     REQUIRE( !descriptors.empty() );
     CHECK( descriptors.back().surface_id == recreated_item_menu.surface_id() );
     CHECK( descriptors.back().kind == "inventory_item_menu" );
-    CHECK( std::none_of( descriptors.begin() + 2, descriptors.end(), []( const semantic_surface_descriptor &d ) {
+    CHECK( std::none_of( descriptors.begin() + 2,
+    descriptors.end(), []( const semantic_surface_descriptor & d ) {
         return d.kind == "world";
     } ) );
     REQUIRE( receipts.size() == 2 );
@@ -2104,10 +2150,10 @@ TEST_CASE( "direction selection receipts bind to its real confirmation successor
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_surface_descriptor> descriptors;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World" );
@@ -2134,7 +2180,8 @@ TEST_CASE( "direction selection receipts bind to its real confirmation successor
         CHECK( receipts.front().request_id == "choose-north" );
         CHECK( receipts.front().resulting_frame_id == manager.top()->frame_id );
     }
-    CHECK( std::none_of( descriptors.begin() + 2, descriptors.end(), []( const semantic_surface_descriptor &d ) {
+    CHECK( std::none_of( descriptors.begin() + 2,
+    descriptors.end(), []( const semantic_surface_descriptor & d ) {
         return d.kind == "world" || d.kind == "inventory_item_menu";
     } ) );
 }
@@ -2145,17 +2192,17 @@ TEST_CASE( "withheld main-menu quit releases its owner before publishing confirm
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_surface_descriptor> descriptors;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
     std::optional<semantic_surface_scope> main_menu;
-    main_menu.emplace( manager, "main_menu", "Main menu", std::map<std::string, std::string>{},
-    std::vector<semantic_action_descriptor>{ { "main_menu.quit", "", "Quit", true } },
-    [&manager]( const semantic_action_request &request ) {
+    main_menu.emplace( manager, "main_menu", "Main menu", std::map<std::string, std::string> {},
+    std::vector<semantic_action_descriptor> { { "main_menu.quit", "", "Quit", true } },
+    [&manager]( const semantic_action_request & request ) {
         if( !manager.withhold_parent_authority_until_recreated( request.surface_id ) ) {
             return semantic_action_dispatch_result{ false, "native_parent_withhold_failed", "" };
         }
@@ -2175,12 +2222,12 @@ TEST_CASE( "withheld main-menu quit releases its owner before publishing confirm
 
     REQUIRE( manager.top() );
     CHECK( manager.top()->kind == "prompt" );
-    CHECK( manager.top()->breadcrumbs == std::vector<std::string>{ "YESNO" } );
+    CHECK( manager.top()->breadcrumbs == std::vector<std::string> { "YESNO" } );
     REQUIRE( receipts.size() == 1 );
     CHECK( receipts.front().request_id == "quit" );
     CHECK( receipts.front().resulting_frame_id == manager.top()->frame_id );
     CHECK( std::none_of( descriptors.begin() + 1, descriptors.end(),
-    []( const semantic_surface_descriptor &descriptor ) {
+    []( const semantic_surface_descriptor & descriptor ) {
         return descriptor.kind == "main_menu";
     } ) );
 }
@@ -2192,13 +2239,13 @@ TEST_CASE( "uilist rejects disabled and duplicate stable semantic choices",
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
 
     uilist disabled;
     disabled.entries = { uilist_entry( 1, false, 'd', "disabled" ) };
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "menu" ) {
             const semantic_action_descriptor &action = descriptor.valid_actions.front();
             REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
@@ -2217,7 +2264,7 @@ TEST_CASE( "uilist rejects disabled and duplicate stable semantic choices",
         uilist_entry( 2, true, 'b', "second" )
     };
     duplicate.entries[1].semantic_stable_id = duplicate.entries[0].semantic_stable_id;
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "menu" ) {
             const semantic_action_descriptor &action = descriptor.valid_actions.front();
             REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
@@ -2250,7 +2297,7 @@ TEST_CASE( "ordinary debug menu chooses a child action by semantic stable ID",
     scoped_imgui_context imgui;
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "menu" ) {
             return;
         }
@@ -2261,7 +2308,7 @@ TEST_CASE( "ordinary debug menu chooses a child action by semantic stable ID",
         const std::string target = descriptor.payload.at( "text" ) == "Debug Functions" ? "Game…" :
                                    "Show debug message";
         const auto action = std::find_if( descriptor.valid_actions.begin(),
-        descriptor.valid_actions.end(), [&target]( const semantic_action_descriptor &candidate ) {
+        descriptor.valid_actions.end(), [&target]( const semantic_action_descriptor & candidate ) {
             return candidate.id == "menu.choose" && candidate.label == target;
         } );
         REQUIRE( action != descriptor.valid_actions.end() );
@@ -2282,14 +2329,15 @@ TEST_CASE( "debug map submenu publishes a semantic successor for Map editor",
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
     bool saw_map_menu = false;
-    manager.set_descriptor_observer( [&manager, &saw_map_menu]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager,
+    &saw_map_menu]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "menu" ) {
             return;
         }
         const std::string &text = descriptor.payload.at( "text" );
         const std::string target = text == "Debug Functions" ? "Map…" : "Map editor";
         const auto action = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-        [&target]( const semantic_action_descriptor &candidate ) {
+        [&target]( const semantic_action_descriptor & candidate ) {
             return candidate.id == "menu.choose" && candidate.label == target;
         } );
         REQUIRE( action != descriptor.valid_actions.end() );
@@ -2312,7 +2360,7 @@ TEST_CASE( "query popup consumes its bound semantic option in test mode",
 {
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "prompt" ) {
             const semantic_action_descriptor &action = descriptor.valid_actions.front();
             REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
@@ -2320,7 +2368,8 @@ TEST_CASE( "query popup consumes its bound semantic option in test mode",
         }
     } );
 
-    const query_popup::result result = query_popup().message( "%s", "Continue?" ).option( "YES" ).query();
+    const query_popup::result result = query_popup().message( "%s",
+                                       "Continue?" ).option( "YES" ).query();
     CHECK( result.action == "YES" );
 }
 
@@ -2329,11 +2378,11 @@ TEST_CASE( "auto-move cancellation popup binds YES to its native successor frame
 {
     semantic_surface_manager manager( "test-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_manager_session session( manager );
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "prompt" ) {
             return;
         }
@@ -2343,12 +2392,12 @@ TEST_CASE( "auto-move cancellation popup binds YES to its native successor frame
     } );
 
     const query_popup::result result = query_popup()
-                                      .context( "YESNO" )
-                                      .message( "%s", "feral human spotted! Cancel auto move?" )
-                                      .option( "YES" )
-                                      .option( "NO" )
-                                      .await_semantic_successor()
-                                      .query();
+                                       .context( "YESNO" )
+                                       .message( "%s", "feral human spotted! Cancel auto move?" )
+                                       .option( "YES" )
+                                       .option( "NO" )
+                                       .await_semantic_successor()
+                                       .query();
     CHECK( result.action == "YES" );
     {
         semantic_surface_scope successor( manager, "auto_move_canceled", "Auto move canceled" );
@@ -2365,18 +2414,19 @@ TEST_CASE( "string prompt accepts constraint-valid structured semantic text",
 {
     semantic_surface_manager manager( "test-run" );
     semantic_surface_manager_session session( manager );
-    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "string_prompt" ) {
             REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                                "submit-text", "prompt.submit", std::nullopt,
-                                               { { "text", "42" } } } ) );
+            { { "text", "42" } } } ) );
         }
     } );
 
     const catacurses::window window = catacurses::newwin( 3, 30, point::zero );
     REQUIRE( window );
     string_input_popup prompt;
-    prompt.window( window, point( 1, 1 ), 28 ).title( "Number" ).text( "" ).max_length( 2 ).only_digits( true );
+    prompt.window( window, point( 1, 1 ),
+                   28 ).title( "Number" ).text( "" ).max_length( 2 ).only_digits( true );
     CHECK( prompt.query_string() == "42" );
     CHECK( prompt.confirmed() );
     CHECK_FALSE( prompt.canceled() );
@@ -2392,13 +2442,14 @@ TEST_CASE( "imgui string prompt owns semantic coordinate submission and rejects 
     bool rejected_wrong_surface = false;
     bool rejected_stale_frame = false;
     std::vector<std::string> rejection_reasons;
-    manager.set_receipt_observer( [&rejection_reasons]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&rejection_reasons]( const semantic_action_receipt & receipt ) {
         if( !receipt.accepted ) {
             rejection_reasons.push_back( receipt.rejection_reason );
         }
     } );
-    manager.set_descriptor_observer( [&manager, &saw_prompt, &rejected_wrong_surface, &rejected_stale_frame]
-    ( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&manager, &saw_prompt, &rejected_wrong_surface,
+                                                &rejected_stale_frame]
+    ( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "string_prompt" ) {
             return;
         }
@@ -2406,15 +2457,15 @@ TEST_CASE( "imgui string prompt owns semantic coordinate submission and rejects 
         CHECK( descriptor.valid_actions[0].id == "prompt.submit" );
         REQUIRE( manager.submit_request( { "test-run", "wrong-surface", descriptor.frame_id,
                                            "wrong", "prompt.submit", std::nullopt,
-                                           { { "text", "0'152,0'49,0" } } } ) );
+        { { "text", "0'152,0'49,0" } } } ) );
         rejected_wrong_surface = !manager.consume_top_request();
         REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, "stale-frame",
                                            "stale", "prompt.submit", std::nullopt,
-                                           { { "text", "0'152,0'49,0" } } } ) );
+        { { "text", "0'152,0'49,0" } } } ) );
         rejected_stale_frame = !manager.consume_top_request();
         REQUIRE( manager.submit_request( { "test-run", descriptor.surface_id, descriptor.frame_id,
                                            "submit", "prompt.submit", std::nullopt,
-                                           { { "text", "0'152,0'49,0" } } } ) );
+        { { "text", "0'152,0'49,0" } } } ) );
     } );
 
     string_input_popup_imgui popup( 65, "", "Teleport where?" );
@@ -2422,7 +2473,7 @@ TEST_CASE( "imgui string prompt owns semantic coordinate submission and rejects 
     CHECK( saw_prompt );
     CHECK( rejected_wrong_surface );
     CHECK( rejected_stale_frame );
-    CHECK( rejection_reasons == std::vector<std::string>{ "wrong_surface", "stale_frame" } );
+    CHECK( rejection_reasons == std::vector<std::string> { "wrong_surface", "stale_frame" } );
 }
 
 TEST_CASE( "rejected transport stays inside the native input owner until a real successor",
@@ -2437,8 +2488,11 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
     const std::optional<std::string> previous = old_path ? std::optional<std::string>( old_path ) :
             std::nullopt;
     on_out_of_scope cleanup( [&]() {
-        if( previous ) { setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 ); }
-        else { unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" ); }
+        if( previous ) {
+            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
+        } else {
+            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+        }
         std::filesystem::remove( path );
     } );
     setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
@@ -2455,7 +2509,9 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
         catacurses::refresh();
     }
     on_out_of_scope close_renderer( [&]() {
-        if( owns_terminal ) { catacurses::endwin(); }
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
     } );
 #endif
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
@@ -2466,7 +2522,7 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
     int native_dispatches = 0;
     std::vector<semantic_surface_descriptor> publications;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         publications.push_back( descriptor );
     } );
     semantic_surface_scope parent( manager, "inventory", "Inventory", {},
@@ -2476,8 +2532,8 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
         return semantic_action_dispatch_result{ true, "", "", true, true };
     } );
     const auto original = *manager.top();
-    const auto append = [&]( const std::string &run, const std::string &surface,
-                             const std::string &frame, const std::string &request ) {
+    const auto append = [&]( const std::string & run, const std::string & surface,
+    const std::string & frame, const std::string & request ) {
         std::ofstream stream( path, std::ios::app );
         stream << "{\"run_id\":\"" << run << "\",\"surface_id\":\"" << surface
                << "\",\"frame_id\":\"" << frame << "\",\"request_id\":\"" << request
@@ -2488,7 +2544,7 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
                                            "inert", "inventory.select", "item:1", {} } ) );
         REQUIRE_FALSE( manager.consume_top_request() );
     }
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
         if( receipt.request_id == "inert" ) {
             CHECK_FALSE( receipt.accepted );
@@ -2514,7 +2570,9 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
     REQUIRE( manager.top() );
     CHECK( manager.top()->surface_id == original.surface_id );
     CHECK( manager.top()->frame_id == original.frame_id );
-    if( native_dispatches != 1 ) { return; }
+    if( native_dispatches != 1 ) {
+        return;
+    }
     REQUIRE( receipts.size() == 1 );
     {
         bool closed = false;
@@ -2562,8 +2620,11 @@ TEST_CASE( "debug prompt retains native keyboard continuation outside semantic m
             std::nullopt;
     unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
     on_out_of_scope restore_environment( [&]() {
-        if( previous ) { setenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", previous->c_str(), 1 ); }
-        else { unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" ); }
+        if( previous ) {
+            setenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", previous->c_str(), 1 );
+        } else {
+            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+        }
     } );
     const bool owns_terminal = !catacurses::stdscr;
     if( owns_terminal ) {
@@ -2571,7 +2632,9 @@ TEST_CASE( "debug prompt retains native keyboard continuation outside semantic m
         catacurses::resizeterm();
     }
     on_out_of_scope close_renderer( [&]() {
-        if( owns_terminal ) { catacurses::endwin(); }
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
     } );
     restore_on_out_of_scope<bool> restore_mode( test_mode );
     test_mode = false;
@@ -2602,7 +2665,9 @@ TEST_CASE( "shared input ownership preserves bounded ordinary keyboard reads",
         catacurses::refresh();
     }
     on_out_of_scope close_owned_terminal( [&]() {
-        if( owns_terminal ) { catacurses::endwin(); }
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
     } );
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
     test_mode = false;
@@ -2619,8 +2684,11 @@ TEST_CASE( "shared input ownership preserves bounded ordinary keyboard reads",
     input.handle_input( 100 );
     CHECK( input.get_raw_input().type == input_event_t::keyboard_char );
     CHECK( input.get_raw_input().get_first_input() == '1' );
-    if( bound ) { CHECK( manager.top()->surface_id == owner->surface_id() ); }
-    else { CHECK( active_semantic_surface_manager() == nullptr ); }
+    if( bound ) {
+        CHECK( manager.top()->surface_id == owner->surface_id() );
+    } else {
+        CHECK( active_semantic_surface_manager() == nullptr );
+    }
 }
 #endif
 
@@ -2634,16 +2702,21 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     fs::create_directories( directory );
     const fs::path trace = directory / "semantic.native.events.jsonl";
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", "OPENCLAW_HARNESS_RAID_ACTOR_TRACE" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", "OPENCLAW_HARNESS_RAID_ACTOR_TRACE"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const std::string &key : keys ) {
         const char *value = std::getenv( key.c_str() );
         previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
     }
     on_out_of_scope cleanup( [&] {
-        for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+        for( const auto &entry : previous )
+        {
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
         fs::remove_all( directory );
     } );
@@ -2668,19 +2741,22 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     on_out_of_scope pop( [&] { manager.pop( surface ); } );
     const semantic_surface_descriptor issued = *manager.top();
     const semantic_action_request request = { run, issued.surface_id, issued.frame_id,
-            "pick-once", "inventory.pick", "item:199", {} };
+                                              "pick-once", "inventory.pick", "item:199", {}
+                                            };
     REQUIRE( manager.submit_request( request ) );
     REQUIRE( manager.consume_top_request() );
     CHECK( dispatched == 1 );
     REQUIRE( manager.publish( surface, { { "selection", "item:199" } }, actions ) );
     // An action catalogue is lossless, including a non-front physical item.
     const std::string diagnostic( 96 * 1024, 'd' );
-    for( const std::string state : { "active", "hostile_boundary", "resumed", "progress", "completed_cleared" } ) {
+    for( const std::string state : {
+             "active", "hostile_boundary", "resumed", "progress", "completed_cleared"
+         } ) {
         REQUIRE( write_native_semantic_event( "{\"event\":\"travel\",\"run_id\":\"" + run +
-                                             "\",\"travel_id\":\"trip-1\",\"receipt_id\":\"trip-1:" + state +
-                                             "\",\"state\":\"" + state + "\",\"destination\":[129,149,0]," +
-                                             "\"destination_present\":" + ( state == "completed_cleared" ? "false" : "true" ) +
-                                             ",\"destination_cleared\":" + ( state == "completed_cleared" ? "true" : "false" ) + "}" ) );
+                                              "\",\"travel_id\":\"trip-1\",\"receipt_id\":\"trip-1:" + state +
+                                              "\",\"state\":\"" + state + "\",\"destination\":[129,149,0]," +
+                                              "\"destination_present\":" + ( state == "completed_cleared" ? "false" : "true" ) +
+                                              ",\"destination_cleared\":" + ( state == "completed_cleared" ? "true" : "false" ) + "}" ) );
     }
     std::set<std::string> travel_states;
     for( int index = 0; index < 100; ++index ) {
@@ -2688,7 +2764,8 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         event << "{\"event\":\"turn\",\"run_id\":\"" << run
               << "\",\"diagnostic\":\"" << diagnostic << "\"}";
         REQUIRE( write_native_diagnostic_event( event.str() ) );
-        diagnostic_recorder.record( "actor", "raid_actor_action", index, "\"action\":\"Pause\",\"npc_id\":5",
+        diagnostic_recorder.record( "actor", "raid_actor_action", index,
+                                    "\"action\":\"Pause\",\"npc_id\":5",
                                     std::to_string( index ) );
     }
     // These all use the same real recorder, including names without raid_.
@@ -2739,7 +2816,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         }
     }
     CHECK( discarded > 0 );
-    CHECK( travel_states == std::set<std::string>{ "active", "hostile_boundary", "progress", "completed_cleared" } );
+    CHECK( travel_states == std::set<std::string> { "active", "hostile_boundary", "progress", "completed_cleared" } );
     CHECK( raid_diagnostic );
     CHECK( retained_diagnostic_kinds == diagnostic_kinds );
     CHECK( current );
@@ -2752,16 +2829,16 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     REQUIRE( manager.publish( surface, { { "selection", "redrawn" } }, actions ) );
     CHECK( manager.top()->frame_id != accepted_frame );
     REQUIRE( write_native_semantic_event( "{\"event\":\"travel\",\"run_id\":\"" + run +
-                                         "\",\"travel_id\":\"trip-2\",\"receipt_id\":\"trip-2:active\"," +
-                                         "\"state\":\"active\",\"destination\":[130,149,0]," +
-                                         "\"destination_present\":true,\"destination_cleared\":false}" ) );
+                                          "\",\"travel_id\":\"trip-2\",\"receipt_id\":\"trip-2:active\"," +
+                                          "\"state\":\"active\",\"destination\":[130,149,0]," +
+                                          "\"destination_present\":true,\"destination_cleared\":false}" ) );
     manager.submit_request( request );
     manager.consume_top_request();
     CHECK( dispatched == 1 );
     input.close();
     for( int index = 0; index < 100; ++index ) {
         REQUIRE( write_native_diagnostic_event( "{\"event\":\"turn\",\"run_id\":\"" + run +
-                                             "\",\"diagnostic\":\"" + diagnostic + "\"}" ) );
+                                                "\",\"diagnostic\":\"" + diagnostic + "\"}" ) );
     }
     std::ifstream replayed( trace );
     bool named_successor = false;
@@ -2823,7 +2900,8 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     CHECK( dispatched == 1 );
     const auto before = fs::file_size( trace );
     const bool prior_identity_error = debug_has_error_been_observed();
-    CHECK_FALSE( write_native_diagnostic_event( "{\"event\":\"npc_alarm\",\"run_id\":\"foreign-run\"}" ) );
+    CHECK_FALSE(
+        write_native_diagnostic_event( "{\"event\":\"npc_alarm\",\"run_id\":\"foreign-run\"}" ) );
     CHECK( fs::file_size( trace ) == before );
     if( !prior_identity_error ) {
         debug_reset_error_observed();
@@ -2848,7 +2926,8 @@ TEST_CASE( "native journal rejects invalid records and initial temporary IO befo
     const fs::path trace = directory / "native.jsonl";
     const fs::path temporary = trace.string() + ".next";
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const auto &key : keys ) {
         const char *value = std::getenv( key.c_str() );
@@ -2857,15 +2936,22 @@ TEST_CASE( "native journal rejects invalid records and initial temporary IO befo
     const std::string original_directory = PATH_INFO::user_dir();
     const bool previous_error = debug_has_error_been_observed();
     on_out_of_scope cleanup( [&] {
-        for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+        for( const auto &entry : previous )
+        {
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
         deinitDebug();
         PATH_INFO::init_user_dir( original_directory );
         PATH_INFO::set_standard_filenames();
         setupDebug( DebugOutput::std_err );
-        if( !previous_error ) { debug_reset_error_observed(); }
+        if( !previous_error )
+        {
+            debug_reset_error_observed();
+        }
         fs::remove_all( directory );
     } );
     deinitDebug();
@@ -2920,8 +3006,12 @@ TEST_CASE( "native journal rejects invalid records and initial temporary IO befo
     }
     errors.close();
     setupDebug( DebugOutput::file );
-    if( failure == 4 ) { fs::remove( temporary ); }
-    if( failure == 5 ) { fs::remove( trace ); }
+    if( failure == 4 ) {
+        fs::remove( temporary );
+    }
+    if( failure == 5 ) {
+        fs::remove( trace );
+    }
     REQUIRE( write_native_semantic_event( good ) );
     CHECK( fs::file_size( trace ) > 0 );
     CHECK_FALSE( fs::exists( temporary ) );
@@ -2936,7 +3026,9 @@ TEST_CASE( "native journal rejects invalid records and initial temporary IO befo
         const auto object = input.get_object();
         object.allow_omitted_members();
         CHECK( object.get_string( "run_id" ) == run );
-        if( object.get_string( "event" ) == "frame" ) { ++frames; }
+        if( object.get_string( "event" ) == "frame" ) {
+            ++frames;
+        }
     }
     // Temporary IO remembers the complete failed row for replacement retry;
     // parser/run refusals never entered retention. No malformed row publishes.
@@ -2954,7 +3046,8 @@ TEST_CASE( "initial HUD World is emitted only after actual journal publication",
     const fs::path trace = directory / "native.jsonl";
     const fs::path temporary = trace.string() + ".next";
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const auto &key : keys ) {
         const char *value = std::getenv( key.c_str() );
@@ -2962,11 +3055,18 @@ TEST_CASE( "initial HUD World is emitted only after actual journal publication",
     }
     const bool previous_error = debug_has_error_been_observed();
     on_out_of_scope cleanup( [&] {
-        for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+        for( const auto &entry : previous )
+        {
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
-        if( !previous_error ) { debug_reset_error_observed(); }
+        if( !previous_error )
+        {
+            debug_reset_error_observed();
+        }
         fs::remove_all( directory );
     } );
     const auto run = directory.filename().string();
@@ -2994,8 +3094,8 @@ TEST_CASE( "initial HUD World is emitted only after actual journal publication",
         const auto object = input.get_object();
         object.allow_omitted_members();
         ready = ready || ( object.get_string( "event" ) == "frame" &&
-                          object.get_string( "producer", "" ) == "hud_world_ready" &&
-                          object.get_bool( "initial_world_ready", false ) );
+                           object.get_string( "producer", "" ) == "hud_world_ready" &&
+                           object.get_bool( "initial_world_ready", false ) );
     }
     CHECK( ready );
 }
@@ -3013,7 +3113,8 @@ TEST_CASE( "rejected receipt and travel types cannot alter later journal retenti
     fs::create_directories( directory );
     const fs::path trace = directory / "native.jsonl";
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
-                                          "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH" };
+                                            "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH"
+                                          };
     std::map<std::string, std::optional<std::string>> previous;
     for( const auto &key : keys ) {
         const char *value = std::getenv( key.c_str() );
@@ -3021,11 +3122,18 @@ TEST_CASE( "rejected receipt and travel types cannot alter later journal retenti
     }
     const bool previous_error = debug_has_error_been_observed();
     on_out_of_scope cleanup( [&] {
-        for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
-            else { unsetenv( entry.first.c_str() ); }
+        for( const auto &entry : previous )
+        {
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unsetenv( entry.first.c_str() );
+            }
         }
-        if( !previous_error ) { debug_reset_error_observed(); }
+        if( !previous_error )
+        {
+            debug_reset_error_observed();
+        }
         fs::remove_all( directory );
     } );
     const auto run = directory.filename().string();
@@ -3038,7 +3146,9 @@ TEST_CASE( "rejected receipt and travel types cannot alter later journal retenti
     REQUIRE( write_native_semantic_event( "{" + base +
                                           "\"event\":\"surface_receipt\",\"request_id\":\"accepted-once\","
                                           "\"accepted\":true,\"resulting_frame_id\":\"frame-0\"}" ) );
-    for( const auto state : { "active", "hostile_boundary", "progress" } ) {
+    for( const auto state : {
+             "active", "hostile_boundary", "progress"
+         } ) {
         REQUIRE( write_native_semantic_event( "{" + base +
                                               "\"event\":\"travel\",\"travel_id\":\"current-trip\","
                                               "\"state\":\"" + state + "\"}" ) );
@@ -3100,7 +3210,7 @@ TEST_CASE( "rejected receipt and travel types cannot alter later journal retenti
     }
     CHECK( accepted );
     CHECK( current_frame );
-    CHECK( travel_states == std::set<std::string>{ "active", "hostile_boundary", "progress" } );
+    CHECK( travel_states == std::set<std::string> { "active", "hostile_boundary", "progress" } );
     CHECK_FALSE( fs::exists( trace.string() + ".next" ) );
     std::cout << "R067_REJECTED_RETENTION invalid=" << invalid
               << " accepted=" << accepted << " current_frame=" << current_frame
@@ -3271,7 +3381,7 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
             REQUIRE( action != d.valid_actions.end() );
             REQUIRE( action->enabled );
             REQUIRE( openclaw_harness_semantic_surface_manager().submit_request( { run, d.surface_id, d.frame_id, "ordinary-world-pause-" + std::to_string( world_frames ),
-                    action->id, action->stable_id, {} } ) );
+                     action->id, action->stable_id, {} } ) );
             return;
         }
         if( d.kind == "activity_wait" ) {
@@ -3314,7 +3424,7 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
                 REQUIRE( action != d.valid_actions.end() );
                 REQUIRE( action->enabled );
                 REQUIRE( openclaw_harness_semantic_surface_manager().submit_request( { run, d.surface_id, d.frame_id, "ordinary-world-pause-" + std::to_string( world_frames ),
-                        action->id, action->stable_id, {} } ) );
+                         action->id, action->stable_id, {} } ) );
                 return;
             }
         } );
@@ -3406,10 +3516,12 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
 TEST_CASE( "avatar activity driver leaves harness-off input unbound",
            "[semantic_surface][activity_driver_lifetime_067]" )
 {
-    clear_avatar(); clear_map();
+    clear_avatar();
+    clear_map();
     avatar &u = get_avatar();
     u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
-    u.set_stamina( u.get_stamina_max() / 4 ); u.set_moves( 100 );
+    u.set_stamina( u.get_stamina_max() / 4 );
+    u.set_moves( 100 );
     u.omt_path = { u.pos_abs_omt() + point::east, u.pos_abs_omt() };
     u.assign_activity( player_activity( activity_id( "ACT_TRAVELLING" ) ) );
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" };
@@ -3421,15 +3533,27 @@ TEST_CASE( "avatar activity driver leaves harness-off input unbound",
     }
     on_out_of_scope restore( [&]() {
         for( const auto &entry : previous ) {
-            if( entry.second ) { setenv( entry.first.c_str(), entry.second->c_str(), 1 ); }
+            if( entry.second ) {
+                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+            }
         }
-        u.cancel_activity(); u.clear_destination(); u.omt_path.clear();
+        u.cancel_activity();
+        u.clear_destination();
+        u.omt_path.clear();
     } );
     const bool owns_terminal = !catacurses::stdscr;
-    if( owns_terminal ) { catacurses::init_interface(); catacurses::resizeterm(); }
-    on_out_of_scope close_terminal( [&]() { if( owns_terminal ) { catacurses::endwin(); } } );
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
     scoped_imgui_context imgui;
-    restore_on_out_of_scope<bool> restore_test_mode( test_mode ); test_mode = false;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
     ui_adaptor fixture_root;
     fixture_root.on_redraw( []( ui_adaptor & ) {} );
     ui_manager::redraw();
@@ -3445,10 +3569,13 @@ TEST_CASE( "avatar activity driver leaves harness-off input unbound",
 TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination states",
            "[npc][pulp_destination_diagnosis_067]" )
 {
-    const std::string mode = GENERATE( "corpse", "empty", "reachable_destination", "blocked_destination",
+    const std::string mode = GENERATE( "corpse", "empty", "reachable_destination",
+                                       "blocked_destination",
                                        "danger", "high_backlog" );
     CAPTURE( mode );
-    clear_avatar(); clear_map(); clear_npcs();
+    clear_avatar();
+    clear_map();
+    clear_npcs();
     set_time_to_day();
     avatar &u = get_avatar();
     u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
@@ -3463,19 +3590,25 @@ TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination stat
         get_map().add_item_or_charges( corpse_pos, item::make_corpse( mtype_id( "mon_zombie" ) ) );
     }
     // Discover and execute through npc::move, not a direct activity/execute_action call.
-    actor.set_moves( 100 ); actor.move();
+    actor.set_moves( 100 );
+    actor.move();
     CAPTURE( actor.activity.id().str(), actor.get_moves() );
     if( mode == "reachable_destination" || mode == "blocked_destination" ) {
         const auto destination = corpse_pos + point( 3, 0 );
-        if( mode == "blocked_destination" ) { get_map().ter_set( destination, ter_id( "t_rock" ) ); }
+        if( mode == "blocked_destination" ) {
+            get_map().ter_set( destination, ter_id( "t_rock" ) );
+        }
         actor.set_destination( { destination } );
         actor.update_path( destination );
         const bool viable = !actor.path.empty();
         std::cout << "pulp_destination mode=" << mode << " route_viable=" << viable << '\n';
         CHECK( viable == ( mode == "reachable_destination" ) );
     }
-    if( mode == "danger" ) { spawn_test_monster( "mon_zombie", corpse_pos + point::south ); }
-    restore_on_out_of_scope<bool> restore_debug( debug_mode ); debug_mode = true;
+    if( mode == "danger" ) {
+        spawn_test_monster( "mon_zombie", corpse_pos + point::south );
+    }
+    restore_on_out_of_scope<bool> restore_debug( debug_mode );
+    debug_mode = true;
     int zero_move_calls = 0;
     const auto initial_turn = calendar::turn;
     for( int iteration = 0; iteration < 12; ++iteration ) {
@@ -3490,7 +3623,9 @@ TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination stat
         const auto left_before = actor.activity.moves_left;
         Messages::clear_messages();
         actor.move();
-        if( actor.get_moves() == before ) { ++zero_move_calls; }
+        if( actor.get_moves() == before ) {
+            ++zero_move_calls;
+        }
         std::cout << "pulp_control mode=" << mode << " iteration=" << iteration
                   << " turn=" << to_turns<int>( calendar::turn - initial_turn )
                   << " moves=" << before << "->" << actor.get_moves()
@@ -3506,7 +3641,8 @@ TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination stat
             }
         }
     }
-    CAPTURE( zero_move_calls, actor.activity.id().str(), actor.has_destination(), actor.get_ai_danger() );
+    CAPTURE( zero_move_calls, actor.activity.id().str(), actor.has_destination(),
+             actor.get_ai_danger() );
     const bool residual_destination = mode == "blocked_destination" || mode == "reachable_destination";
     if( residual_destination ) {
         // Reproduces the existing defect; this passing mechanism control is
@@ -3514,7 +3650,9 @@ TEST_CASE( "NPC pulp selection reconciles ordinary and residual destination stat
         CHECK( zero_move_calls == 12 );
         CHECK( actor.activity.id() == activity_id( "ACT_PULP" ) );
         CHECK( actor.has_destination() );
-    } else { CHECK( zero_move_calls < 9 ); }
+    } else {
+        CHECK( zero_move_calls < 9 );
+    }
     const std::string warning = capture_debugmsg_during( [&]() {
         process_monsters_and_npcs_turn_for_test();
     } );

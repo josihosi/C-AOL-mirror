@@ -137,8 +137,9 @@ bounded_context make_bounded_context( const snapshot_context &context, bool incl
     result.schema = bound_identity( context.schema );
     record_identity_status( result, result.schema, "schema" );
     const auto copy_optional = [&result]( const std::optional<std::string> &input,
-    const std::string &field ) -> std::optional<bounded_text> {
-        if( !input ) {
+    const std::string & field ) -> std::optional<bounded_text> {
+        if( !input )
+        {
             return std::nullopt;
         }
         bounded_text text = bound_identity( *input );
@@ -424,11 +425,11 @@ std::string serialize_sized_snapshot( const view_snapshot &view,
     };
 
     long long render_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(
-                                       std::chrono::steady_clock::now() - render_started ).count();
+                                        std::chrono::steady_clock::now() - render_started ).count();
     std::string output = build_payload( render_microseconds );
     for( int attempt = 0; attempt < 4; ++attempt ) {
         const long long total_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(
-                                                std::chrono::steady_clock::now() - render_started ).count();
+                std::chrono::steady_clock::now() - render_started ).count();
         if( std::to_string( total_microseconds ).size() ==
             std::to_string( render_microseconds ).size() ) {
             replace_number( output, "\"render_us\":", std::to_string( total_microseconds ) );

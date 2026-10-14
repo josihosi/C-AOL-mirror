@@ -50,7 +50,7 @@ std::vector<inspected_item> physical_items( npc &actor )
     const std::vector<const item *> pseudo = actor.get_pseudo_items();
     std::set<const item *> visited;
     std::function<void( const item *, const std::string &, const std::string & )> append;
-    append = [&]( const item *value, const std::string &parent, const std::string &slot ) {
+    append = [&]( const item * value, const std::string & parent, const std::string & slot ) {
         if( !visited.insert( value ).second ) {
             return;
         }
@@ -65,7 +65,7 @@ std::vector<inspected_item> physical_items( npc &actor )
             }
         }
     };
-    actor.visit_items( [&]( item *value, item * ) {
+    actor.visit_items( [&]( item * value, item * ) {
         if( std::find( pseudo.begin(), pseudo.end(), value ) == pseudo.end() ) {
             const std::string slot = actor.is_wielding( *value ) ? "wielded" :
                                      actor.is_worn( *value ) ? "worn" : "inventory";
@@ -146,7 +146,9 @@ class inspection_window : public cataimgui::window
 input_context inspection_context()
 {
     input_context ctxt( "default" );
-    for( const char *action : { "QUIT", "CONFIRM", "PAGE_UP", "PAGE_DOWN", "HOME", "END" } ) {
+    for( const char *action : {
+             "QUIT", "CONFIRM", "PAGE_UP", "PAGE_DOWN", "HOME", "END"
+         } ) {
         ctxt.register_action( action );
     }
     ctxt.set_timeout( 10 );
@@ -176,15 +178,16 @@ void show_item( npc &actor, const std::string &uid )
         return;
     }
     inspection_window window( _( "NPC item details" ) );
-    window.text = string_format( _( "Diagnostic inventory of %s\n%s\nItem information is evaluated by the native player item-info formatter." ),
-                                 actor.get_name(), value->tname() );
+    window.text = string_format(
+                      _( "Diagnostic inventory of %s\n%s\nItem information is evaluated by the native player item-info formatter." ),
+                      actor.get_name(), value->tname() );
     value->info( true, window.item_details );
     const auto facts = item_facts( actor, *value, window.item_details );
     std::optional<semantic_surface_scope> scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         scope.emplace( *manager, "npc_item_info", _( "NPC item details" ), facts,
-                       std::vector<semantic_action_descriptor>{ { "npc_item_info.close", "", _( "Close" ), true } },
-        [&window]( const semantic_action_request &request ) {
+        std::vector<semantic_action_descriptor> { { "npc_item_info.close", "", _( "Close" ), true } },
+        [&window]( const semantic_action_request & request ) {
             if( request.action_id != "npc_item_info.close" ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }
@@ -268,7 +271,8 @@ std::string npc_outing_member_diagnostic( const character_id id, const bool incl
         json.member( "id", id.get_value() );
         json.member( "calendar_turn", to_turns<int>( calendar::turn - calendar::turn_zero ) );
         json.member( "found", bool( persistent ) );
-        json.member( "selected_object_source", persistent ? "persistent_overmap_in_memory" : "unavailable" );
+        json.member( "selected_object_source",
+                     persistent ? "persistent_overmap_in_memory" : "unavailable" );
         json.member( "game_lookup_source", "game_find_npc_aliases_overmap_buffer" );
         json.member( "persistent_object_available", bool( persistent ) );
         json.member( "tracker_objects_available", !tracked.empty() );
@@ -287,7 +291,8 @@ std::string npc_outing_member_diagnostic( const character_id id, const bool incl
             if( persistent ) {
                 json.member( "same_object", copy == persistent.get() );
                 json.member( "position_matches_persistent", copy->pos_abs() == persistent->pos_abs() );
-                json.member( "update_clock_matches_persistent", copy->get_last_updated() == persistent->get_last_updated() );
+                json.member( "update_clock_matches_persistent",
+                             copy->get_last_updated() == persistent->get_last_updated() );
                 json.member( "lease_matches_persistent", lease_matches(
                                  copy->get_bandit_live_world_projection_lease(),
                                  persistent->get_bandit_live_world_projection_lease() ) );
@@ -295,7 +300,8 @@ std::string npc_outing_member_diagnostic( const character_id id, const bool incl
             json.end_object();
         }
         json.end_array();
-        json.member( "provenance", "Read-only current in-memory objects. Persistent-only is not a current tracker actor. "
+        json.member( "provenance",
+                     "Read-only current in-memory objects. Persistent-only is not a current tracker actor. "
                      "Unavailable tracker/copy comparison is not absence/death or agreement. Body update clock is native body/effect lifecycle data, not position freshness or movement proof. "
                      "Same-pointer comparison is not independent saved-copy validation; durable outing remains the owner authority." );
         json.end_object();
@@ -364,10 +370,13 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
         { "calendar_turn", std::to_string( to_turns<int>( calendar::turn - calendar::turn_zero ) ) },
         { "provenance", "Native NPC inspection; visible facts use npc::print_info getters. diagnostic_* facts are internal state, not avatar knowledge or gameplay proof. Items include every pocket type, excluding virtual pseudo-items." },
         { "item_details_parameters", "npc_inspection.item_details requires parameter item_uid from diagnostic_items; ownership is revalidated against actor_id." },
-        { "visible", json_text( [&]( JsonOut & json ) {
+        {
+            "visible", json_text( [&]( JsonOut & json )
+            {
                 json.start_object();
                 json.member( "health", actor.hp_description().first );
-                json.member( "attitude", Creature::get_attitude_ui_data( actor.attitude_to( viewer ) ).first.translated() );
+                json.member( "attitude", Creature::get_attitude_ui_data( actor.attitude_to(
+                                 viewer ) ).first.translated() );
                 json.member( "wielded", actor.is_armed() ? actor.get_wielded_item()->tname() : "" );
                 json.member( "wielded_item_uid", actor.is_armed() ?
                              std::to_string( actor.get_wielded_item()->uid().get_value() ) : "" );
@@ -381,8 +390,11 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                 }
                 json.end_array();
                 json.end_object();
-            } ) },
-        { "diagnostic_health", json_text( [&]( JsonOut & json ) {
+            } )
+        },
+        {
+            "diagnostic_health", json_text( [&]( JsonOut & json )
+            {
                 json.start_object();
                 for( const bodypart_id &part : actor.get_all_body_parts() ) {
                     json.member( part.id().str() );
@@ -393,8 +405,11 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                     json.end_object();
                 }
                 json.end_object();
-            } ) },
-        { "diagnostic_orders", json_text( [&]( JsonOut & json ) {
+            } )
+        },
+        {
+            "diagnostic_orders", json_text( [&]( JsonOut & json )
+            {
                 json.start_object();
                 json.member( "attitude", npc_attitude_name( actor.get_attitude() ) );
                 json.member( "mission", io::enum_to_string( actor.mission ) );
@@ -416,16 +431,23 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                     json.member( "companion_destination", mission.destination );
                 }
                 json.end_object();
-            } ) },
-        { "diagnostic_llm_intent", json_text( [&]( JsonOut & json ) {
+            } )
+        },
+        {
+            "diagnostic_llm_intent", json_text( [&]( JsonOut & json )
+            {
                 json.write( actor.get_llm_intent_diagnostic_state() );
-            } ) },
-        { "diagnostic_camp_patrol", json_text( [&]( JsonOut & json ) {
+            } )
+        },
+        {
+            "diagnostic_camp_patrol", json_text( [&]( JsonOut & json )
+            {
                 json.start_object();
-                json.member( "provenance", "Read-only assigned-camp patrol shift-cache diagnostic; it never refreshes the plan or synchronizes this actor's patrol order." );
+                json.member( "provenance",
+                             "Read-only assigned-camp patrol shift-cache diagnostic; it never refreshes the plan or synchronizes this actor's patrol order." );
                 const std::optional<basecamp *> camp = actor.assigned_camp ?
-                                                     overmap_buffer.find_camp( actor.assigned_camp->xy() ) :
-                                                     std::nullopt;
+                overmap_buffer.find_camp( actor.assigned_camp->xy() ) :
+                std::nullopt;
                 json.member( "camp_found", camp && *camp != nullptr );
                 if( !camp || *camp == nullptr ) {
                     json.end_object();
@@ -455,7 +477,7 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                 }
                 json.end_array();
                 const auto active = std::find_if( plan->active_guards.begin(), plan->active_guards.end(),
-                [&actor]( const camp_patrol_guard_plan &guard ) {
+                [&actor]( const camp_patrol_guard_plan & guard ) {
                     return guard.worker_id == actor.getID();
                 } );
                 json.member( "actor_active_guard", active != plan->active_guards.end() );
@@ -478,12 +500,18 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                     json.member( "coordinate_system", "absolute_ms" );
                 }
                 json.end_object();
-            } ) },
-        { "diagnostic_rules", json_text( [&]( JsonOut & json ) {
+            } )
+        },
+        {
+            "diagnostic_rules", json_text( [&]( JsonOut & json )
+            {
                 json.write( rules );
-            } ) },
+            } )
+        },
         { "diagnostic_item_count", std::to_string( items.size() ) },
-        { "diagnostic_items", json_text( [&]( JsonOut & json ) {
+        {
+            "diagnostic_items", json_text( [&]( JsonOut & json )
+            {
                 json.start_object();
                 for( const inspected_item &entry : items ) {
                     const item &value = *entry.value;
@@ -499,7 +527,8 @@ std::map<std::string, std::string> npc_inspection_payload( npc &actor, avatar &v
                     json.end_object();
                 }
                 json.end_object();
-            } ) }
+            } )
+        }
     };
 }
 
@@ -532,9 +561,10 @@ void show_npc_inspection( npc &actor, const bool allow_offbubble )
     }
     const auto facts = npc_inspection_payload( actor, get_avatar() );
     inspection_window window( _( "NPC inspection" ) );
-    window.text = string_format( _( "%s\nDiagnostic inspection: exact health, orders, rules and all stored items. These facts include information the avatar cannot see.\nHealth: %s\nOrders: %s\nSelect an item for its native details." ),
-                                 actor.get_name(), actor.hp_description().first,
-                                 actor.describe_mission() );
+    window.text = string_format(
+                      _( "%s\nDiagnostic inspection: exact health, orders, rules and all stored items. These facts include information the avatar cannot see.\nHealth: %s\nOrders: %s\nSelect an item for its native details." ),
+                      actor.get_name(), actor.hp_description().first,
+                      actor.describe_mission() );
     for( const bodypart_id &part : actor.get_all_body_parts() ) {
         window.text += string_format( "\n%s: %d/%d", body_part_name( part ),
                                       actor.get_part_hp_cur( part ), actor.get_part_hp_max( part ) );
@@ -547,7 +577,9 @@ void show_npc_inspection( npc &actor, const bool allow_offbubble )
         window.text += "\n" + rule_labels.at( actor.rules.has_flag( rule.second.rule ) ?
                                               rule.second.rule_true_text : rule.second.rule_false_text );
     }
-    for( const char *key : { "engagement", "aim", "cbm_recharge", "cbm_reserve" } ) {
+    for( const char *key : {
+             "engagement", "aim", "cbm_recharge", "cbm_reserve"
+         } ) {
         window.text += "\n" + rule_facts.at( key );
     }
     const std::vector<semantic_action_descriptor> actions = {
@@ -563,7 +595,7 @@ void show_npc_inspection( npc &actor, const bool allow_offbubble )
     std::optional<semantic_surface_scope> scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         scope.emplace( *manager, "npc_inspection", _( "NPC inspection" ), facts, actions,
-        [&window, &actor]( const semantic_action_request &request ) {
+        [&window, &actor]( const semantic_action_request & request ) {
             if( request.action_id == "npc_inspection.close" ) {
                 window.closed = true;
                 return semantic_action_dispatch_result{ true, "", "" };

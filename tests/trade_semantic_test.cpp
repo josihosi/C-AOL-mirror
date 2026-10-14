@@ -129,7 +129,7 @@ TEST_CASE( "native trade switches identified parties and preserves selected quan
         CHECK( descriptor.payload.at( "trader_actor_id" ) == trader_id );
         CHECK( descriptor.payload.at( "player_actor_id" ) == player_id );
         const JsonObject selected = json_loader::from_string( descriptor.payload.at( "selected_items" ) );
-        const auto selected_item = [&selected]( const std::string &uid ) {
+        const auto selected_item = [&selected]( const std::string & uid ) {
             JsonObject entry = selected.get_object( uid );
             entry.allow_omitted_members();
             return entry;
@@ -213,7 +213,7 @@ TEST_CASE( "native trade Auto Balance uses highlighted physical coin group",
     int stage = 0;
     int sequence = 0;
     manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
-        const auto action = [&]( const std::string & id, const std::string & target = "" ) {
+        const auto action = [&]( const std::string & id, const std::string &target = "" ) {
             const auto found = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
             [&]( const semantic_action_descriptor & candidate ) {
                 return candidate.id == id && candidate.stable_id == target;
@@ -221,7 +221,7 @@ TEST_CASE( "native trade Auto Balance uses highlighted physical coin group",
             REQUIRE( found != descriptor.valid_actions.end() );
             return *found;
         };
-        const auto submit = [&]( const std::string & id, const std::string & target = "" ) {
+        const auto submit = [&]( const std::string & id, const std::string &target = "" ) {
             REQUIRE( action( id, target ).enabled );
             REQUIRE( manager.submit_request( { "coin-controls", descriptor.surface_id, descriptor.frame_id,
                                                std::to_string( ++sequence ), id,
@@ -230,7 +230,9 @@ TEST_CASE( "native trade Auto Balance uses highlighted physical coin group",
         if( descriptor.kind == "prompt" ) {
             REQUIRE( commit );
             const auto yes = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor & candidate ) { return candidate.label == "YES"; } );
+            []( const semantic_action_descriptor & candidate ) {
+                return candidate.label == "YES";
+            } );
             REQUIRE( yes != descriptor.valid_actions.end() );
             submit( yes->id, yes->stable_id );
         } else if( descriptor.kind == "inventory" ) {
@@ -284,7 +286,7 @@ TEST_CASE( "native trade Auto Balance uses highlighted physical coin group",
     CHECK( stage == 5 );
     CHECK( you.amount_of( itype_id( "coin_gold" ) ) == ( commit ? 133 : 300 ) );
     int received = 0;
-    trader.visit_items( [&]( const item *it, const item * ) {
+    trader.visit_items( [&]( const item * it, const item * ) {
         if( it->typeId() == itype_id( "coin_gold" ) ) {
             ++received;
         }
@@ -325,15 +327,18 @@ TEST_CASE( "native Trade rows and letters use exact payer groups and authenticat
     item local( itype_id( "coin_gold" ) );
     local.set_owner( *payer );
     local.invlet = 'b';
-    item_location coin = get_map().add_item_or_charges_ret_loc( payer->pos_bub() + tripoint::south, local );
+    item_location coin = get_map().add_item_or_charges_ret_loc( payer->pos_bub() + tripoint::south,
+                         local );
     REQUIRE( coin );
     const std::string coin_uid = std::to_string( coin->uid().get_value() );
-    item_location remote = get_map().add_item_or_charges_ret_loc( payer->pos_bub() + tripoint( 0, 6, 0 ), local );
+    item_location remote = get_map().add_item_or_charges_ret_loc( payer->pos_bub() + tripoint( 0, 6,
+                           0 ), local );
     REQUIRE( remote );
     const std::string remote_uid = std::to_string( remote->uid().get_value() );
     item foreign( itype_id( "coin_gold" ) );
     foreign.set_owner( trader );
-    item_location other_owner = get_map().add_item_or_charges_ret_loc( payer->pos_bub() + tripoint::north, foreign );
+    item_location other_owner = get_map().add_item_or_charges_ret_loc( payer->pos_bub() +
+                                tripoint::north, foreign );
     REQUIRE( other_owner );
     const std::string foreign_uid = std::to_string( other_owner->uid().get_value() );
     item_location wallet = trader.i_add( item( itype_id( "wallet" ) ), false );
@@ -357,13 +362,17 @@ TEST_CASE( "native Trade rows and letters use exact payer groups and authenticat
     std::string last_error;
     int accepted = 0;
     int rejected = 0;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
-        if( receipt.accepted ) { ++accepted; } else { ++rejected; }
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
+        if( receipt.accepted ) {
+            ++accepted;
+        } else {
+            ++rejected;
+        }
         last_error = receipt.rejection_reason;
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        const auto submit = [&]( const std::string &id,
-        std::map<std::string, std::string> params = {},
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        const auto submit = [&]( const std::string & id,
+                                 std::map<std::string, std::string> params = {},
         std::optional<std::string> uid = std::nullopt, std::string frame = "" ) {
             REQUIRE( manager.submit_request( { manager.run_id(), descriptor.surface_id,
                                                frame.empty() ? descriptor.frame_id : frame,
@@ -372,17 +381,22 @@ TEST_CASE( "native Trade rows and letters use exact payer groups and authenticat
         if( descriptor.kind == "prompt" ) {
             REQUIRE( commit );
             const auto yes = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) { return action.label == "YES"; } );
+            []( const semantic_action_descriptor & action ) {
+                return action.label == "YES";
+            } );
             REQUIRE( yes != descriptor.valid_actions.end() );
             submit( yes->id, {}, yes->stable_id );
             return;
         }
-        if( descriptor.kind != "inventory" ) { return; }
+        if( descriptor.kind != "inventory" ) {
+            return;
+        }
         CHECK( descriptor.payload.at( "player_actor_id" ) == payer_id );
         CHECK( descriptor.payload.at( "demand_amount" ) == format_money( cost ) );
         JsonArray rows = json_loader::from_string( descriptor.payload.at( "trade_rows" ) );
-        const auto row = [&]( const std::string &uid ) -> JsonObject {
-            for( JsonObject candidate : rows ) {
+        const auto row = [&]( const std::string & uid ) -> JsonObject {
+            for( JsonObject candidate : rows )
+            {
                 candidate.allow_omitted_members();
                 if( candidate.get_string( "group_uid" ) == uid ) {
                     candidate.allow_omitted_members();
@@ -395,7 +409,8 @@ TEST_CASE( "native Trade rows and letters use exact payer groups and authenticat
         if( stage == 0 ) {
             JsonObject entry = row( wallet_uid );
             CHECK( entry.get_string( "party" ) == "npc" );
-            CHECK( ( [&] { auto loc = entry.get_array( "locations" ).get_object( 0 ); loc.allow_omitted_members(); return loc.get_int( "carrier_id" ); }() ) == trader.getID().get_value() );
+            CHECK( ( [&] { auto loc = entry.get_array( "locations" ).get_object( 0 ); loc.allow_omitted_members(); return loc.get_int( "carrier_id" ); }() )
+                   == trader.getID().get_value() );
             ++stage;
             submit( "trade.switch_pane" );
             return;
@@ -407,9 +422,15 @@ TEST_CASE( "native Trade rows and letters use exact payer groups and authenticat
         CHECK( a.get_int( "available" ) == 5 );
         CHECK( a.get_string( "unit_price" ) == format_money( npc_trading::trading_price( trader, *payer, { ammo, 1 } ) ) );
         CHECK( c.get_string( "unit_price" ) == format_money( coin_price ) );
-        CHECK( ( [&] { auto loc = c.get_array( "locations" ).get_object( 0 ); loc.allow_omitted_members(); return loc.get_string( "root_source" ); }() ) == "map" );
-        CHECK( ( [&] { auto loc = c.get_array( "locations" ).get_object( 0 ); loc.allow_omitted_members(); return loc.get_string( "owner_faction" ); }() ) == "your_followers" );
-        for( JsonObject r : rows ) { r.allow_omitted_members(); CHECK( r.get_string( "group_uid" ) != remote_uid ); CHECK( r.get_string( "group_uid" ) != foreign_uid ); }
+        CHECK( ( [&] { auto loc = c.get_array( "locations" ).get_object( 0 ); loc.allow_omitted_members(); return loc.get_string( "root_source" ); }() )
+               == "map" );
+        CHECK( ( [&] { auto loc = c.get_array( "locations" ).get_object( 0 ); loc.allow_omitted_members(); return loc.get_string( "owner_faction" ); }() )
+               == "your_followers" );
+        for( JsonObject r : rows ) {
+            r.allow_omitted_members();
+            CHECK( r.get_string( "group_uid" ) != remote_uid );
+            CHECK( r.get_string( "group_uid" ) != foreign_uid );
+        }
         const std::map<std::string, std::string> identity = {
             { "party", "player" }, { "actor_id", payer_id }, { "letters", letters }
         };
@@ -452,7 +473,8 @@ TEST_CASE( "native Trade rows and letters use exact payer groups and authenticat
             submit( commit ? "inventory.commit" : "inventory.cancel" );
         }
     } );
-    CHECK( npc_trading::trade( trader, cost, "Local payment rows", 2, 0, nullptr, payer, true ) == commit );
+    CHECK( npc_trading::trade( trader, cost, "Local payment rows", 2, 0, nullptr, payer,
+                               true ) == commit );
     CHECK( stage == 3 );
     CHECK( rejected == 4 );
     CHECK( accepted == ( commit ? 4 : 3 ) );
@@ -470,8 +492,8 @@ TEST_CASE( "shakedown stash payment conserves the exact basket and survives map 
 {
     const bool resident = GENERATE( false, true );
     const std::string outcome = GENERATE( std::string( "paid" ), std::string( "cancel" ),
-                                         std::string( "blocked" ), std::string( "duplicate" ),
-                                         std::string( "quantity" ), std::string( "overlap" ) );
+                                          std::string( "blocked" ), std::string( "duplicate" ),
+                                          std::string( "quantity" ), std::string( "overlap" ) );
     INFO( resident << " " << outcome );
     clear_avatar();
     clear_map();
@@ -497,7 +519,7 @@ TEST_CASE( "shakedown stash payment conserves the exact basket and survives map 
     item purse( itype_id( "wallet" ) );
     for( int i = 0; i < 2; ++i ) {
         REQUIRE( purse.put_in( item( itype_id( "coin_gold" ) ),
-                              pocket_type::CONTAINER ).success() );
+                               pocket_type::CONTAINER ).success() );
     }
     item_location wallet = payer->i_add( purse, false );
     REQUIRE( ammo );
@@ -607,7 +629,7 @@ TEST_CASE( "native shakedown trade uses home stash rather than collector capacit
            "[semantic_surface][home_stash_ui_067]" )
 {
     const std::string outcome = GENERATE( std::string( "paid" ), std::string( "cancel" ),
-                                         std::string( "failure_retry" ), std::string( "failure_cancel" ) );
+                                          std::string( "failure_retry" ), std::string( "failure_cancel" ) );
     const bool complete = outcome == "paid" || outcome == "failure_retry";
     const bool initially_blocked = outcome == "failure_retry" || outcome == "failure_cancel";
     const bool resident = GENERATE( false, true );
@@ -649,8 +671,8 @@ TEST_CASE( "native shakedown trade uses home stash rather than collector capacit
     int seq = 0;
     int confirmations = 0;
     bool storage_failure = false;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        const auto submit = [&]( const std::string &action, const std::string &target = "" ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        const auto submit = [&]( const std::string & action, const std::string &target = "" ) {
             REQUIRE( manager.submit_request( { "stash-trade", descriptor.surface_id, descriptor.frame_id,
                                                std::to_string( ++seq ), action,
                                                target.empty() ? std::nullopt : std::optional<std::string>( target ), {} } ) );
@@ -664,7 +686,7 @@ TEST_CASE( "native shakedown trade uses home stash rather than collector capacit
                 CHECK( trader.amount_of( itype_id( "m240" ) ) == 0 );
                 if( complete ) {
                     get_map().ter_set( get_map().get_bub( project_to<coords::ms>( home ) +
-                                                        tripoint( SEEX, SEEY, 0 ) ), ter_str_id( "t_floor" ) );
+                                                          tripoint( SEEX, SEEY, 0 ) ), ter_str_id( "t_floor" ) );
                 }
                 const auto &ack = descriptor.valid_actions.front();
                 submit( ack.id, ack.stable_id );
@@ -673,7 +695,9 @@ TEST_CASE( "native shakedown trade uses home stash rather than collector capacit
             REQUIRE( ( complete || ( initially_blocked && !storage_failure ) ) );
             CHECK( descriptor.payload.at( "text" ).find( "Accept this trade" ) != std::string::npos );
             const auto yes = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) { return action.label == "YES"; } );
+            []( const semantic_action_descriptor & action ) {
+                return action.label == "YES";
+            } );
             REQUIRE( yes != descriptor.valid_actions.end() );
             ++confirmations;
             submit( yes->id, yes->stable_id );
@@ -684,11 +708,13 @@ TEST_CASE( "native shakedown trade uses home stash rather than collector capacit
             } else if( stage == 2 ) {
                 submit( "inventory.toggle", uid );
             } else {
-                submit( complete || ( initially_blocked && !storage_failure ) ? "inventory.commit" : "inventory.cancel" );
+                submit( complete || ( initially_blocked &&
+                                      !storage_failure ) ? "inventory.commit" : "inventory.cancel" );
             }
         }
     } );
-    CHECK( npc_trading::trade_to_stash( trader, *payer, home, 0, "Pay:", 2, 0, nullptr, true ) == complete );
+    CHECK( npc_trading::trade_to_stash( trader, *payer, home, 0, "Pay:", 2, 0, nullptr,
+                                        true ) == complete );
     CHECK( confirmations == ( initially_blocked ? ( complete ? 2 : 1 ) : ( complete ? 1 : 0 ) ) );
     CHECK( storage_failure == initially_blocked );
     CHECK( get_map().i_at( source ).empty() == complete );
@@ -747,8 +773,8 @@ TEST_CASE( "native grouped stash payment expands every discrete item before pers
     semantic_surface_scope world( manager, "world", "World" );
     int stage = 0;
     int sequence = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        const auto submit = [&]( const std::string &action, const std::string &target = "" ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        const auto submit = [&]( const std::string & action, const std::string &target = "" ) {
             REQUIRE( manager.submit_request( { "stash-native-group", descriptor.surface_id,
                                                descriptor.frame_id, std::to_string( ++sequence ), action,
                                                target.empty() ? std::nullopt : std::optional<std::string>( target ), {} } ) );
@@ -757,7 +783,9 @@ TEST_CASE( "native grouped stash payment expands every discrete item before pers
             REQUIRE( paid );
             REQUIRE( descriptor.payload.at( "text" ).find( "Accept this trade" ) != std::string::npos );
             const auto yes = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) { return action.label == "YES"; } );
+            []( const semantic_action_descriptor & action ) {
+                return action.label == "YES";
+            } );
             REQUIRE( yes != descriptor.valid_actions.end() );
             submit( yes->id, yes->stable_id );
         } else if( descriptor.kind == "inventory" ) {

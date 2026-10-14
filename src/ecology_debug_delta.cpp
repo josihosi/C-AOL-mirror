@@ -109,7 +109,7 @@ std::optional<delta_kind> terminal_disappearance_kind( const selected_projection
     if( projection.detail && !projection.detail->members.empty() &&
         std::all_of( projection.detail->members.begin(), projection.detail->members.end(),
     []( const member_detail & member ) {
-        return terminal_member( member );
+    return terminal_member( member );
     } ) ) {
         return delta_kind::died;
     }
@@ -246,7 +246,7 @@ delta_observation_result delta_ring::observe(
     const auto append_anomaly = [this, &result, &context](
                                     const std::optional<selected_projection> &before_projection,
                                     const std::optional<selected_projection> &after_projection,
-                                    const std::string &reason ) {
+    const std::string & reason ) {
         delta_record record;
         record.kind = delta_kind::anomaly;
         record.turn = context.turn;
@@ -304,9 +304,9 @@ delta_observation_result delta_ring::observe(
     }
 
     const auto append_change = [this, &result, &context, &current]( delta_kind kind,
-                               const std::string &entity_id,
+                               const std::string & entity_id,
                                const std::optional<delta_entity_summary> &before,
-                               const std::optional<delta_entity_summary> &after ) {
+    const std::optional<delta_entity_summary> &after ) {
         delta_record record;
         record.kind = kind;
         record.turn = context.turn;

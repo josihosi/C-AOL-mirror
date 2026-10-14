@@ -213,7 +213,8 @@ candidate_debug make_bounded_explore_candidate( const camp_input &camp )
                                     candidate.score.temperament_bias +
                                     candidate.score.job_type_bonus;
     candidate.score.distance_multiplier = std::clamp( camp.explore_distance_multiplier, 0.15, 0.60 );
-    candidate.score.travel_shaped_pull = candidate.score.positive_pull * candidate.score.distance_multiplier;
+    candidate.score.travel_shaped_pull = candidate.score.positive_pull *
+                                         candidate.score.distance_multiplier;
     candidate.score.pre_veto_job_score = candidate.score.travel_shaped_pull;
     candidate.score.need_adjusted_job_score = candidate.score.pre_veto_job_score;
     candidate.score.threat_gate_result = threat_gate::discount_only;
@@ -410,7 +411,8 @@ evaluation_result evaluate( const camp_input &camp, const std::vector<lead_input
                                             candidate.score.temperament_bias +
                                             candidate.score.job_type_bonus;
             candidate.score.distance_multiplier = std::clamp( lead.distance_multiplier, 0.0, 1.0 );
-            candidate.score.travel_shaped_pull = candidate.score.positive_pull * candidate.score.distance_multiplier;
+            candidate.score.travel_shaped_pull = candidate.score.positive_pull *
+                                                 candidate.score.distance_multiplier;
             candidate.score.threat_penalty = lead.threat_penalty;
             candidate.score.monster_pressure_bonus = std::max( 0, lead.monster_pressure_bonus );
             candidate.score.target_coherence_bonus = std::max( 0, lead.target_coherence_bonus );
@@ -428,7 +430,7 @@ evaluation_result evaluate( const camp_input &camp, const std::vector<lead_input
                 candidate.score.pre_veto_job_score >= -2.0 &&
                 candidate.score.pre_veto_job_score <= 0.0 ) {
                 candidate.score.need_override_bonus = candidate.score.shortage_band_bonus *
-                                                     candidate.score.reward_profile_match;
+                                                      candidate.score.reward_profile_match;
             }
 
             candidate.score.need_adjusted_job_score = candidate.score.pre_veto_job_score +
@@ -517,7 +519,8 @@ evaluation_result evaluate( const camp_input &camp, const std::vector<lead_input
     result.winner_index = best_index;
     result.candidates[best_index].winner = true;
     if( best_index == 0 ) {
-        result.winner_reason = "hold / chill wins because no valid outward candidate beat the score-0 baseline";
+        result.winner_reason =
+            "hold / chill wins because no valid outward candidate beat the score-0 baseline";
     } else {
         const candidate_debug &winner = result.candidates[best_index];
         std::ostringstream reason;

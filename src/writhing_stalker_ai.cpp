@@ -291,7 +291,7 @@ void record_observed_attack( const Creature *observer, const Creature *attacker,
     const observed_attack event{ observer->get_identity(), attacker->get_identity(),
                                  target->get_identity(), resolution, turn };
     const auto duplicate = std::find_if( observed_attacks.begin(), observed_attacks.end(),
-    [&event]( const observed_attack &existing ) {
+    [&event]( const observed_attack & existing ) {
         return existing.observer == event.observer && existing.attacker == event.attacker &&
                existing.target == event.target && existing.resolution == event.resolution;
     } );
@@ -333,7 +333,7 @@ int observed_attack_count( const Creature *observer, const Creature *attacker,
     const actor_identity attacker_id = attacker->get_identity();
     const actor_identity target_id = target->get_identity();
     return static_cast<int>( std::count_if( observed_attacks.begin(), observed_attacks.end(),
-    [&]( const observed_attack &event ) {
+    [&]( const observed_attack & event ) {
         return event.observer == observer_id && event.attacker == attacker_id &&
                event.target == target_id && event.resolution == resolution;
     } ) );
@@ -398,7 +398,7 @@ latch_update advance_latch( const latch_context &ctx )
     latch_update result;
     result.state = ctx.current;
     result.state.cooldown_minutes = std::max( 0, result.state.cooldown_minutes -
-            ctx.elapsed_minutes );
+                                    ctx.elapsed_minutes );
 
     if( result.state.active ) {
         result.state.age_minutes += std::max( 0, ctx.elapsed_minutes );
@@ -694,9 +694,9 @@ opportunity_report evaluate_opportunity( const opportunity_context &ctx )
         report.next = decision::withdraw;
         report.reason = "lit_allied_support_withdraw";
     } else if( report.opportunity >= 70 || ( ctx.zombie_pressure >= 4 &&
-                                              ctx.distance_to_target > 0 &&
-                                              ctx.distance_to_target <= 3 &&
-                                              ctx.allied_support_nearby < 3 ) ) {
+               ctx.distance_to_target > 0 &&
+               ctx.distance_to_target <= 3 &&
+               ctx.allied_support_nearby < 3 ) ) {
         report.next = decision::strike;
         report.reason = report.opportunity >= 70 ? "vulnerability_window_strike" :
                         "heavy_zombie_pressure_strike";
@@ -984,7 +984,7 @@ live_response evaluate_live_response( const live_context &ctx )
     response.retreat_distance = opportunity.retreat_distance;
 
     const bool handoff_has_target_footing = ctx.has_overmap_interest_footing &&
-                                        ctx.overmap_intent != handoff_intent::none;
+                                            ctx.overmap_intent != handoff_intent::none;
     if( !ctx.has_believable_local_evidence && !handoff_has_target_footing ) {
         response.next = decision::ignore;
         response.reason = "live_no_believable_evidence";
@@ -1026,7 +1026,7 @@ live_response evaluate_live_response( const live_context &ctx )
     const bool exposed_or_focused_without_pressure = ctx.stalker_in_bright_exposure &&
             ctx.target_has_focus && ctx.zombie_pressure < 4;
     latch_update latch = advance_latch( latch_context{ live_latch, evaluate_interest( interest_ctx ), 0,
-            ctx.distance_to_target, exposed_or_focused_without_pressure } );
+                                        ctx.distance_to_target, exposed_or_focused_without_pressure } );
 
     if( !latch.state.active ) {
         response.next = latch.next;
@@ -1066,7 +1066,7 @@ live_response evaluate_live_response( const live_context &ctx )
         response.route = anti_gnome.route;
         response.writeback_intent = anti_gnome.writeback_intent;
         response.writeback_cooldown_minutes = std::max( response.writeback_cooldown_minutes,
-                                             anti_gnome.writeback_cooldown_minutes );
+                                              anti_gnome.writeback_cooldown_minutes );
         response.persistent_state_required = true;
         response.anti_gnome_triggered = true;
         response.reason = "live_" + anti_gnome.reason;
@@ -1075,8 +1075,9 @@ live_response evaluate_live_response( const live_context &ctx )
 
     if( opportunity.next == decision::withdraw || opportunity.next == decision::cooling_off ) {
         response.next = opportunity.next;
-        response.writeback_intent = opportunity.next == decision::withdraw ? handoff_intent::spent_disengage :
-                                  handoff_intent::none;
+        response.writeback_intent = opportunity.next == decision::withdraw ?
+                                    handoff_intent::spent_disengage :
+                                    handoff_intent::none;
         response.writeback_cooldown_minutes = opportunity.next == decision::withdraw ? 5 :
                                               response.writeback_cooldown_minutes;
         if( opportunity.next == decision::withdraw ) {

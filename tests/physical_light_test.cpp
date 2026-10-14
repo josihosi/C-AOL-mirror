@@ -196,7 +196,8 @@ TEST_CASE( "physical_light_source_scan_benchmark", "[.][physical_light][signal_b
     }, physical_light::loaded_source_sampler::discovery_interval_turns );
 }
 
-TEST_CASE( "physical_light_collects_carried_and_stationary_sources_independently", "[physical_light]" )
+TEST_CASE( "physical_light_collects_carried_and_stationary_sources_independently",
+           "[physical_light]" )
 {
     clear_avatar();
     clear_map_without_vision();
@@ -211,10 +212,10 @@ TEST_CASE( "physical_light_collects_carried_and_stationary_sources_independently
     const std::vector<physical_light::emitter> emitters =
         physical_light::collect_item_emitters( guy, here, 3 );
 
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::carried_item;
     } ) == 1 );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::ground_item;
     } ) == 1 );
     CHECK( carried->ammo_remaining() == before );
@@ -250,11 +251,11 @@ TEST_CASE( "physical_light_loaded_z_index_finds_remote_loaded_level_and_excludes
     const tripoint_abs_ms remote_abs = here.get_abs( remote_loaded_source );
     const tripoint_abs_ms depleted_abs = here.get_abs( depleted_source );
     CHECK( std::count_if( index.item_emitters.begin(), index.item_emitters.end(),
-    [&remote_abs]( const physical_light::emitter &emitter ) {
+    [&remote_abs]( const physical_light::emitter & emitter ) {
         return emitter.position == remote_abs;
     } ) == 1 );
     CHECK( std::none_of( index.item_emitters.begin(), index.item_emitters.end(),
-    [&depleted_abs]( const physical_light::emitter &emitter ) {
+    [&depleted_abs]( const physical_light::emitter & emitter ) {
         return emitter.position == depleted_abs;
     } ) );
 }
@@ -280,9 +281,9 @@ TEST_CASE( "physical_light_loaded_z_index_tracks_beside_onto_and_away_movement",
     guy.setpos( here, beside );
 
     const auto beside_index = physical_light::index_loaded_z_sources( guy, here );
-    const auto check_fixture = [&fixture_abs]( const physical_light::loaded_z_source_index &index ) {
+    const auto check_fixture = [&fixture_abs]( const physical_light::loaded_z_source_index & index ) {
         const auto terrain_source = std::find_if( index.stationary_emitters.begin(),
-        index.stationary_emitters.end(), [&fixture_abs]( const physical_light::emitter &emitter ) {
+        index.stationary_emitters.end(), [&fixture_abs]( const physical_light::emitter & emitter ) {
             return emitter.kind == physical_light::source_kind::terrain &&
                    emitter.position == fixture_abs;
         } );
@@ -290,17 +291,17 @@ TEST_CASE( "physical_light_loaded_z_index_tracks_beside_onto_and_away_movement",
         CHECK( terrain_source->provenance.rfind( "terrain:", 0 ) == 0 );
         CHECK( terrain_source->luminance == 31 );
         return std::count_if( index.item_emitters.begin(), index.item_emitters.end(),
-        [&fixture_abs]( const physical_light::emitter &emitter ) {
+        [&fixture_abs]( const physical_light::emitter & emitter ) {
             return emitter.kind == physical_light::source_kind::ground_item &&
                    emitter.position == fixture_abs && emitter.provenance == "flashlight_on";
         } );
     };
     const auto check_both_discovery_routes = [&here, &origin, &fixture_abs,
-            &check_fixture]( const physical_light::loaded_z_source_index &index ) {
+           &check_fixture]( const physical_light::loaded_z_source_index & index ) {
         CHECK( check_fixture( index ) == 1 );
         const auto selected = physical_light::collect_stationary_emitters( here, origin, 0 );
         const auto terrain_source = std::find_if( selected.begin(), selected.end(),
-        [&fixture_abs]( const physical_light::emitter &emitter ) {
+        [&fixture_abs]( const physical_light::emitter & emitter ) {
             return emitter.kind == physical_light::source_kind::terrain &&
                    emitter.position == fixture_abs;
         } );
@@ -340,7 +341,7 @@ TEST_CASE( "physical_light_loaded_z_index_keeps_player_tile_stationary_sources_a
         furniture.light_emitted = 37;
         const auto index = physical_light::index_loaded_z_sources( guy, here );
         CHECK( std::count_if( index.stationary_emitters.begin(), index.stationary_emitters.end(),
-        [&here, &origin]( const physical_light::emitter &emitter ) {
+        [&here, &origin]( const physical_light::emitter & emitter ) {
             return emitter.position == here.get_abs( origin ) &&
                    ( emitter.kind == physical_light::source_kind::terrain ||
                      emitter.kind == physical_light::source_kind::furniture );
@@ -390,7 +391,7 @@ TEST_CASE( "physical_light_production_facade_records_real_delivery_order",
     reset_live_light_sample_cache();
     run_live_light_delivery_for_test();
     CHECK( live_light_sample_is_current_for_test() );
-    CHECK( live_light_delivery_trace_for_test() == std::vector<live_light_delivery_stage>{
+    CHECK( live_light_delivery_trace_for_test() == std::vector<live_light_delivery_stage> {
         live_light_delivery_stage::rider_reconciliation,
         live_light_delivery_stage::rider_memory_aging,
         live_light_delivery_stage::fresh_sampling,
@@ -441,7 +442,7 @@ TEST_CASE( "live_light_discovers_each_advancing_turn_without_same_turn_replay",
     callbacks.deliver_stalkers = count_delivery;
     callbacks.deliver_riders = count_delivery;
     callbacks.deliver_cannibals = [&cannibal_packets](
-                                      const std::vector<live_bandit_signal_observation> &samples ) {
+    const std::vector<live_bandit_signal_observation> &samples ) {
         cannibal_packets.insert( cannibal_packets.end(), samples.begin(), samples.end() );
     };
 
@@ -495,19 +496,19 @@ TEST_CASE( "live_light_routes_smoke_to_cannibals_but_keeps_optics_light_only",
     callbacks.reconcile_riders = []() {};
     callbacks.age_rider_memory = []() {};
     const auto capture_optical = [&optical_packets](
-                                     const std::vector<live_bandit_signal_observation> &samples ) {
+    const std::vector<live_bandit_signal_observation> &samples ) {
         optical_packets.push_back( samples );
     };
     callbacks.deliver_hordes = capture_optical;
     callbacks.deliver_stalkers = capture_optical;
     callbacks.deliver_riders = capture_optical;
     callbacks.deliver_cannibals = [&cannibal_packets](
-                                      const std::vector<live_bandit_signal_observation> &samples ) {
+    const std::vector<live_bandit_signal_observation> &samples ) {
         cannibal_packets.push_back( samples );
     };
 
     const tripoint_abs_omt smoke_source( 135, 137, 0 );
-    const auto smoke = [&smoke_source]( const std::string &id ) {
+    const auto smoke = [&smoke_source]( const std::string & id ) {
         live_bandit_signal_observation sample;
         sample.mark.mark_id = id;
         sample.mark.kind = "smoke";
@@ -605,8 +606,8 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
         here.remove_field( smoke_pos, smoke_type );
     } );
 
-    const auto make_site = []( const std::string &id,
-    const tripoint_abs_omt &anchor ) {
+    const auto make_site = []( const std::string & id,
+    const tripoint_abs_omt & anchor ) {
         bandit_live_world::site_record site;
         site.site_id = id;
         site.source_kind = bandit_live_world::anchor_source_kind::overmap_special;
@@ -632,7 +633,9 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     bandit_live_world::site_record &dispatchable =
         overmap_buffer.global_state.bandit_live_world.sites.emplace_back(
             make_site( "test:smoke_dispatchable", camp_omt ) );
-    for( const npc *member : { &member_a, &member_b } ) {
+    for( const npc *member : {
+             &member_a, &member_b
+         } ) {
         const tripoint_abs_ms position = member->pos_abs();
         dispatchable.members.push_back( { member->getID(), "cannibal_hunter", position,
                                           bandit_live_world::member_state::at_home, false, "" } );
@@ -640,7 +643,7 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     }
 
     const tripoint_abs_omt failed_route_anchor( camp_omt.x(), camp_omt.y() + 1,
-                                                 camp_omt.z() );
+            camp_omt.z() );
     bandit_live_world::site_record &failed_route =
         overmap_buffer.global_state.bandit_live_world.sites.emplace_back(
             make_site( "test:smoke_failed_route", failed_route_anchor ) );
@@ -651,9 +654,10 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
                                       project_to<coords::ms>( failed_route_anchor ),
                                       bandit_live_world::member_state::at_home, false, "" } );
 
-    const auto camp_special_at = [&camp_omt]( const tripoint_abs_omt &candidate ) ->
+    const auto camp_special_at = [&camp_omt]( const tripoint_abs_omt & candidate ) ->
     std::optional<std::string> {
-        if( candidate == camp_omt ) {
+        if( candidate == camp_omt )
+        {
             return "cannibal_camp";
         }
         return std::nullopt;
@@ -666,7 +670,7 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
         overmap_buffer.global_state.bandit_live_world.sites.back().site_id;
 
     const tripoint_abs_omt out_of_range_anchor( camp_omt.x() + 40, camp_omt.y(),
-                                                 camp_omt.z() );
+            camp_omt.z() );
     overmap_buffer.global_state.bandit_live_world.sites.push_back(
         make_site( "test:smoke_out_of_range", out_of_range_anchor ) );
 
@@ -704,27 +708,27 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     const std::vector<live_bandit_signal_observation> &samples =
         live_light::samples_for_turn( calendar::turn );
     const auto smoke = std::find_if( samples.begin(), samples.end(),
-    []( const live_bandit_signal_observation &sample ) {
+    []( const live_bandit_signal_observation & sample ) {
         return sample.mark.kind == "smoke";
     } );
     REQUIRE( smoke != samples.end() );
     CHECK_FALSE( smoke->has_light_projection );
     CHECK_FALSE( std::any_of( samples.begin(), samples.end(),
-    []( const live_bandit_signal_observation &sample ) {
+    []( const live_bandit_signal_observation & sample ) {
         return sample.mark.kind == "light" || sample.mark.kind == "searchlight";
     } ) );
     CHECK( smoke->source_ms == smoke_abs );
     CHECK( smoke->observed_turn == 100 );
     CHECK( smoke->sample_id == smoke->mark.mark_id + "#100" );
 
-    const auto find_site = []( const std::string &id ) -> const bandit_live_world::site_record * {
+    const auto find_site = []( const std::string & id ) -> const bandit_live_world::site_record * {
         return overmap_buffer.global_state.bandit_live_world.find_site( id );
     };
     // Physical discovery records a staffed observer's real signal lead; it
     // cannot bypass the ordinary structural assignment/watch/return owner.
     const live_bandit_signal_observation original_smoke = *smoke;
     const auto check_observed_lead = [&original_smoke, &camp_omt](
-    const bandit_live_world::site_record *site ) {
+    const bandit_live_world::site_record * site ) {
         REQUIRE( site != nullptr );
         CHECK_FALSE( site->active_outing.is_active() );
         CHECK( site->active_outing.member_ids.empty() );
@@ -751,7 +755,9 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     for( const auto &member : abstract_site->members ) {
         transient_npcs.push_back( member.npc_id );
     }
-    for( const std::string &id : { "test:smoke_failed_route", "test:smoke_out_of_range" } ) {
+    for( const std::string &id : {
+             "test:smoke_failed_route", "test:smoke_out_of_range"
+         } ) {
         const auto *refused_site = find_site( id );
         REQUIRE( refused_site != nullptr );
         CHECK( refused_site->intelligence_map.leads.empty() );
@@ -778,7 +784,8 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     observed_site = find_site( "test:smoke_dispatchable" );
     check_observed_lead( observed_site );
     CHECK( observed_site->intelligence_map.leads.front().revision == first_lead.revision );
-    CHECK( observed_site->intelligence_map.leads.front().source_sample_id == first_lead.source_sample_id );
+    CHECK( observed_site->intelligence_map.leads.front().source_sample_id ==
+           first_lead.source_sample_id );
     abstract_site = find_site( abstract_site_id );
     check_observed_lead( abstract_site );
     CHECK( abstract_site->members.size() == 3 );
@@ -819,7 +826,7 @@ TEST_CASE( "physical_light_item_power_states_match_native_lightmap", "[physical_
     here.add_item( source_pos, powered_flashlight() );
     const auto full = physical_light::collect_item_emitters( guy, here, 4 );
     const auto full_source = std::find_if( full.begin(), full.end(),
-    [&source_abs]( const physical_light::emitter &e ) {
+    [&source_abs]( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::ground_item && e.position == source_abs;
     } );
     REQUIRE( full_source != full.end() );
@@ -898,7 +905,8 @@ TEST_CASE( "physical_light_containment_matches_native_lightmap", "[physical_ligh
     CHECK( here.ambient_light_at( source_pos ) == Approx( baseline_native ) );
 }
 
-TEST_CASE( "physical_light_carried_record_matches_native_character_light", "[physical_light][lightmap]" )
+TEST_CASE( "physical_light_carried_record_matches_native_character_light",
+           "[physical_light][lightmap]" )
 {
     setup_dark_native_lightmap();
     avatar &guy = get_avatar();
@@ -911,7 +919,7 @@ TEST_CASE( "physical_light_carried_record_matches_native_character_light", "[phy
 
     const auto carried = physical_light::collect_item_emitters( guy, here, 1 );
     const auto carried_source = std::find_if( carried.begin(), carried.end(),
-    [&source_abs]( const physical_light::emitter &e ) {
+    [&source_abs]( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::carried_item && e.position == source_abs;
     } );
     REQUIRE( carried_source != carried.end() );
@@ -920,7 +928,8 @@ TEST_CASE( "physical_light_carried_record_matches_native_character_light", "[phy
     CHECK( here.ambient_light_at( neighbour_pos ) > baseline_native );
 }
 
-TEST_CASE( "physical_light_native_same_omt_sources_remain_independent", "[physical_light][lightmap]" )
+TEST_CASE( "physical_light_native_same_omt_sources_remain_independent",
+           "[physical_light][lightmap]" )
 {
     setup_dark_native_lightmap();
     avatar &guy = get_avatar();
@@ -937,11 +946,11 @@ TEST_CASE( "physical_light_native_same_omt_sources_remain_independent", "[physic
     const auto combined = physical_light::collect_item_emitters( guy, here, 4 );
     REQUIRE( combined.size() == 2 );
     CHECK( std::count_if( combined.begin(), combined.end(),
-    [&here, &bright_pos]( const physical_light::emitter &e ) {
+    [&here, &bright_pos]( const physical_light::emitter & e ) {
         return e.position == here.get_abs( bright_pos );
     } ) == 1 );
     CHECK( std::count_if( combined.begin(), combined.end(),
-    [&here, &dim_pos]( const physical_light::emitter &e ) {
+    [&here, &dim_pos]( const physical_light::emitter & e ) {
         return e.position == here.get_abs( dim_pos );
     } ) == 1 );
     rebuild_native_lightmap();
@@ -1010,10 +1019,10 @@ TEST_CASE( "physical_light_weapon_mount_has_one_source", "[physical_light]" )
     REQUIRE( gun.put_in( mounted, pocket_type::MOD ).success() );
     REQUIRE( guy.wield( gun ) );
     const auto emitters = physical_light::collect_item_emitters( guy, here, 1 );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::weapon_mounted;
     } ) == 1 );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.provenance == "glock_19";
     } ) == 0 );
 }
@@ -1041,12 +1050,12 @@ TEST_CASE( "physical_light_loaded_z_index_handles_ground_gun_light_mod", "[physi
         physical_light::index_loaded_z_sources( guy, here );
     const tripoint_abs_ms source_abs = here.get_abs( source_pos );
     CHECK( std::count_if( index.item_emitters.begin(), index.item_emitters.end(),
-    [&source_abs]( const physical_light::emitter &emitter ) {
+    [&source_abs]( const physical_light::emitter & emitter ) {
         return emitter.position == source_abs && emitter.kind == physical_light::source_kind::ground_item &&
                emitter.provenance == "mounted_flashlight_on";
     } ) == 1 );
     CHECK( std::none_of( index.item_emitters.begin(), index.item_emitters.end(),
-    [&source_abs]( const physical_light::emitter &emitter ) {
+    [&source_abs]( const physical_light::emitter & emitter ) {
         return emitter.position == source_abs && emitter.provenance == "glock_19";
     } ) );
 }
@@ -1077,7 +1086,7 @@ TEST_CASE( "physical_light_weapon_mount_matches_native_lightmap", "[physical_lig
     const auto powered = physical_light::collect_item_emitters( guy, here, 1 );
     const auto source_abs = here.get_abs( guy.pos_bub() );
     const auto mounted_source = std::find_if( powered.begin(), powered.end(),
-    [&source_abs]( const physical_light::emitter &e ) {
+    [&source_abs]( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::weapon_mounted &&
                e.position == source_abs;
     } );
@@ -1089,7 +1098,8 @@ TEST_CASE( "physical_light_weapon_mount_matches_native_lightmap", "[physical_lig
     CHECK( here.ambient_light_at( neighbour ) > baseline_native );
 }
 
-TEST_CASE( "physical_light_weapon_mount_depleted_matches_native_lightmap", "[physical_light][lightmap]" )
+TEST_CASE( "physical_light_weapon_mount_depleted_matches_native_lightmap",
+           "[physical_light][lightmap]" )
 {
     setup_dark_native_lightmap();
     avatar &depleted_guy = get_avatar();
@@ -1145,7 +1155,8 @@ TEST_CASE( "physical_light_detects_each_escaped_source_without_terrain_recogniti
     CHECK( detected( 2, 0, true, true, { 1 } ).visible );
 }
 
-TEST_CASE( "physical_light_keeps_same_omt_escape_and_position_per_source", "[physical_light][optics]" )
+TEST_CASE( "physical_light_keeps_same_omt_escape_and_position_per_source",
+           "[physical_light][optics]" )
 {
     physical_light::route window_lamp;
     window_lamp.distance_omt = 1;
@@ -1191,13 +1202,13 @@ TEST_CASE( "physical_light_collects_stationary_native_owners", "[physical_light]
     REQUIRE( enabled_light );
 
     const auto emitters = physical_light::collect_stationary_emitters( here, origin, 2 );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::field;
     } ) == 1 );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::luminous_monster;
     } ) == 1 );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::vehicle_part;
     } ) >= 1 );
 }
@@ -1224,13 +1235,16 @@ TEST_CASE( "physical_light_stationary_records_are_source_bound", "[physical_ligh
     here.add_field( field_b, field_type_id( "fd_bile_adv" ), 3 );
 
     const auto emitters = physical_light::collect_stationary_emitters( here, origin, 2 );
-    const auto find = [&emitters]( physical_light::source_kind kind, const tripoint_abs_ms &pos ) {
-        return std::find_if( emitters.begin(), emitters.end(), [kind, &pos]( const physical_light::emitter &e ) {
+    const auto find = [&emitters]( physical_light::source_kind kind, const tripoint_abs_ms & pos ) {
+        return std::find_if( emitters.begin(), emitters.end(), [kind,
+        &pos]( const physical_light::emitter & e ) {
             return e.kind == kind && e.position == pos;
         } );
     };
-    const auto terrain_source = find( physical_light::source_kind::terrain, here.get_abs( terrain_pos ) );
-    const auto furniture_source = find( physical_light::source_kind::furniture, here.get_abs( furniture_pos ) );
+    const auto terrain_source = find( physical_light::source_kind::terrain,
+                                      here.get_abs( terrain_pos ) );
+    const auto furniture_source = find( physical_light::source_kind::furniture,
+                                        here.get_abs( furniture_pos ) );
     REQUIRE( terrain_source != emitters.end() );
     REQUIRE( furniture_source != emitters.end() );
     CHECK( terrain_source->provenance == "terrain:" + here.ter( terrain_pos ).obj().id.str() );
@@ -1239,12 +1253,12 @@ TEST_CASE( "physical_light_stationary_records_are_source_bound", "[physical_ligh
     CHECK( furniture_source->luminance == 23 );
     CHECK( terrain_source->position == here.get_abs( terrain_pos ) );
     CHECK( furniture_source->position == here.get_abs( furniture_pos ) );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::field;
     } ) == 2 );
     CHECK( coords::project_to<coords::omt>( here.get_abs( field_a ) ) ==
            coords::project_to<coords::omt>( here.get_abs( field_b ) ) );
-    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( emitters.begin(), emitters.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::field && e.position.x() != 0;
     } ) == 2 );
 
@@ -1271,9 +1285,9 @@ TEST_CASE( "physical_light_stationary_records_match_native_lightmap", "[physical
 
     const auto emitters = physical_light::collect_stationary_emitters( here, origin, 4 );
     const auto has_source = [&emitters]( physical_light::source_kind kind,
-    const tripoint_abs_ms &position ) {
+    const tripoint_abs_ms & position ) {
         return std::find_if( emitters.begin(), emitters.end(),
-        [kind, &position]( const physical_light::emitter &e ) {
+        [kind, &position]( const physical_light::emitter & e ) {
             return e.kind == kind && e.position == position && e.luminance > 0;
         } ) != emitters.end();
     };
@@ -1305,7 +1319,7 @@ TEST_CASE( "physical_light_excludes_disabled_or_unavailable_vehicle_parts", "[ph
         }
     }
     const auto disabled = physical_light::collect_stationary_emitters( here, origin, 2 );
-    CHECK( std::none_of( disabled.begin(), disabled.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::none_of( disabled.begin(), disabled.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::vehicle_part;
     } ) );
     for( const vpart_reference &ref : veh->get_all_parts() ) {
@@ -1318,7 +1332,8 @@ TEST_CASE( "physical_light_excludes_disabled_or_unavailable_vehicle_parts", "[ph
         }
     }
     const auto unavailable = physical_light::collect_stationary_emitters( here, origin, 2 );
-    CHECK( std::none_of( unavailable.begin(), unavailable.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::none_of( unavailable.begin(),
+    unavailable.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::vehicle_part;
     } ) );
 }
@@ -1346,7 +1361,7 @@ TEST_CASE( "physical_light_vehicle_parts_match_native_lightmap", "[physical_ligh
     const std::string provenance = "vehicle:" + chosen->info().id.str();
     const auto emitters = physical_light::collect_stationary_emitters( here, origin, 6 );
     const auto source = std::find_if( emitters.begin(), emitters.end(),
-    [&source_abs, &provenance]( const physical_light::emitter &e ) {
+    [&source_abs, &provenance]( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::vehicle_part &&
                e.position == source_abs && e.provenance == provenance;
     } );
@@ -1392,17 +1407,18 @@ TEST_CASE( "physical_light_stationary_excludes_stale_and_hallucinated_sources", 
     monster &real = spawn_test_monster( "mon_fungal_blossom", origin + tripoint::west );
     REQUIRE( real.type->luminance > 0 );
     const auto before = physical_light::collect_stationary_emitters( here, origin, 2 );
-    CHECK( std::count_if( before.begin(), before.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::count_if( before.begin(), before.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::luminous_monster;
     } ) == 1 );
     g->remove_zombie( real );
     const auto after = physical_light::collect_stationary_emitters( here, origin, 2 );
-    CHECK( std::none_of( after.begin(), after.end(), []( const physical_light::emitter &e ) {
+    CHECK( std::none_of( after.begin(), after.end(), []( const physical_light::emitter & e ) {
         return e.kind == physical_light::source_kind::luminous_monster;
     } ) );
 }
 
-TEST_CASE( "current smoke support follows actual building roof geometry", "[physical_light][smoke_support_067]" )
+TEST_CASE( "current smoke support follows actual building roof geometry",
+           "[physical_light][smoke_support_067]" )
 {
     clear_avatar();
     clear_map_with_vision( -1, 4, false );
@@ -1414,8 +1430,13 @@ TEST_CASE( "current smoke support follows actual building roof geometry", "[phys
             here.build_map_cache( z );
         }
     };
-    const auto support = [&]() { rebuild(); return physical_light::evaluate_smoke_support( here, source ); };
-    const auto air = [&]( const int z ) { return here.get_abs( tripoint_bub_ms( 40, 40, z ) ); };
+    const auto support = [&]() {
+        rebuild();
+        return physical_light::evaluate_smoke_support( here, source );
+    };
+    const auto air = [&]( const int z ) {
+        return here.get_abs( tripoint_bub_ms( 40, 40, z ) );
+    };
     CHECK( support().position == here.get_abs( source ) );
     CHECK( support().reason == "exposed_emitter" );
     here.ter_set( source, ter_str_id( "t_floor" ) );
@@ -1448,10 +1469,12 @@ TEST_CASE( "current smoke support follows actual building roof geometry", "[phys
     here.invalidate_map_cache( unknown.z() );
     here.build_map_cache( unknown.z() );
     CHECK_FALSE( physical_light::evaluate_smoke_support( here, unknown ).position );
-    CHECK_FALSE( physical_light::evaluate_smoke_support( here, tripoint_bub_ms( -1, 40, 0 ) ).position );
+    CHECK_FALSE( physical_light::evaluate_smoke_support( here, tripoint_bub_ms( -1, 40,
+                 0 ) ).position );
 }
 
-TEST_CASE( "underground or smoke-suppressing sources need an actual outlet", "[physical_light][smoke_support_067]" )
+TEST_CASE( "underground or smoke-suppressing sources need an actual outlet",
+           "[physical_light][smoke_support_067]" )
 {
     clear_avatar();
     clear_map_with_vision( -1, 3, false );

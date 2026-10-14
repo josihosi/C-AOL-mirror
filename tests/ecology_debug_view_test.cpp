@@ -46,7 +46,8 @@ void add_active_outing( bandit_live_world::site_record &site, int generation = 1
     outing.leader_id = site.members.front().npc_id;
     outing.shared_route = { site.anchor,
                             tripoint_abs_omt( site.anchor.x() + 1, site.anchor.y(), site.anchor.z() ),
-                            tripoint_abs_omt( site.anchor.x() + 2, site.anchor.y(), site.anchor.z() ) };
+                            tripoint_abs_omt( site.anchor.x() + 2, site.anchor.y(), site.anchor.z() )
+                          };
     outing.waypoint_index = 1;
     outing.target_id = "observer-target";
     outing.target_omt = outing.shared_route.back();
@@ -58,11 +59,11 @@ void add_active_outing( bandit_live_world::site_record &site, int generation = 1
     outing.expected_return_minutes = 300;
     outing.missing_deadline_minutes = 420;
     outing.return_application_key = bandit_pursuit_handoff::make_operation_component_key(
-                                         outing.activity_id, outing.generation, "return" );
+                                        outing.activity_id, outing.generation, "return" );
     outing.report_application_key = bandit_pursuit_handoff::make_operation_component_key(
-                                         outing.activity_id, outing.generation, "report" );
+                                        outing.activity_id, outing.generation, "report" );
     outing.cargo_application_key = bandit_pursuit_handoff::make_operation_component_key(
-                                        outing.activity_id, outing.generation, "cargo" );
+                                       outing.activity_id, outing.generation, "cargo" );
     site.members.front().state = bandit_live_world::member_state::outbound;
 }
 
@@ -205,7 +206,7 @@ TEST_CASE( "ecology_debug_view_merges_filtered_mobile_entities_deterministically
     request.region.maximum = tripoint_abs_omt( 10, 10, 2 );
     request.selected_id = lower_horde.id;
     request.read_mobile_entities = [&rows, &mobile_reads, &callback_region,
-    &callback_selected_id, &callback_cap]( const ecology_debug::query_region & region,
+                                           &callback_selected_id, &callback_cap]( const ecology_debug::query_region & region,
     std::string_view selected_id, size_t cap ) {
         mobile_reads++;
         callback_region = region;

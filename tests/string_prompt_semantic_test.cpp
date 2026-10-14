@@ -72,12 +72,12 @@ TEST_CASE( "string prompt applies a semantic result consumed before its owner re
     semantic_surface_manager_session session( manager );
     semantic_surface_scope parent( manager, "world", "World" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     std::string prompt_frame;
     int prompt_descriptor_count = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "string_prompt" ) {
             return;
         }
@@ -87,7 +87,7 @@ TEST_CASE( "string prompt applies a semantic result consumed before its owner re
         REQUIRE( manager.submit_request( { "prompt-run", descriptor.surface_id,
                                            descriptor.frame_id, "quantity", action, std::nullopt,
                                            cancel ? std::map<std::string, std::string>{} :
-                                           std::map<std::string, std::string>{ { "text", "1" } } } ) );
+        std::map<std::string, std::string>{ { "text", "1" } } } ) );
         // input_context::handle_input consumes transport requests itself.
         // Exercise the real popup with exactly that already-consumed state;
         // its local drain must not be required to consume the request twice.
@@ -128,10 +128,10 @@ TEST_CASE( "string prompt rejects malformed text payloads before accepting its b
     semantic_surface_manager manager( "prompt-validation-run" );
     semantic_surface_manager_session session( manager );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "string_prompt" ) {
             return;
         }
@@ -142,22 +142,22 @@ TEST_CASE( "string prompt rejects malformed text payloads before accepting its b
         CHECK( descriptor.valid_actions[1].enabled );
         REQUIRE( manager.submit_request( { "prompt-validation-run", "wrong-surface", descriptor.frame_id,
                                            "wrong-owner", "prompt.submit", std::nullopt,
-                                           { { "text", "12" } } } ) );
+        { { "text", "12" } } } ) );
         CHECK_FALSE( manager.consume_top_request() );
         REQUIRE( manager.submit_request( { "prompt-validation-run", descriptor.surface_id, "stale-frame",
                                            "stale-owner", "prompt.submit", std::nullopt,
-                                           { { "text", "12" } } } ) );
+        { { "text", "12" } } } ) );
         CHECK_FALSE( manager.consume_top_request() );
         REQUIRE( manager.submit_request( { "prompt-validation-run", descriptor.surface_id, descriptor.frame_id,
                                            "missing-text", "prompt.submit", std::nullopt, {} } ) );
         CHECK_FALSE( manager.consume_top_request() );
         REQUIRE( manager.submit_request( { "prompt-validation-run", descriptor.surface_id, descriptor.frame_id,
                                            "extra-field", "prompt.submit", std::nullopt,
-                                           { { "text", "12" }, { "other", "no" } } } ) );
+        { { "text", "12" }, { "other", "no" } } } ) );
         CHECK_FALSE( manager.consume_top_request() );
         REQUIRE( manager.submit_request( { "prompt-validation-run", descriptor.surface_id, descriptor.frame_id,
                                            "submit", "prompt.submit", std::nullopt,
-                                           { { "text", "12" } } } ) );
+        { { "text", "12" } } } ) );
     } );
 
     string_input_popup_imgui prompt( 20, "", "Set hour to?" );
@@ -185,7 +185,7 @@ TEST_CASE( "numeric STRING_INPUT prompt advertises and consumes a semantic submi
     semantic_surface_manager_session session( manager );
     semantic_surface_scope parent( manager, "menu", "Select time point" );
     bool submission_queued = false;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "string_prompt" ) {
             return;
         }
@@ -199,7 +199,7 @@ TEST_CASE( "numeric STRING_INPUT prompt advertises and consumes a semantic submi
         submission_queued = true;
         REQUIRE( manager.submit_request( { "numeric-prompt-run", descriptor.surface_id,
                                            descriptor.frame_id, "set-hour", "prompt.submit", std::nullopt,
-                                           { { "text", "23" } } } ) );
+        { { "text", "23" } } } ) );
         if( consumed_by_input_boundary ) {
             // input_context can consume an accepted transport wake before
             // number_input_popup regains its loop.  The popup must still
@@ -244,14 +244,16 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
         catacurses::init_interface();
         catacurses::resizeterm();
     }
-    on_out_of_scope close_renderer( [&]() { catacurses::endwin(); } );
+    on_out_of_scope close_renderer( [&]() {
+        catacurses::endwin();
+    } );
 #endif
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
     test_mode = false;
 
     const std::filesystem::path path = std::filesystem::temp_directory_path() /
-                                      ( "pickup-quantity-wake-" + std::to_string(
-                                            std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+                                       ( "pickup-quantity-wake-" + std::to_string(
+                                               std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
     const char *old_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
     const std::optional<std::string> previous = old_path ?
             std::optional<std::string>( old_path ) : std::nullopt;
@@ -275,7 +277,7 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
     bool closing_reopened = false;
     bool arrived_inside_input = false;
     int accepted_quantity_receipts = 0;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         std::cout << "R067_QUANTITY_RECEIPT request=" << receipt.request_id
                   << " accepted=" << receipt.accepted << " owner=" << receipt.consuming_surface_id
                   << "/" << receipt.consuming_frame_id << " reason=" << receipt.rejection_reason << std::endl;
@@ -289,7 +291,7 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
             REQUIRE( manager.submit_request( { "pickup-wake", prompt->surface_id,
                                                prompt->frame_id, "quantity", cancel ? "prompt.cancel" : "prompt.submit",
                                                std::nullopt, cancel ? std::map<std::string, std::string>{} :
-                                               std::map<std::string, std::string>{{ "text", "1" }} } ) );
+            std::map<std::string, std::string>{{ "text", "1" }} } ) );
         } else if( receipt.request_id == "quantity" ) {
             CHECK( receipt.accepted );
             if( receipt.accepted ) {
@@ -314,7 +316,7 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
             }
         }
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         std::cout << "R067_QUANTITY_OWNER kind=" << descriptor.kind << " owner=" << descriptor.surface_id
                   << "/" << descriptor.frame_id << std::endl;
         if( descriptor.kind == "string_prompt" ) {
@@ -328,7 +330,9 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
                 // Bound the failing source: acknowledge the old request at
                 // the real successor (which rejects it), then cancel that
                 // successor so the automated counterexample cannot hang.
-                if( manager.has_pending_request() ) { CHECK_FALSE( manager.consume_top_request() ); }
+                if( manager.has_pending_request() ) {
+                    CHECK_FALSE( manager.consume_top_request() );
+                }
                 REQUIRE( manager.submit_request( { "pickup-wake", descriptor.surface_id,
                                                    descriptor.frame_id, "close-reopened", "prompt.cancel", std::nullopt, {} } ) );
             }
@@ -344,7 +348,7 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
             count += quantity.get_int( "count" );
             CHECK( quantity.get_string( "unit" ) == "items" );
         }
-        const auto submit = [&]( const std::string &id, const std::string &request_id ) {
+        const auto submit = [&]( const std::string & id, const std::string & request_id ) {
             REQUIRE( manager.submit_request( { "pickup-wake", descriptor.surface_id, descriptor.frame_id,
                                                request_id, id, ( id == "inventory.commit" || id == "inventory.cancel" ) ? std::nullopt :
                                                std::optional<std::string>( uid ), {} } ) );
@@ -421,7 +425,9 @@ TEST_CASE( "unbound legacy text query still returns after each native editing st
         catacurses::refresh();
     }
     on_out_of_scope close_renderer( [&]() {
-        if( owns_terminal ) { catacurses::endwin(); }
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
     } );
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
     test_mode = false;

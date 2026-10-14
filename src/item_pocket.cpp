@@ -2293,13 +2293,13 @@ ret_val<item *> item_pocket::insert_item_impl( Item &&it,
 }
 
 ret_val<item *> item_pocket::insert_item( const item &it, const bool into_bottom,
-                                        bool restack_charges, bool ignore_contents )
+        bool restack_charges, bool ignore_contents )
 {
     return insert_item_impl( it, into_bottom, restack_charges, ignore_contents );
 }
 
 ret_val<item *> item_pocket::insert_item( item &&it, const bool into_bottom,
-                                        bool restack_charges, bool ignore_contents )
+        bool restack_charges, bool ignore_contents )
 {
     return insert_item_impl( std::move( it ), into_bottom, restack_charges, ignore_contents );
 }

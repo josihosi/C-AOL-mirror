@@ -14055,7 +14055,7 @@ void zone_sort_activity_actor::stage_do( player_activity &act, Character &you )
 
             if( is_adjacent_or_closer_to_dest ) {
                 auto stale = std::remove_if( picked_up_stuff.begin(), picked_up_stuff.end(),
-                []( const item_location &loc ) {
+                []( const item_location & loc ) {
                     return !loc.get_item();
                 } );
                 if( stale != picked_up_stuff.end() ) {
@@ -14231,7 +14231,7 @@ void zone_sort_activity_actor::stage_do( player_activity &act, Character &you )
         }
 
         const bool skip_item = zone_sorting::sort_skip_item( you, it->first, other_activity_items,
-                                 mgr.has( zone_type_LOOT_IGNORE_FAVORITES, src, fac_id ), src );
+                               mgr.has( zone_type_LOOT_IGNORE_FAVORITES, src, fac_id ), src );
         if( trace_plank ) {
             DebugLog( D_WARNING, DC_ALL ) << "bulk_plank stage=skip_check item="
                                           << static_cast<const void *>( &thisitem ) << " skipped=" << skip_item;

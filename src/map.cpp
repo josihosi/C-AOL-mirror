@@ -8106,7 +8106,7 @@ bool map::sees_with_optics( const tripoint_bub_ms &origin,
             return false;
         }
         depth += distance * ( LIGHT_TRANSPARENCY_OPEN_AIR / magnification +
-                             std::max( 0.0f, transparency - LIGHT_TRANSPARENCY_OPEN_AIR ) );
+                              std::max( 0.0f, transparency - LIGHT_TRANSPARENCY_OPEN_AIR ) );
     }
     return std::exp( -depth ) > 0.1f;
 }
@@ -8120,9 +8120,9 @@ bool map::sees_site_with_optics( const tripoint_bub_ms &origin,
         magnification <= 0.0f || magnification > 2.0f || rl_dist( origin, target ) > range ) {
         return false;
     }
-    const auto checked = [&]( const tripoint_bub_ms &p ) {
+    const auto checked = [&]( const tripoint_bub_ms & p ) {
         const auto omt = project_to<coords::omt>( get_abs( p ) );
-        return std::any_of( footprint.begin(), footprint.end(), [&]( const auto &tile ) {
+        return std::any_of( footprint.begin(), footprint.end(), [&]( const auto & tile ) {
             return tile.xy() == omt.xy();
         } );
     };
@@ -8133,7 +8133,7 @@ bool map::sees_site_with_optics( const tripoint_bub_ms &origin,
     tripoint_bub_ms previous = origin;
     bool entered = false;
     for( const tripoint_abs_ms &absolute : scout_observation::site_sightline( get_abs( origin ),
-                                                                        get_abs( target ) ) ) {
+            get_abs( target ) ) ) {
         const auto p = get_bub( absolute );
         const float radial = rl_dist_exact( origin.raw(), p.raw() );
         const float distance = radial - previous_distance;
@@ -8157,8 +8157,8 @@ bool map::sees_site_with_optics( const tripoint_bub_ms &origin,
             const bool current_blocked = has_floor_or_support( {p.xy(), high} ) ||
                                          !is_transparent( {p.xy(), previous.z()} );
             const bool previous_blocked = checked( previous ) &&
-                ( has_floor_or_support( {previous.xy(), high} ) ||
-                  !is_transparent( {previous.xy(), p.z()} ) );
+                                          ( has_floor_or_support( {previous.xy(), high} ) ||
+                                            !is_transparent( {previous.xy(), p.z()} ) );
             if( current_blocked && ( !checked( previous ) || previous_blocked ) ) {
                 return false;
             }
@@ -8288,9 +8288,11 @@ int map::obstacle_coverage( const tripoint_bub_ms &loc1, const tripoint_bub_ms &
     } );
     if( footprint ) {
         const auto omt = project_to<coords::omt>( get_abs( obstaclepos ) );
-        if( std::none_of( footprint->begin(), footprint->end(), [&]( const auto &tile ) {
-            return tile.xy() == omt.xy();
-        } ) ) { return 0; }
+        if( std::none_of( footprint->begin(), footprint->end(), [&]( const auto & tile ) {
+        return tile.xy() == omt.xy();
+        } ) ) {
+            return 0;
+        }
     }
     if( const furn_id &obstacle_f = furn( tripoint_bub_ms( obstaclepos ) ) ) {
         return obstacle_f->coverage;
@@ -8344,7 +8346,9 @@ int map::ledge_coverage( const Creature &viewer, const tripoint_bub_ms &target_p
     // Viewer eye level is higher when standing on furniture
     if( !footprint ) {
         const furn_id &viewer_furn = furn( viewer_p );
-        if( viewer_furn.obj().id ) { eye_level += viewer_furn->coverage * 0.01f; }
+        if( viewer_furn.obj().id ) {
+            eye_level += viewer_furn->coverage * 0.01f;
+        }
     }
 
     return ledge_coverage( viewer_p, target_p, eye_level, footprint );
@@ -8374,8 +8378,8 @@ int map::ledge_coverage( const tripoint_bub_ms &viewer_p, const tripoint_bub_ms 
     &ledge_p, footprint]( const tripoint_bub_ms & new_point ) {
         if( footprint ) {
             const auto omt = project_to<coords::omt>( get_abs( new_point ) );
-            if( std::none_of( footprint->begin(), footprint->end(), [&]( const auto &tile ) {
-                return tile.xy() == omt.xy();
+            if( std::none_of( footprint->begin(), footprint->end(), [&]( const auto & tile ) {
+            return tile.xy() == omt.xy();
             } ) ) {
                 return true;
             }

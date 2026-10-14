@@ -66,7 +66,7 @@ trade_preset::trade_preset( Character const &you, Character const &trader,
 {
     save_state = &inventory_ui_default_state;
     if( _encounter_payment ) {
-        append_cell( []( const item_location &loc ) {
+        append_cell( []( const item_location & loc ) {
             return loc->get_owner().is_null() ? _( "Unowned" ) : loc->get_owner_name();
         }, _( "Property owner" ) );
     }
@@ -128,8 +128,8 @@ std::string trade_preset::get_denial( const item_location &loc ) const
         for( const item *part : loc->all_items_ptr() ) {
             const item_location nested( loc, const_cast<item *>( part ) );
             const bool refused = part->has_var( VAR_TRADE_IGNORE ) ||
-                ( _u.is_npc() ? !_u.as_npc()->wants_to_sell( nested, 1 ).success() :
-                  _trader.is_npc() && !_trader.as_npc()->wants_to_buy( *part, 1 ).success() );
+                                 ( _u.is_npc() ? !_u.as_npc()->wants_to_sell( nested, 1 ).success() :
+                                   _trader.is_npc() && !_trader.as_npc()->wants_to_buy( *part, 1 ).success() );
             if( refused ) {
                 return _( "Contains goods which cannot be included in this payment" );
             }
@@ -159,7 +159,7 @@ bool encounter_goods_reachable( Character &payer, const tripoint_bub_ms &target,
 {
     map &here = get_map();
     const auto origin = payer.pos_bub();
-    const auto in_area = [&]( const tripoint_bub_ms &p ) {
+    const auto in_area = [&]( const tripoint_bub_ms & p ) {
         return here.inbounds( p ) && ( here.supports_zlevels() || p.z() == origin.z() ) &&
                here.ter( p ) != ter_str_id::NULL_ID() &&
                rl_dist( origin.xy(), p.xy() ) <= radius && std::abs( p.z() - origin.z() ) <= z_radius;
@@ -168,14 +168,14 @@ bool encounter_goods_reachable( Character &payer, const tripoint_bub_ms &target,
         return false;
     }
     const auto native_avoid = payer.get_path_avoid();
-    const auto avoid = [&]( const tripoint_bub_ms &p ) {
+    const auto avoid = [&]( const tripoint_bub_ms & p ) {
         const trap &candidate = here.tr_at( p );
         return !in_area( p ) || native_avoid( p ) ||
                payer.is_dangerous_fields( here.field_at( p ) ) ||
                ( candidate.can_see( p, payer ) && !candidate.is_benign() );
     };
     // Ordinary item interaction may reach from an adjacent tile on its level.
-    const auto can_access = [&]( const tripoint_bub_ms &p ) {
+    const auto can_access = [&]( const tripoint_bub_ms & p ) {
         return p.z() == target.z() && rl_dist( p, target ) <= 1 &&
                ( p == target || here.clear_path( p, target, 1, 1, 100 ) );
     };
@@ -209,8 +209,8 @@ class encounter_item_selector : public inventory_selector
             std::vector<item_location> result;
             std::set<const item *> seen;
             for( const auto *column : get_all_columns() ) {
-                for( const auto *entry : column->get_entries( []( const inventory_entry &e ) {
-                    return e.is_item() && !e.is_collation_header();
+                for( const auto *entry : column->get_entries( []( const inventory_entry & e ) {
+                return e.is_item() && !e.is_collation_header();
                 }, true ) ) {
                     for( const item_location &loc : entry->locations ) {
                         if( loc && preset.is_shown( loc ) && preset.get_denial( loc ).empty() &&
@@ -258,13 +258,15 @@ void add_encounter_trade_sources( inventory_selector &selector, Character &payer
     if( ally_radius > 0 ) {
         avatar &local_avatar = get_avatar();
         if( &payer != &local_avatar && &buyer != &local_avatar && !local_avatar.is_dead_state() &&
-            encounter_goods_reachable( payer, local_avatar.pos_bub(), std::max( item_radius, ally_radius ), z_radius ) ) {
+            encounter_goods_reachable( payer, local_avatar.pos_bub(), std::max( item_radius, ally_radius ),
+                                       z_radius ) ) {
             selector.add_character_items( local_avatar );
         }
         for( npc &ally : g->all_npcs() ) {
             if( &ally != &payer && &ally != &buyer && ally.is_player_ally() &&
                 ally.is_active() && !ally.is_dead() &&
-                encounter_goods_reachable( payer, ally.pos_bub(), std::max( item_radius, ally_radius ), z_radius ) ) {
+                encounter_goods_reachable( payer, ally.pos_bub(), std::max( item_radius, ally_radius ),
+                                           z_radius ) ) {
                 selector.add_character_items( ally );
             }
         }
@@ -282,7 +284,8 @@ std::vector<item_location> encounter_trade_items( Character &payer, const Charac
 
 trade_ui::trade_ui( party_t &you, npc &trader, currency_t cost, std::string title,
                     const int you_nearby_item_radius, const int you_nearby_ally_radius,
-                    basecamp *you_basecamp, const bool encounter_only, const bool goods_to_stash, const int nearby_z_radius )
+                    basecamp *you_basecamp, const bool encounter_only, const bool goods_to_stash,
+                    const int nearby_z_radius )
     : _upreset{ you, trader, encounter_only }, _tpreset{ trader, you },
       _panes{ std::make_unique<pane_t>( this, trader, _tpreset, std::string(), _pane_size(),
                                         _pane_orig( -1 ) ),
@@ -290,7 +293,8 @@ trade_ui::trade_ui( party_t &you, npc &trader, currency_t cost, std::string titl
                                         _pane_orig( 1 ) ) },
       _parties{ &trader, &you }, _requested_cost( cost ), _goods_to_stash( goods_to_stash ),
       _encounter_payment( encounter_only && goods_to_stash ),
-      _encounter_identity( _encounter_payment ? npc_trading::encounter_payment_identity( trader, you ) : "" ),
+      _encounter_identity( _encounter_payment ? npc_trading::encounter_payment_identity( trader,
+                           you ) : "" ),
       _title( std::move( title ) )
 
 {
@@ -304,7 +308,7 @@ trade_ui::trade_ui( party_t &you, npc &trader, currency_t cost, std::string titl
     if( you_basecamp != nullptr && !encounter_only ) {
         _panes[_you]->add_basecamp_items( *you_basecamp, you_nearby_item_radius );
         std::set<character_id> added_basecamp_workers;
-        const auto add_basecamp_worker_items = [&]( npc &assigned ) {
+        const auto add_basecamp_worker_items = [&]( npc & assigned ) {
             if( &assigned == &trader || assigned.is_dead() || !assigned.is_player_ally() ) {
                 return;
             }
@@ -434,7 +438,7 @@ std::map<std::string, std::string> trade_ui::semantic_payload() const
 {
     const npc &trader = *_parties[_trader]->as_npc();
     const Character &active = *_parties[_cpane];
-    const auto actor_id = []( const Character &actor ) {
+    const auto actor_id = []( const Character & actor ) {
         return "character:" + std::to_string( actor.getID().get_value() );
     };
     return {
@@ -539,14 +543,19 @@ void trade_ui::_process( event const &ev )
         case event::TRADEOK: {
             _source_snapshots.clear();
             if( _goods_to_stash ) {
-                for( const auto *pane : { _panes[_you].get(), _panes[_trader].get() } ) {
+                for( const auto *pane : {
+                         _panes[_you].get(), _panes[_trader].get()
+                     } ) {
                     for( const auto &entry : pane->to_trade() ) {
-                        if( !entry.first ) { continue; }
+                        if( !entry.first ) {
+                            continue;
+                        }
                         trade_source_snapshot snapshot;
                         snapshot.location = entry.first;
                         snapshot.position = get_map().get_abs( entry.first.pos_bub( get_map() ) );
-                        entry.first->visit_items( [&]( const item *part, const item * ) {
-                            snapshot.items.emplace_back( part->uid().get_value(), part->typeId(), part->get_owner(), part->charges );
+                        entry.first->visit_items( [&]( const item * part, const item * ) {
+                            snapshot.items.emplace_back( part->uid().get_value(), part->typeId(), part->get_owner(),
+                                                         part->charges );
                             return VisitResponse::NEXT;
                         } );
                         _source_snapshots.push_back( std::move( snapshot ) );

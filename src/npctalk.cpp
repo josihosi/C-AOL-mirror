@@ -281,7 +281,7 @@ static npc *select_llm_ambient_speech_target( const avatar &speaker, int hear_vo
         return nullptr;
     }
     map &here = get_map();
-    std::vector<npc *> candidates = g->get_npcs_if( [&]( const npc &guy ) {
+    std::vector<npc *> candidates = g->get_npcs_if( [&]( const npc & guy ) {
         if( guy.is_player_ally() || guy.is_hallucination() ) {
             return false;
         }
@@ -295,7 +295,7 @@ static npc *select_llm_ambient_speech_target( const avatar &speaker, int hear_vo
         return nullptr;
     }
     const tripoint_bub_ms speaker_pos = speaker.pos_bub();
-    std::sort( candidates.begin(), candidates.end(), [&]( const npc *lhs, const npc *rhs ) {
+    std::sort( candidates.begin(), candidates.end(), [&]( const npc * lhs, const npc * rhs ) {
         const int lhs_dist = rl_dist( speaker_pos, lhs->pos_bub() );
         const int rhs_dist = rl_dist( speaker_pos, rhs->pos_bub() );
         if( lhs_dist != rhs_dist ) {
@@ -313,7 +313,7 @@ static npc *select_llm_out_of_hearing_follower( const avatar &speaker, int hear_
         return nullptr;
     }
     static constexpr int out_of_hearing_margin = 5;
-    std::vector<npc *> candidates = g->get_npcs_if( [&]( const npc &guy ) {
+    std::vector<npc *> candidates = g->get_npcs_if( [&]( const npc & guy ) {
         const int reply_volume = yelled_reply ? guy.get_shout_volume() : guy.indoor_voice();
         return guy.is_player_ally() &&
                !guy.is_hallucination() &&
@@ -325,7 +325,7 @@ static npc *select_llm_out_of_hearing_follower( const avatar &speaker, int hear_
         return nullptr;
     }
     const tripoint_bub_ms speaker_pos = speaker.pos_bub();
-    std::sort( candidates.begin(), candidates.end(), [&]( const npc *lhs, const npc *rhs ) {
+    std::sort( candidates.begin(), candidates.end(), [&]( const npc * lhs, const npc * rhs ) {
         const int lhs_dist = rl_dist( speaker_pos, lhs->pos_bub() );
         const int rhs_dist = rl_dist( speaker_pos, rhs->pos_bub() );
         if( lhs_dist != rhs_dist ) {
@@ -367,12 +367,14 @@ static bool llm_direct_address_matches( std::string_view utterance, std::string_
 static std::string strip_llm_direct_address_prefix( const std::string &utterance,
         const npc &listener )
 {
-    const auto strip_prefix = [&]( const std::string &candidate ) -> std::optional<std::string> {
-        if( !llm_direct_address_matches( utterance, candidate ) ) {
+    const auto strip_prefix = [&]( const std::string & candidate ) -> std::optional<std::string> {
+        if( !llm_direct_address_matches( utterance, candidate ) )
+        {
             return std::nullopt;
         }
         size_t prefix_end = candidate.size();
-        while( prefix_end < utterance.size() ) {
+        while( prefix_end < utterance.size() )
+        {
             const unsigned char next = utterance[prefix_end];
             if( !std::isspace( next ) && next != ',' && next != ':' && next != ';' &&
                 next != '!' && next != '?' && next != '-' ) {
@@ -449,7 +451,8 @@ static std::string next_llm_out_of_hearing_bark( bool yelled = false )
             translate_marker( "Say that again." ),
             translate_marker( "Didn't catch that." ),
             translate_marker( "Too far. Speak up." )
-        }};
+        }
+    };
     static size_t bark_index = 0;
     const char *raw = barks[bark_index % barks.size()];
     bark_index++;
@@ -1428,91 +1431,91 @@ void game::chat( const std::optional<tripoint_bub_ms> &p )
     bool is_sentence_say = false;
     sentence_speech_mode sentence_mode = sentence_speech_mode::normal;
     {
-    uilist nmenu;
-    nmenu.text = std::string( _( "What do you want to do?" ) );
-    // Several choices immediately enter another native input owner, such as
-    // the sentence prompt.  Keep the semantic receipt attached to that
-    // successor instead of transiently republishing World while this menu
-    // unwinds.
-    nmenu.semantic_await_child_successor = true;
+        uilist nmenu;
+        nmenu.text = std::string( _( "What do you want to do?" ) );
+        // Several choices immediately enter another native input owner, such as
+        // the sentence prompt.  Keep the semantic receipt attached to that
+        // successor instead of transiently republishing World while this menu
+        // unwinds.
+        nmenu.semantic_await_child_successor = true;
 
-    if( !available.empty() ) {
-        const Creature *guy = available.front();
-        std::string title;
-        if( guy->is_npc() ) {
-            title = guy->as_npc()->name_and_activity();
-        } else if( guy->is_monster() ) {
-            title = guy->as_monster()->disp_name();
+        if( !available.empty() ) {
+            const Creature *guy = available.front();
+            std::string title;
+            if( guy->is_npc() ) {
+                title = guy->as_npc()->name_and_activity();
+            } else if( guy->is_monster() ) {
+                title = guy->as_monster()->disp_name();
+            }
+            nmenu.addentry( NPC_CHAT_TALK, true, 't', available_count == 1 ?
+                            string_format( _( "Talk to %s" ), title ) :
+                            _( "Talk to…" ) );
         }
-        nmenu.addentry( NPC_CHAT_TALK, true, 't', available_count == 1 ?
-                        string_format( _( "Talk to %s" ), title ) :
-                        _( "Talk to…" ) );
-    }
 
-    if( !available_for_activities.empty() ) {
-        const Creature *guy = available_for_activities.front();
-        std::string title;
-        if( guy->is_npc() ) {
-            title = guy->as_npc()->name_and_activity();
-        } else if( guy->is_monster() ) {
-            title = guy->as_monster()->disp_name();
+        if( !available_for_activities.empty() ) {
+            const Creature *guy = available_for_activities.front();
+            std::string title;
+            if( guy->is_npc() ) {
+                title = guy->as_npc()->name_and_activity();
+            } else if( guy->is_monster() ) {
+                title = guy->as_monster()->disp_name();
+            }
+            nmenu.addentry( NPC_CHAT_ACTIVITIES, true, 'A', available_for_activities_count == 1 ?
+                            string_format( _( "Tell %s to work on…" ), title ) :
+                            _( "Tell someone to work on…" )
+                          );
         }
-        nmenu.addentry( NPC_CHAT_ACTIVITIES, true, 'A', available_for_activities_count == 1 ?
-                        string_format( _( "Tell %s to work on…" ), title ) :
-                        _( "Tell someone to work on…" )
-                      );
-    }
 
-    nmenu.addentry( NPC_CHAT_YELL, true, 'a', _( "Yell" ) );
-    nmenu.addentry( NPC_CHAT_SENTENCE, true, 'b', _( "Say a sentence" ) );
-    nmenu.addentry( NPC_CHAT_SENTENCE_WHISPER, true, 'h', _( "Whisper a sentence" ) );
-    nmenu.addentry( NPC_CHAT_SENTENCE_YELL, true, 'y', _( "Yell a sentence" ) );
-    nmenu.addentry( NPC_CHAT_EMOTE, true, 'E', _( "Emote" ) );
-    if( !animal_vehicles.empty() ) {
-        nmenu.addentry( NPC_CHAT_ANIMAL_VEHICLE_FOLLOW, true, 'F',
-                        _( "Whistle at your animals pulling vehicles to follow you." ) );
-    }
-    if( !magic_vehicles.empty() ) {
-        nmenu.addentry( NPC_CHAT_COMMAND_MAGIC_VEHICLE_FOLLOW, true, 'Q',
-                        _( "Utter a magical command that will order your magical vehicles to follow you." ) );
-    }
-    if( !magic_following_vehicles.empty() ) {
-        nmenu.addentry( NPC_CHAT_COMMAND_MAGIC_VEHICLE_STOP_FOLLOW, true, 'q',
-                        _( "Utter a magical command that will order your magical vehicles to stop following you." ) );
-    }
-    if( !following_vehicles.empty() ) {
-        nmenu.addentry( NPC_CHAT_ANIMAL_VEHICLE_STOP_FOLLOW, true, 'S',
-                        _( "Whistle at your animals pulling vehicles to stop following you." ) );
-    }
-    if( !guards.empty() ) {
-        nmenu.addentry( NPC_CHAT_FOLLOW, true, 'f', guard_count == 1 ?
-                        string_format( _( "Tell %s to follow" ), guards.front()->get_name() ) :
-                        _( "Tell someone to follow…" )
-                      );
-    }
-    if( !followers.empty() ) {
-        bool enable_seminar = !player_character.has_effect( effect_asked_to_train );
-        nmenu.addentry( NPC_CHAT_START_SEMINAR, enable_seminar, 'T',
-                        enable_seminar ? _( "Start a training seminar" ) :
-                        _( "Start a training seminar (You've already taught enough for now)" ) );
-        nmenu.addentry( NPC_CHAT_GUARD, true, 'g', follower_count == 1 ?
-                        string_format( _( "Tell %s to guard" ), followers.front()->get_name() ) :
-                        _( "Tell someone to guard…" )
-                      );
-        nmenu.addentry( NPC_CHAT_MOVE_TO_POS, true, 'G',
-                        follower_count == 1 ? string_format( _( "Tell %s to move to location" ),
-                                followers.front()->get_name() ) : _( "Tell someone to move to location…" ) );
-        nmenu.addentry( NPC_CHAT_AWAKE, true, 'w', _( "Tell everyone on your team to wake up" ) );
-        nmenu.addentry( NPC_CHAT_MOUNT, true, 'M', _( "Tell everyone on your team to mount up" ) );
-        nmenu.addentry( NPC_CHAT_DISMOUNT, true, 'm', _( "Tell everyone on your team to dismount" ) );
-        nmenu.addentry( NPC_CHAT_DANGER, true, 'D',
-                        _( "Tell everyone on your team to prepare for danger" ) );
-        nmenu.addentry( NPC_CHAT_CLEAR_OVERRIDES, true, 'r',
-                        _( "Tell everyone on your team to relax (Clear Overrides)" ) );
-        nmenu.addentry( NPC_CHAT_ORDERS, true, 'o', _( "Tell everyone on your team to temporarily…" ) );
-    }
-    nmenu.query();
-    chat_choice = nmenu.ret;
+        nmenu.addentry( NPC_CHAT_YELL, true, 'a', _( "Yell" ) );
+        nmenu.addentry( NPC_CHAT_SENTENCE, true, 'b', _( "Say a sentence" ) );
+        nmenu.addentry( NPC_CHAT_SENTENCE_WHISPER, true, 'h', _( "Whisper a sentence" ) );
+        nmenu.addentry( NPC_CHAT_SENTENCE_YELL, true, 'y', _( "Yell a sentence" ) );
+        nmenu.addentry( NPC_CHAT_EMOTE, true, 'E', _( "Emote" ) );
+        if( !animal_vehicles.empty() ) {
+            nmenu.addentry( NPC_CHAT_ANIMAL_VEHICLE_FOLLOW, true, 'F',
+                            _( "Whistle at your animals pulling vehicles to follow you." ) );
+        }
+        if( !magic_vehicles.empty() ) {
+            nmenu.addentry( NPC_CHAT_COMMAND_MAGIC_VEHICLE_FOLLOW, true, 'Q',
+                            _( "Utter a magical command that will order your magical vehicles to follow you." ) );
+        }
+        if( !magic_following_vehicles.empty() ) {
+            nmenu.addentry( NPC_CHAT_COMMAND_MAGIC_VEHICLE_STOP_FOLLOW, true, 'q',
+                            _( "Utter a magical command that will order your magical vehicles to stop following you." ) );
+        }
+        if( !following_vehicles.empty() ) {
+            nmenu.addentry( NPC_CHAT_ANIMAL_VEHICLE_STOP_FOLLOW, true, 'S',
+                            _( "Whistle at your animals pulling vehicles to stop following you." ) );
+        }
+        if( !guards.empty() ) {
+            nmenu.addentry( NPC_CHAT_FOLLOW, true, 'f', guard_count == 1 ?
+                            string_format( _( "Tell %s to follow" ), guards.front()->get_name() ) :
+                            _( "Tell someone to follow…" )
+                          );
+        }
+        if( !followers.empty() ) {
+            bool enable_seminar = !player_character.has_effect( effect_asked_to_train );
+            nmenu.addentry( NPC_CHAT_START_SEMINAR, enable_seminar, 'T',
+                            enable_seminar ? _( "Start a training seminar" ) :
+                            _( "Start a training seminar (You've already taught enough for now)" ) );
+            nmenu.addentry( NPC_CHAT_GUARD, true, 'g', follower_count == 1 ?
+                            string_format( _( "Tell %s to guard" ), followers.front()->get_name() ) :
+                            _( "Tell someone to guard…" )
+                          );
+            nmenu.addentry( NPC_CHAT_MOVE_TO_POS, true, 'G',
+                            follower_count == 1 ? string_format( _( "Tell %s to move to location" ),
+                                    followers.front()->get_name() ) : _( "Tell someone to move to location…" ) );
+            nmenu.addentry( NPC_CHAT_AWAKE, true, 'w', _( "Tell everyone on your team to wake up" ) );
+            nmenu.addentry( NPC_CHAT_MOUNT, true, 'M', _( "Tell everyone on your team to mount up" ) );
+            nmenu.addentry( NPC_CHAT_DISMOUNT, true, 'm', _( "Tell everyone on your team to dismount" ) );
+            nmenu.addentry( NPC_CHAT_DANGER, true, 'D',
+                            _( "Tell everyone on your team to prepare for danger" ) );
+            nmenu.addentry( NPC_CHAT_CLEAR_OVERRIDES, true, 'r',
+                            _( "Tell everyone on your team to relax (Clear Overrides)" ) );
+            nmenu.addentry( NPC_CHAT_ORDERS, true, 'o', _( "Tell everyone on your team to temporarily…" ) );
+        }
+        nmenu.query();
+        chat_choice = nmenu.ret;
     }
 
     if( chat_choice < 0 ) {
@@ -1899,7 +1902,7 @@ void game::chat( const std::optional<tripoint_bub_ms> &p )
             } );
             if( allow_out_of_hearing_bark ) {
                 npc *out_of_hearing_follower = select_llm_out_of_hearing_follower( u, llm_hear_volume,
-                                              bark_is_yelled );
+                                               bark_is_yelled );
                 if( out_of_hearing_follower != nullptr ) {
                     out_of_hearing_follower->say( next_llm_out_of_hearing_bark( bark_is_yelled ),
                                                   bark_is_yelled ? sounds::sound_t::alert : sounds::sound_t::speech );
@@ -1912,7 +1915,7 @@ void game::chat( const std::optional<tripoint_bub_ms> &p )
             if( llm_or_debug ) {
                 const std::string utterance = !yell_msg.empty() ? yell_msg : message;
                 const std::vector<npc *> addressed_hearers = filter_llm_hearers_by_direct_address( hearers,
-                                                          utterance );
+                        utterance );
                 const bool direct_address_filtered = addressed_hearers.size() < hearers.size();
                 hearers = addressed_hearers;
 
@@ -1941,7 +1944,7 @@ void game::chat( const std::optional<tripoint_bub_ms> &p )
                         }
                         const std::string assigned_camp = guy.assigned_camp.has_value() ?
                                                           string_format( "%d,%d,%d", guy.assigned_camp->x(),
-                                                                         guy.assigned_camp->y(), guy.assigned_camp->z() ) : "none";
+                                                                  guy.assigned_camp->y(), guy.assigned_camp->z() ) : "none";
                         llm_intent::log_event( string_format(
                                                    "camp routing check npc=\"%s\" id=%d uses_basecamp=%s camp_found=%s assigned_camp=%s attitude=%s mission=%d walking_with=%s player_ally=%s role=%s reason=%s",
                                                    guy.get_name(), guy.getID().get_value(), uses_basecamp ? "yes" : "no",
@@ -1987,7 +1990,8 @@ void game::chat( const std::optional<tripoint_bub_ms> &p )
                             continue;
                         }
                         log_camp_routing_state( *guy, "camp_grouped", true, true );
-                        auto it = std::find_if( camp_groups.begin(), camp_groups.end(), [&]( const camp_hearer_group & group ) {
+                        auto it = std::find_if( camp_groups.begin(),
+                        camp_groups.end(), [&]( const camp_hearer_group & group ) {
                             return group.camp_omt == *guy->assigned_camp;
                         } );
                         if( it == camp_groups.end() ) {
@@ -2010,7 +2014,7 @@ void game::chat( const std::optional<tripoint_bub_ms> &p )
                     llm_intent::enqueue_requests( hearers, utterance );
                     if( ambient_target != nullptr ) {
                         llm_intent::log_event( string_format( "ambient target %s (%d) for utterance\n%s",
-                                               ambient_target->get_name(), ambient_target->getID().get_value(), utterance ) );
+                                                              ambient_target->get_name(), ambient_target->getID().get_value(), utterance ) );
                         llm_intent::enqueue_ambient_request( *ambient_target, utterance );
                     }
                 }
@@ -2113,7 +2117,8 @@ void npc::handle_sound( const sounds::sound_t spriority, const std::string &desc
             return ( *camp )->get_current_patrol_runtime( getID(), calendar::turn ).has_value();
         }
         return false;
-    }();
+    }
+    ();
     // Patrolling guards will investigate more readily than stationary NPCs.
     int investigate_dist = 10;
     if( mission == NPC_MISSION_GUARD_ALLY || camp_patrol_investigates_noise ) {
@@ -3640,9 +3645,9 @@ talk_topic dialogue::opt( dialogue_window &d_win, const talk_topic &topic )
     };
     if( semantic_manager != nullptr ) {
         semantic_scope.emplace( *semantic_manager, "dialogue", speaker_name( d_win ),
-        semantic_payload(), semantic_actions(),
-        [this, &d_win, &semantic_response_index, &semantic_speaker_id]
-        ( const semantic_action_request &request ) {
+                                semantic_payload(), semantic_actions(),
+                                [this, &d_win, &semantic_response_index, &semantic_speaker_id]
+        ( const semantic_action_request & request ) {
             const auto speaker = request.parameters.find( "speaker_id" );
             if( speaker != request.parameters.end() && speaker->second != semantic_speaker_id ) {
                 return semantic_action_dispatch_result{ false, "wrong_speaker", "" };
@@ -9341,7 +9346,9 @@ void talk_effect_t::parse_string_effect( const std::string &effect_id, const Jso
             WRAP( buy_cow ),
             WRAP( buy_chicken ),
             WRAP( buy_horse ),
-            { "basecamp_mission", []( npc & p ) {
+            {
+                "basecamp_mission", []( npc & p )
+                {
                     talk_function::basecamp_mission( p );
                 }
             },

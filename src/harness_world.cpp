@@ -8,7 +8,8 @@ std::optional<harness_world_options> parse_harness_world_options(
     const std::string_view scenario_id )
 {
     const auto fail = [error]( const char *message ) -> std::optional<harness_world_options> {
-        if( error != nullptr ) {
+        if( error != nullptr )
+        {
             *error = message;
         }
         return std::nullopt;

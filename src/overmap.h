@@ -768,7 +768,7 @@ class overmap
         int attract_hordes_to_light( const tripoint_abs_ms &source, int intensity,
                                      int observer_radius_sm, const std::string &sample_id,
                                      const time_point &observed, const std::function<bool(
-                                                 const tripoint_abs_ms &)> &visible,
+                                         const tripoint_abs_ms & )> &visible,
                                      int *candidate_count = nullptr );
         void alert_entity( const tripoint_om_ms &location, const tripoint_abs_ms &destination,
                            int intensity );

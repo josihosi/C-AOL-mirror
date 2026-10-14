@@ -32,14 +32,14 @@ bool is_openclaw_harness_main_menu_quit_confirmation( const std::string &categor
         const std::string &text )
 {
     return category == "YESNO" && ( text == "Really quit?" ||
-                                     text == "Really quit? (Case Sensitive)" );
+                                    text == "Really quit? (Case Sensitive)" );
 }
 
 bool is_openclaw_harness_save_quit_confirmation( const std::string &category,
         const std::string &text )
 {
     return category == "YESNO" && ( text == "Save and quit?" ||
-                                     text == "Save and quit? (Case Sensitive)" );
+                                    text == "Save and quit? (Case Sensitive)" );
 }
 
 void openclaw_harness_trace_quit_confirmation( const char *event, uint64_t instance )
@@ -437,8 +437,8 @@ query_popup::result query_popup::query_once()
         prompt_payload["text"] = text;
         prompt_payload["title"] = category;
         semantic_scope.emplace( *manager, "prompt", category,
-        std::move( prompt_payload ), std::move( semantic_actions ),
-        [this, &semantic_action, receipt_before_native_exit]( const semantic_action_request &request ) {
+                                std::move( prompt_payload ), std::move( semantic_actions ),
+        [this, &semantic_action, receipt_before_native_exit]( const semantic_action_request & request ) {
             if( request.action_id == "prompt.cancel" && cancel ) {
                 semantic_action = "QUIT";
                 return semantic_action_dispatch_result{ true, "", "" };

@@ -391,12 +391,12 @@ static void debug_error_prompt(
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "prompt", "Debug error",
-        std::map<std::string, std::string>{
+        std::map<std::string, std::string> {
             { "native_owner", "DEBUG_MSG" }, { "title", "DEBUG_MSG" },
             { "text", error_message }, { "source_file", filename }, { "source_line", line }
-        }, std::vector<semantic_action_descriptor>{
+        }, std::vector<semantic_action_descriptor> {
             { "prompt.acknowledge", "", _( "Continue" ), true }
-        }, [&continue_requested]( const semantic_action_request &request ) {
+        }, [&continue_requested]( const semantic_action_request & request ) {
             if( request.action_id != "prompt.acknowledge" || request.stable_id ||
                 !request.parameters.empty() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };

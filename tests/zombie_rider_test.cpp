@@ -92,8 +92,10 @@ static monster round_trip_zombie_rider_without_neutral_predator_metadata( const 
     rider.serialize( jsout );
 
     std::string legacy = out.str();
-    for( const std::string &member : { "band_revision_cache", "band_reference",
-                                      "ammo_initialization_version" } ) {
+    for( const std::string &member : {
+             "band_revision_cache", "band_reference",
+             "ammo_initialization_version"
+         } ) {
         const std::size_t member_pos = legacy.find( "\"" + member + "\"" );
         REQUIRE( member_pos != std::string::npos );
         legacy.replace( member_pos + 1, member.size(), "legacy_" + member );
@@ -219,7 +221,7 @@ TEST_CASE( "zombie_rider_large_body_small_passage_pathing", "[zombie_rider][mons
     pathfinding_settings normal_sized_settings( {}, 20, 100, 0, false, false, false, true,
             false, false, ordinary_zombie.get_size() );
     const std::vector<tripoint_bub_ms> normal_path = here.route( rider_start,
-            pathfinding_target::point( target ), normal_sized_settings, []( const tripoint_bub_ms & ) {
+    pathfinding_target::point( target ), normal_sized_settings, []( const tripoint_bub_ms & ) {
         return false;
     } );
     REQUIRE_FALSE( normal_path.empty() );
@@ -229,7 +231,7 @@ TEST_CASE( "zombie_rider_large_body_small_passage_pathing", "[zombie_rider][mons
     pathfinding_settings rider_sized_settings( {}, 20, 100, 0, false, false, false, true,
             false, false, rider.get_size() );
     const std::vector<tripoint_bub_ms> rider_path = here.route( rider_start,
-            pathfinding_target::point( target ), rider_sized_settings, []( const tripoint_bub_ms & ) {
+    pathfinding_target::point( target ), rider_sized_settings, []( const tripoint_bub_ms & ) {
         return false;
     } );
     REQUIRE_FALSE( rider_path.empty() );
@@ -244,7 +246,8 @@ TEST_CASE( "zombie_rider_large_body_small_passage_pathing", "[zombie_rider][mons
     clear_map_without_vision();
 }
 
-TEST_CASE( "zombie_rider_local_bow_shot_sets_cooldown_and_repositions", "[zombie_rider][monster][ai]" )
+TEST_CASE( "zombie_rider_local_bow_shot_sets_cooldown_and_repositions",
+           "[zombie_rider][monster][ai]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -285,7 +288,8 @@ TEST_CASE( "zombie_rider_local_bow_shot_sets_cooldown_and_repositions", "[zombie
     clear_map_without_vision();
 }
 
-TEST_CASE( "zombie_rider_bow_pressure_marks_avatar_hostile_before_shooting", "[zombie_rider][monster][ai]" )
+TEST_CASE( "zombie_rider_bow_pressure_marks_avatar_hostile_before_shooting",
+           "[zombie_rider][monster][ai]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -318,7 +322,8 @@ TEST_CASE( "zombie_rider_bow_pressure_marks_avatar_hostile_before_shooting", "[z
     clear_map_without_vision();
 }
 
-TEST_CASE( "zombie_rider_close_pressure_bunny_hops_without_point_blank_bow_shot", "[zombie_rider][monster][ai]" )
+TEST_CASE( "zombie_rider_close_pressure_bunny_hops_without_point_blank_bow_shot",
+           "[zombie_rider][monster][ai]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -356,7 +361,8 @@ TEST_CASE( "zombie_rider_close_pressure_bunny_hops_without_point_blank_bow_shot"
     clear_map_without_vision();
 }
 
-TEST_CASE( "zombie_rider_empty_bow_charges_instead_of_kiting_forever", "[zombie_rider][monster][ai]" )
+TEST_CASE( "zombie_rider_empty_bow_charges_instead_of_kiting_forever",
+           "[zombie_rider][monster][ai]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -721,7 +727,7 @@ TEST_CASE( "zombie_rider_impact_vehicle_teleport_does_not_arm",
 
     const tripoint_bub_ms vehicle_pos = center + point::east;
     vehicle *const cart = here.add_vehicle( vehicle_prototype_none,
-            vehicle_pos, 0_degrees, 0, veh_spawn_status::UNDAMAGED );
+                                            vehicle_pos, 0_degrees, 0, veh_spawn_status::UNDAMAGED );
     REQUIRE( cart != nullptr );
 
     monster &rider = spawn_test_monster( mon_zombie_rider.str(), center + point::east * 2 );
@@ -911,7 +917,8 @@ TEST_CASE( "zombie_rider_impact_native_armor_absorption_is_no_damage",
     clear_map_without_vision();
 }
 
-TEST_CASE( "zombie_rider_close_indoor_pressure_repositions_instead_of_loitering", "[zombie_rider][monster][ai][map]" )
+TEST_CASE( "zombie_rider_close_indoor_pressure_repositions_instead_of_loitering",
+           "[zombie_rider][monster][ai][map]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -962,7 +969,8 @@ TEST_CASE( "zombie_rider_close_indoor_pressure_repositions_instead_of_loitering"
     clear_map_without_vision();
 }
 
-TEST_CASE( "zombie_rider_injured_continues_pursuit_instead_of_withdrawing", "[zombie_rider][monster][ai]" )
+TEST_CASE( "zombie_rider_injured_continues_pursuit_instead_of_withdrawing",
+           "[zombie_rider][monster][ai]" )
 {
     clear_map_without_vision();
     map &here = get_map();
@@ -1136,7 +1144,7 @@ TEST_CASE( "zombie_rider_camp_pressure_intent_drives_live_planning",
                     rider, pathfinding_target::point( planned_dest ) );
         REQUIRE_FALSE( route.empty() );
         CHECK( route.back() == planned_dest );
-        CHECK( std::all_of( route.begin(), route.end(), [&rider]( const tripoint_bub_ms &step ) {
+        CHECK( std::all_of( route.begin(), route.end(), [&rider]( const tripoint_bub_ms & step ) {
             return rider.know_danger_at( step );
         } ) );
 
@@ -1344,7 +1352,7 @@ TEST_CASE( "zombie_rider_distant_camp_investigation_uses_a_reachable_waypoint",
                 rider, pathfinding_target::point( planned_dest ) );
     REQUIRE_FALSE( route.empty() );
     CHECK( route.back() == planned_dest );
-    CHECK( std::all_of( route.begin(), route.end(), [&rider]( const tripoint_bub_ms &step ) {
+    CHECK( std::all_of( route.begin(), route.end(), [&rider]( const tripoint_bub_ms & step ) {
         return rider.know_danger_at( step );
     } ) );
 
@@ -1428,18 +1436,18 @@ TEST_CASE( "zombie_rider_endpoint_uses_mature_predator_evolution",
             if( entry.is_group() || entry.mtype != mon_zombie_rider ) {
                 continue;
             }
-        if( group_pair.first == GROUP_DEBUG_ZOMBIE_RIDER ) {
-            debug_direct_entries++;
-            CHECK( entry.pack_minimum == 1 );
-            CHECK( entry.pack_maximum == 1 );
-            continue;
-        }
-        // The predator upgrade group is the deliberate late-world origin,
-        // not an ordinary area-generation spawn table.
-        if( group_pair.first == GROUP_ZOMBIE_PREDATOR_UPGRADE ) {
-            continue;
-        }
-        natural_direct_entries++;
+            if( group_pair.first == GROUP_DEBUG_ZOMBIE_RIDER ) {
+                debug_direct_entries++;
+                CHECK( entry.pack_minimum == 1 );
+                CHECK( entry.pack_maximum == 1 );
+                continue;
+            }
+            // The predator upgrade group is the deliberate late-world origin,
+            // not an ordinary area-generation spawn table.
+            if( group_pair.first == GROUP_ZOMBIE_PREDATOR_UPGRADE ) {
+                continue;
+            }
+            natural_direct_entries++;
         }
     }
     CHECK( natural_direct_entries == 0 );
@@ -1662,7 +1670,8 @@ TEST_CASE( "zombie_rider_overmap_light_negative_controls_do_not_call_riders",
     const bandit_mark_generation::light_projection daylight_projection =
         bandit_mark_generation::adapt_light_packet( daylight_searchlight );
     REQUIRE( daylight_projection.viable );
-    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection( daylight_projection ) == 0 );
+    CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
+               daylight_projection ) == 0 );
 
     const zombie_rider_overmap_ai::rider_light_interest daylight_interest =
         zombie_rider_overmap_ai::evaluate_light_attraction( daylight_projection,
@@ -1757,7 +1766,8 @@ TEST_CASE( "zombie_rider_light_observation_is_timestamped_and_cached_delivery_do
     REQUIRE( zombie_rider_overmap_ai::refresh_light_memory( memory, interest, "lamp@2#125", 125 ) );
     CHECK( memory.observed_at_turn == 125 );
     CHECK( memory.expires_at_turn == 215 );
-    CHECK_FALSE( zombie_rider_overmap_ai::refresh_light_memory( memory, interest, "lamp@old#110", 110 ) );
+    CHECK_FALSE( zombie_rider_overmap_ai::refresh_light_memory( memory, interest, "lamp@old#110",
+                 110 ) );
     CHECK( memory.observed_at_turn == 125 );
     CHECK( memory.expires_at_turn == 215 );
     // Light evidence is an area lead only; it carries no prey/camp identity.
@@ -1799,7 +1809,7 @@ TEST_CASE( "zombie_rider_overmap_convergence_is_capped_dispatch_not_band_members
     CHECK( result.band_size == 0 );
     CHECK( result.posture == "lone_rider_harass" );
     CHECK( result.reason == "rider_converges_to_light_interest" );
-    CHECK( result.rider_ids == std::vector<std::string>{ "near_alpha", "near_beta" } );
+    CHECK( result.rider_ids == std::vector<std::string> { "near_alpha", "near_beta" } );
 }
 
 TEST_CASE( "zombie_rider_overmap_convergence_keeps_lone_rider_below_band_minimum",
@@ -1822,7 +1832,7 @@ TEST_CASE( "zombie_rider_overmap_convergence_keeps_lone_rider_below_band_minimum
     CHECK( result.selected_riders == 1 );
     CHECK( result.posture == "lone_rider_harass" );
     CHECK( result.reason == "rider_converges_to_light_interest" );
-    CHECK( result.rider_ids == std::vector<std::string>{ "lone_rider" } );
+    CHECK( result.rider_ids == std::vector<std::string> { "lone_rider" } );
 }
 
 TEST_CASE( "zombie_rider_overmap_convergence_reserves_riders_between_light_clusters",
@@ -1839,7 +1849,7 @@ TEST_CASE( "zombie_rider_overmap_convergence_reserves_riders_between_light_clust
     REQUIRE( first.selected_riders == 2 );
 
     zombie_rider_overmap_ai::reserve_rider_convergence( riders, first );
-    CHECK( std::all_of( riders.begin(), riders.end(), []( const auto &rider ) {
+    CHECK( std::all_of( riders.begin(), riders.end(), []( const auto & rider ) {
         return !rider.available && !rider.already_in_band;
     } ) );
 
@@ -2097,7 +2107,8 @@ TEST_CASE( "zombie_rider_band_equal_turn_observations_choose_identified_direct_e
     rider_band_registry reverse;
     reverse.observe( "rider", direct );
     reverse.observe( "rider", light );
-    const std::optional<rider_band_observation> reverse_selected = reverse.observation_for( "rider", 50 );
+    const std::optional<rider_band_observation> reverse_selected = reverse.observation_for( "rider",
+            50 );
     REQUIRE( reverse_selected );
     CHECK( reverse_selected->source_actor_id == "alpha" );
     CHECK( reverse_selected->position == direct.position );

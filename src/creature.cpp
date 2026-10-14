@@ -194,7 +194,8 @@ creature_identity::creature_identity() : value_( ++next_creature_identity )
 {
 }
 
-creature_identity::creature_identity( const creature_identity & ) : value_( ++next_creature_identity )
+creature_identity::creature_identity( const creature_identity & ) : value_
+    ( ++next_creature_identity )
 {
 }
 
@@ -703,7 +704,7 @@ bool Creature::sees_impl( const map &here, const Creature &critter,
         const int range = lit_target ? maximum_range : current_range;
         const int recognition_range = critter.is_avatar() ?
                                       static_cast<int>( std::floor( range *
-                                          get_player_character().visibility() / 100.0f ) ) : range;
+                                              get_player_character().visibility() / 100.0f ) ) : range;
         return target_range <= recognition_range &&
                ( footprint ? here.sees_site_with_optics( pos, critter_pos, range, optics, *footprint ) :
                  here.sees_with_optics( pos, critter_pos, range, optics ) );
@@ -730,7 +731,8 @@ bool Creature::sees_impl( const map &here, const Creature &critter,
               critter.get_size() < creature_size::medium ) ) ) ||
         ( critter.has_flag( mon_flag_NIGHT_INVISIBILITY ) &&
           here.light_at( critter_pos ) <= lit_level::LOW ) ||
-        ( !( footprint ? is_underwater() : is_likely_underwater( here ) ) && critter.is_likely_underwater( here ) &&
+        ( !( footprint ? is_underwater() : is_likely_underwater( here ) ) &&
+          critter.is_likely_underwater( here ) &&
           majority_rule( critter.has_flag( mon_flag_WATER_CAMOUFLAGE ),
                          here.has_flag( ter_furn_flag::TFLAG_DEEP_WATER, critter_pos ),
                          posz() != critter.posz() ) ) ||

@@ -215,7 +215,7 @@ class zzip
 
     private:
         static std::optional<zzip> load_impl( std::shared_ptr<mmap_file> file,
-                const std::filesystem::path &dictionary, const std::filesystem::path &path );
+                                              const std::filesystem::path &dictionary, const std::filesystem::path &path );
         JsonObject copy_footer() const;
         size_t ensure_capacity_for( size_t bytes );
         size_t write_file_at( std::string_view filename, std::string_view content, size_t offset,

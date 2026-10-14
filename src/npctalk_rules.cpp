@@ -91,8 +91,10 @@ std::map<std::string, std::string> follower_rules_ui::semantic_labels( npc &guy 
 {
     std::map<std::string, std::string> labels;
     for( const auto &entry : ally_rule_strs ) {
-        labels.emplace( entry.second.rule_true_text, follower_rule_text( guy, entry.second.rule_true_text ) );
-        labels.emplace( entry.second.rule_false_text, follower_rule_text( guy, entry.second.rule_false_text ) );
+        labels.emplace( entry.second.rule_true_text, follower_rule_text( guy,
+                        entry.second.rule_true_text ) );
+        labels.emplace( entry.second.rule_false_text, follower_rule_text( guy,
+                        entry.second.rule_false_text ) );
     }
     for( const auto &entry : engagement_rules ) {
         labels.emplace( entry.second, follower_rule_text( guy, entry.second ) );
@@ -124,7 +126,7 @@ std::map<std::string, std::string> follower_rules_ui::semantic_payload(
         json.member( "base_enabled", guy.rules.has_flag( entry.second.rule, false ) );
         json.member( "override_enabled", guy.rules.has_override_enable( entry.second.rule ) );
         json.member( "label", labels.at( enabled ? entry.second.rule_true_text :
-                                        entry.second.rule_false_text ) );
+                                         entry.second.rule_false_text ) );
         json.end_object();
     }
     json.end_array();
@@ -212,8 +214,8 @@ void follower_rules_ui::draw_follower_rules_ui( npc *guy )
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "npc_rules_menu", _( "Rules for your follower" ),
-        semantic_payload( *guy, labels ), semantic_actions( *guy, labels ),
-        [guy, &semantic_close_requested]( const semantic_action_request &request ) {
+                                semantic_payload( *guy, labels ), semantic_actions( *guy, labels ),
+        [guy, &semantic_close_requested]( const semantic_action_request & request ) {
             if( request.action_id == "menu.cancel" ) {
                 semantic_close_requested = true;
                 return semantic_action_dispatch_result{ true, "", "" };

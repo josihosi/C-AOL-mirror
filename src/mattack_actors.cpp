@@ -1308,11 +1308,11 @@ bool zombie_rider_impact_actor::call( monster &z ) const
 
     Creature *target = z.attack_target();
     const bool legal_contact = target != nullptr && !target->is_dead_state() &&
-                                target->get_identity() == state.target_identity &&
-                                target->posz() == z.posz() &&
-                                z.is_adjacent( target, false ) &&
-                                z.attitude_to( *target ) == Creature::Attitude::HOSTILE &&
-                                z.sees( get_map(), *target );
+                               target->get_identity() == state.target_identity &&
+                               target->posz() == z.posz() &&
+                               z.is_adjacent( target, false ) &&
+                               z.attitude_to( *target ) == Creature::Attitude::HOSTILE &&
+                               z.sees( get_map(), *target );
     if( !legal_contact ) {
         DebugLog( D_INFO, DC_ALL ) << "zombie_rider impact_attempt ready=yes legal=no turn="
                                    << to_turn<int>( calendar::turn ) << '\n';

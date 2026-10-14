@@ -675,7 +675,7 @@ class ecology_watch_session
             active_ = true;
             pause_requested_ = false;
             monitor_id_ = debug_capture::instance().add_monitor(
-                              "ecology:" + selected->marker.alias, [this]() {
+            "ecology:" + selected->marker.alias, [this]() {
                 return tick();
             }, monitor_mode::on_change );
             return true;
@@ -804,7 +804,7 @@ class ecology_watch_session
                     identity, prior_, ring_, note.empty() ? std::nullopt :
                     std::optional<std::string>( note ), interventions_,
                     ecology_debug::incident_watch_state { spec_, last_watch_input_,
-                        last_watch_result_ } );
+                            last_watch_result_ } );
             if( !bundle.valid ) {
                 incident_status_ = "Incident rejected: " + bundle.error;
                 return false;
@@ -1251,10 +1251,10 @@ void debug_console::execute()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *const semantic_manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *semantic_manager, "debug_console", "Debug console",
-        std::map<std::string, std::string>{ { "native_owner", "DEBUG_CONSOLE" } },
-        std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "native_owner", "DEBUG_CONSOLE" } },
+        std::vector<semantic_action_descriptor> {
             { "debug_console.close", "", _( "Close debug console" ), true }
-        }, [&semantic_action]( const semantic_action_request &request ) {
+        }, [&semantic_action]( const semantic_action_request & request ) {
             if( request.action_id != "debug_console.close" || request.stable_id ||
                 !request.parameters.empty() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };

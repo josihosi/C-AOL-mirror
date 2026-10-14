@@ -56,8 +56,8 @@ TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
     test_mode = false;
 
     const std::filesystem::path path = std::filesystem::temp_directory_path() /
-                                      ( "pickup-quantity-wake-" + std::to_string(
-                                            std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+                                       ( "pickup-quantity-wake-" + std::to_string(
+                                               std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
     const char *old_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
     const std::optional<std::string> previous = old_path ?
             std::optional<std::string>( old_path ) : std::nullopt;
@@ -81,7 +81,7 @@ TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
     bool closing_reopened = false;
     bool arrived_inside_input = false;
     int accepted_quantity_receipts = 0;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         if( receipt.request_id == "arrival-boundary" ) {
             CHECK_FALSE( receipt.accepted );
             CHECK( receipt.rejection_reason == "wrong_run" );
@@ -90,7 +90,7 @@ TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
             ++accepted_quantity_receipts;
         }
     } );
-    manager.set_transport_observer( [&]( const semantic_request_transport_event &event ) {
+    manager.set_transport_observer( [&]( const semantic_request_transport_event & event ) {
         if( event.event != "jsonl_record" || event.request_id != "arrival-boundary" ) {
             return;
         }
@@ -108,9 +108,9 @@ TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
         REQUIRE( manager.submit_request( { "pickup-wake", prompt->surface_id,
                                            prompt->frame_id, "quantity", cancel ? "prompt.cancel" : "prompt.submit",
                                            std::nullopt, cancel ? std::map<std::string, std::string>{} :
-                                           std::map<std::string, std::string>{{ "text", "1" }} } ) );
+        std::map<std::string, std::string>{{ "text", "1" }} } ) );
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind == "string_prompt" ) {
             ++prompt_count;
             if( prompt_count == 1 ) {
@@ -136,7 +136,7 @@ TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
             count += quantity.get_int( "count" );
             CHECK( quantity.get_string( "unit" ) == "items" );
         }
-        const auto submit = [&]( const std::string &id, const std::string &request_id ) {
+        const auto submit = [&]( const std::string & id, const std::string & request_id ) {
             REQUIRE( manager.submit_request( { "pickup-wake", descriptor.surface_id, descriptor.frame_id,
                                                request_id, id, ( id == "inventory.commit" || id == "inventory.cancel" ) ? std::nullopt :
                                                std::optional<std::string>( uid ), {} } ) );
@@ -212,13 +212,13 @@ TEST_CASE( "pickup selection publishes native quantities before completing toggl
     semantic_surface_manager_session session( manager );
     semantic_surface_scope world( manager, "world", "World" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     std::string initial_frame;
     std::string selected_frame;
     int publications = 0;
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
         if( descriptor.kind != "inventory" ) {
             return;
         }
@@ -228,17 +228,17 @@ TEST_CASE( "pickup selection publishes native quantities before completing toggl
             initial_frame = descriptor.frame_id;
             CHECK( descriptor.payload.at( "selected_items" ) == "{}" );
             const auto toggle = std::find_if( descriptor.valid_actions.begin(),
-            descriptor.valid_actions.end(), [&uid]( const semantic_action_descriptor &action ) {
+            descriptor.valid_actions.end(), [&uid]( const semantic_action_descriptor & action ) {
                 return action.id == "inventory.toggle" && action.stable_id == uid;
             } );
             REQUIRE( toggle != descriptor.valid_actions.end() );
             const auto select = std::find_if( descriptor.valid_actions.begin(), toggle,
-            [&uid]( const semantic_action_descriptor &action ) {
+            [&uid]( const semantic_action_descriptor & action ) {
                 return action.id == "inventory.select" && action.stable_id == uid;
             } );
             CHECK( select != toggle );
             CHECK( std::count_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            []( const semantic_action_descriptor &action ) {
+            []( const semantic_action_descriptor & action ) {
                 return action.id == "inventory.commit";
             } ) == 1 );
             REQUIRE( manager.submit_request( { "pickup-run", descriptor.surface_id,
@@ -323,7 +323,7 @@ TEST_CASE( "pickup native partial quantities preserve current frames and physica
     int sequence = 0;
     std::string initial_frame;
     bool stale_rejected = false;
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         if( receipt.request_id == "old-frame" ) {
             CHECK_FALSE( receipt.accepted );
             stale_rejected = true;
@@ -331,11 +331,11 @@ TEST_CASE( "pickup native partial quantities preserve current frames and physica
             CHECK( receipt.accepted );
         }
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        const auto submit = [&]( const std::string &id, const std::optional<std::string> &target,
-                                 const std::map<std::string, std::string> &params = {} ) {
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        const auto submit = [&]( const std::string & id, const std::optional<std::string> &target,
+        const std::map<std::string, std::string> &params = {} ) {
             const auto found = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [&]( const semantic_action_descriptor &action ) {
+            [&]( const semantic_action_descriptor & action ) {
                 return action.id == id && action.stable_id == target.value_or( "" );
             } );
             REQUIRE( found != descriptor.valid_actions.end() );
@@ -368,9 +368,11 @@ TEST_CASE( "pickup native partial quantities preserve current frames and physica
             ( stage == 7 && chosen == 39 ) ) {
             return;
         }
-        const auto enabled = [&]( const std::string &id ) {
+        const auto enabled = [&]( const std::string & id ) {
             const auto action = std::find_if( descriptor.valid_actions.begin(), descriptor.valid_actions.end(),
-            [&]( const semantic_action_descriptor &candidate ) { return candidate.id == id && candidate.stable_id == uid; } );
+            [&]( const semantic_action_descriptor & candidate ) {
+                return candidate.id == id && candidate.stable_id == uid;
+            } );
             REQUIRE( action != descriptor.valid_actions.end() );
             return action->enabled;
         };
@@ -473,8 +475,11 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
     const std::optional<std::string> previous = old_path ? std::optional<std::string>( old_path ) :
             std::nullopt;
     on_out_of_scope cleanup( [&]() {
-        if( previous ) { setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 ); }
-        else { unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" ); }
+        if( previous ) {
+            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
+        } else {
+            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+        }
         std::filesystem::remove( path );
     } );
     setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
@@ -487,7 +492,9 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
         catacurses::init_interface();
         catacurses::resizeterm();
     }
-    on_out_of_scope close_renderer( [&]() { catacurses::endwin(); } );
+    on_out_of_scope close_renderer( [&]() {
+        catacurses::endwin();
+    } );
 #endif
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
     test_mode = false;
@@ -503,7 +510,9 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
     std::optional<semantic_surface_descriptor> popup_descriptor;
     std::vector<semantic_action_receipt> receipts;
     const auto submit_cancel = [&]() {
-        if( cancel_queued ) { return; }
+        if( cancel_queued ) {
+            return;
+        }
         cancel_queued = true;
         REQUIRE( manager.top() );
         const auto current = *manager.top();
@@ -511,7 +520,7 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
         REQUIRE( manager.submit_request( { manager.run_id(), current.surface_id, current.frame_id,
                                            "close-pickup", "inventory.cancel", std::nullopt, {} } ) );
     };
-    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
         std::cout << "R067_POPUP_RECEIPT request=" << receipt.request_id << " accepted=" << receipt.accepted
                   << " consumed=" << receipt.consuming_surface_id << "/" << receipt.consuming_frame_id
@@ -527,18 +536,23 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
             accepted_ack = receipt.accepted;
             // Bound the old failing path: the real popup has unwound without
             // consuming its acknowledgement. Close only the current parent.
-            if( !receipt.accepted ) { submit_cancel(); }
+            if( !receipt.accepted ) {
+                submit_cancel();
+            }
         }
     } );
-    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
-        std::cout << "R067_POPUP_PUBLICATION kind=" << descriptor.kind << " surface=" << descriptor.surface_id
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        std::cout << "R067_POPUP_PUBLICATION kind=" << descriptor.kind << " surface=" <<
+                  descriptor.surface_id
                   << " frame=" << descriptor.frame_id << std::endl;
         if( descriptor.kind == "inventory" ) {
             ++inventory_publications;
             if( inventory_publications == 1 ) {
                 REQUIRE( manager.submit_request( { manager.run_id(), descriptor.surface_id,
                                                    descriptor.frame_id, "empty-select", "inventory.select", std::to_string( uid ), {} } ) );
-            } else { submit_cancel(); }
+            } else {
+                submit_cancel();
+            }
         } else if( descriptor.kind == "prompt" ) {
             ++popup_publications;
             popup_descriptor = descriptor;
@@ -556,7 +570,7 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
     CHECK( accepted_ack );
     CHECK( popup_publications == 1 );
     CHECK( inventory_publications == 2 );
-    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto &receipt ) {
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & receipt ) {
         return receipt.request_id == "ack" && receipt.accepted;
     } ) == 1 );
     CHECK( here.i_at( position ).only_item().uid().get_value() == uid );
@@ -576,11 +590,14 @@ TEST_CASE( "unbound any-key popup still accepts ordinary native keyboard input",
         catacurses::init_interface();
         catacurses::resizeterm();
     }
-    on_out_of_scope close_renderer( [&]() { catacurses::endwin(); } );
+    on_out_of_scope close_renderer( [&]() {
+        catacurses::endwin();
+    } );
     restore_on_out_of_scope<bool> restore_test_mode( test_mode );
     test_mode = false;
     REQUIRE( ungetch( 'x' ) != -1 );
-    const auto result = query_popup().allow_anykey( true ).message( "%s", "Native acknowledgement" ).query();
+    const auto result = query_popup().allow_anykey( true ).message( "%s",
+                        "Native acknowledgement" ).query();
     CHECK_FALSE( result.wait_input );
     CHECK( result.evt.type == input_event_t::keyboard_char );
     CHECK( result.evt.get_first_input() == 'x' );

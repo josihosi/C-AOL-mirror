@@ -309,8 +309,8 @@ bool npc_trading::trade( npc &np, int cost, const std::string &deal,
     // the header.  Nested trade prompts remain above this modal guard.
     ui_adaptor modal( ui_adaptor::disable_uis_below{} );
     std::unique_ptr<trade_ui> tradeui = std::make_unique<trade_ui>( physical_payer, np, cost, deal,
-                                      you_nearby_item_radius, you_nearby_ally_radius,
-                                      you_basecamp, encounter_only );
+                                        you_nearby_item_radius, you_nearby_ally_radius,
+                                        you_basecamp, encounter_only );
     trade_ui::trade_result_t trade_result = tradeui->perform_trade();
     tradeui.reset();
     return complete_trade( np, physical_payer, trade_result );
@@ -322,12 +322,16 @@ const bandit_live_world::site_record *payment_site( const npc &trader, const Cha
 {
     const auto *site = bandit_live_world::active_operation_duty_site_for(
                            overmap_buffer.global_state.bandit_live_world, trader.getID() );
-    if( site == nullptr ) { return nullptr; }
+    if( site == nullptr ) {
+        return nullptr;
+    }
     const auto &operation = site->active_hostile_operation;
-    if( !operation.is_active() || operation.operation_kind != bandit_live_world::hostile_operation_kind::shakedown ||
+    if( !operation.is_active() ||
+        operation.operation_kind != bandit_live_world::hostile_operation_kind::shakedown ||
         !operation.shakedown_contact_established || operation.shakedown_receiver_id != payer.getID() ||
         operation.shakedown_receiver_is_avatar != payer.is_avatar() ||
-        ( !operation.shakedown_pending_branch.empty() && operation.shakedown_pending_branch != "pay_waiting_route" ) ||
+        ( !operation.shakedown_pending_branch.empty() &&
+          operation.shakedown_pending_branch != "pay_waiting_route" ) ||
         trader.is_dead() || !trader.is_active() || payer.is_dead_state() ||
         ( payer.is_npc() && !payer.as_npc()->is_active() ) ) {
         return nullptr;
@@ -345,15 +349,20 @@ std::vector<witnessed_transfer> observe_property_transfer(
     const bandit_live_world::site_record *site )
 {
     std::vector<witnessed_transfer> witnessed;
-    if( site == nullptr ) { return witnessed; }
+    if( site == nullptr ) {
+        return witnessed;
+    }
     const auto &outing = site->active_hostile_operation.reservation;
     const map &here = get_map();
     for( npc &observer : g->all_npcs() ) {
         if( &observer == &trader || observer.is_fake() || observer.is_hallucination() ||
             observer.is_dead() ||
             !observer.is_active() || observer.in_sleep_state() || observer.is_blind() ||
-            observer.has_effect( efftype_id( "narcosis" ) ) || observer.has_effect( efftype_id( "npc_suspend" ) ) ||
-            !observer.sees( here, payer ) ) { continue; }
+            observer.has_effect( efftype_id( "narcosis" ) ) ||
+            observer.has_effect( efftype_id( "npc_suspend" ) ) ||
+            !observer.sees( here, payer ) ) {
+            continue;
+        }
         npc_property_theft fact;
         fact.site_id = site->site_id;
         fact.operation_id = outing.activity_id;
@@ -372,13 +381,17 @@ std::vector<witnessed_transfer> observe_property_transfer(
                 fact.culprit_ids.push_back( id );
             }
         }
-        if( fact.culprit_ids.empty() ) { continue; }
+        if( fact.culprit_ids.empty() ) {
+            continue;
+        }
         for( const auto &entry : selected ) {
             const auto position = here.get_abs( entry.first.pos_bub( here ) );
             if( !observer.sees( here, entry.first.pos_bub( here ) ) ||
                 ( entry.first.where_recursive() == item_location::type::map &&
-                  !here.sees_some_items( entry.first.pos_bub( here ), observer ) ) ) { continue; }
-            std::function<void( const item * )> observe = [&]( const item *goods ) {
+                  !here.sees_some_items( entry.first.pos_bub( here ), observer ) ) ) {
+                continue;
+            }
+            std::function<void( const item * )> observe = [&]( const item * goods ) {
                 const auto owner = goods->get_owner();
                 bool wronged = owner == fact.wronged_faction && owner != payer.get_faction_id() &&
                                owner != trader.get_fac_id();
@@ -388,9 +401,11 @@ std::vector<witnessed_transfer> observe_property_transfer(
                 // cannot accuse a later coerced receiver again.
                 for( const auto &prior : observer.known_property_thefts ) {
                     if( !prior.voluntary_pickup || prior.wronged_faction != fact.wronged_faction ||
-                        goods->get_old_owner() != fact.wronged_faction ) { continue; }
-                    if( std::any_of( prior.property.begin(), prior.property.end(), [&]( const auto &source ) {
-                        return source.source_uid == goods->uid().get_value();
+                        goods->get_old_owner() != fact.wronged_faction ) {
+                        continue;
+                    }
+                    if( std::any_of( prior.property.begin(), prior.property.end(), [&]( const auto & source ) {
+                    return source.source_uid == goods->uid().get_value();
                     } ) ) {
                         wronged = true;
                         for( const auto id : prior.culprit_ids ) {
@@ -402,9 +417,9 @@ std::vector<witnessed_transfer> observe_property_transfer(
                 }
                 if( wronged ) {
                     fact.property.push_back( { goods->uid().get_value(), goods->typeId(),
-                        goods == entry.first.get_item() && goods->count_by_charges() ? entry.second :
-                        goods->count_by_charges() ? goods->charges : 1,
-                        fact.wronged_faction, position } );
+                                               goods == entry.first.get_item() &&goods->count_by_charges() ? entry.second :
+                                               goods->count_by_charges() ? goods->charges : 1,
+                                               fact.wronged_faction, position } );
                 }
                 // Selecting a physical child transfers that child, not its
                 // containing bag. When a container itself is handed over,
@@ -415,7 +430,9 @@ std::vector<witnessed_transfer> observe_property_transfer(
             };
             observe( entry.first.get_item() );
         }
-        if( fact.valid() ) { witnessed.push_back( { observer.getID(), std::move( fact ) } ); }
+        if( fact.valid() ) {
+            witnessed.push_back( { observer.getID(), std::move( fact ) } );
+        }
     }
     return witnessed;
 }
@@ -424,7 +441,9 @@ std::vector<witnessed_transfer> observe_property_transfer(
 std::string npc_trading::encounter_payment_identity( const npc &trader, const Character &payer )
 {
     const auto *site = payment_site( trader, payer );
-    if( site == nullptr ) { return {}; }
+    if( site == nullptr ) {
+        return {};
+    }
     const auto &operation = site->active_hostile_operation;
     const auto &outing = operation.reservation;
     std::ostringstream stream;
@@ -448,7 +467,7 @@ bool npc_trading::trade_to_stash( npc &np, Character &payer, const tripoint_abs_
     ui_adaptor modal( ui_adaptor::disable_uis_below{} );
     const auto make_ui = [&]() {
         return std::make_unique<trade_ui>( payer, np, cost, deal, nearby_item_radius, nearby_ally_radius,
-                                          payer_basecamp, encounter_only, true, nearby_z_radius );
+                                           payer_basecamp, encounter_only, true, nearby_z_radius );
     };
     auto tradeui = make_ui();
     while( true ) {
@@ -458,7 +477,7 @@ bool npc_trading::trade_to_stash( npc &np, Character &payer, const tripoint_abs_
         }
         stash_trade_failure failure;
         if( complete_trade_to_stash( np, payer, result, home, nearby_item_radius,
-                                    nearby_ally_radius, nearby_z_radius, &failure ) ) {
+                                     nearby_ally_radius, nearby_z_radius, &failure ) ) {
             return true;
         }
         if( failure == stash_trade_failure::source ) {
@@ -488,23 +507,31 @@ bool npc_trading::complete_trade_to_stash( npc &np, Character &payer,
     const auto *site = payment_site( np, payer );
     if( result.encounter_payment &&
         ( result.encounter_identity != encounter_payment_identity( np, payer ) ||
-          ( site && site->anchor != home ) ) ) { return false; }
+          ( site && site->anchor != home ) ) ) {
+        return false;
+    }
     for( const auto &snapshot : result.source_snapshots ) {
-        if( !snapshot.location || get_map().get_abs( snapshot.location.pos_bub( get_map() ) ) != snapshot.position ) {
+        if( !snapshot.location ||
+            get_map().get_abs( snapshot.location.pos_bub( get_map() ) ) != snapshot.position ) {
             return false;
         }
         std::vector<std::tuple<std::int64_t, itype_id, faction_id, int>> current;
-        snapshot.location->visit_items( [&]( const item *goods, const item * ) {
-            current.emplace_back( goods->uid().get_value(), goods->typeId(), goods->get_owner(), goods->charges );
+        snapshot.location->visit_items( [&]( const item * goods, const item * ) {
+            current.emplace_back( goods->uid().get_value(), goods->typeId(), goods->get_owner(),
+                                  goods->charges );
             return VisitResponse::NEXT;
         } );
-        if( current != snapshot.items ) { return false; }
+        if( current != snapshot.items ) {
+            return false;
+        }
     }
     // Native selections name each discrete item once (charged items carry a
     // quantity). Reject stale, duplicate and overlapping parent/child sources
     // before loading or changing the destination or debiting anything.
     std::vector<const item *> sources;
-    for( const auto *selection : { &result.items_you, &result.items_trader } ) {
+    for( const auto *selection : {
+             &result.items_you, &result.items_trader
+         } ) {
         for( const auto &entry : *selection ) {
             if( !entry.first || entry.second <= 0 ||
                 ( entry.first->count_by_charges() ? entry.second > entry.first->charges : entry.second != 1 ) ) {
@@ -528,14 +555,16 @@ bool npc_trading::complete_trade_to_stash( npc &np, Character &payer,
 
     const auto payer_sources = encounter_trade_items( payer, np, nearby_item_radius,
                                nearby_ally_radius, nearby_z_radius );
-    const auto trader_sources = encounter_trade_items( np, payer, np.is_player_ally() ? -1 : 1, 0, 0, false );
+    const auto trader_sources = encounter_trade_items( np, payer, np.is_player_ally() ? -1 : 1, 0, 0,
+                                false );
     const auto eligible = []( const trade_selector::select_t &selected,
     const std::vector<item_location> &current ) {
-        return std::all_of( selected.begin(), selected.end(), [&]( const auto &entry ) {
+        return std::all_of( selected.begin(), selected.end(), [&]( const auto & entry ) {
             return std::find( current.begin(), current.end(), entry.first ) != current.end();
         } );
     };
-    if( !eligible( result.items_you, payer_sources ) || !eligible( result.items_trader, trader_sources ) ) {
+    if( !eligible( result.items_you, payer_sources ) ||
+        !eligible( result.items_trader, trader_sources ) ) {
         return false;
     }
     // Capture observable source/actor facts while every original location and
@@ -598,15 +627,18 @@ bool npc_trading::complete_trade_to_stash( npc &np, Character &payer,
             json.member( "when", calendar::turn );
             json.member( "source_position", get_map().get_abs( entry.first.pos_bub( get_map() ) ) );
             json.member( "quantity", entry.second );
-            json.member( "property" ); json.start_array();
-            entry.first->visit_items( [&]( const item *part, const item * ) {
+            json.member( "property" );
+            json.start_array();
+            entry.first->visit_items( [&]( const item * part, const item * ) {
                 npc_taken_property source{ part->uid().get_value(), part->typeId(),
-                    part == entry.first.get_item() && part->count_by_charges() ? entry.second :
-                    part->count_by_charges() ? part->charges : 1,
-                    part->get_owner(), get_map().get_abs( entry.first.pos_bub( get_map() ) ) };
-                source.serialize( json ); return VisitResponse::NEXT;
+                                           part == entry.first.get_item() &&part->count_by_charges() ? entry.second :
+                                           part->count_by_charges() ? part->charges : 1,
+                                           part->get_owner(), get_map().get_abs( entry.first.pos_bub( get_map() ) ) };
+                source.serialize( json );
+                return VisitResponse::NEXT;
             } );
-            json.end_array(); json.end_object();
+            json.end_array();
+            json.end_object();
             goods.set_var( "shakedown_source", stream.str() );
         }
         goods.set_owner( np );
@@ -638,14 +670,20 @@ bool npc_trading::complete_trade_to_stash( npc &np, Character &payer,
     // recovery intent before removing its object; durable witnessed facts above
     // retain attribution without redirecting NPC theft toward the avatar.
     for( npc &observer : g->all_npcs() ) {
-        if( !observer.known_stolen_item ) { continue; }
+        if( !observer.known_stolen_item ) {
+            continue;
+        }
         for( const auto &entry : result.items_you ) {
-            if( entry.first->count_by_charges() && entry.second < entry.first->charges ) { continue; }
+            if( entry.first->count_by_charges() && entry.second < entry.first->charges ) {
+                continue;
+            }
             const auto contained = entry.first->all_items_ptr();
             if( observer.known_stolen_item == entry.first.get_item() ||
                 std::find( contained.begin(), contained.end(), observer.known_stolen_item ) != contained.end() ) {
                 observer.known_stolen_item = nullptr;
-                if( observer.get_attitude() == NPCATT_RECOVER_GOODS ) { observer.set_attitude( NPCATT_NULL ); }
+                if( observer.get_attitude() == NPCATT_RECOVER_GOODS ) {
+                    observer.set_attitude( NPCATT_NULL );
+                }
                 break;
             }
         }
@@ -681,7 +719,7 @@ bool npc_trading::complete_trade_to_stash( npc &np, Character &payer,
 }
 
 bool npc_trading::complete_trade( npc &np, Character &player_character,
-                                trade_ui::trade_result_t &trade_result )
+                                  trade_ui::trade_result_t &trade_result )
 {
     const bool traded = trade_result.traded;
 

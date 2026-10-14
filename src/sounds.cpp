@@ -283,13 +283,13 @@ static void record_significant_sound( const tripoint_bub_ms &p, const int volume
     const tripoint_abs_omt source_omt = coords::project_to<coords::omt>( get_map().get_abs( p ) );
     const int bucket = emitted_minutes - emitted_minutes % 30;
     const auto matching = std::find_if( recent_significant_sounds.begin(),
-    recent_significant_sounds.end(), [&source_omt, kind, bucket](
+                                        recent_significant_sounds.end(), [&source_omt, kind, bucket](
     const significant_sound_event & event ) {
         return event.source_omt == source_omt && event.kind == kind &&
                event.emitted_minutes - event.emitted_minutes % 30 == bucket;
     } );
     const int bounded_volume = std::clamp( volume, significant_sound_min_volume,
-                                          significant_sound_max_volume );
+                                           significant_sound_max_volume );
     if( matching != recent_significant_sounds.end() ) {
         if( bounded_volume > matching->volume ||
             ( bounded_volume == matching->volume && emitted_minutes > matching->emitted_minutes ) ) {
@@ -339,23 +339,23 @@ static int sound_distance( const tripoint_bub_ms &source, const tripoint_bub_ms 
 }
 
 static int sound_heard_volume( int raw_volume, int weather_volume,
-                              float hearing_multiplier, int distance )
+                               float hearing_multiplier, int distance )
 {
     return static_cast<int>( ( raw_volume - weather_volume ) * hearing_multiplier ) - distance;
 }
 
 bool sounds::can_hear_local_sound( const Character &hearer,
-                                  const tripoint_bub_ms &source, int volume )
+                                   const tripoint_bub_ms &source, int volume )
 {
     return !hearer.is_deaf() && ( source == hearer.pos_bub() ||
-           sound_heard_volume( volume, get_weather().weather_id->sound_attn,
-                              hearer.hearing_ability(), sound_distance( hearer.pos_bub(), source ) ) > 0 );
+                                  sound_heard_volume( volume, get_weather().weather_id->sound_attn,
+                                          hearer.hearing_ability(), sound_distance( hearer.pos_bub(), source ) ) > 0 );
 }
 
 bool sounds::robbery_demand_pending( const robbery_demand &demand )
 {
     return std::any_of( sounds_since_last_turn.begin(), sounds_since_last_turn.end(),
-    [&demand]( const auto &entry ) {
+    [&demand]( const auto & entry ) {
         const auto &pending = entry.second.robbery;
         return pending && pending->site_id == demand.site_id &&
                pending->operation_id == demand.operation_id && pending->generation == demand.generation &&
@@ -751,15 +751,19 @@ void sounds::process_sound_markers( Character *you, bool robbery_only )
         // This row observes the real queued event and this delivery pass, not a
         // later can_hear recheck or the speaker's current contact position.
         const auto record_robbery_delivery = [&]( const char *reason,
-        const std::optional<int> distance = std::nullopt,
+                                             const std::optional<int> distance = std::nullopt,
         const std::optional<int> heard = std::nullopt ) {
-            if( !sound.robbery ) { return; }
+            if( !sound.robbery ) {
+                return;
+            }
             const auto &demand = *sound.robbery;
             const int turn = to_turns<int>( calendar::turn - calendar::turn_zero );
             const auto scope = raid_decision_trace::environment_selected_npcs();
             if( !scope.includes_turn( turn ) ||
                 !( scope.includes( demand.speaker_id.get_value() ) ||
-                   scope.includes( you->getID().get_value() ) ) ) { return; }
+                   scope.includes( you->getID().get_value() ) ) ) {
+                return;
+            }
             std::ostringstream stream;
             JsonOut json( stream );
             json.start_object();

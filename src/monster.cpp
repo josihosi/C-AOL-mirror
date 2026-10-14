@@ -405,35 +405,35 @@ void monster::on_move( const tripoint_abs_ms &old_pos )
     if( type->id == mtype_id( "mon_zombie_rider" ) ) {
         if( physical_move_to_step ) {
             zombie_rider_overmap_ai::rider_pursuit_state &state = zombie_rider_pursuit_state();
-        const int now_turn = to_turn<int>( calendar::turn );
-        const bool before_ready = state.impact_ready;
-        DebugLog( D_INFO, DC_ALL ) << "zombie_rider impact_arm_check old=" << old_pos.to_string_writable()
-                                   << " new=" << pos_abs().to_string_writable()
-                                   << " target=" << state.target_identity
-                                   << " player=" << get_player_character().get_identity()
-                                   << " ready_before=" << ( before_ready ? "yes" : "no" ) << '\n';
-        auto arm_if_contact = [&]( Creature *target ) {
-            if( target != nullptr && !target->is_dead_state() &&
-                target->get_identity() == state.target_identity &&
-                target->posz() == posz() && old_pos.z() == posz() &&
-                rl_dist( old_pos, target->pos_abs() ) == rl_dist( pos_abs(), target->pos_abs() ) + 1 &&
-                rl_dist( old_pos, pos_abs() ) == 1 && is_adjacent( target, false ) &&
-                attitude_to( *target ) == Creature::Attitude::HOSTILE ) {
-                state.impact_ready = true;
-                state.impact_ready_turn = now_turn;
-                DebugLog( D_INFO, DC_ALL ) << "zombie_rider impact_armed turn=" << now_turn
-                                           << " target=" << state.target_identity << '\n';
-            }
-        };
-        arm_if_contact( &get_player_character() );
-        if( !state.impact_ready ) {
-            for( const tripoint_bub_ms &p : get_map().points_in_radius( pos_bub(), 1 ) ) {
-                arm_if_contact( get_creature_tracker().creature_at( p ) );
-                if( state.impact_ready ) {
-                    break;
+            const int now_turn = to_turn<int>( calendar::turn );
+            const bool before_ready = state.impact_ready;
+            DebugLog( D_INFO, DC_ALL ) << "zombie_rider impact_arm_check old=" << old_pos.to_string_writable()
+                                       << " new=" << pos_abs().to_string_writable()
+                                       << " target=" << state.target_identity
+                                       << " player=" << get_player_character().get_identity()
+                                       << " ready_before=" << ( before_ready ? "yes" : "no" ) << '\n';
+            auto arm_if_contact = [&]( Creature * target ) {
+                if( target != nullptr && !target->is_dead_state() &&
+                    target->get_identity() == state.target_identity &&
+                    target->posz() == posz() && old_pos.z() == posz() &&
+                    rl_dist( old_pos, target->pos_abs() ) == rl_dist( pos_abs(), target->pos_abs() ) + 1 &&
+                    rl_dist( old_pos, pos_abs() ) == 1 && is_adjacent( target, false ) &&
+                    attitude_to( *target ) == Creature::Attitude::HOSTILE ) {
+                    state.impact_ready = true;
+                    state.impact_ready_turn = now_turn;
+                    DebugLog( D_INFO, DC_ALL ) << "zombie_rider impact_armed turn=" << now_turn
+                                               << " target=" << state.target_identity << '\n';
+                }
+            };
+            arm_if_contact( &get_player_character() );
+            if( !state.impact_ready ) {
+                for( const tripoint_bub_ms &p : get_map().points_in_radius( pos_bub(), 1 ) ) {
+                    arm_if_contact( get_creature_tracker().creature_at( p ) );
+                    if( state.impact_ready ) {
+                        break;
+                    }
                 }
             }
-        }
         }
     }
     g->update_zombie_pos( *this, old_pos, pos_abs() );

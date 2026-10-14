@@ -57,14 +57,14 @@ TEST_CASE( "R009-M051 observes released terminal shakedown replays without mutat
     const std::string saved = serialize_terminal_replay_world( reloaded );
 
     CHECK( bandit_live_world::observe_terminal_hostile_shakedown_replay( reloaded,
-           released_winner, identity ) ==
+            released_winner, identity ) ==
            bandit_live_world::terminal_hostile_shakedown_replay_disposition::exact_duplicate );
     CHECK( serialize_terminal_replay_world( reloaded ) == saved );
 
     bandit_live_world::terminal_hostile_shakedown_replay_identity stale = identity;
     stale.generation++;
     CHECK( bandit_live_world::observe_terminal_hostile_shakedown_replay( reloaded,
-           released_winner, stale ) ==
+            released_winner, stale ) ==
            bandit_live_world::terminal_hostile_shakedown_replay_disposition::stale_replay );
     CHECK( serialize_terminal_replay_world( reloaded ) == saved );
 }

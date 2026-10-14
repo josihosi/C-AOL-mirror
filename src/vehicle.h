@@ -869,7 +869,9 @@ class vehicle
         // its own remaining footprint independently.
         struct resident_index_link {
             mapbuffer *owner = nullptr;
-            resident_index_link &operator=( const resident_index_link & ) { return *this; }
+            resident_index_link &operator=( const resident_index_link & ) {
+                return *this;
+            }
         };
         resident_index_link resident_index; // NOLINT(cata-serialize)
         // TODO: Get rid of untyped overload.

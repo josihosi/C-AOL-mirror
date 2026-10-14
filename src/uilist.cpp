@@ -959,7 +959,7 @@ shared_ptr_fast<uilist_impl> uilist::query( bool loop, int timeout, bool allow_u
                 const uilist_entry &entry = entries[index];
                 actions.push_back( { "menu.select", entry.semantic_stable_id, entry.txt, entry.enabled } );
                 actions.push_back( { "menu.choose", entry.semantic_stable_id, entry.txt,
-                                     entry.enabled && allow_confirm } );
+                                     entry.enabled &&allow_confirm } );
             }
         }
         if( filtering ) {
@@ -974,12 +974,14 @@ shared_ptr_fast<uilist_impl> uilist::query( bool loop, int timeout, bool allow_u
         return actions;
     };
     const auto semantic_payload = [this]() {
-        return std::map<std::string, std::string>{
+        return std::map<std::string, std::string> {
             { "title", title }, { "text", text }, { "filter", filter },
             { "filtered_entry_count", std::to_string( fentries.size() ) },
             { "filter_required", semantic_actions_require_filter( entries, fentries ) ? "true" : "false" },
-            { "selected_stable_id", selected >= 0 && selected < static_cast<int>( entries.size() ) ?
-                entries[selected].semantic_stable_id : "" }
+            {
+                "selected_stable_id", selected >= 0 && selected < static_cast<int>( entries.size() ) ?
+                entries[selected].semantic_stable_id : ""
+            }
         };
     };
     if( semantic_manager != nullptr && semantic_owner ) {
@@ -988,9 +990,11 @@ shared_ptr_fast<uilist_impl> uilist::query( bool loop, int timeout, bool allow_u
         // and intentionally leave the window title empty.  The semantic
         // breadcrumb must still name this native owner.
         const std::string semantic_breadcrumb = !title.empty() ? title :
-                                              !text.empty() ? text : _( "Menu" );
-        semantic_scope.emplace( *manager, "menu", semantic_breadcrumb, semantic_payload(), semantic_actions(),
-        [this, manager, &semantic_scope, &semantic_actions, &semantic_payload]( const semantic_action_request &request ) {
+                                                !text.empty() ? text : _( "Menu" );
+        semantic_scope.emplace( *manager, "menu", semantic_breadcrumb, semantic_payload(),
+                                semantic_actions(),
+                                [this, manager, &semantic_scope, &semantic_actions,
+              &semantic_payload]( const semantic_action_request & request ) {
             if( request.action_id == "menu.cancel" && allow_cancel ) {
                 ret = UILIST_CANCEL;
                 return semantic_action_dispatch_result{ true, "", "", semantic_await_child_successor };
@@ -1046,7 +1050,7 @@ shared_ptr_fast<uilist_impl> uilist::query( bool loop, int timeout, bool allow_u
                         callback->confirm( this );
                     }
                     return semantic_action_dispatch_result{ true, "", "",
-                                                             semantic_await_child_successor };
+                                                            semantic_await_child_successor };
                 }
                 if( request.action_id != "menu.select" ) {
                     return semantic_action_dispatch_result{ false, "unadvertised_action", "" };

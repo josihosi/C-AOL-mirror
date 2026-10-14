@@ -217,7 +217,8 @@ std::size_t environment_size( const char *name, const std::size_t fallback )
     }
 
     std::uint64_t value = 0;
-    const std::from_chars_result parsed = std::from_chars( text.data(), text.data() + text.size(), value );
+    const std::from_chars_result parsed = std::from_chars( text.data(), text.data() + text.size(),
+                                          value );
     if( parsed.ec != std::errc() || parsed.ptr != text.data() + text.size() ||
         value > std::numeric_limits<std::size_t>::max() ) {
         throw std::runtime_error( std::string( "invalid nonnegative integer in " ) + name );
@@ -335,11 +336,13 @@ std::string sha256( const std::string &content )
             0x391c0cb3U, 0x4ed8aa4aU, 0x5b9cca4fU, 0x682e6ff3U,
             0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
             0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U,
-        } };
+        }
+    };
     std::array<std::uint32_t, 8> state = { {
             0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
             0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
-        } };
+        }
+    };
 
     std::vector<std::uint8_t> message( content.begin(), content.end() );
     const std::uint64_t bit_length = static_cast<std::uint64_t>( message.size() ) * 8;
@@ -441,7 +444,8 @@ void add_legacy_saturated_leads( bandit_live_world::site_record &site )
             { -4, 0 }, { 4, 0 }, { 0, -4 }, { 0, 4 },
             { -5, -1 }, { 5, 1 }, { -1, 5 }, { 1, -5 },
             { -6, 0 }, { 6, 0 }, { 0, -6 }, { 0, 6 },
-        } };
+        }
+    };
 
     site.intelligence_map.known_radius_omt = 8;
     site.intelligence_map.leads.reserve( near_offsets.size() );
@@ -451,7 +455,7 @@ void add_legacy_saturated_leads( bandit_live_world::site_record &site )
         lead.status = bandit_live_world::camp_lead_status::harvested;
         lead.target_id = "forest";
         lead.omt = tripoint_abs_omt( site.anchor.x() + offset.first,
-                                    site.anchor.y() + offset.second, site.anchor.z() );
+                                     site.anchor.y() + offset.second, site.anchor.z() );
         lead.lead_id = bandit_live_world::make_structural_bounty_lead_id(
                            site.site_id, lead.omt, lead.target_id );
         lead.source_key = "structural_bounty:forest";
@@ -490,7 +494,7 @@ bandit_live_world::world_state make_legacy_fixture( const std::size_t site_count
             site.supply_accounted_living_total = legacy_loaded_roster_members;
         }
         site.anchor = tripoint_abs_omt( static_cast<int>( site_index * 20 ),
-                                       static_cast<int>( site_index * 20 ), 0 );
+                                        static_cast<int>( site_index * 20 ), 0 );
         site.footprint.push_back( site.anchor );
         const tripoint_abs_ms home_base = project_to<coords::ms>( site.anchor );
 
@@ -530,8 +534,8 @@ void add_evidence_aging_leads( bandit_live_world::site_record &site )
         lead.revision = 3;
         lead.target_id = "aging-target-" + suffix.str();
         lead.omt = tripoint_abs_omt( site.anchor.x() + 1 + lead_index % 8,
-                                    site.anchor.y() + 1 + lead_index / 8,
-                                    site.anchor.z() );
+                                     site.anchor.y() + 1 + lead_index / 8,
+                                     site.anchor.z() );
         lead.first_seen_minutes = 0;
         lead.last_seen_minutes = 0;
         lead.last_checked_minutes = 0;
@@ -650,7 +654,7 @@ class scheduler_wait_tracker
                     continue;
                 }
                 const std::uint64_t dispatch_considered = service.counts[static_cast<std::size_t>(
-                        bandit_live_world_probe::site_service::dispatch_considered )];
+                            bandit_live_world_probe::site_service::dispatch_considered )];
                 if( dispatch_considered <= record.dispatch_considered ) {
                     continue;
                 }
@@ -773,7 +777,7 @@ void write_process_memory( JsonOut &json,
 {
     std::optional<std::uint64_t> maximum_sampled_resident_bytes;
     const bool all_samples_supported = !samples.empty() && std::all_of( samples.begin(),
-                                       samples.end(), []( const process_memory_snapshot &sample ) {
+    samples.end(), []( const process_memory_snapshot & sample ) {
         return sample.resident_bytes.has_value();
     } );
     json.start_object();
@@ -799,7 +803,7 @@ void write_process_memory( JsonOut &json,
                 json.null_member( "delta_from_previous_bytes" );
             }
             maximum_sampled_resident_bytes = std::max( maximum_sampled_resident_bytes.value_or( 0 ),
-                                              *sample.resident_bytes );
+                                             *sample.resident_bytes );
             previous_resident_bytes = sample.resident_bytes;
         } else {
             json.null_member( "resident_bytes" );
@@ -962,13 +966,14 @@ void write_fairness( JsonOut &json, const bandit_live_world::world_state &world,
     json.member( "per_site" );
     json.start_array();
     for( const bandit_live_world::site_record &site : world.sites ) {
-        const bandit_live_world_probe::site_service_record *record = find_site_service( probe, site.site_id );
+        const bandit_live_world_probe::site_service_record *record = find_site_service( probe,
+                site.site_id );
         std::array<std::uint64_t, bandit_live_world_probe::site_service_count> counts = {};
         if( record != nullptr ) {
             counts = record->counts;
         }
         const std::uint64_t scan_samples = counts[static_cast<std::size_t>(
-                bandit_live_world_probe::site_service::scan_samples )];
+                                               bandit_live_world_probe::site_service::scan_samples )];
         if( !have_site ) {
             minimum_scan_samples = scan_samples;
             have_site = true;
@@ -988,10 +993,10 @@ void write_fairness( JsonOut &json, const bandit_live_world::world_state &world,
                 have_eligible_site = true;
             } else {
                 minimum_eligible_routine_scan_samples = std::min(
-                            minimum_eligible_routine_scan_samples, scan_samples );
+                        minimum_eligible_routine_scan_samples, scan_samples );
             }
             maximum_eligible_routine_scan_samples = std::max(
-                        maximum_eligible_routine_scan_samples, scan_samples );
+                    maximum_eligible_routine_scan_samples, scan_samples );
         }
 
         json.start_object();
@@ -1103,7 +1108,7 @@ void run_workload_update( const std::string &workload, bandit_live_world::world_
     const std::size_t minute_multiplier = hourly_scheduler_cadence ? 60 : 1;
     const int now_minutes = static_cast<int>(
                                 update_index % ( static_cast<std::size_t>(
-                                        std::numeric_limits<int>::max() ) / minute_multiplier ) ) *
+                                            std::numeric_limits<int>::max() ) / minute_multiplier ) ) *
                             static_cast<int>( minute_multiplier );
     const bool saturated_leads = workload == "lead_saturated";
     const int scan_budget = saturated_leads ? static_cast<int>( world.sites.size() * 4 ) :
@@ -1111,11 +1116,11 @@ void run_workload_update( const std::string &workload, bandit_live_world::world_
     const int dispatch_cap = workload == "structural" ? 1 : 0;
     bandit_live_world::advance_structural_bounty_maintenance( world, now_minutes, scan_budget,
             dispatch_cap,
-    []( const tripoint_abs_omt &omt ) -> std::optional<std::string> {
+    []( const tripoint_abs_omt & omt ) -> std::optional<std::string> {
         return omt.z() == 0 ? std::optional<std::string>( "forest" ) : std::nullopt;
     }, []( const bandit_live_world::site_record &, const bandit_live_world::camp_map_lead & ) {
         return bandit_live_world::structural_threat_read{ 0, true,
-               "deterministic hostile-camp benchmark terrain" };
+                "deterministic hostile-camp benchmark terrain" };
     } );
 }
 
@@ -1205,7 +1210,7 @@ void run_observer_query( const bandit_live_world::world_state &world, observer_m
                                            metrics.maximum_considered_count,
                                            snapshot.metadata.considered_count );
     metrics.maximum_emitted_count = std::max<std::uint64_t>( metrics.maximum_emitted_count,
-                                      snapshot.metadata.emitted_count );
+                                    snapshot.metadata.emitted_count );
     metrics.truncated_query_count += snapshot.metadata.truncated ? 1 : 0;
     const std::uint64_t elapsed = static_cast<std::uint64_t>(
                                       snapshot.metadata.query_microseconds );
@@ -1460,7 +1465,8 @@ void require_identical_serialized( const std::string &actual, const std::string 
     if( actual == expected ) {
         return;
     }
-    const auto mismatch = std::mismatch( actual.begin(), actual.end(), expected.begin(), expected.end() );
+    const auto mismatch = std::mismatch( actual.begin(), actual.end(), expected.begin(),
+                                         expected.end() );
     const std::size_t offset = static_cast<std::size_t>(
                                    std::distance( actual.begin(), mismatch.first ) );
     std::ostringstream message;
@@ -1527,7 +1533,7 @@ TEST_CASE( "hostile camp evidence aging benchmark fixture is mixed and bounded",
     CHECK( metrics.leads_considered == 2 * evidence_aging_leads_per_site );
     CHECK( metrics.leads_aged == 2 * evidence_aging_signal_leads_per_site );
     CHECK( metrics.leads_pruned == 2 * ( evidence_aging_signal_leads_per_site +
-                                        evidence_aging_prunable_terminal_leads_per_site ) );
+                                         evidence_aging_prunable_terminal_leads_per_site ) );
     for( const bandit_live_world::site_record &site : world.sites ) {
         REQUIRE( site.intelligence_map.leads.size() ==
                  evidence_aging_retained_leads_per_site );
@@ -1640,10 +1646,10 @@ TEST_CASE( "hostile camp deterministic benchmark driver",
     const std::size_t clock_floor_samples = environment_size(
             "CAOL_HOSTILE_BENCHMARK_CLOCK_FLOOR_SAMPLES", 10000 );
     const std::size_t configured_calendar_turn = environment_size(
-            "CAOL_HOSTILE_BENCHMARK_CALENDAR_TURN", benchmark_default_calendar_turn );
+                "CAOL_HOSTILE_BENCHMARK_CALENDAR_TURN", benchmark_default_calendar_turn );
     const std::size_t configured_season_length_days = environment_size(
-            "CAOL_HOSTILE_BENCHMARK_SEASON_LENGTH_DAYS",
-            benchmark_default_season_length_days );
+                "CAOL_HOSTILE_BENCHMARK_SEASON_LENGTH_DAYS",
+                benchmark_default_season_length_days );
     const std::string variant = environment_string( "CAOL_HOSTILE_BENCHMARK_VARIANT",
                                 "sites-" + std::to_string( site_count ) );
     const std::string output_path = environment_string( "CAOL_HOSTILE_BENCHMARK_OUTPUT" );
@@ -1689,9 +1695,9 @@ TEST_CASE( "hostile camp deterministic benchmark driver",
     memory_samples.reserve( 12 );
     record_process_memory( memory_samples, "before_fixture_construction" );
     bandit_live_world::world_state world = evidence_aging_workload( workload ) ?
-            make_evidence_aging_fixture( site_count ) :
-            make_legacy_fixture( site_count, saturate_existing_leads,
-                                 observer_workload( workload ) );
+                                           make_evidence_aging_fixture( site_count ) :
+                                           make_legacy_fixture( site_count, saturate_existing_leads,
+                                                   observer_workload( workload ) );
     record_process_memory( memory_samples, "after_fixture_construction" );
     const cardinality initial_cardinality = measure_cardinality( world );
     const std::size_t expected_initial_leads = evidence_aging_workload( workload ) ?
@@ -1759,8 +1765,8 @@ TEST_CASE( "hostile camp deterministic benchmark driver",
                                               benchmark_clock::now() - update_started ).count() );
         }
         wall_time_ns = std::max<std::int64_t>( 0,
-                                              std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                      benchmark_clock::now() - wall_started ).count() );
+                                               std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                       benchmark_clock::now() - wall_started ).count() );
         timing_probe_result = probe_session.result();
     }
     record_process_memory( memory_samples, "after_timing_replay" );
@@ -1793,7 +1799,7 @@ TEST_CASE( "hostile camp deterministic benchmark driver",
         if( fairness_evidence_aging.applicable ) {
             run_evidence_aging_update( fairness_world, fairness_evidence_aging );
         } else if( workload != "serialize" && workload != "whole_save" &&
-            !observer_workload( workload ) ) {
+                   !observer_workload( workload ) ) {
             for( std::size_t update = 0; update < updates; ++update ) {
                 run_workload_update( workload, fairness_world, update, fairness_last_serialized,
                                      workload == "structural" );

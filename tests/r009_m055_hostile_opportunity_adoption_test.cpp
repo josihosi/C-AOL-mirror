@@ -64,7 +64,7 @@ TEST_CASE( "authoritative player opportunity adopts once then dispatches the rou
     const std::string adopted_lead_id = adopted_lead.lead_id;
 
     CHECK( bandit_live_world::adopt_observed_hostile_player_opportunities( world, 60,
-    []( const bandit_live_world::site_record &,
+            []( const bandit_live_world::site_record &,
     const bandit_live_world::hostile_target_opportunity_record & ) {
         return true;
     } ) == 0 );
@@ -75,10 +75,10 @@ TEST_CASE( "authoritative player opportunity adopts once then dispatches the rou
     []( const tripoint_abs_omt & ) -> std::optional<std::string> {
         return std::nullopt;
     }, []( const bandit_live_world::site_record &,
-    const bandit_live_world::camp_map_lead & ) {
+           const bandit_live_world::camp_map_lead & ) {
         return bandit_live_world::structural_threat_read{ 0, true, "test-clear" };
     }, []( const bandit_live_world::site_record &,
-    const bandit_live_world::structural_outing_plan & ) {
+           const bandit_live_world::structural_outing_plan & ) {
         return bandit_live_world::structural_route_read{ true, 4, 0, "test-routable" };
     } );
 
@@ -88,8 +88,9 @@ TEST_CASE( "authoritative player opportunity adopts once then dispatches the rou
     CHECK( dispatched.active_outing.target_id == adopted_lead_id );
     REQUIRE( world.find_hostile_target_opportunity( target_id, target_omt ) != nullptr );
     CHECK( world.find_hostile_target_opportunity( target_id, target_omt )->revision == 1 );
-    CHECK( dispatched.active_outing.member_ids == std::vector<character_id>{
-               character_id( 2000 ), character_id( 2001 ) } );
+    CHECK( dispatched.active_outing.member_ids == std::vector<character_id> {
+        character_id( 2000 ), character_id( 2001 )
+    } );
 }
 
 TEST_CASE( "consumed player opportunity is never adopted", "[bandit][r009_m055]" )
@@ -100,7 +101,7 @@ TEST_CASE( "consumed player opportunity is never adopted", "[bandit][r009_m055]"
             80, 1, 1, 1, "operation", "report", 1 } );
 
     CHECK( bandit_live_world::adopt_observed_hostile_player_opportunities( world, 60,
-    []( const bandit_live_world::site_record &,
+            []( const bandit_live_world::site_record &,
     const bandit_live_world::hostile_target_opportunity_record & ) {
         return true;
     } ) == 0 );
@@ -110,7 +111,7 @@ TEST_CASE( "consumed player opportunity is never adopted", "[bandit][r009_m055]"
     world.hostile_target_opportunities.push_back( { "player@2,0,0", tripoint_abs_omt( 2, 0, 0 ),
             80, 1, 1, 1, "", "", 0 } );
     CHECK( bandit_live_world::adopt_observed_hostile_player_opportunities( world, 60,
-    []( const bandit_live_world::site_record &,
+            []( const bandit_live_world::site_record &,
     const bandit_live_world::hostile_target_opportunity_record & ) {
         return false;
     } ) == 0 );
@@ -118,7 +119,7 @@ TEST_CASE( "consumed player opportunity is never adopted", "[bandit][r009_m055]"
 
     world.hostile_target_opportunities.front().revision = 0;
     CHECK( bandit_live_world::adopt_observed_hostile_player_opportunities( world, 60,
-    []( const bandit_live_world::site_record &,
+            []( const bandit_live_world::site_record &,
     const bandit_live_world::hostile_target_opportunity_record & ) {
         return true;
     } ) == 0 );

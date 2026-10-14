@@ -16,10 +16,10 @@ TEST_CASE( "committed dialogue effects do not expose retiring dialogue or World 
     semantic_surface_manager manager( "dialogue-run" );
     std::vector<semantic_surface_descriptor> descriptors;
     std::vector<semantic_action_receipt> receipts;
-    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor &descriptor ) {
+    manager.set_descriptor_observer( [&descriptors]( const semantic_surface_descriptor & descriptor ) {
         descriptors.push_back( descriptor );
     } );
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     std::optional<semantic_surface_scope> world;
@@ -32,7 +32,7 @@ TEST_CASE( "committed dialogue effects do not expose retiring dialogue or World 
         } );
         const auto frame = *manager.top();
         REQUIRE( manager.submit_request( { "dialogue-run", frame.surface_id, frame.frame_id,
-                                          "choose-1", "dialogue.choose", "response-1", {} } ) );
+                                           "choose-1", "dialogue.choose", "response-1", {} } ) );
         REQUIRE( dialogue.consume_request() );
         REQUIRE( receipts.size() == 1 );
         CHECK( receipts.front().resulting_frame_id.empty() );
@@ -75,7 +75,7 @@ TEST_CASE( "nested retiring dialogue and item owners preserve their own successo
 {
     semantic_surface_manager manager( "nested-run" );
     std::vector<semantic_action_receipt> receipts;
-    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt &receipt ) {
+    manager.set_receipt_observer( [&receipts]( const semantic_action_receipt & receipt ) {
         receipts.push_back( receipt );
     } );
     semantic_surface_scope world( manager, "world", "World" );

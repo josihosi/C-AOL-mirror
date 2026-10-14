@@ -16,7 +16,7 @@ namespace scout_observation
 // Fixed physical bearing/elevation, including equal minor axes; bounded by the
 // site reader's native optical range before any geometry is inspected.
 std::vector<tripoint_abs_ms> site_sightline( const tripoint_abs_ms &origin,
-                                          const tripoint_abs_ms &target );
+        const tripoint_abs_ms &target );
 struct visibility_read {
     bool known = false;
     bool visible = false;

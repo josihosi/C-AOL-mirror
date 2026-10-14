@@ -891,7 +891,7 @@ void Messages::dialog::run()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         const auto semantic_payload = [this]() {
-            return std::map<std::string, std::string>{
+            return std::map<std::string, std::string> {
                 { "filter", filter_str },
                 { "filtering", filtering ? "true" : "false" },
                 { "offset", std::to_string( offset ) },
@@ -900,10 +900,12 @@ void Messages::dialog::run()
             };
         };
         const auto semantic_actions = [this]() {
-            return std::vector<semantic_action_descriptor>{
-                { "message_log.scroll_up", "", _( "Scroll up" ), !filtering && offset > 0 },
-                { "message_log.scroll_down", "", _( "Scroll down" ), !filtering &&
-                  offset + max_lines < folded_filtered.size() },
+            return std::vector<semantic_action_descriptor> {
+                { "message_log.scroll_up", "", _( "Scroll up" ), !filtering &&offset > 0 },
+                {
+                    "message_log.scroll_down", "", _( "Scroll down" ), !filtering &&
+                    offset + max_lines < folded_filtered.size()
+                },
                 { "message_log.page_up", "", _( "Page up" ), !filtering },
                 { "message_log.page_down", "", _( "Page down" ), !filtering },
                 { "message_log.filter", "", _( "Filter" ), !filtering },
@@ -912,7 +914,7 @@ void Messages::dialog::run()
             };
         };
         semantic_scope.emplace( *manager, "message_log", _( "Message log" ), semantic_payload(),
-        semantic_actions(), [this]( const semantic_action_request &request ) {
+        semantic_actions(), [this]( const semantic_action_request & request ) {
             static const std::map<std::string, std::string> native_actions = {
                 { "message_log.scroll_up", "UP" },
                 { "message_log.scroll_down", "DOWN" },
@@ -941,9 +943,11 @@ void Messages::dialog::run()
                 { "visible_lines", std::to_string( max_lines ) },
                 { "matching_lines", std::to_string( folded_filtered.size() ) }
             }, {
-                { "message_log.scroll_up", "", _( "Scroll up" ), !filtering && offset > 0 },
-                { "message_log.scroll_down", "", _( "Scroll down" ), !filtering &&
-                  offset + max_lines < folded_filtered.size() },
+                { "message_log.scroll_up", "", _( "Scroll up" ), !filtering &&offset > 0 },
+                {
+                    "message_log.scroll_down", "", _( "Scroll down" ), !filtering &&
+                    offset + max_lines < folded_filtered.size()
+                },
                 { "message_log.page_up", "", _( "Page up" ), !filtering },
                 { "message_log.page_down", "", _( "Page down" ), !filtering },
                 { "message_log.filter", "", _( "Filter" ), !filtering },

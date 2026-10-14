@@ -117,13 +117,27 @@ std::string openclaw_harness_json_quote( const std::string &value )
     out << '"';
     for( const unsigned char character : value ) {
         switch( character ) {
-            case '"': out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            case '\b': out << "\\b"; break;
-            case '\f': out << "\\f"; break;
-            case '\n': out << "\\n"; break;
-            case '\r': out << "\\r"; break;
-            case '\t': out << "\\t"; break;
+            case '"':
+                out << "\\\"";
+                break;
+            case '\\':
+                out << "\\\\";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
             default:
                 if( character < 0x20 ) {
                     out << string_format( "\\u%04x", character );
@@ -156,7 +170,7 @@ void append_openclaw_harness_semantic_llm_event( const std::string &message )
                << ",\"run_id\":" << openclaw_harness_json_quote( run_id )
                << ",\"wall_time_ms\":"
                << std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::system_clock::now().time_since_epoch() ).count()
+                   std::chrono::system_clock::now().time_since_epoch() ).count()
                << ",\"game_minutes\":"
                << to_minutes<int>( calendar::turn - calendar::start_of_cataclysm )
                << ",\"game_turn\":" << to_turns<int>( calendar::turn - calendar::turn_zero )
@@ -641,7 +655,8 @@ void add_summary_ids_from_json( const JsonObject &jo, const std::string &single_
     }
 }
 
-void insert_background_summary_entry( std::unordered_map<std::string, background_summary_entry> &out,
+void insert_background_summary_entry( std::unordered_map<std::string, background_summary_entry>
+                                      &out,
                                       const std::vector<std::string> &ids,
                                       const background_summary_entry &entry_value,
                                       bool overwrite_existing )
@@ -735,7 +750,8 @@ void load_background_summary_json_entry( const JsonObject &jo,
     }
 
     insert_background_summary_entry( summary_by_topic, topic_ids, entry_value, overwrite_existing );
-    insert_background_summary_entry( summary_by_selector, selector_ids, entry_value, overwrite_existing );
+    insert_background_summary_entry( summary_by_selector, selector_ids, entry_value,
+                                     overwrite_existing );
 }
 
 void load_background_summary_json_file( const cata_path &summary_path,
@@ -802,8 +818,8 @@ void load_background_summary_dir( const cata_path &summary_root,
         files.push_back( entry.path().filename() );
     }
 
-    std::sort( files.begin(), files.end(), []( const std::filesystem::path &lhs,
-    const std::filesystem::path &rhs ) {
+    std::sort( files.begin(), files.end(), []( const std::filesystem::path & lhs,
+    const std::filesystem::path & rhs ) {
         const int lhs_generation = summary_file_generation_priority( lhs );
         const int rhs_generation = summary_file_generation_priority( rhs );
         if( lhs_generation != rhs_generation ) {
@@ -1422,7 +1438,8 @@ void for_each_visible_look_around_item( npc &listener, int radius, const F &cb )
     map &here = get_map();
     const auto visit_node = [&]( const tripoint_bub_ms & p, const int dist,
     const item_location & base_loc, item & top, const auto & ) -> void {
-        top.visit_items( [&]( item * node, item * ) {
+        top.visit_items( [&]( item * node, item * )
+        {
             if( node == nullptr ) {
                 return VisitResponse::NEXT;
             }
@@ -1453,7 +1470,8 @@ void for_each_visible_look_around_item( npc &listener, int radius, const F &cb )
         }
         for( item &it : cargo->items() ) {
             visit_node( p, dist,
-                        item_location( vehicle_cursor{ cargo->vehicle(), static_cast<ptrdiff_t>( cargo->part_index() ) }, &it ),
+                        item_location( vehicle_cursor{ cargo->vehicle(), static_cast<ptrdiff_t>( cargo->part_index() ) },
+                                       &it ),
                         it, visit_node );
         }
     }
@@ -2452,71 +2470,77 @@ std::string build_snapshot_json( npc &listener, const std::string &player_uttera
         if( capacity > 0 )
         {
             name += " (" + std::to_string( ammo ) + "/" + std::to_string( capacity ) + ")";
-        } else if( ammo > 0 )
-        {
-            name += " (" + std::to_string( ammo ) + ")";
-        }
-        return name;
-    };
-    listener.visit_items( [&]( item * it, item * ) {
-        if( it == nullptr ) {
-            return VisitResponse::NEXT;
-        }
-        if( it->is_gun() ) {
-            if( combat_guns.size() < max_items ) {
-                combat_guns.push_back( format_gun_label( *it ) );
-            }
-        } else if( it->is_melee() ) {
-            if( combat_melee.size() < max_items ) {
-                combat_melee.push_back( sanitize_text( it->tname() ) );
-            }
-        }
-        if( it->is_medication() || it->is_medical_tool() ) {
-            bandage_possible = true;
-        }
-        if( combat_guns.size() >= max_items &&
-            combat_melee.size() >= max_items ) {
-            return VisitResponse::ABORT;
-        }
+} else if( ammo > 0 )
+{
+    name += " (" + std::to_string( ammo ) + ")";
+}
+return name;
+};
+listener.visit_items( [&]( item *it, item * )
+{
+    if( it == nullptr ) {
         return VisitResponse::NEXT;
-    } );
-
-    std::vector<std::string> combat_items;
-    combat_items.reserve( max_items );
-    for( const std::string &gun : combat_guns ) {
-        if( combat_items.size() >= max_items ) {
-            break;
+    }
+    if( it->is_gun() ) {
+        if( combat_guns.size() < max_items ) {
+            combat_guns.push_back( format_gun_label( *it ) );
         }
-        combat_items.push_back( gun );
-    }
-    for( const std::string &melee : combat_melee ) {
-        if( combat_items.size() >= max_items ) {
-            break;
+    } else if( it->is_melee() ) {
+        if( combat_melee.size() < max_items ) {
+            combat_melee.push_back( sanitize_text( it->tname() ) );
         }
-        combat_items.push_back( melee );
     }
+    if( it->is_medication() || it->is_medical_tool() ) {
+        bandage_possible = true;
+    }
+    if( combat_guns.size() >= max_items &&
+        combat_melee.size() >= max_items ) {
+        return VisitResponse::ABORT;
+    }
+    return VisitResponse::NEXT;
+} );
 
-    out << "weapons: [";
-    for( size_t i = 0; i < combat_items.size(); ++i ) {
-        if( i > 0 ) {
-            out << ", ";
-        }
-        out << combat_items[i];
+std::vector<std::string> combat_items;
+combat_items.reserve( max_items );
+for( const std::string &gun : combat_guns )
+{
+    if( combat_items.size() >= max_items ) {
+        break;
     }
-    out << "]\n";
-    out << "bandage_possible: " << ( bandage_possible ? "true" : "false" ) << "\n\n";
+    combat_items.push_back( gun );
+}
+for( const std::string &melee : combat_melee )
+{
+    if( combat_items.size() >= max_items ) {
+        break;
+    }
+    combat_items.push_back( melee );
+}
 
-    const map_snapshot map_data = build_ascii_map_snapshot( listener, request_id );
-    out << "legend:\n" << build_snapshot_legend();
-    out << "creature legend with attitude and threat level:\n";
-    if( map_data.legend.empty() ) {
-        out << "(none)\n";
-    } else {
-        out << map_data.legend << "\n";
+out << "weapons: [";
+for( size_t i = 0; i < combat_items.size(); ++i )
+{
+    if( i > 0 ) {
+        out << ", ";
     }
-    out << "map axes: +x east/right, -x west/left, +y north/up, -y south/down\n";
-    out << "map:\n" << map_data.map;
-    return out.str();
+    out << combat_items[i];
+}
+out << "]\n";
+out << "bandage_possible: " << ( bandage_possible ? "true" : "false" ) << "\n\n";
+
+const map_snapshot map_data = build_ascii_map_snapshot( listener, request_id );
+out << "legend:\n" << build_snapshot_legend();
+out << "creature legend with attitude and threat level:\n";
+if( map_data.legend.empty() )
+{
+    out << "(none)\n";
+} else
+{
+    out << map_data.legend << "\n";
+}
+out << "map axes: +x east/right, -x west/left, +y north/up, -y south/down\n";
+out << "map:\n" << map_data.map;
+return out.str();
 }
 
 std::string default_npc_action_prompt_template()
@@ -4151,330 +4175,346 @@ class llm_intent_manager
                                     if( !snapshot_origin ) {
                                         snapshot_origin = target->pos_abs();
                                         llm_intent::log_event( string_format( "move target %s (%s): snapshot origin missing, falling back to current pos (%d,%d,%d)",
-                                                                              target->get_name(), resp.request_id,
-                                                                              snapshot_origin->x(), snapshot_origin->y(), snapshot_origin->z() ) );
-                                    }
-                                    const int dx = move_delta->x;
-                                    const int dy = move_delta->y;
-                                    const tripoint_abs_ms final_target = resolve_move_target_from_origin(
-                                                                            *snapshot_origin, *move_delta );
-                                    const llm_intent_action arrival_state = move_terminal_state == "hold_position" ?
-                                            llm_intent_action::hold_position : llm_intent_action::wait_here;
-                                    llm_intent::log_event( string_format( "move target %s (%s): delta=(%d,%d) origin=(%d,%d,%d) final=(%d,%d,%d) arrival=%s",
-                                                                          target->get_name(), resp.request_id,
-                                                                          dx, dy,
-                                                                          snapshot_origin->x(), snapshot_origin->y(), snapshot_origin->z(),
-                                                                          final_target.x(), final_target.y(), final_target.z(),
-                                                                          move_terminal_state ) );
-                                    target->set_llm_intent_move_target( final_target, arrival_state );
-                                } else {
-                                    target->set_llm_intent_move_target( std::nullopt, llm_intent_action::none );
-                                }
-                            }
-                        }
-                    }
-                }
-                if( resp.ok && parse_error.empty() ) {
-                    const std::string memory_speech = !speech.empty() ? speech : speak_text;
-                    if( npc *target = g->find_npc( resp.npc_id ) ) {
-                        if( target->is_player_ally() ) {
-                            target->add_llm_intent_memory( player_utterance, memory_speech, memory_actions );
-                            broadcast_overheard_memory( *target, memory_speech, memory_actions );
-                        }
-                    }
-                }
-                if( resp.ok && parse_error.empty() ) {
-                    if( debug_ui ) {
-                        add_msg( "LLM intent response for %s: %s", resp.npc_name, resp.text );
-                        if( !action_error.empty() ) {
-                            add_msg( "LLM intent warning for %s: %s", resp.npc_name, action_error );
-                        }
-                    }
-                    if( debug_log ) {
-                        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
-                        std::string log_block = string_format( "response %s (%s)\n%s\n\n",
-                                                               resp.npc_name, resp.request_id, payload );
-                        if( !say_log_line.empty() ) {
-                            log_block += say_log_line;
-                        } else if( !say_failed_log_line.empty() ) {
-                            log_block += say_failed_log_line;
-                        }
-                        append_llm_intent_log( log_block );
-                    }
-                } else {
-                    const std::string err = resp.ok ? parse_error : resp.error;
-                    if( debug_ui ) {
-                        add_msg( "LLM intent failed for %s: %s", resp.npc_name, err );
-                    }
-                    if( debug_log ) {
-                        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
-                        std::string log_block = string_format( "failed %s (%s)\n%s\nraw:\n%s\n\n",
-                                                               resp.npc_name, resp.request_id, err, payload );
-                        if( !say_log_line.empty() ) {
-                            log_block += say_log_line;
-                        } else if( !say_failed_log_line.empty() ) {
-                            log_block += say_failed_log_line;
-                        }
-                        append_llm_intent_log( log_block );
-                    }
-                }
-                if( wants_look_around ) {
-                    std::string player_utterance;
-                    {
-                        std::lock_guard<std::mutex> lock( mutex );
-                        auto it = utterance_by_request.find( resp.request_id );
-                        if( it != utterance_by_request.end() ) {
-                            player_utterance = it->second;
-                        }
-                    }
-                    if( npc *target = g->find_npc( resp.npc_id ) ) {
-                        if( target->is_player_ally() &&
-                            enqueue_look_around_request( *target, player_utterance,
-                                    resp.request_id ) ) {
-                            target->set_llm_intent_item_request_pending( true );
-                        }
-                    }
-                }
-                if( wants_look_inventory ) {
-                    std::string player_utterance;
-                    {
-                        std::lock_guard<std::mutex> lock( mutex );
-                        auto it = utterance_by_request.find( resp.request_id );
-                        if( it != utterance_by_request.end() ) {
-                            player_utterance = it->second;
-                        }
-                    }
-                    if( npc *target = g->find_npc( resp.npc_id ) ) {
-                        if( target->is_player_ally() ) {
-                            enqueue_look_inventory_request( *target, player_utterance, resp.request_id );
-                        }
-                    }
-                }
-                bool dispatch_next_serial = false;
-                {
-                    std::lock_guard<std::mutex> lock( mutex );
-                    utterance_by_request.erase( resp.request_id );
-                    snapshot_origin_by_request.erase( resp.request_id );
-                    is_primary_response = primary_request_ids.erase( resp.request_id ) > 0;
-                    if( is_primary_response ) {
-                        pending_primary_npcs.erase( resp.npc_id );
-                    }
-                    dispatch_next_serial = serial_primary_request_ids.erase( resp.request_id ) > 0;
-                }
-                if( dispatch_next_serial ) {
-                    dispatch_next_serial_primary_request();
-                }
-                local.pop();
-            }
+           target->get_name(), resp.request_id,
+           snapshot_origin->x(), snapshot_origin->y(), snapshot_origin->z() ) );
+}
+const int dx = move_delta->x;
+const int dy = move_delta->y;
+const tripoint_abs_ms final_target = resolve_move_target_from_origin(
+        *snapshot_origin, *move_delta );
+const llm_intent_action arrival_state = move_terminal_state == "hold_position" ?
+                                        llm_intent_action::hold_position : llm_intent_action::wait_here;
+llm_intent::log_event(
+    string_format( "move target %s (%s): delta=(%d,%d) origin=(%d,%d,%d) final=(%d,%d,%d) arrival=%s",
+                   target->get_name(), resp.request_id,
+                   dx, dy,
+                   snapshot_origin->x(), snapshot_origin->y(), snapshot_origin->z(),
+                   final_target.x(), final_target.y(), final_target.z(),
+                   move_terminal_state ) );
+target->set_llm_intent_move_target( final_target, arrival_state );
+} else
+{
+    target->set_llm_intent_move_target( std::nullopt, llm_intent_action::none );
+}
+}
+}
+}
+}
+if( resp.ok && parse_error.empty() )
+{
+    const std::string memory_speech = !speech.empty() ? speech : speak_text;
+    if( npc *target = g->find_npc( resp.npc_id ) ) {
+        if( target->is_player_ally() ) {
+            target->add_llm_intent_memory( player_utterance, memory_speech, memory_actions );
+            broadcast_overheard_memory( *target, memory_speech, memory_actions );
         }
-
-        void process_response_for_test( npc &listener, const std::string &request_id,
-                                        const std::string &player_utterance,
-                                        const std::string &response_text ) {
-            llm_intent_response response;
-            response.request_id = request_id;
-            response.npc_id = listener.getID();
-            response.npc_name = listener.get_name();
-            response.ok = true;
-            response.text = response_text;
-            response.raw = response_text;
-            {
-                std::lock_guard<std::mutex> lock( mutex );
-                utterance_by_request[request_id] = player_utterance;
-                snapshot_origin_by_request[request_id] = listener.pos_abs();
-                primary_request_ids.insert( request_id );
-                pending_primary_npcs.insert( listener.getID() );
-                response_queue.push( std::move( response ) );
-            }
-            process_responses();
+    }
+}
+if( resp.ok && parse_error.empty() )
+{
+    if( debug_ui ) {
+        add_msg( "LLM intent response for %s: %s", resp.npc_name, resp.text );
+        if( !action_error.empty() ) {
+            add_msg( "LLM intent warning for %s: %s", resp.npc_name, action_error );
         }
-
-        bool has_request_state_for_test( const npc &listener, const std::string &request_id ) {
-            std::lock_guard<std::mutex> lock( mutex );
-            return utterance_by_request.count( request_id ) > 0 ||
-                   snapshot_origin_by_request.count( request_id ) > 0 ||
-                   primary_request_ids.count( request_id ) > 0 ||
-                   pending_primary_npcs.count( listener.getID() ) > 0;
+    }
+    if( debug_log ) {
+        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+        std::string log_block = string_format( "response %s (%s)\n%s\n\n",
+                                               resp.npc_name, resp.request_id, payload );
+        if( !say_log_line.empty() ) {
+            log_block += say_log_line;
+        } else if( !say_failed_log_line.empty() ) {
+            log_block += say_failed_log_line;
         }
+        append_llm_intent_log( log_block );
+    }
+} else
+{
+    const std::string err = resp.ok ? parse_error : resp.error;
+    if( debug_ui ) {
+        add_msg( "LLM intent failed for %s: %s", resp.npc_name, err );
+    }
+    if( debug_log ) {
+        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+        std::string log_block = string_format( "failed %s (%s)\n%s\nraw:\n%s\n\n",
+                                               resp.npc_name, resp.request_id, err, payload );
+        if( !say_log_line.empty() ) {
+            log_block += say_log_line;
+        } else if( !say_failed_log_line.empty() ) {
+            log_block += say_failed_log_line;
+        }
+        append_llm_intent_log( log_block );
+    }
+}
+if( wants_look_around )
+{
+    std::string player_utterance;
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        auto it = utterance_by_request.find( resp.request_id );
+        if( it != utterance_by_request.end() ) {
+            player_utterance = it->second;
+        }
+    }
+    if( npc *target = g->find_npc( resp.npc_id ) ) {
+        if( target->is_player_ally() &&
+            enqueue_look_around_request( *target, player_utterance,
+                                         resp.request_id ) ) {
+            target->set_llm_intent_item_request_pending( true );
+        }
+    }
+}
+if( wants_look_inventory )
+{
+    std::string player_utterance;
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        auto it = utterance_by_request.find( resp.request_id );
+        if( it != utterance_by_request.end() ) {
+            player_utterance = it->second;
+        }
+    }
+    if( npc *target = g->find_npc( resp.npc_id ) ) {
+        if( target->is_player_ally() ) {
+            enqueue_look_inventory_request( *target, player_utterance, resp.request_id );
+        }
+    }
+}
+bool dispatch_next_serial = false;
+{
+    std::lock_guard<std::mutex> lock( mutex );
+    utterance_by_request.erase( resp.request_id );
+    snapshot_origin_by_request.erase( resp.request_id );
+    is_primary_response = primary_request_ids.erase( resp.request_id ) > 0;
+    if( is_primary_response ) {
+        pending_primary_npcs.erase( resp.npc_id );
+    }
+    dispatch_next_serial = serial_primary_request_ids.erase( resp.request_id ) > 0;
+}
+if( dispatch_next_serial )
+{
+    dispatch_next_serial_primary_request();
+}
+local.pop();
+}
+}
 
-    private:
-        std::mutex mutex;
-        std::condition_variable cv;
-        std::queue<llm_intent_request> request_queue;
-        std::queue<llm_intent_response> response_queue;
-        std::unordered_map<std::string, std::string> utterance_by_request;
-        std::unordered_map<std::string, tripoint_abs_ms> snapshot_origin_by_request;
-        std::unordered_set<std::string> primary_request_ids;
-        std::unordered_set<std::string> ambient_request_ids;
-        std::deque<pending_primary_request> pending_primary_requests;
-        std::set<character_id> pending_primary_npcs;
-        std::set<character_id> pending_ambient_npcs;
-        std::unordered_set<std::string> serial_primary_request_ids;
-        std::unordered_map<std::string, look_around_context> look_around_requests;
-        std::unordered_map<std::string, look_inventory_context> look_inventory_requests;
-        std::thread worker;
-        std::atomic<bool> stopping = false;
-        std::atomic<int> counter = 0;
-        std::atomic<bool> warmup_enqueued = false;
+void process_response_for_test( npc &listener, const std::string &request_id,
+                                const std::string &player_utterance,
+                                const std::string &response_text )
+{
+    llm_intent_response response;
+    response.request_id = request_id;
+    response.npc_id = listener.getID();
+    response.npc_name = listener.get_name();
+    response.ok = true;
+    response.text = response_text;
+    response.raw = response_text;
+    {
+        std::lock_guard<std::mutex> lock( mutex );
+        utterance_by_request[request_id] = player_utterance;
+        snapshot_origin_by_request[request_id] = listener.pos_abs();
+        primary_request_ids.insert( request_id );
+        pending_primary_npcs.insert( listener.getID() );
+        response_queue.push( std::move( response ) );
+    }
+    process_responses();
+}
+
+bool has_request_state_for_test( const npc &listener, const std::string &request_id )
+{
+    std::lock_guard<std::mutex> lock( mutex );
+    return utterance_by_request.count( request_id ) > 0 ||
+           snapshot_origin_by_request.count( request_id ) > 0 ||
+           primary_request_ids.count( request_id ) > 0 ||
+           pending_primary_npcs.count( listener.getID() ) > 0;
+}
+
+private:
+std::mutex mutex;
+std::condition_variable cv;
+std::queue<llm_intent_request> request_queue;
+std::queue<llm_intent_response> response_queue;
+std::unordered_map<std::string, std::string> utterance_by_request;
+std::unordered_map<std::string, tripoint_abs_ms> snapshot_origin_by_request;
+std::unordered_set<std::string> primary_request_ids;
+std::unordered_set<std::string> ambient_request_ids;
+std::deque<pending_primary_request> pending_primary_requests;
+std::set<character_id> pending_primary_npcs;
+std::set<character_id> pending_ambient_npcs;
+std::unordered_set<std::string> serial_primary_request_ids;
+std::unordered_map<std::string, look_around_context> look_around_requests;
+std::unordered_map<std::string, look_inventory_context> look_inventory_requests;
+std::thread worker;
+std::atomic<bool> stopping = false;
+std::atomic<int> counter = 0;
+std::atomic<bool> warmup_enqueued = false;
 #if defined(_WIN32)
-        llm_intent_runner_process runner;
+llm_intent_runner_process runner;
 #else
-        posix_runner_process runner;
+posix_runner_process runner;
 #endif
 
-        void ensure_worker() {
-            if( worker.joinable() ) {
-                return;
-            }
-            worker = std::thread( [this]() {
-                worker_loop();
+void ensure_worker()
+{
+    if( worker.joinable() ) {
+        return;
+    }
+    worker = std::thread( [this]() {
+        worker_loop();
+    } );
+}
+
+void stop()
+{
+    stopping = true;
+    cv.notify_one();
+    if( worker.joinable() ) {
+        worker.join();
+    }
+}
+
+std::string next_request_id()
+{
+    return string_format( "req_%d", counter.fetch_add( 1 ) );
+}
+
+void worker_loop()
+{
+    while( !stopping ) {
+        llm_intent_request req;
+        {
+            std::unique_lock<std::mutex> lock( mutex );
+            cv.wait( lock, [this]() {
+                return stopping || !request_queue.empty();
             } );
-        }
-
-        void stop() {
-            stopping = true;
-            cv.notify_one();
-            if( worker.joinable() ) {
-                worker.join();
+            if( stopping ) {
+                break;
             }
+            req = std::move( request_queue.front() );
+            request_queue.pop();
         }
-
-        std::string next_request_id() {
-            return string_format( "req_%d", counter.fetch_add( 1 ) );
+        if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
+            llm_intent::log_event( string_format( "request dequeued id=%s npc=\"%s\"",
+                                                  req.request_id, req.npc_name ) );
         }
-
-        void worker_loop() {
-            while( !stopping ) {
-                llm_intent_request req;
-                {
-                    std::unique_lock<std::mutex> lock( mutex );
-                    cv.wait( lock, [this]() {
-                        return stopping || !request_queue.empty();
-                    } );
-                    if( stopping ) {
-                        break;
-                    }
-                    req = std::move( request_queue.front() );
-                    request_queue.pop();
-                }
-                if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
-                    llm_intent::log_event( string_format( "request dequeued id=%s npc=\"%s\"",
-                                                           req.request_id, req.npc_name ) );
-                }
-                llm_intent_response response;
-                try {
-                    response = handle_request( req );
-                } catch( const std::exception &error ) {
-                    response.request_id = req.request_id;
-                    response.npc_id = req.npc_id;
-                    response.npc_name = req.npc_name;
-                    response.ok = false;
-                    response.error = string_format( "LLM worker exception: %s", error.what() );
-                    llm_intent::log_event( string_format( "request failed id=%s error=\"%s\"",
-                                                           req.request_id, response.error ) );
-                } catch( ... ) {
-                    response.request_id = req.request_id;
-                    response.npc_id = req.npc_id;
-                    response.npc_name = req.npc_name;
-                    response.ok = false;
-                    response.error = "LLM worker exception: unknown exception.";
-                    llm_intent::log_event( string_format( "request failed id=%s error=unknown_exception",
-                                                           req.request_id ) );
-                }
-                const bool response_ok = response.ok;
-                const std::string response_category = response_ok ? "" : classify_runner_error( response.error );
-                const std::string response_error = response_ok ? "" : sanitize_runner_error_for_event( response.error );
-                {
-                    std::lock_guard<std::mutex> lock( mutex );
-                    response_queue.push( std::move( response ) );
-                }
-                if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
-                    if( response_ok ) {
-                        llm_intent::log_event( string_format( "response queued id=%s ok=true",
-                                                               req.request_id ) );
-                    } else {
-                        llm_intent::log_event( string_format(
-                            "response queued id=%s ok=false category=%s error=\"%s\"",
-                            req.request_id, response_category, response_error ) );
-                    }
-                }
-            }
-        }
-
-        llm_intent_response handle_request( const llm_intent_request &req ) {
-            llm_intent_response response;
+        llm_intent_response response;
+        try {
+            response = handle_request( req );
+        } catch( const std::exception &error ) {
             response.request_id = req.request_id;
             response.npc_id = req.npc_id;
             response.npc_name = req.npc_name;
-            const runner_config config = current_runner_config();
-            std::string error;
-            if( !config.use_api && config.force_npu && config.device != "NPU" ) {
-                response.ok = false;
-                response.error = "LLM_INTENT_FORCE_NPU requires device NPU.";
-                llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
-                                                       req.request_id, classify_runner_error( response.error ),
-                                                       sanitize_runner_error_for_event( response.error ) ) );
-                return response;
-            }
-            if( !runner.ensure_running( config, error ) ) {
-                response.ok = false;
-                response.error = error;
-                llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
-                                                       req.request_id, classify_runner_error( response.error ),
-                                                       sanitize_runner_error_for_event( response.error ) ) );
-                return response;
-            }
-            std::string line;
-            const int timeout_ms = get_option<int>( "LLM_INTENT_TIMEOUT_MS" );
-            if( !runner.send_request( req, line, error,
-                                      std::chrono::milliseconds( timeout_ms ) ) ) {
-                const std::string first_error = error;
-                if( should_retry_runner_request( first_error ) ) {
-                    std::string restart_error;
-                    llm_intent::log_event( string_format(
-                        "runner recovery requested id=%s category=runner_stdout_eof", req.request_id ) );
-                    if( runner.restart( config, restart_error ) ) {
-                        line.clear();
-                        error.clear();
-                        if( runner.send_request( req, line, error,
-                                                  std::chrono::milliseconds( timeout_ms ) ) ) {
-                            if( auto recovered = response_from_json( line, req ) ) {
-                                llm_intent::log_event( string_format(
-                                    "runner recovery succeeded id=%s request_id_preserved=true",
-                                    req.request_id ) );
-                                return *recovered;
-                            }
-                            error = "Runner recovery returned invalid JSON.";
-                        }
-                    } else {
-                        error = string_format( "Runner recovery restart failed: %s", restart_error );
-                    }
-                    if( error.empty() ) {
-                        error = "Runner recovery resend failed.";
-                    }
-                    llm_intent::log_event( string_format(
-                        "runner recovery failed id=%s category=%s error=\"%s\"",
-                        req.request_id, classify_runner_error( error ),
-                        sanitize_runner_error_for_event( error ) ) );
-                }
-                runner.terminate();
-                response.ok = false;
-                response.error = error;
-                llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
-                                                       req.request_id, classify_runner_error( response.error ),
-                                                       sanitize_runner_error_for_event( response.error ) ) );
-                return response;
-            }
-            if( auto parsed = response_from_json( line, req ) ) {
-                return *parsed;
-            }
             response.ok = false;
-            response.error = "Runner returned invalid JSON.";
-            llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
-                                                   req.request_id, classify_runner_error( response.error ),
-                                                   sanitize_runner_error_for_event( response.error ) ) );
-            return response;
+            response.error = string_format( "LLM worker exception: %s", error.what() );
+            llm_intent::log_event( string_format( "request failed id=%s error=\"%s\"",
+                                                  req.request_id, response.error ) );
+        } catch( ... ) {
+            response.request_id = req.request_id;
+            response.npc_id = req.npc_id;
+            response.npc_name = req.npc_name;
+            response.ok = false;
+            response.error = "LLM worker exception: unknown exception.";
+            llm_intent::log_event( string_format( "request failed id=%s error=unknown_exception",
+                                                  req.request_id ) );
         }
+        const bool response_ok = response.ok;
+        const std::string response_category = response_ok ? "" : classify_runner_error( response.error );
+        const std::string response_error = response_ok ? "" : sanitize_runner_error_for_event(
+                                               response.error );
+        {
+            std::lock_guard<std::mutex> lock( mutex );
+            response_queue.push( std::move( response ) );
+        }
+        if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
+            if( response_ok ) {
+                llm_intent::log_event( string_format( "response queued id=%s ok=true",
+                                                      req.request_id ) );
+            } else {
+                llm_intent::log_event( string_format(
+                                           "response queued id=%s ok=false category=%s error=\"%s\"",
+                                           req.request_id, response_category, response_error ) );
+            }
+        }
+    }
+}
+
+llm_intent_response handle_request( const llm_intent_request &req )
+{
+    llm_intent_response response;
+    response.request_id = req.request_id;
+    response.npc_id = req.npc_id;
+    response.npc_name = req.npc_name;
+    const runner_config config = current_runner_config();
+    std::string error;
+    if( !config.use_api && config.force_npu && config.device != "NPU" ) {
+        response.ok = false;
+        response.error = "LLM_INTENT_FORCE_NPU requires device NPU.";
+        llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
+                                              req.request_id, classify_runner_error( response.error ),
+                                              sanitize_runner_error_for_event( response.error ) ) );
+        return response;
+    }
+    if( !runner.ensure_running( config, error ) ) {
+        response.ok = false;
+        response.error = error;
+        llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
+                                              req.request_id, classify_runner_error( response.error ),
+                                              sanitize_runner_error_for_event( response.error ) ) );
+        return response;
+    }
+    std::string line;
+    const int timeout_ms = get_option<int>( "LLM_INTENT_TIMEOUT_MS" );
+    if( !runner.send_request( req, line, error,
+                              std::chrono::milliseconds( timeout_ms ) ) ) {
+        const std::string first_error = error;
+        if( should_retry_runner_request( first_error ) ) {
+            std::string restart_error;
+            llm_intent::log_event( string_format(
+                                       "runner recovery requested id=%s category=runner_stdout_eof", req.request_id ) );
+            if( runner.restart( config, restart_error ) ) {
+                line.clear();
+                error.clear();
+                if( runner.send_request( req, line, error,
+                                         std::chrono::milliseconds( timeout_ms ) ) ) {
+                    if( auto recovered = response_from_json( line, req ) ) {
+                        llm_intent::log_event( string_format(
+                                                   "runner recovery succeeded id=%s request_id_preserved=true",
+                                                   req.request_id ) );
+                        return *recovered;
+                    }
+                    error = "Runner recovery returned invalid JSON.";
+                }
+            } else {
+                error = string_format( "Runner recovery restart failed: %s", restart_error );
+            }
+            if( error.empty() ) {
+                error = "Runner recovery resend failed.";
+            }
+            llm_intent::log_event( string_format(
+                                       "runner recovery failed id=%s category=%s error=\"%s\"",
+                                       req.request_id, classify_runner_error( error ),
+                                       sanitize_runner_error_for_event( error ) ) );
+        }
+        runner.terminate();
+        response.ok = false;
+        response.error = error;
+        llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
+                                              req.request_id, classify_runner_error( response.error ),
+                                              sanitize_runner_error_for_event( response.error ) ) );
+        return response;
+    }
+    if( auto parsed = response_from_json( line, req ) ) {
+        return *parsed;
+    }
+    response.ok = false;
+    response.error = "Runner returned invalid JSON.";
+    llm_intent::log_event( string_format( "request failed id=%s category=%s error=\"%s\"",
+                                          req.request_id, classify_runner_error( response.error ),
+                                          sanitize_runner_error_for_event( response.error ) ) );
+    return response;
+}
 };
 
 llm_intent_manager &get_manager()
@@ -4671,7 +4711,7 @@ std::string parse_action_csv_speech_for_test( const std::string &csv )
     std::string move_terminal_state;
     std::string error;
     if( !parse_csv_payload( csv, speech, actions, attack_target, move_delta,
-                           move_terminal_state, error ) ) {
+                            move_terminal_state, error ) ) {
         return {};
     }
     return strip_speaker_prefix( speech );

@@ -99,7 +99,7 @@ struct semantic_action_dispatch_result {
 };
 
 using semantic_action_consumer = std::function<semantic_action_dispatch_result(
-            const semantic_action_request &request )>;
+                                     const semantic_action_request &request )>;
 
 class semantic_surface_manager
 {

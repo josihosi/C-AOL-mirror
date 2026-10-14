@@ -547,7 +547,8 @@ std::vector<overmap_spawn_option> overmap_spawn_options()
     };
 }
 
-tripoint_abs_sm overmap_spawn_destination( const tripoint_abs_ms &player_abs_ms, const int distance_omt )
+tripoint_abs_sm overmap_spawn_destination( const tripoint_abs_ms &player_abs_ms,
+        const int distance_omt )
 {
     const int distance_ms = distance_omt * coords::map_squares_per( coords::scale::overmap_terrain );
     return project_to<coords::sm>( player_abs_ms + point{ 0, -distance_ms } );
@@ -556,7 +557,8 @@ tripoint_abs_sm overmap_spawn_destination( const tripoint_abs_ms &player_abs_ms,
 void spawn_overmap_threat( const overmap_spawn_option &option )
 {
     const tripoint_abs_ms player_position = get_player_character().pos_abs();
-    const tripoint_abs_sm destination = overmap_spawn_destination( player_position, option.distance_omt );
+    const tripoint_abs_sm destination = overmap_spawn_destination( player_position,
+                                        option.distance_omt );
     if( option.preserve_abstract_predator_identity ) {
         // This remains an overmap owner: no local creature is placed here.
         // Unlike a type-only idle horde, it has a durable identity and a
@@ -1897,8 +1899,8 @@ static void change_spells( Character &character )
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_manager != nullptr ) {
         semantic_scope.emplace( *semantic_manager, "debug_spells", "Debug spell editor", semantic_payload(),
-        semantic_actions(), [&spells_relative, &spell_selected, &semantic_native_action]
-        ( const semantic_action_request &request ) {
+                                semantic_actions(), [&spells_relative, &spell_selected, &semantic_native_action]
+        ( const semantic_action_request & request ) {
             static const std::map<std::string, std::string> action_map = {
                 { "debug_spells.close", "QUIT" },
                 { "debug_spells.filter", "FILTER" },
@@ -1913,7 +1915,7 @@ static void change_spells( Character &character )
             if( request.action_id == "debug_spells.select" ) {
                 const std::string stable_id = request.stable_id.value_or( "" );
                 const auto selected = std::find_if( spells_relative.begin(), spells_relative.end(),
-                [&stable_id]( const spell_tuple *spell ) {
+                [&stable_id]( const spell_tuple * spell ) {
                     return std::get<0>( *spell ).id.str() == stable_id;
                 } );
                 if( selected == spells_relative.end() ) {

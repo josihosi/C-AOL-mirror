@@ -977,7 +977,8 @@ using debug_item_spawn_setup_key = std::pair<std::string, std::string>;
 std::map<debug_item_spawn_setup_key, debug_menu::debug_item_spawn_setup_receipt>
 debug_item_spawn_setup_receipts;
 
-bool debug_item_spawn_matches( const item &candidate, const debug_menu::debug_item_spawn_request &request,
+bool debug_item_spawn_matches( const item &candidate,
+                               const debug_menu::debug_item_spawn_request &request,
                                int ordinal )
 {
     return candidate.get_var( debug_item_spawn_transaction_var ) == request.transaction_id &&

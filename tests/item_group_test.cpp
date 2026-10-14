@@ -17,9 +17,11 @@
 
 static const damage_type_id damage_bash( "bash" );
 static const damage_type_id damage_stab( "stab" );
-static const item_group_id Item_spawn_data_cannibal_camp_monsterbone_relic( "cannibal_camp_monsterbone_relic" );
+static const item_group_id
+Item_spawn_data_cannibal_camp_monsterbone_relic( "cannibal_camp_monsterbone_relic" );
 static const item_group_id Item_spawn_data_cannibal_weapons( "cannibal_weapons" );
-static const item_group_id Item_spawn_data_NC_CANNIBAL_BUTCHER_weapon( "NC_CANNIBAL_BUTCHER_weapon" );
+static const item_group_id
+Item_spawn_data_NC_CANNIBAL_BUTCHER_weapon( "NC_CANNIBAL_BUTCHER_weapon" );
 static const item_group_id Item_spawn_data_NC_CANNIBAL_ELITE_weapon( "NC_CANNIBAL_ELITE_weapon" );
 static const item_group_id Item_spawn_data_NC_CANNIBAL_HUNTER_weapon( "NC_CANNIBAL_HUNTER_weapon" );
 static const itype_id itype_40x46mm_m1006( "40x46mm_m1006" );

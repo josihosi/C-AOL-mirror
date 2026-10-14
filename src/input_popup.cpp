@@ -346,11 +346,12 @@ std::string string_input_popup_imgui::query()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "string_prompt", id.empty() ? "Text input" : id,
-        std::map<std::string, std::string>{ { "title", id }, { "text", text } },
-        std::vector<semantic_action_descriptor>{
+        std::map<std::string, std::string> { { "title", id }, { "text", text } },
+        std::vector<semantic_action_descriptor> {
             { "prompt.submit", "", _( "Submit" ), true },
             { "prompt.cancel", "", _( "Cancel" ), true }
-        }, [this, &semantic_submitted_text, &semantic_cancelled]( const semantic_action_request &request ) {
+        }, [this, &semantic_submitted_text,
+                  &semantic_cancelled]( const semantic_action_request & request ) {
             if( request.action_id == "prompt.cancel" ) {
                 semantic_cancelled = true;
                 return semantic_action_dispatch_result{ true, "", "" };
@@ -374,9 +375,10 @@ std::string string_input_popup_imgui::query()
         ui_manager::redraw_invalidated();
 
         if( semantic_scope ) {
-            semantic_scope->publish( { { "title", id }, { "text", text } },
-                                      { { "prompt.submit", "", _( "Submit" ), true },
-                                        { "prompt.cancel", "", _( "Cancel" ), true } } );
+            semantic_scope->publish( { { "title", id }, { "text", text } }, {
+                { "prompt.submit", "", _( "Submit" ), true },
+                { "prompt.cancel", "", _( "Cancel" ), true }
+            } );
             semantic_scope->consume_request();
             if( semantic_submitted_text ) {
                 text = *semantic_submitted_text;
@@ -476,12 +478,12 @@ T number_input_popup<T>::query()
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "string_prompt", id.empty() ? "Numeric input" : id,
-        std::map<std::string, std::string>{
+        std::map<std::string, std::string> {
             { "title", id }, { "text", std::to_string( value ) }, { "numeric", "true" }
-        }, std::vector<semantic_action_descriptor>{
+        }, std::vector<semantic_action_descriptor> {
             { "prompt.submit", "", _( "Submit" ), true },
             { "prompt.cancel", "", _( "Cancel" ), true }
-        }, [this, &semantic_submitted]( const semantic_action_request &request ) {
+        }, [this, &semantic_submitted]( const semantic_action_request & request ) {
             if( request.action_id == "prompt.cancel" ) {
                 is_cancelled = true;
                 return semantic_action_dispatch_result{ true, "", "" };
