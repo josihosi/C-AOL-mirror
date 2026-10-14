@@ -273,15 +273,20 @@ def run_cpp_analysis(changed_cpp):
         print("Affected translation units from existing include scan: {}".format(", ".join(tus)))
     else:
         print("Affected translation units: none selected")
-    tidy = shutil.which("clang-tidy-22")
+    tidy_name = os.environ.get("CATA_CLANG_TIDY", "clang-tidy-22")
+    tidy = shutil.which(tidy_name)
     tidy_version = version_text(tidy, ["--version"]) if tidy else None
     if tidy:
-        print("clang-tidy-22: {}".format(tidy_version or "version unavailable"))
+        print("clang-tidy ({}): {}".format(tidy_name, tidy_version or "version unavailable"))
     build_dir = Path(os.environ.get("CATA_BUILD_DIR", "build"))
     if not build_dir.is_absolute():
         build_dir = ROOT / build_dir
     database = build_dir / "compile_commands.json"
-    plugin = build_dir / "tools/clang-tidy-plugin/libCataAnalyzerPlugin.so"
+    plugin_name = os.environ.get("CATA_CLANG_TIDY_PLUGIN")
+    plugin = Path(plugin_name) if plugin_name else build_dir / "tools/clang-tidy-plugin/libCataAnalyzerPlugin.so"
+    if not plugin.is_absolute():
+        plugin = ROOT / plugin
+    plugin = plugin.resolve()
     prerequisites = []
     if reason:
         prerequisites.append(reason)
@@ -292,7 +297,7 @@ def run_cpp_analysis(changed_cpp):
     if not plugin.is_file():
         prerequisites.append("{} is missing".format(plugin.relative_to(ROOT) if plugin.is_relative_to(ROOT) else plugin))
     if not tidy:
-        prerequisites.append("clang-tidy-22 is missing (CI uses LLVM 22)")
+        prerequisites.append("{} is missing (CI uses LLVM 22)".format(tidy_name))
     elif not tidy_version or not re.search(r"LLVM version 22(?:\.|\b)", tidy_version):
         prerequisites.append("clang-tidy tool version does not match CI LLVM 22")
     if not tus:
@@ -305,6 +310,7 @@ def run_cpp_analysis(changed_cpp):
     env = os.environ.copy()
     env["CATA_CLANG_TIDY"] = tidy
     env["CATA_BUILD_DIR"] = str(build_dir)
+    env["CATA_CLANG_TIDY_PLUGIN"] = str(plugin)
     wrapper = ROOT / "build-scripts/clang-tidy-wrapper.sh"
     status = 0
     for tu in tus:

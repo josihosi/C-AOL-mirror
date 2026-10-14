@@ -193,6 +193,10 @@ class ChangedSourceEntryPointTest(unittest.TestCase):
             env = os.environ.copy()
             env["CATA_BUILD_DIR"] = str(build_dir)
             env["CATA_CLANG_TIDY"] = str(stub)
+            plugin = root / "isolated/libCataAnalyzerPlugin.so"
+            plugin.parent.mkdir(parents=True)
+            plugin.touch()
+            env["CATA_CLANG_TIDY_PLUGIN"] = str(plugin)
             result = subprocess.run(
                 ["bash", str(ROOT / "build-scripts/clang-tidy-wrapper.sh"),
                  "-p", str(build_dir), str(root / "src/alpha.cpp")],
@@ -200,6 +204,7 @@ class ChangedSourceEntryPointTest(unittest.TestCase):
                 stderr=subprocess.STDOUT, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn("--load={}".format(plugin), result.stdout)
             self.assertIn(str(build_dir), result.stdout)
             self.assertIn(str(root / "src/alpha.cpp"), result.stdout)
 
@@ -227,21 +232,42 @@ class ChangedSourceEntryPointTest(unittest.TestCase):
             output = io.StringIO()
             with mock.patch.object(lint, "ROOT", root), \
                     mock.patch.object(lint, "select_cpp_tus", return_value=(["src/alpha.cpp"], None)), \
-                    mock.patch.object(lint.shutil, "which", return_value="/isolated/clang-tidy-22"), \
+                    mock.patch.object(lint.shutil, "which", return_value="/isolated/clang-tidy") as which_tool, \
                     mock.patch.object(lint, "version_text", return_value="Debian LLVM version 22.1.0"), \
                     mock.patch.object(lint, "run", side_effect=capture), \
-                    mock.patch.dict(os.environ, {"CATA_BUILD_DIR": "analysis-build"}), \
+                    mock.patch.dict(os.environ, {
+                        "CATA_BUILD_DIR": "analysis-build",
+                        "CATA_CLANG_TIDY": "/isolated/clang-tidy",
+                        "CATA_CLANG_TIDY_PLUGIN": str(plugin),
+                    }), \
                     contextlib.redirect_stdout(output):
                 status = lint.run_cpp_analysis(["src/alpha.cpp"])
 
             self.assertEqual(status, 0)
+            which_tool.assert_called_once_with("/isolated/clang-tidy")
             self.assertEqual(observed["command"][0:2], ["bash", str(root / "build-scripts/clang-tidy-wrapper.sh")])
             self.assertEqual(observed["command"][2:4], ["-p", str(build_dir)])
             self.assertEqual(observed["command"][4], str((root / "src/alpha.cpp").resolve()))
             self.assertNotEqual(Path(observed["cwd"]), root)
             self.assertFalse(Path(observed["cwd"]).exists())
             self.assertEqual(observed["env"]["CATA_BUILD_DIR"], str(build_dir))
-            self.assertEqual(observed["env"]["CATA_CLANG_TIDY"], "/isolated/clang-tidy-22")
+            self.assertEqual(observed["env"]["CATA_CLANG_TIDY"], "/isolated/clang-tidy")
+            self.assertEqual(
+                observed["env"]["CATA_CLANG_TIDY_PLUGIN"],
+                str(plugin.resolve()),
+            )
+
+    def test_custom_clang_tidy_still_requires_llvm_22(self):
+        output = io.StringIO()
+        with mock.patch.object(lint, "ROOT", Path("/repo")), \
+                mock.patch.object(lint, "select_cpp_tus", return_value=([], "include maps missing")), \
+                mock.patch.object(lint.shutil, "which", return_value="/isolated/clang-tidy"), \
+                mock.patch.object(lint, "version_text", return_value="Debian LLVM version 18.1.8"), \
+                mock.patch.dict(os.environ, {"CATA_CLANG_TIDY": "/isolated/clang-tidy"}), \
+                contextlib.redirect_stdout(output):
+            status = lint.run_cpp_analysis(["src/alpha.cpp"])
+        self.assertEqual(status, 2)
+        self.assertIn("does not match CI LLVM 22", output.getvalue())
 
     def test_unclassified_selected_source_is_incomplete(self):
         output = io.StringIO()

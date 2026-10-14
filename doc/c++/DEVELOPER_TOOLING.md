@@ -128,6 +128,14 @@ scans under `obj/tiles`. If multiple layouts resolve to the same translation
 unit, every layout scan is checked—even when only one scan maps the changed
 header—so an ambiguous stale layout keeps coverage incomplete.
 
+If an isolated LLVM 22 executable is not named `clang-tidy-22`, set
+`CATA_CLANG_TIDY` to its executable path; the checker still requires its
+reported LLVM major version to be 22. `CATA_CLANG_TIDY_PLUGIN` can point at a
+matching plugin module outside the default
+`$CATA_BUILD_DIR/tools/clang-tidy-plugin/libCataAnalyzerPlugin.so` location.
+The wrapper loads the module with clang-tidy's `--load` option. Keep the plugin
+and compilation database built against the same LLVM installation.
+
 Exit status `0` means all selected checks ran and passed, `1` means a selected
 check found a problem, and `2` means coverage is incomplete or setup could not
 be established. Unclassified changed paths are listed, receive no lint check,

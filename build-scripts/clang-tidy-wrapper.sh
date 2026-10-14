@@ -4,7 +4,8 @@ set -eu
 set -o pipefail
 
 build_dir=${CATA_BUILD_DIR:-build}
-plugin=${build_dir}/tools/clang-tidy-plugin/libCataAnalyzerPlugin.so
+plugin=${CATA_CLANG_TIDY_PLUGIN:-${build_dir}/tools/clang-tidy-plugin/libCataAnalyzerPlugin.so}
+clang_tidy=${CATA_CLANG_TIDY:-clang-tidy}
 
 # Tolerate GCC-built compile_commands driving clang-tidy (silence unknown
 # -W flags) and dodge the clang>=22 c2y-extension warning on Catch2
@@ -17,8 +18,8 @@ extra_args=(
 if [ -f "$plugin" ]
 then
     set -x
-    LD_PRELOAD=$plugin ${CATA_CLANG_TIDY} --enable-check-profile --store-check-profile=clang-tidy-trace "${extra_args[@]}" "$@"
+    "$clang_tidy" --load="$plugin" --enable-check-profile --store-check-profile=clang-tidy-trace "${extra_args[@]}" "$@"
 else
     set -x
-    ${CATA_CLANG_TIDY} "${extra_args[@]}" "$@"
+    "$clang_tidy" "${extra_args[@]}" "$@"
 fi
