@@ -76,6 +76,7 @@ void copy_json_value( JsonOut &out, const JsonValue &value )
         out.write( value.get_float() );
     }
 }
+#if !defined(TILES)
 void diagnostic_environment( const std::string &key, const std::optional<std::string> &value )
 {
 #if defined(_WIN32)
@@ -84,6 +85,7 @@ void diagnostic_environment( const std::string &key, const std::optional<std::st
     REQUIRE( ( value ? setenv( key.c_str(), value->c_str(), 1 ) : unsetenv( key.c_str() ) ) == 0 );
 #endif
 }
+#endif
 
 std::string replace_json_member( const JsonObject &object, const std::string &key,
                                  const std::string &replacement )
