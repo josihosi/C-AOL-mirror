@@ -190,6 +190,19 @@ extern "C" int flushinp();
 
 namespace
 {
+void assign_environment( const char *name, const std::optional<std::string> &value )
+{
+#if defined(_WIN32)
+    _putenv_s( name, value ? value->c_str() : "" );
+#else
+    if( value ) {
+        setenv( name, value->c_str(), 1 );
+    } else {
+        unsetenv( name );
+    }
+#endif
+}
+
 class pickup_environment
 {
     public:
@@ -197,14 +210,10 @@ class pickup_environment
             if( const char *old = std::getenv( name ) ) {
                 previous = old;
             }
-            setenv( name, value.c_str(), 1 );
+            assign_environment( name, value );
         }
         ~pickup_environment() {
-            if( previous ) {
-                setenv( name.c_str(), previous->c_str(), 1 );
-            } else {
-                unsetenv( name.c_str() );
-            }
+            assign_environment( name.c_str(), previous );
         }
     private:
         std::string name;

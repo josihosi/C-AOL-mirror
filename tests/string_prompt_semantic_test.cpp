@@ -32,6 +32,19 @@
 
 namespace
 {
+void assign_environment( const char *name, const std::optional<std::string> &value )
+{
+#if defined(_WIN32)
+    _putenv_s( name, value ? value->c_str() : "" );
+#else
+    if( value ) {
+        setenv( name, value->c_str(), 1 );
+    } else {
+        unsetenv( name );
+    }
+#endif
+}
+
 class scoped_imgui_context
 {
     public:
@@ -56,6 +69,53 @@ class scoped_imgui_context
         bool owns_context;
 };
 } // namespace
+
+TEST_CASE( "string prompt environment restores absent and present callers through unwind",
+           "[semantic_surface][string_prompt_environment_067]" )
+{
+    constexpr const char *name = "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH";
+    const char *initial = std::getenv( name );
+    const std::optional<std::string> saved = initial ? std::optional<std::string>( initial ) :
+            std::nullopt;
+    on_out_of_scope restore_caller( [&]() {
+        assign_environment( name, saved );
+    } );
+    const auto prior = GENERATE( std::optional<std::string> {},
+                                 std::optional<std::string>( "" ),
+                                 std::optional<std::string>( "caller-path" ) );
+    assign_environment( name, prior );
+    const auto exercise = [&]() {
+        on_out_of_scope restore_prior( [&]() {
+            assign_environment( name, prior );
+        } );
+        assign_environment( name, "outer-path" );
+        REQUIRE( std::getenv( name ) != nullptr );
+        CHECK( std::string( std::getenv( name ) ) == "outer-path" );
+        {
+            on_out_of_scope restore_outer( [&]() {
+                assign_environment( name, "outer-path" );
+            } );
+            assign_environment( name, "inner-path" );
+            REQUIRE( std::getenv( name ) != nullptr );
+            CHECK( std::string( std::getenv( name ) ) == "inner-path" );
+        }
+        CHECK( std::string( std::getenv( name ) ) == "outer-path" );
+        throw 1;
+    };
+    CHECK_THROWS_AS( exercise(), int );
+#if defined(_WIN32)
+    // Windows represents assignment of an empty value as removal.
+    const bool restored_present = prior && !prior->empty();
+#else
+    const bool restored_present = prior.has_value();
+#endif
+    if( restored_present ) {
+        REQUIRE( std::getenv( name ) != nullptr );
+        CHECK( std::string( std::getenv( name ) ) == *prior );
+    } else {
+        CHECK( std::getenv( name ) == nullptr );
+    }
+}
 
 TEST_CASE( "string prompt applies a semantic result consumed before its owner resumes",
            "[semantic_surface][string_prompt]" )
@@ -258,14 +318,10 @@ TEST_CASE( "pickup quantity retains its owner across a rejected native input wak
     const std::optional<std::string> previous = old_path ?
             std::optional<std::string>( old_path ) : std::nullopt;
     on_out_of_scope cleanup( [&]() {
-        if( previous ) {
-            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
-        } else {
-            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
-        }
+        assign_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous );
         std::filesystem::remove( path );
     } );
-    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
+    assign_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string() );
 
     semantic_surface_manager manager( "pickup-wake" );
     semantic_surface_manager_session session( manager );
