@@ -79,8 +79,21 @@ including the witness charter and, for a live cockpit, `registry-detached-launch
 path. Do not pre-create that directory. A build, repair, or missing-charter response identifies the
 prerequisite instead. Saved query readiness is a snapshot; launch revalidates current state.
 
-For a task-local saved start, carry `saved_world_snapshot` from the verified current checkpoint
-and the chosen destination profile in the selected source. When its initial `steps` are exactly
+For a fresh full-story run, use the scenario's designated clean initial/pre-scenario save,
+before the first required encounter or mission stage; do not default to the latest checkpoint.
+Verify the relevant actor/site consistency and perform ordinary setup. Clean means a coherent
+starting fixture, not a guaranteed successful outcome: do not erase genuine encounters or
+reposition actors merely to make the run pass. If the designated start is inconsistent, record
+the mismatch and select a suitable clean start without treating the restart as a diagnosis or fix.
+
+Checkpoints remain useful for focused reproduction, recovery or continuation. State the purpose
+and any stages skipped; a historical checkpoint alone cannot prove those stages. Saving and
+reloading within the same observed full-start journey preserves its earlier evidence when the
+save/actor continuity is established. This rule does not require replaying accepted full-start
+successes or interrupting valid active games.
+
+For a task-local saved start, carry the selected `saved_world_snapshot`
+and destination profile in the selected source. When its initial `steps` are exactly
 one `native_semantic_bootstrap` followed by one `cockpit_live_session`, startup reuses those
 source-bound steps directly; no duplicate `post_relaunch` declaration or new label is needed.
 The snapshot is still copied/validated through the existing saved-world path, with fixture
@@ -95,8 +108,9 @@ source bytes. A useful read-only check is:
 python3 tools/openclaw_harness/scenario_registry_cli.py --json lint-declarations "$SCENARIO_SOURCE"
 ```
 
-Use the returned current checkpoint and exact retained save, not an older starting save merely
-because its label is familiar. Source declarations and native save evidence remain separate.
+For continuation, use the returned current checkpoint and exact retained save rather than
+rolling back to a familiar starting label. For a fresh story, apply the initial-save rule above.
+Source declarations and native save evidence remain separate.
 
 If a launch supplies `--profile`, use the profile's name under `.userdata`, not its absolute path.
 The startup helper sanitizes slashes into a new name; an absolute path can silently select an

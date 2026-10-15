@@ -13,11 +13,18 @@ The existing table below is the single **20-family** index: 13 faction families,
 
 Clean completed game/helpers/profile/session/save/log/capture residue after use, no backups or proof copies. Retain only active necessary inputs, current compatible build/cache and concise source/run/first-divergence facts. Current material-review outputs remain only through review. Protect unrelated data and explicitly unresolved old native ownership; no inferred forced unsaved discard.
 
+Fresh full-story admissions start from the scenario's designated coherent initial/pre-scenario
+save, before the first required story stage, rather than the latest checkpoint. Follow the
+[selection and launch](selection-and-launch.md) distinction between a clean starting fixture,
+a focused checkpoint run and continuation of the same observed journey. Ordinary save/reload
+preserves connected evidence; a historical checkpoint does not prove skipped stages. Existing
+accepted full-start successes and valid active games need no automatic replay or interruption.
+
 ## Save continuity within faction journeys — 2026-10-08
 
 Use the selected coherent product and complete save for the assigned continuity segment. Save and gracefully exit at a meaningful returning frontier/watch transition. Reload the complete save normally and verify the same living members, physical positions, route/ownership and carried or delivered goods. Continue actual home return/report, then save, exit and reload again to prove effects are not repeated. Cover related abstract progress and both shared faction paths in connected production controls rather than multiplying native scenarios.
 
-Preserve an active failing save only while its diagnosis needs it; do not recreate a consumed historical checkpoint or copy full worlds merely for evidence. Full strict global/world load plus actual NPC/lease reconciliation and native continuation are distinct proof. Recovery is disclosed and idempotent; wrong members, foreign generations, ambiguous provenance, casualties and duplicate items retain refusal. Recovered continuation does not count as a fresh initial journey.
+Preserve an active failing save only while its diagnosis needs it; do not recreate a consumed historical checkpoint or copy full worlds merely for evidence. Full strict global/world load plus actual NPC/lease reconciliation and native continuation are distinct proof. Recovery is disclosed and idempotent; wrong members, foreign generations, ambiguous provenance, casualties and duplicate items retain refusal. A recovered historical checkpoint alone does not count as a fresh initial journey; recovery within the same observed full-start run retains its established earlier evidence.
 
 Inspect existing complete-save publication and coherent fallback before selecting more code. If publication protection changes, inject failures only into isolated disposable automated saves at real writer boundaries and prove either a complete new generation or coherent prior generation loads without mixed actor/item state. Otherwise report the existing guarantee and demonstrated gap. Record disk/latency implications before choosing storage policy. No new format, database, automatic cancellation or teleportation is selected. New fallback behavior requires scoped specification. Existing sole Luna ownership, single-first and parallel/full-suite sequence remain.
 
