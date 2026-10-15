@@ -31,6 +31,61 @@
 #include "semantic_surface.h"
 #include "type_id.h"
 
+namespace
+{
+void assign_semantic_request_path( const std::optional<std::string> &value )
+{
+    constexpr const char *name = "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH";
+#if defined(_WIN32)
+    _putenv_s( name, value ? value->c_str() : "" );
+#else
+    if( value ) {
+        setenv( name, value->c_str(), 1 );
+    } else {
+        unsetenv( name );
+    }
+#endif
+}
+} // namespace
+
+TEST_CASE( "pickup request path restores the caller environment across nested scope and unwind",
+           "[semantic_surface][pickup][pickup_environment_067]" )
+{
+    constexpr const char *name = "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH";
+    const char *initial = std::getenv( name );
+    const std::optional<std::string> saved = initial ? std::optional<std::string>( initial ) :
+            std::nullopt;
+    on_out_of_scope restore_caller( [&]() {
+        assign_semantic_request_path( saved );
+    } );
+    const std::optional<std::string> prior = GENERATE( std::optional<std::string> {},
+            std::optional<std::string>( "caller-request-path" ) );
+    assign_semantic_request_path( prior );
+    const auto exercise = [&]() {
+        on_out_of_scope restore_prior( [&]() {
+            assign_semantic_request_path( prior );
+        } );
+        assign_semantic_request_path( "outer-request-path" );
+        CHECK( std::string( std::getenv( name ) ) == "outer-request-path" );
+        {
+            on_out_of_scope restore_outer( [&]() {
+                assign_semantic_request_path( "outer-request-path" );
+            } );
+            assign_semantic_request_path( "inner-request-path" );
+            CHECK( std::string( std::getenv( name ) ) == "inner-request-path" );
+        }
+        CHECK( std::string( std::getenv( name ) ) == "outer-request-path" );
+        throw 1;
+    };
+    CHECK_THROWS_AS( exercise(), int );
+    if( prior ) {
+        REQUIRE( std::getenv( name ) != nullptr );
+        CHECK( std::string( std::getenv( name ) ) == *prior );
+    } else {
+        CHECK( std::getenv( name ) == nullptr );
+    }
+}
+
 #if defined(TILES)
 TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
            "[semantic_surface][pickup][pickup_quantity_wake_067]" )
@@ -62,14 +117,10 @@ TEST_CASE( "pickup quantity applies a request arriving in blocked native input",
     const std::optional<std::string> previous = old_path ?
             std::optional<std::string>( old_path ) : std::nullopt;
     on_out_of_scope cleanup( [&]() {
-        if( previous ) {
-            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
-        } else {
-            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
-        }
+        assign_semantic_request_path( previous );
         std::filesystem::remove( path );
     } );
-    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.c_str(), 1 );
+    assign_semantic_request_path( path.string() );
 
     semantic_surface_manager manager( "pickup-wake" );
     semantic_surface_manager_session session( manager );
@@ -475,14 +526,10 @@ TEST_CASE( "empty pickup item confirmation keeps its acknowledgement owner acros
     const std::optional<std::string> previous = old_path ? std::optional<std::string>( old_path ) :
             std::nullopt;
     on_out_of_scope cleanup( [&]() {
-        if( previous ) {
-            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
-        } else {
-            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
-        }
+        assign_semantic_request_path( previous );
         std::filesystem::remove( path );
     } );
-    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
+    assign_semantic_request_path( path.string() );
 #if defined(TILES)
     software_render_fixture renderer;
     REQUIRE( renderer.available() );
