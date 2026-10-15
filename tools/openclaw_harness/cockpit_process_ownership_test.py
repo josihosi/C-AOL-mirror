@@ -13,6 +13,79 @@ import startup_harness as harness
 from cockpit_file_bridge import FileBackedCockpitBridge
 
 class ProcessOwnershipTest(unittest.TestCase):
+    def test_staged_cleanup_requires_exact_launch_executable_and_quit(self):
+        pid = 812345
+        executable = "/test/.build/cataclysm.next"
+        command = executable + " --userdir /test/disposable"
+        expected = {"pid": pid, "birth_identity": "owned-birth",
+                    "command": command, "executable_path": executable}
+
+        for case, explicit, birth, actual_command, actual_executable, exits, status in (
+            ("quit", True, "owned-birth", command, executable, True, "terminated"),
+            ("no quit", False, "owned-birth", command, executable, True,
+             "retained_waiting_for_player_quit"),
+            ("reused pid", True, "foreign-birth", command, executable, True,
+             "retained_process_identity_changed"),
+            ("changed command", True, "owned-birth", command + " other", executable, True,
+             "retained_process_identity_changed"),
+            ("changed executable", True, "owned-birth", command, executable + "-helper", True,
+             "retained_process_executable_changed"),
+            ("missing executable", True, "owned-birth", command, "", True,
+             "retained_process_executable_changed"),
+            ("no escalation", True, "owned-birth", command, executable, False,
+             "graceful_quit_unconfirmed_process_retained"),
+        ):
+            with self.subTest(case=case):
+                alive = True
+
+                def inspect(current_pid):
+                    return harness.ProcessSnapshot(pid=current_pid, alive=alive,
+                        birth_identity=birth, command=actual_command,
+                        executable_path=actual_executable)
+
+                def signal_owned(current_pid, sig):
+                    nonlocal alive
+                    self.assertEqual(current_pid, pid)
+                    self.assertEqual(sig, harness.signal.SIGTERM)
+                    if exits:
+                        alive = False
+
+                inspector = Mock()
+                inspector.inspect.side_effect = inspect
+                with patch.object(harness.os, "kill", side_effect=signal_owned) as kill:
+                    result = harness.cleanup_game_process(pid, explicit_quit=explicit,
+                        grace_seconds=0, expected_process_generation=expected, inspector=inspector)
+                self.assertEqual(result["status"], status)
+                self.assertFalse(result["native_exit_credit"])
+                self.assertEqual(kill.call_count, int(case in ("quit", "no escalation")))
+
+    def test_exact_staged_windows_binding_still_retains_unconfirmed_native_quit(self):
+        executable = "C:/test/cataclysm.next.exe"
+        expected = {"pid": 812345, "birth_identity": "owned-birth",
+                    "command": executable, "executable_path": executable}
+        inspector = Mock()
+        inspector.inspect.return_value = harness.ProcessSnapshot(
+            pid=812345, alive=True, birth_identity="owned-birth",
+            command=executable, executable_path=executable)
+        with patch.object(harness.os, "name", "nt"), patch.object(harness.os, "kill") as kill:
+            result = harness.cleanup_game_process(812345, explicit_quit=True,
+                expected_process_generation=expected, inspector=inspector)
+        self.assertEqual(result["status"], "graceful_quit_unconfirmed_process_retained")
+        self.assertFalse(result["native_exit_credit"])
+        kill.assert_not_called()
+
+    def test_unbound_staged_lookalike_is_not_a_legacy_cleanup_allowance(self):
+        command = "/test/cataclysm.next-helper"
+        expected = {"pid": 812345, "birth_identity": "owned-birth", "command": command}
+        inspector = Mock()
+        inspector.inspect.return_value = harness.ProcessSnapshot(
+            pid=812345, alive=True, birth_identity="owned-birth", command=command)
+        with patch.object(harness.os, "kill") as kill:
+            result = harness.cleanup_game_process(812345, explicit_quit=True,
+                expected_process_generation=expected, inspector=inspector)
+        self.assertEqual(result["status"], "skipped_non_cataclysm_process")
+        kill.assert_not_called()
+
     def test_early_identity_is_persisted_and_retained_before_hud(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp) / "session"

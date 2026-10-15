@@ -5460,6 +5460,18 @@ void basecamp::job_assignment_ui()
     // and preserve that same selector/CONFIRM path for the semantic owner.
     // This keeps the job priorities themselves in the game's uilist and
     // numeric prompt rather than creating a separate command surface.
+    std::vector<npc *> stationed_npcs;
+    npc *cur_npc = nullptr;
+    const auto refresh_workers = [&]() {
+        stationed_npcs.clear();
+        for( const npc_ptr &worker : get_npcs_assigned() ) {
+            if( worker ) {
+                stationed_npcs.push_back( worker.get() );
+            }
+        }
+        selection = stationed_npcs.empty() ? 0 : std::min( selection, stationed_npcs.size() - 1 );
+        cur_npc = stationed_npcs.empty() ? nullptr : stationed_npcs[selection];
+    };
     std::string semantic_native_action;
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
@@ -5485,7 +5497,8 @@ void basecamp::job_assignment_ui()
             { "job_priority_editor", _( "Native uilist and numeric prompt after selecting an advertised worker" ) }
         };
         semantic_scope.emplace( *manager, "basecamp_worker_assignment", _( "Worker assignment" ), payload,
-        actions, [ this, expected_site, expected_owner, &semantic_native_action, &selection ]
+        actions, [ this, expected_site, expected_owner, &semantic_native_action, &selection,
+                   &refresh_workers, &stationed_npcs, &cur_npc ]
         ( const semantic_action_request &request ) {
             if( camp_omt_pos() != expected_site || get_owner() != expected_owner ) {
                 return semantic_action_dispatch_result{ false, "stale_camp", "" };
@@ -5498,11 +5511,14 @@ void basecamp::job_assignment_ui()
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }
             const std::string requested_id = request.stable_id.value_or( "" );
-            const std::vector<npc_ptr> current_workers = get_npcs_assigned();
-            for( size_t index = 0; index < current_workers.size(); ++index ) {
-                const npc_ptr &worker = current_workers[index];
-                if( worker && requested_id == string_format( "character:%d", worker->getID().get_value() ) ) {
+            // Resolve identity against the same filtered native list used by
+            // CONFIRM, at dispatch time. An old index cannot select a successor.
+            refresh_workers();
+            for( size_t index = 0; index < stationed_npcs.size(); ++index ) {
+                npc *worker = stationed_npcs[index];
+                if( requested_id == string_format( "character:%d", worker->getID().get_value() ) ) {
                     selection = index;
+                    cur_npc = worker;
                     semantic_native_action = "CONFIRM";
                     return semantic_action_dispatch_result{ true, "", "" };
                 }
@@ -5510,9 +5526,6 @@ void basecamp::job_assignment_ui()
             return semantic_action_dispatch_result{ false, "stale_worker", "" };
         } );
     }
-
-    std::vector<npc *> stationed_npcs;
-    npc *cur_npc = nullptr;
 
     ui.on_redraw( [&]( const ui_adaptor & ) {
         werase( w_jobs );
@@ -5559,18 +5572,7 @@ void basecamp::job_assignment_ui()
     } );
 
     while( true ) {
-        // create a list of npcs stationed at this camp
-        stationed_npcs.clear();
-        for( const auto &elem : get_npcs_assigned() ) {
-            if( elem ) {
-                stationed_npcs.push_back( elem.get() );
-            }
-        }
-        cur_npc = nullptr;
-        // entries_per_page * page number
-        if( !stationed_npcs.empty() ) {
-            cur_npc = stationed_npcs[selection];
-        }
+        refresh_workers();
 
         ui_manager::redraw();
         if( semantic_scope ) {

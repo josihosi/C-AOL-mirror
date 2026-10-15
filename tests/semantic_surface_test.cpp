@@ -17,6 +17,8 @@
 #include "cata_catch.h"
 #include "cached_options.h"
 #include "avatar.h"
+#include "bodygraph.h"
+#include "input.h"
 #include "activity_actor_definitions.h"
 #include "player_activity.h"
 #include "map.h"
@@ -57,6 +59,91 @@
 #include "uilist.h"
 #include "ui_manager.h"
 
+namespace
+{
+void set_test_environment( const char *name, const char *value, int overwrite = 1 )
+{
+#if defined(_WIN32)
+    // The caller's POSIX overwrite=1 maps to an unconditional assignment here.
+    ( void )overwrite;
+    _putenv_s( name, value );
+#else
+    setenv( name, value, overwrite );
+#endif
+}
+
+void unset_test_environment( const char *name )
+{
+#if defined(_WIN32)
+    _putenv_s( name, "" );
+#else
+    unsetenv( name );
+#endif
+}
+
+void assign_test_environment( const std::string &name, const std::optional<std::string> &value )
+{
+    if( value ) {
+        set_test_environment( name.c_str(), value->c_str() );
+    } else {
+        unset_test_environment( name.c_str() );
+    }
+}
+} // namespace
+
+TEST_CASE( "semantic test environment assignment keeps native empty-value behavior and restores on unwind",
+           "[semantic_surface][environment_portability_067]" )
+{
+    constexpr const char *name = "OPENCLAW_HARNESS_TEST_ENVIRONMENT_PORTABILITY_067";
+    const char *initial_value = std::getenv( name );
+    const std::optional<std::string> initial = initial_value ?
+            std::optional<std::string>( initial_value ) : std::nullopt;
+    on_out_of_scope restore_initial( [&]() {
+        assign_test_environment( name, initial );
+    } );
+
+    const std::optional<std::string> prior = GENERATE( std::optional<std::string> {},
+            std::optional<std::string>( "prior-value" ) );
+    assign_test_environment( name, prior );
+    try {
+        {
+            on_out_of_scope restore_prior( [&]() {
+                assign_test_environment( name, prior );
+            } );
+            assign_test_environment( name, std::string( "outer-value" ) );
+            try {
+                on_out_of_scope restore_outer( [&]() {
+                    assign_test_environment( name, std::string( "outer-value" ) );
+                } );
+                assign_test_environment( name, std::string( "inner-value" ) );
+                throw std::runtime_error( "exercise nested environment restoration during unwind" );
+            } catch( const std::runtime_error & ) {
+            }
+            REQUIRE( std::getenv( name ) != nullptr );
+            CHECK( std::string( std::getenv( name ) ) == "outer-value" );
+            throw std::runtime_error( "exercise prior environment restoration during unwind" );
+        }
+    } catch( const std::runtime_error & ) {
+        // The prior-value scope has unwound and restored its saved state.
+    }
+    if( prior ) {
+        REQUIRE( std::getenv( name ) != nullptr );
+        CHECK( std::string( std::getenv( name ) ) == *prior );
+    } else {
+        CHECK( std::getenv( name ) == nullptr );
+    }
+
+    assign_test_environment( name, std::string() );
+#if defined(_WIN32)
+    CHECK( std::getenv( name ) == nullptr );
+#else
+    REQUIRE( std::getenv( name ) != nullptr );
+    CHECK( std::string( std::getenv( name ) ).empty() );
+#endif
+    assign_test_environment( name, std::nullopt );
+    CHECK( std::getenv( name ) == nullptr );
+}
+
 TEST_CASE( "redraw debug errors interrupt input without completing its pending action",
            "[semantic_surface][debug_error_prompt_067]" )
 {
@@ -72,18 +159,18 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
     on_out_of_scope restore_environment( [&]() {
         for( const auto &entry : previous ) {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
     } );
     const std::string run = std::string( enclosing_session ? "redraw-enclosed-" :
                                          "redraw-between-owners-" ) +
                             std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    unsetenv( keys[2].c_str() );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    unset_test_environment( keys[2].c_str() );
 #if defined(TILES)
     software_render_fixture renderer;
     REQUIRE( renderer.available() );
@@ -678,17 +765,17 @@ TEST_CASE( "native compatibility observations do not duplicate input-owner rende
         for( const auto &entry : previous )
         {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
         fs::remove_all( directory );
     } );
     const auto run = directory.filename().string();
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[2].c_str(), trace.string().c_str(), 1 );
     const auto context = get_default_mode_input_context();
     openclaw_harness_semantic_initial_world_frame_if_ready( &context, true, true, true );
     auto &manager = openclaw_harness_semantic_surface_manager();
@@ -1089,14 +1176,15 @@ TEST_CASE( "semantic transport records JSONL offsets through a lost FIFO wake",
     on_out_of_scope cleanup( [&] {
         if( had_previous_path )
         {
-            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", saved_path.c_str(), 1 );
+            set_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", saved_path.c_str(), 1 );
         } else
         {
-            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+            unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
         }
         std::filesystem::remove( transport_path );
     } );
-    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", transport_path.string().c_str(), 1 );
+    set_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", transport_path.string().c_str(),
+                          1 );
 
     semantic_surface_manager manager( "transport-run" );
     semantic_surface_manager_session session( manager );
@@ -2489,13 +2577,13 @@ TEST_CASE( "rejected transport stays inside the native input owner until a real 
             std::nullopt;
     on_out_of_scope cleanup( [&]() {
         if( previous ) {
-            setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
+            set_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous->c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+            unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
         }
         std::filesystem::remove( path );
     } );
-    setenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
+    set_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
 #if defined(TILES)
     software_render_fixture renderer;
     REQUIRE( renderer.available() );
@@ -2618,12 +2706,12 @@ TEST_CASE( "debug prompt retains native keyboard continuation outside semantic m
     const char *old_run = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
     const std::optional<std::string> previous = old_run ? std::optional<std::string>( old_run ) :
             std::nullopt;
-    unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
     on_out_of_scope restore_environment( [&]() {
         if( previous ) {
-            setenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", previous->c_str(), 1 );
+            set_test_environment( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", previous->c_str(), 1 );
         } else {
-            unsetenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
+            unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
         }
     } );
     const bool owns_terminal = !catacurses::stdscr;
@@ -2713,18 +2801,18 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
         for( const auto &entry : previous )
         {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
         fs::remove_all( directory );
     } );
     const std::string run = directory.filename().string();
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
-    setenv( keys[3].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[2].c_str(), trace.string().c_str(), 1 );
+    set_test_environment( keys[3].c_str(), run.c_str(), 1 );
     raid_decision_trace::recorder diagnostic_recorder( { run, run, run, trace.string() } );
     semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
     int dispatched = 0;
@@ -2906,7 +2994,7 @@ TEST_CASE( "native journal bounds diagnostics while preserving current authority
     if( !prior_identity_error ) {
         debug_reset_error_observed();
     }
-    unsetenv( keys[1].c_str() );
+    unset_test_environment( keys[1].c_str() );
     CHECK_FALSE( write_native_semantic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
     CHECK_FALSE( write_native_diagnostic_event( "{\"event\":\"turn\",\"run_id\":\"" + run + "\"}" ) );
     CHECK( fs::file_size( trace ) == before );
@@ -2939,9 +3027,9 @@ TEST_CASE( "native journal rejects invalid records and initial temporary IO befo
         for( const auto &entry : previous )
         {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
         deinitDebug();
@@ -2960,9 +3048,9 @@ TEST_CASE( "native journal rejects invalid records and initial temporary IO befo
     setupDebug( DebugOutput::file );
     const fs::path log = fs::path( PATH_INFO::debug() );
     const std::string run = directory.filename().string();
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[2].c_str(), trace.string().c_str(), 1 );
     const std::string good = "{\"event\":\"frame\",\"run_id\":\"" + run +
                              "\",\"frame_id\":\"first-frame\"}";
     std::string record;
@@ -3058,9 +3146,9 @@ TEST_CASE( "initial HUD World is emitted only after actual journal publication",
         for( const auto &entry : previous )
         {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
         if( !previous_error )
@@ -3070,9 +3158,9 @@ TEST_CASE( "initial HUD World is emitted only after actual journal publication",
         fs::remove_all( directory );
     } );
     const auto run = directory.filename().string();
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[2].c_str(), trace.string().c_str(), 1 );
     const auto context = get_default_mode_input_context();
     fs::create_directory( temporary );
     openclaw_harness_semantic_initial_world_frame_if_ready( &context, true, true, true );
@@ -3125,9 +3213,9 @@ TEST_CASE( "rejected receipt and travel types cannot alter later journal retenti
         for( const auto &entry : previous )
         {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
         if( !previous_error )
@@ -3137,9 +3225,9 @@ TEST_CASE( "rejected receipt and travel types cannot alter later journal retenti
         fs::remove_all( directory );
     } );
     const auto run = directory.filename().string();
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    setenv( keys[2].c_str(), trace.string().c_str(), 1 );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[2].c_str(), trace.string().c_str(), 1 );
     const std::string base = "\"run_id\":\"" + run + "\",";
     REQUIRE( write_native_semantic_event( "{" + base +
                                           "\"event\":\"surface_descriptor\",\"frame_id\":\"frame-0\"}" ) );
@@ -3302,15 +3390,15 @@ TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
     }
     const std::string run = "activity-driver-" +
                             std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    unsetenv( keys[2].c_str() );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    unset_test_environment( keys[2].c_str() );
     on_out_of_scope restore( [&]() {
         for( const auto &entry : previous ) {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
         u.cancel_activity();
@@ -3527,12 +3615,12 @@ TEST_CASE( "avatar activity driver leaves harness-off input unbound",
     for( const auto &key : keys ) {
         const char *value = std::getenv( key.c_str() );
         previous[key] = value ? std::optional<std::string>( value ) : std::nullopt;
-        unsetenv( key.c_str() );
+        unset_test_environment( key.c_str() );
     }
     on_out_of_scope restore( [&]() {
         for( const auto &entry : previous ) {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             }
         }
         u.cancel_activity();
@@ -3712,15 +3800,15 @@ TEST_CASE( "World movement mode opens its native choices and restores ordinary i
     }
     const std::string run = "movement-mode-" +
                             std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
-    setenv( keys[0].c_str(), run.c_str(), 1 );
-    setenv( keys[1].c_str(), run.c_str(), 1 );
-    unsetenv( keys[2].c_str() );
+    set_test_environment( keys[0].c_str(), run.c_str(), 1 );
+    set_test_environment( keys[1].c_str(), run.c_str(), 1 );
+    unset_test_environment( keys[2].c_str() );
     on_out_of_scope restore_environment( [&]() {
         for( const auto &entry : previous ) {
             if( entry.second ) {
-                setenv( entry.first.c_str(), entry.second->c_str(), 1 );
+                set_test_environment( entry.first.c_str(), entry.second->c_str(), 1 );
             } else {
-                unsetenv( entry.first.c_str() );
+                unset_test_environment( entry.first.c_str() );
             }
         }
     } );
@@ -3839,5 +3927,123 @@ TEST_CASE( "World movement mode opens its native choices and restores ordinary i
     CHECK( menus == 1 );
     CHECK( active_semantic_surface_manager() == ( enclosing ? &manager : nullptr ) );
     flushinp();
+}
+#endif
+
+#if !defined(TILES)
+TEST_CASE( "bodygraph Close owns the concrete modal across timeout and nested return",
+           "[semantic_surface][bodygraph_owner_067]" )
+{
+    const std::string mode = GENERATE( "direct", "nested", "native_quit" );
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    clear_avatar();
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        flushinp();
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    semantic_surface_manager manager( "bodygraph-owner-control" );
+    semantic_surface_manager_session session( manager );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    semantic_surface_descriptor parent;
+    semantic_surface_descriptor child;
+    int parents = 0;
+    int children = 0;
+    const auto queue_key = [&]( const std::string & action ) {
+        const auto &keys = inp_mngr.get_input_for_action( action, "BODYGRAPH" );
+        const auto key = std::find_if( keys.begin(), keys.end(), []( const input_event & event ) {
+            return event.type == input_event_t::keyboard_char && event.sequence.size() == 1 &&
+                   event.get_first_input() >= 0 && event.get_first_input() < 128;
+        } );
+        REQUIRE( key != keys.end() );
+        REQUIRE( ::ungetch( key->get_first_input() ) != -1 );
+    };
+    const auto close = [&]( const semantic_surface_descriptor & owner,
+    const std::string & request_id ) {
+        REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                           request_id, "bodygraph.close", std::nullopt, {} } ) );
+    };
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & descriptor ) {
+        if( descriptor.kind != "bodygraph" ) {
+            return;
+        }
+        CHECK( descriptor.payload.at( "native_owner" ) == "BODYGRAPH" );
+        CHECK( descriptor.payload.at( "character_id" ) ==
+               std::to_string( get_avatar().getID().get_value() ) );
+        if( descriptor.payload.at( "bodygraph_id" ) == "full_body" ) {
+            ++parents;
+            if( parents == 1 ) {
+                parent = descriptor;
+                input_context idle( "BODYGRAPH" );
+                idle.register_action( "ANY_INPUT" );
+                CHECK( idle.handle_input( 1 ) == "TIMEOUT" );
+                REQUIRE( manager.top() );
+                CHECK( manager.top()->surface_id == parent.surface_id );
+                CHECK( manager.top()->frame_id == parent.frame_id );
+                if( mode == "direct" ) {
+                    close( descriptor, "parent-close" );
+                } else {
+                    queue_key( "RIGHT" );
+                }
+            } else {
+                CHECK( descriptor.surface_id == parent.surface_id );
+                CHECK( descriptor.frame_id != parent.frame_id );
+                close( child, "closed-child" );
+                close( parent, "stale-parent" );
+                close( descriptor, "parent-close" );
+            }
+        } else {
+            ++children;
+            child = descriptor;
+            CHECK( child.surface_id != parent.surface_id );
+            close( parent, "covered-parent" );
+            if( mode == "native_quit" ) {
+                queue_key( "QUIT" );
+            } else {
+                close( descriptor, "child-close" );
+            }
+        }
+    } );
+    display_bodygraph( get_avatar() );
+    CHECK( parents == ( mode == "direct" ? 1 : 2 ) );
+    CHECK( children == ( mode == "direct" ? 0 : 1 ) );
+    CHECK_FALSE( manager.top() );
+    const auto receipt_for = [&]( const std::string & request_id ) {
+        return std::find_if( receipts.begin(), receipts.end(), [&]( const auto & receipt ) {
+            return receipt.request_id == request_id;
+        } );
+    };
+    const auto accepted = receipt_for( "parent-close" );
+    REQUIRE( accepted != receipts.end() );
+    CHECK( accepted->accepted );
+    if( mode != "direct" ) {
+        for( const std::string request_id : {
+                 "covered-parent", "closed-child", "stale-parent"
+             } ) {
+            const auto rejected = receipt_for( request_id );
+            REQUIRE( rejected != receipts.end() );
+            CHECK_FALSE( rejected->accepted );
+        }
+        if( mode == "nested" ) {
+            const auto closed = receipt_for( "child-close" );
+            REQUIRE( closed != receipts.end() );
+            CHECK( closed->accepted );
+        }
+    }
 }
 #endif

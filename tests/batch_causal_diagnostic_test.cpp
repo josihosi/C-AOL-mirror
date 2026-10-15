@@ -11,6 +11,7 @@
 
 #include "activity_actor_definitions.h"
 #include "avatar.h"
+#include "basecamp.h"
 #include "bodypart.h"
 #include "bandit_live_world.h"
 #include "bandit_live_world_probe.h"
@@ -718,6 +719,171 @@ TEST_CASE( "batch death camera retains its owner across timeout turns",
               << " quit=" << static_cast<int>( g->uquit ) << '\n';
 }
 #endif
+
+TEST_CASE( "batch worker assignment edits the advertised worker on first selection",
+           "[batch_causal_067][camp_assignment_identity_067]" )
+{
+#if !defined(TILES)
+    const std::string roster_change = GENERATE( std::string( "unchanged" ),
+                                      std::string( "reordered" ), std::string( "removed" ) );
+    clear_avatar();
+    clear_map_without_vision();
+    clear_npcs();
+    diagnostic_terminal terminal;
+    avatar &you = get_avatar();
+    map &here = get_map();
+    you.setpos( here, tripoint_bub_ms{ 60, 60, 0 }, false );
+    const tripoint_abs_ms camp_abs = here.get_abs( tripoint_bub_ms{ 60, 60, 0 } );
+    basecamp camp( "Identity Diagnostic Camp", project_to<coords::omt>( camp_abs ) );
+    npc &first = spawn_npc( tripoint_bub_ms{ 61, 60, 0 }.xy(), "test_talker" );
+    npc &second = spawn_npc( tripoint_bub_ms{ 62, 60, 0 }.xy(), "test_talker" );
+    npc &third = spawn_npc( tripoint_bub_ms{ 63, 60, 0 }.xy(), "test_talker" );
+    static const activity_id ACT_CAMP_PATROL( "ACT_CAMP_PATROL" );
+    camp.add_assignee( first.getID() );
+    camp.add_assignee( second.getID() );
+    camp.add_assignee( third.getID() );
+    const std::vector<npc_ptr> workers = camp.get_npcs_assigned();
+    REQUIRE( workers.size() == 3 );
+
+    // Choose the second row in the actual native roster, regardless of the
+    // roster's pointer-based ordering.  The job editor and numeric prompt
+    // remain the real uilist/input surfaces owned by the game.
+    npc *untouched_worker = workers.front().get();
+    npc *requested_worker = workers[1].get();
+    npc *successor_worker = workers.back().get();
+    REQUIRE( untouched_worker->job.set_task_priority( ACT_CAMP_PATROL, 3 ) );
+    REQUIRE( requested_worker->job.set_task_priority( ACT_CAMP_PATROL, 0 ) );
+    REQUIRE( successor_worker->job.set_task_priority( ACT_CAMP_PATROL, 5 ) );
+    const int untouched_priority = untouched_worker->job.get_priority_of_job( ACT_CAMP_PATROL );
+    const int requested_priority = requested_worker->job.get_priority_of_job( ACT_CAMP_PATROL );
+    REQUIRE( untouched_priority == 3 );
+    REQUIRE( requested_priority == 0 );
+
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    semantic_surface_manager manager( "camp-worker-control-" + roster_change );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    int stage = 0;
+    bool edited_requested_worker = false;
+    bool selected_set_all = false;
+    bool submitted_priority = false;
+    bool closed = false;
+    bool stale_worker_rejected = false;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
+        if( receipt.request_id == "edit-second-worker" ) {
+            stale_worker_rejected = !receipt.accepted && receipt.rejection_reason == "stale_worker";
+            if( stale_worker_rejected ) {
+                REQUIRE( manager.top() );
+                const auto &owner = *manager.top();
+                REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id,
+                                                   owner.frame_id, "close-after-stale-worker",
+                                                   "camp_assignment.close", std::nullopt, {} } ) );
+                stage = 6;
+                closed = true;
+            }
+        }
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & screen ) {
+        if( screen.kind == "basecamp_worker_assignment" ) {
+            if( stage == 0 ) {
+                const std::string stable_id = string_format( "character:%d",
+                                              requested_worker->getID().get_value() );
+                const auto action = std::find_if( screen.valid_actions.begin(),
+                                                  screen.valid_actions.end(),
+                [&]( const semantic_action_descriptor & candidate ) {
+                    return candidate.id == "camp_assignment.edit_worker_jobs" &&
+                           candidate.stable_id == stable_id && candidate.enabled;
+                } );
+                REQUIRE( action != screen.valid_actions.end() );
+                REQUIRE( manager.submit_request( { manager.run_id(), screen.surface_id,
+                                                   screen.frame_id, "edit-second-worker",
+                                                   action->id, action->stable_id, {} } ) );
+                if( roster_change == "reordered" ) {
+                    // Removing the preceding row shifts the requested worker
+                    // from index 1 to index 0 while another worker takes index 1.
+                    camp.remove_assignee( untouched_worker->getID() );
+                } else if( roster_change == "removed" ) {
+                    camp.remove_assignee( requested_worker->getID() );
+                }
+                stage = 1;
+            }
+            if( stage == 4 ) {
+                CHECK( requested_worker->job.get_priority_of_job( ACT_CAMP_PATROL ) == 8 );
+                CHECK( untouched_worker->job.get_priority_of_job( ACT_CAMP_PATROL ) ==
+                       untouched_priority );
+                CHECK( successor_worker->job.get_priority_of_job( ACT_CAMP_PATROL ) == 5 );
+                edited_requested_worker = true;
+                const auto action = std::find_if( screen.valid_actions.begin(),
+                                                  screen.valid_actions.end(),
+                []( const semantic_action_descriptor & candidate ) {
+                    return candidate.id == "camp_assignment.close" && candidate.enabled;
+                } );
+                REQUIRE( action != screen.valid_actions.end() );
+                REQUIRE( manager.submit_request( { manager.run_id(), screen.surface_id,
+                                                   screen.frame_id, "close-worker-assignment",
+                                                   action->id, std::nullopt, {} } ) );
+                stage = 5;
+                closed = true;
+            }
+            return;
+        }
+        if( screen.kind == "menu" && stage == 1 && roster_change != "removed" ) {
+            const auto action = std::find_if( screen.valid_actions.begin(),
+                                              screen.valid_actions.end(),
+            []( const semantic_action_descriptor & candidate ) {
+                return candidate.id == "menu.choose" && candidate.enabled &&
+                       candidate.label.find( "Set all priorities" ) != std::string::npos;
+            } );
+            REQUIRE( action != screen.valid_actions.end() );
+            REQUIRE( manager.submit_request( { manager.run_id(), screen.surface_id,
+                                               screen.frame_id, "set-second-worker-priorities",
+                                               action->id, action->stable_id, {} } ) );
+            selected_set_all = true;
+            stage = 2;
+            return;
+        }
+        if( screen.kind == "menu" && stage == 3 ) {
+            const auto action = std::find_if( screen.valid_actions.begin(),
+            screen.valid_actions.end(), []( const semantic_action_descriptor & candidate ) {
+                return candidate.id == "menu.cancel" && candidate.enabled;
+            } );
+            REQUIRE( action != screen.valid_actions.end() );
+            REQUIRE( manager.submit_request( { manager.run_id(), screen.surface_id,
+                                               screen.frame_id, "return-to-worker-roster",
+                                               action->id, std::nullopt, {} } ) );
+            stage = 4;
+            return;
+        }
+        if( screen.kind == "string_prompt" && stage == 2 ) {
+            REQUIRE( manager.submit_request( { manager.run_id(), screen.surface_id,
+                                               screen.frame_id, "set-priority-eight",
+                                               "prompt.submit", std::nullopt,
+            { { "text", "8" } } } ) );
+            submitted_priority = true;
+            stage = 3;
+            return;
+        }
+    } );
+    on_out_of_scope clear_descriptor_observer( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+
+    camp.job_assignment_ui();
+
+    CHECK( stage == ( roster_change == "removed" ? 6 : 5 ) );
+    CHECK( selected_set_all == ( roster_change != "removed" ) );
+    CHECK( submitted_priority == ( roster_change != "removed" ) );
+    CHECK( edited_requested_worker == ( roster_change != "removed" ) );
+    CHECK( closed );
+    CHECK( stale_worker_rejected == ( roster_change == "removed" ) );
+    CHECK( requested_worker->job.get_priority_of_job( ACT_CAMP_PATROL ) ==
+           ( roster_change == "removed" ? requested_priority : 8 ) );
+    CHECK( untouched_worker->job.get_priority_of_job( ACT_CAMP_PATROL ) == untouched_priority );
+    CHECK( successor_worker->job.get_priority_of_job( ACT_CAMP_PATROL ) == 5 );
+#endif
+}
 
 
 TEST_CASE( "batch repeated options initialization retains grouped interface definitions",

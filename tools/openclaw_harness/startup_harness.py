@@ -24780,6 +24780,18 @@ def cleanup_game_process(
         info["status"] = "retained_process_identity_unavailable"
         info["cleanup_finished_at"] = _utc_timestamp(time.time())
         return info
+    expected_executable = str(expected.get("executable_path") or "")
+    if expected_executable:
+        observed_executable = str(observed.get("executable_path") or "")
+        # This is the executable recorded by this launch, not a name-based
+        # allowance for arbitrary staged binaries. Birth and command matched
+        # above; a missing or changed executable still cannot be signalled.
+        if (not observed_executable or
+                os.path.normcase(os.path.realpath(expected_executable)) !=
+                os.path.normcase(os.path.realpath(observed_executable))):
+            info["status"] = "retained_process_executable_changed"
+            info["cleanup_finished_at"] = _utc_timestamp(time.time())
+            return info
     elif not re.search(
             r"(?:Cataclysm-AOL|cataclysm(?:-(?:tiles|tlg-tiles))?|r_surface_008_curses/cataclysm|r027-(?:closure|exploration)-[0-9]+-tiles)(?:\.exe)?(?:\s|$)",
             command,

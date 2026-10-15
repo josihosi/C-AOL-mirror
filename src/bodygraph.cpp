@@ -4,7 +4,12 @@
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
+#include <map>
+#include <optional>
+#include <utility>
+#include <vector>
 #include <set>
+#include <string>
 #include <tuple>
 
 #include "bodypart.h"
@@ -23,6 +28,7 @@
 #include "memory_fast.h"
 #include "output.h"
 #include "point.h"
+#include "semantic_surface.h"
 #include "string_formatter.h"
 #include "subbodypart.h"
 #include "translation.h"
@@ -614,10 +620,40 @@ void bodygraph_display::display()
     prepare_partlist();
     prepare_infolist();
 
+    // One capability belongs to this concrete invocation, including timeout
+    // polls. Nested graphs push their own owner and return to this one.
+    std::optional<semantic_surface_manager_session> semantic_session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    std::string semantic_action;
+    std::optional<semantic_surface_scope> semantic_scope;
+    if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
+        semantic_scope.emplace( *manager, "bodygraph", _( "Body status" ),
+        std::map<std::string, std::string> {
+            { "native_owner", "BODYGRAPH" },
+            { "character_id", std::to_string( u->getID().get_value() ) },
+            { "bodygraph_id", id.str() }
+        }, std::vector<semantic_action_descriptor> {
+            { "bodygraph.close", "", _( "Close" ), true }
+        }, [&semantic_action]( const semantic_action_request & request ) {
+            if( request.action_id != "bodygraph.close" || request.stable_id.has_value() ) {
+                return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+            }
+            semantic_action = "QUIT";
+            return semantic_action_dispatch_result{ true, "", "" };
+        } );
+    }
     bool done = false;
     while( !done ) {
         ui_manager::redraw();
-        std::string action = ctxt.handle_input();
+        if( semantic_scope ) {
+            semantic_scope->consume_request();
+        }
+        std::string action = semantic_action.empty() ? ctxt.handle_input() : "";
+        if( !semantic_action.empty() ) {
+            action = std::exchange( semantic_action, std::string() );
+        }
         if( action == "QUIT" || ( action == "LEFT" && id != bodygraph_full_body ) ) {
             done = true;
         } else if( action == "CONFIRM" || action == "RIGHT" ) {
