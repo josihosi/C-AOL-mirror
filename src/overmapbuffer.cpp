@@ -13,6 +13,7 @@
 #include <type_traits>
 
 #include "basecamp.h"
+#include "bandit_live_world_probe.h"
 #include "calendar.h"
 #include "cata_assert.h"
 #include "cata_utility.h"
@@ -116,6 +117,21 @@ cata_path overmapbuffer::player_filename( const point_abs_om &p )
 
 overmap &overmapbuffer::get( const point_abs_om &p )
 {
+    const auto record_branch = [&]( const char *branch ) {
+        if( p != point_abs_om( 1, 0 ) || !bandit_live_world_probe::active() ||
+            !bandit_live_world_probe::transition_events_enabled() ) {
+            return;
+        }
+        bandit_live_world_probe::transition_event event;
+        event.domain = "worldgen";
+        event.transition = "overmap_request";
+        event.site_id = "overmap@" + p.to_string();
+        event.operation_id = event.site_id;
+        event.outcome = branch;
+        event.reason = "overmapbuffer::get";
+        event.turn = to_turn<int>( calendar::turn );
+        bandit_live_world_probe::record_transition_event( std::move( event ) );
+    };
     if( last_requested_overmap != nullptr && last_requested_overmap->pos() == p ) {
         return *last_requested_overmap;
     }
@@ -126,6 +142,7 @@ overmap &overmapbuffer::get( const point_abs_om &p )
     }
 
     // That constructor loads an existing overmap or creates a new one.
+    record_branch( "create" );
     overmap &new_om = *( overmaps[ p ] = std::make_unique<overmap>( p ) );
     global_state.overmap_count++;
     new_om.populate();
@@ -135,6 +152,7 @@ overmap &overmapbuffer::get( const point_abs_om &p )
     fix_npcs( new_om );
 
     last_requested_overmap = &new_om;
+    record_branch( "request_complete" );
     return new_om;
 }
 

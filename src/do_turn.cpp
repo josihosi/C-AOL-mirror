@@ -2061,19 +2061,53 @@ bool live_bandit_update_local_path_avoiding(
     return !member_npc.path.empty();
 }
 
+void record_live_bandit_ingress_motor( const npc &member, const std::string_view guard,
+                                       const std::optional<tripoint_abs_ms> &destination = std::nullopt )
+{
+    if( !bandit_live_world_probe::active() ||
+        !bandit_live_world_probe::transition_events_enabled() ) {
+        return;
+    }
+    const auto &lease = member.get_bandit_live_world_projection_lease();
+    bandit_live_world_probe::transition_event event;
+    event.transition = "scout_ingress_motor";
+    event.site_id = lease.site_id;
+    event.operation_id = lease.activity_id;
+    event.generation = lease.generation;
+    event.handoff_epoch = lease.handoff_epoch;
+    event.actor_ids = { member.getID().get_value() };
+    event.turn = to_turn<int>( calendar::turn );
+    event.outcome = guard;
+    event.reason = string_format( "pos=%s goal=%s moves=%d local=%d omt=%d",
+                                  member.pos_abs().to_string(), member.goal.to_string(), member.get_moves(),
+                                  static_cast<int>( member.path.size() ), static_cast<int>( member.omt_path.size() ) );
+    if( destination ) {
+        event.reason += " destination=" + destination->to_string();
+    }
+    bandit_live_world_probe::record_transition_event( std::move( event ) );
+}
+
 bool live_bandit_move_to_omt_destination_avoiding(
     npc &member_npc,
     const std::function<bool( const std::vector<tripoint_bub_ms> & )> &path_validator,
-    const std::function<bool( const tripoint_bub_ms & )> &additional_avoid )
+    const std::function<bool( const tripoint_bub_ms & )> &additional_avoid,
+    std::string *diagnostic_guard = nullptr )
 {
+    const auto record_guard = [diagnostic_guard]( const char *guard ) {
+        if( diagnostic_guard ) {
+            *diagnostic_guard = guard;
+        }
+    };
     map &here = get_map();
     const tripoint_abs_omt current_omt = member_npc.pos_abs_omt();
     if( member_npc.goal == npc::no_goal_point || member_npc.omt_path.empty() ||
         member_npc.goal == current_omt ) {
+        record_guard( "ordinary_destination_owner" );
         member_npc.go_to_omt_destination( path_validator );
         return true;
     }
     if( !member_npc.path.empty() && path_validator( member_npc.path ) ) {
+        record_guard( "cached_route_selected" );
         member_npc.move_to_next();
         return true;
     }
@@ -2082,20 +2116,25 @@ bool live_bandit_move_to_omt_destination_avoiding(
         member_npc.omt_path.pop_back();
     }
     if( member_npc.omt_path.empty() ) {
+        record_guard( "omt_route_consumed" );
         member_npc.move_pause();
         return false;
     }
     const tripoint_bub_ms next_center =
         here.get_bub( project_to<coords::ms>( member_npc.omt_path.back() ) ) +
         point( SEEX, SEEY );
-    if( !here.inbounds( next_center ) ||
-        !live_bandit_update_local_path_avoiding(
-            member_npc, pathfinding_target::radius( next_center, 2 ), additional_avoid ) ||
-        !path_validator( member_npc.path ) ) {
+    const bool in_bounds = here.inbounds( next_center );
+    const bool route_found = in_bounds && live_bandit_update_local_path_avoiding(
+                                 member_npc, pathfinding_target::radius( next_center, 2 ), additional_avoid );
+    const bool route_valid = route_found && path_validator( member_npc.path );
+    if( !route_valid ) {
+        record_guard( !in_bounds ? "next_center_outside_map" :
+                      !route_found ? "native_local_route_unavailable" : "watch_ring_route_refused" );
         member_npc.path.clear();
         member_npc.move_pause();
         return false;
     }
+    record_guard( "solved_route_selected" );
     member_npc.move_to_next();
     return true;
 }
@@ -16977,6 +17016,10 @@ void monmove()
                         } );
                     }
                 }
+                if( ingress_destination != pair_ingress_travel_destinations.end() ||
+                    assembly_order != pair_assembly_orders.end() ) {
+                    record_live_bandit_ingress_motor( guy, "native_survival" );
+                }
                 homeward_trace.action( "npc_move", "native_survival branch selected" );
                 guy.move();
             } else if( assembly_order != pair_assembly_orders.end() ) {
@@ -16984,12 +17027,20 @@ void monmove()
                 if( guy.has_flag( json_flag_CANNOT_MOVE ) ||
                     !m.inbounds( assembly_order->second ) ||
                     guy.pos_abs() == assembly_order->second ) {
+                    record_live_bandit_ingress_motor( guy,
+                                                      guy.has_flag( json_flag_CANNOT_MOVE ) ? "assembly_cannot_move" :
+                                                      !m.inbounds( assembly_order->second ) ? "assembly_destination_outside_map" :
+                                                      "at_assembly_destination",
+                                                      assembly_order->second );
                     guy.move_pause();
                 } else {
                     if( live_bandit_update_local_path(
                             guy, m.get_bub( assembly_order->second ) ) ) {
+                        record_live_bandit_ingress_motor( guy, "assembly_route_selected", assembly_order->second );
                         guy.move_to_next();
                     } else {
+                        record_live_bandit_ingress_motor( guy, "assembly_native_route_unavailable",
+                                                          assembly_order->second );
                         guy.path.clear();
                         guy.move_pause();
                     }
@@ -17036,9 +17087,14 @@ void monmove()
                     guy.goal != ingress_destination->second || guy.omt_path.empty() ) {
                     // The overmap cadence owns route binding and repair.  Keep this loaded
                     // member inert until that exact owner route is present.
+                    record_live_bandit_ingress_motor( guy, !relationship ? "relationship_missing" :
+                                                      guy.has_flag( json_flag_CANNOT_MOVE ) ? "cannot_move" :
+                                                      !guy.is_travelling() ? "native_not_travelling" :
+                                                      guy.goal != ingress_destination->second ? "goal_mismatch" : "omt_path_empty" );
                     guy.move_pause();
                 } else if( ingress_boundary != pair_ingress_boundary_steps.end() ) {
                     if( guy.pos_abs() == ingress_boundary->second.departure ) {
+                        record_live_bandit_ingress_motor( guy, "at_ingress_boundary", ingress_boundary->second.departure );
                         guy.move_pause();
                     } else {
                         const bool route_found = live_bandit_update_local_path(
@@ -17046,6 +17102,8 @@ void monmove()
                                                          ingress_boundary->second.departure ) );
                         const bool route_safe = route_found &&
                                                 local_path_respects_watch_ring( guy.path );
+                        record_live_bandit_ingress_motor( guy, !route_found ? "boundary_native_route_unavailable" :
+                                                          !route_safe ? "boundary_watch_ring_refused" : "boundary_route_selected" );
                         if( route_safe ) {
                             guy.move_to_next();
                         } else {
@@ -17063,8 +17121,15 @@ void monmove()
                     // distance.  Keep that non-inward corridor available while excluding every
                     // step closer to the target; the covert mover retains the native OMT mission
                     // and validates the prospective route before the arrival commit.
+                    std::string motor_guard;
+                    const bool diagnostic = bandit_live_world_probe::active() &&
+                                            bandit_live_world_probe::transition_events_enabled();
                     live_bandit_move_to_omt_destination_avoiding(
-                        guy, local_path_respects_watch_ring, avoid_watch_ring );
+                        guy, local_path_respects_watch_ring, avoid_watch_ring,
+                        diagnostic ? &motor_guard : nullptr );
+                    if( diagnostic ) {
+                        record_live_bandit_ingress_motor( guy, motor_guard );
+                    }
                 }
             } else if( pair_homeward_travel_ids.count( guy.getID() ) > 0 ) {
                 const std::optional<bandit_live_world::covert_scout_relationship_read>
@@ -17628,6 +17693,10 @@ void monmove()
             }
         }
         if( !entered_action_loop ) {
+            if( pair_ingress_travel_destinations.count( guy.getID() ) ||
+                pair_assembly_orders.count( guy.getID() ) ) {
+                record_live_bandit_ingress_motor( guy, "native_action_loop_not_entered" );
+            }
             live_bandit_homeward_motor_trace homeward_trace(
                 guy, pair_homeward_travel_ids.count( guy.getID() ) > 0 );
             homeward_trace.action( "none", "NPC action loop not entered", "not_invoked" );

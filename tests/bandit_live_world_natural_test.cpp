@@ -2,6 +2,7 @@
 #include "bandit_live_world_probe.h"
 #include "bandit_pursuit_handoff.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <map>
@@ -113,17 +114,35 @@ std::map<std::string, tripoint_abs_omt> find_natural_hostile_camps()
               << " libstdcxx=" << __GLIBCXX__
 #endif
               << '\n';
-    overmap &generated = overmap_buffer.get( point_abs_om( 1, 0 ) );
+    bandit_live_world_probe::snapshot request_trace;
+    overmap *requested = nullptr;
+    {
+        bandit_live_world_probe::session request_probe(
+            bandit_live_world_probe::collection_mode::transition_events );
+        requested = &overmap_buffer.get( point_abs_om( 1, 0 ) );
+        request_trace = request_probe.result();
+    }
+    overmap &generated = *requested;
+    for( const auto &event : request_trace.transition_events ) {
+        if( event.transition == "overmap_request" ) {
+            std::cout << "batch_worldgen_branch requested=(1,0) returned=" << generated.pos().to_string()
+                      << " seed=" << g->get_seed() << " stage=" << event.outcome
+                      << " " << event.reason << '\n';
+        }
+    }
+    std::cout << "batch_worldgen_branch dropped=" << request_trace.dropped_transition_events << '\n';
     std::cout << "batch_worldgen_region id=" << generated.get_settings().id.str()
               << " city_size=" << generated.get_settings().get_settings_city().city_size
               << " city_spacing=" << generated.get_settings().get_settings_city().city_spacing << '\n';
     int scanned_tiles = 0;
     int bandit_tiles = 0;
     int cannibal_tiles = 0;
-    for( int x = 0; x < OMAPX && found.size() < 2; ++x ) {
-        for( int y = 0; y < OMAPY && found.size() < 2; ++y ) {
+    std::map<std::string, int> terrain_counts;
+    for( int x = 0; x < OMAPX; ++x ) {
+        for( int y = 0; y < OMAPY; ++y ) {
             const tripoint_om_omt local( x, y, 0 );
             ++scanned_tiles;
+            ++terrain_counts[generated.ter( local ).id().str()];
             const std::optional<overmap_special_id> special = generated.overmap_special_at( local );
             if( special && ( *special == overmap_special_id( "bandit_camp" ) ||
                              *special == overmap_special_id( "cannibal_camp" ) ) ) {
@@ -138,7 +157,19 @@ std::map<std::string, tripoint_abs_omt> find_natural_hostile_camps()
               << " observed_cannibal_tiles=" << cannibal_tiles
               << " found_bandit=" << found.count( "bandit_camp" )
               << " found_cannibal=" << found.count( "cannibal_camp" )
-              << " scan_complete=" << ( found.size() < 2 ) << '\n';
+              << " scan_complete=" << ( scanned_tiles == OMAPX * OMAPY ) << '\n';
+    std::vector<std::pair<std::string, int>> top_terrain( terrain_counts.begin(),
+                                          terrain_counts.end() );
+    std::sort( top_terrain.begin(), top_terrain.end(), []( const auto & a, const auto & b ) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    } );
+    std::cout << "batch_worldgen_content omt=" << generated.pos().to_string()
+              << " z=0 tiles=" << scanned_tiles << " distinct_terrain=" << terrain_counts.size()
+              << " cities=" << generated.cities.size() << " top=";
+    for( std::size_t i = 0; i < std::min<std::size_t>( 8, top_terrain.size() ); ++i ) {
+        std::cout << top_terrain[i].first << ':' << top_terrain[i].second << ',';
+    }
+    std::cout << '\n';
     return found;
 }
 
@@ -589,12 +620,74 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         REQUIRE( overmap_buffer.find_npc( generated_ids[index] ) );
         CHECK( overmap_buffer.find_npc( generated_ids[index] )->is_active() );
     }
+    const auto report_staging_bodies = [&]( const char *stage ) {
+        std::cout << "batch_blind_staging stage=" << stage << " seed=" <<
+                  Catch::getCurrentContext().getConfig()->rngSeed() << " turn=" <<
+                  to_turn<int>( calendar::turn ) << " owner=" <<
+                  bandit_live_world::to_string( live_site.active_outing.owner ) <<
+                  " epoch=" << live_site.active_outing.handoff_epoch << '\n';
+        for( const auto id : generated_ids ) {
+            const auto member = overmap_buffer.find_npc( id );
+            const auto snapshot = std::find_if( live_site.active_outing.local_handoff.members.begin(),
+                                                live_site.active_outing.local_handoff.members.end(),
+            [id]( const auto & entry ) {
+                return entry.npc_id == id;
+            } );
+            std::cout << "batch_blind_body id=" << id.get_value() << " present=" << bool( member );
+            if( member ) {
+                const auto &lease = member->get_bandit_live_world_projection_lease();
+                std::cout << " pos=" << member->pos_abs().to_string() << " active=" << member->is_active()
+                          << " dead=" << member->is_dead() << " moves=" << member->get_moves()
+                          << " clock=" << to_turn<int>( member->get_last_updated() )
+                          << " sleeping=" << member->in_sleep_state() << " incapable=" << member->duty_incapacitated()
+                          << " goal=" << member->goal.to_string() << " path=" << member->path.size()
+                          << " omt_path=" << member->omt_path.size()
+                          << " attitude=" << static_cast<int>( member->get_attitude() )
+                          << " alarm=" << member->faction_alarm.has_value()
+                          << " target=" << ( member->current_target() != nullptr )
+                          << " danger=" << member->get_ai_danger() << " lease=" << lease.present
+                          << ':' << lease.generation << ':' << lease.handoff_epoch;
+            }
+            if( snapshot != live_site.active_outing.local_handoff.members.end() ) {
+                std::cout << " staging=" << snapshot->staging_position.to_string();
+            }
+            std::cout << '\n';
+        }
+    };
+    report_staging_bodies( "before" );
+    std::map<std::string, bandit_live_world_probe::transition_event> motor_first_guards;
+    std::uint64_t motor_probe_dropped = 0;
+    bool motor_summary_full = false;
     const std::size_t movement_stop_bound = get_map().points_on_zlevel(
             production_route_edge.z() ).size();
     std::size_t movement_steps = 0;
     bool pair_reached_staging = false;
     while( movement_steps < movement_stop_bound && !pair_reached_staging ) {
-        process_monsters_and_npcs_turn_for_test();
+        {
+            // A fresh existing probe keeps the first refusal observable after many native steps.
+            // Only the first instance of each actor/guard is retained, with a fixed output bound.
+            bandit_live_world_probe::session motor_probe(
+                bandit_live_world_probe::collection_mode::transition_events );
+            process_monsters_and_npcs_turn_for_test();
+            motor_probe_dropped += motor_probe.result().dropped_transition_events;
+            for( const auto &event : motor_probe.result().transition_events ) {
+                if( event.transition != "scout_ingress_motor" || event.actor_ids.empty() ) {
+                    continue;
+                }
+                const auto actor = character_id( static_cast<int>( event.actor_ids.front() ) );
+                if( std::find( generated_ids.begin(), generated_ids.end(), actor ) == generated_ids.end() ) {
+                    continue;
+                }
+                const std::string key = std::to_string( event.actor_ids.front() ) + ':' + event.outcome;
+                if( motor_first_guards.count( key ) == 0 ) {
+                    if( motor_first_guards.size() < 16 ) {
+                        motor_first_guards.emplace( key, event );
+                    } else {
+                        motor_summary_full = true;
+                    }
+                }
+            }
+        }
         pair_reached_staging = std::all_of( generated_ids.begin(), generated_ids.end(),
         [&live_site]( const character_id id ) {
             const shared_ptr_fast<npc> member = overmap_buffer.find_npc( id );
@@ -609,6 +702,14 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         } );
         movement_steps++;
     }
+    report_staging_bodies( "after" );
+    for( const auto &entry : motor_first_guards ) {
+        const auto &event = entry.second;
+        std::cout << "batch_blind_motor actor=" << event.actor_ids.front() << " turn=" << event.turn
+                  << " guard=" << event.outcome << " " << event.reason << '\n';
+    }
+    std::cout << "batch_blind_staging steps=" << movement_steps << " bound=" << movement_stop_bound
+              << " probe_dropped=" << motor_probe_dropped << " summary_full=" << motor_summary_full << '\n';
     REQUIRE( pair_reached_staging );
     process_monsters_and_npcs_turn_for_test();
     for( const character_id id : generated_ids ) {

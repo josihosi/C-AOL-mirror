@@ -12,10 +12,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
 #include "auto_note.h"
+#include "bandit_live_world_probe.h"
 #include "avatar.h"
 #include "calendar.h"
 #include "cata_assert.h"
@@ -48,6 +50,7 @@
 #include "overmap_map_data_cache.h"
 #include "overmap_noise.h"
 #include "overmap_types.h"
+#include "overmap_worldgen.h"
 #include "overmapbuffer.h"
 #include "path_info.h"
 #include "regional_settings.h"
@@ -260,12 +263,38 @@ tripoint displace( cube_direction d )
     cata_fatal( "Invalid cube_direction" );
 }
 
+// Existing scoped probes opt in to this single request, including its nested native branches.
+// No world lookup, generation or randomness is performed for diagnostic purposes.
+static void record_requested_overmap_branch( const point_abs_om &where,
+        const std::string_view stage, const std::string_view reason )
+{
+    if( where != point_abs_om( 1, 0 ) || !bandit_live_world_probe::active() ||
+        !bandit_live_world_probe::transition_events_enabled() ) {
+        return;
+    }
+    bandit_live_world_probe::transition_event event;
+    event.domain = "worldgen";
+    event.transition = "overmap_request";
+    event.site_id = "overmap@" + where.to_string();
+    event.operation_id = event.site_id;
+    event.outcome = stage;
+    event.reason = reason;
+    event.turn = to_turn<int>( calendar::turn );
+    bandit_live_world_probe::record_transition_event( std::move( event ) );
+}
+
 // *** BEGIN overmap FUNCTIONS ***
 overmap::overmap( const point_abs_om &p ) : loc( p )
 {
     settings = overmap_buffer.get_overmap_region( tripoint_abs_om( p, 0 ) );
     init_layers();
     hordes.set_location( loc );
+    if( loc == point_abs_om( 1, 0 ) && bandit_live_world_probe::active() ) {
+        const auto dimension = g->get_dimension_prefix();
+        record_requested_overmap_branch( loc, "constructed",
+                                         "dimension=" + dimension.str() + " layout=" + dimension->get_region_layout().str() +
+                                         " region=" + settings.str() );
+    }
 }
 
 overmap::~overmap() = default;
@@ -273,6 +302,24 @@ overmap::~overmap() = default;
 void overmap::populate( overmap_special_batch &enabled_specials )
 {
 
+    const auto record_batch = [&]( const char *stage ) {
+        if( loc != point_abs_om( 1, 0 ) || !bandit_live_world_probe::active() ||
+            !bandit_live_world_probe::transition_events_enabled() ) {
+            return;
+        }
+        int count = 0;
+        bool bandit = false;
+        bool cannibal = false;
+        for( const overmap_special_placement &entry : enabled_specials ) {
+            ++count;
+            bandit |= entry.special_details->id.str() == "bandit_camp";
+            cannibal |= entry.special_details->id.str() == "cannibal_camp";
+        }
+        record_requested_overmap_branch( loc, stage,
+                                         string_format( "count=%d bandit=%d cannibal=%d place_specials=%d",
+                                                 count, bandit, cannibal, settings->place_specials ) );
+    };
+    record_batch( "batch_before_filter" );
     const region_settings_feature_flag &overmap_feature_flag = settings->overmap_feature_flag;
     const bool should_blacklist = !overmap_feature_flag.blacklist.empty();
     const bool should_whitelist = !overmap_feature_flag.whitelist.empty();
@@ -303,9 +350,12 @@ void overmap::populate( overmap_special_batch &enabled_specials )
             }
         }
     }
+    record_batch( "batch_after_filter" );
     try {
         open( enabled_specials );
+        record_requested_overmap_branch( loc, "populate_complete", "open returned" );
     } catch( const std::exception &err ) {
+        record_requested_overmap_branch( loc, "populate_exception", "open threw std::exception" );
         debugmsg( "overmap (%d,%d) failed to load: %s", loc.x(), loc.y(), err.what() );
     }
 }
@@ -941,6 +991,7 @@ void overmap::generate( const std::vector<const overmap *> &neighbor_overmaps,
                         overmap_special_batch &enabled_specials )
 {
     dbg( D_INFO ) << "overmap::generate start…";
+    record_requested_overmap_branch( loc, "generate_enter", "native generator entered" );
     const oter_id omt_outside_defined_omap = static_cast<oter_id>
             ( get_option<std::string>( "OUTSIDE_DEFINED_OMAP_OMT" ) );
     const std::string overmap_pregenerated_path =
@@ -1062,6 +1113,7 @@ void overmap::generate( const std::vector<const overmap *> &neighbor_overmaps,
     // Place the monsters, now that the terrain is laid out
     place_mongroups();
     place_radios();
+    record_requested_overmap_branch( loc, "generate_complete", "native generator completed" );
     dbg( D_INFO ) << "overmap::generate done";
 }
 
@@ -3891,6 +3943,7 @@ void overmap::open( overmap_special_batch &enabled_specials )
             std::istringstream is{ std::string( sv ) };
             unserialize( is );
             } ) ) {
+                record_requested_overmap_branch( loc, "loaded_zzip", "terrain archive read succeeded" );
                 const cata_path plrfilename = overmapbuffer::player_filename( loc );
                 read_from_file_optional( plrfilename, [this, &plrfilename]( std::istream & is ) {
                     unserialize_view( plrfilename, is );
@@ -3906,6 +3959,7 @@ void overmap::open( overmap_special_batch &enabled_specials )
         if( read_from_file_optional( terfilename, [this, &terfilename]( std::istream & is ) {
         unserialize( terfilename, is );
         } ) ) {
+            record_requested_overmap_branch( loc, "loaded_plain", "terrain file read succeeded" );
             const cata_path plrfilename = overmapbuffer::player_filename( loc );
             read_from_file_optional( plrfilename, [this, &plrfilename]( std::istream & is ) {
                 unserialize_view( plrfilename, is );
