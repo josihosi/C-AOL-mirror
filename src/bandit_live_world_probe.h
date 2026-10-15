@@ -308,6 +308,8 @@ class session
         session &operator=( const session & ) = delete;
 
         const snapshot &result();
+        // Scoped observation target only; the existing natural fixture defaults to (1,0).
+        void set_overmap_request_target( int x, int y ) noexcept;
 
     private:
         friend class scoped_section;
@@ -315,6 +317,8 @@ class session
         friend void record_site_service( const std::string &site_id, site_service target,
                                          std::uint64_t amount );
         friend bool transition_events_enabled() noexcept;
+        friend bool overmap_request_selected( int x, int y ) noexcept;
+        friend bool begin_overmap_request( int x, int y ) noexcept;
         friend void record_transition_event( std::string_view operation_id, int generation,
                                              std::string_view simulation_owner,
                                              std::string_view previous_phase,
@@ -335,6 +339,8 @@ class session
         void record_timing( section target, std::int64_t inclusive_ns,
                             std::int64_t self_ns ) noexcept;
 
+        std::array<int, 2> overmap_request_target_ = {{ 1, 0 }};
+        bool overmap_request_started_ = false;
         snapshot result_;
         std::unique_ptr<timing_state> timing_state_;
         std::unordered_map<std::string, std::size_t> site_service_indices_;
@@ -390,6 +396,8 @@ void increment( counter target, std::uint64_t amount = 1 );
 void record_site_service( const std::string &site_id, site_service target,
                           std::uint64_t amount = 1 );
 bool active() noexcept;
+bool overmap_request_selected( int x, int y ) noexcept;
+bool begin_overmap_request( int x, int y ) noexcept;
 bool loaded_covert_member_active() noexcept;
 bool transition_events_enabled() noexcept;
 void record_transition_event( std::string_view operation_id, int generation,

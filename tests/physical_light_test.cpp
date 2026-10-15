@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 
 #include "avatar.h"
@@ -30,6 +31,51 @@
 
 namespace
 {
+class scoped_transition_environment
+{
+    public:
+        scoped_transition_environment() :
+            previous_event_path( get( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" ) ),
+            previous_run_id( get( "OPENCLAW_HARNESS_RUN_ID" ) ) {}
+
+        ~scoped_transition_environment() {
+            restore( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", previous_event_path );
+            restore( "OPENCLAW_HARNESS_RUN_ID", previous_run_id );
+        }
+
+        void set( const std::string &event_path, const std::string &run_id ) const {
+            assign( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", event_path.c_str() );
+            assign( "OPENCLAW_HARNESS_RUN_ID", run_id.c_str() );
+        }
+
+    private:
+        static std::optional<std::string> get( const char *name ) {
+            if( const char *value = std::getenv( name ) ) {
+                return value;
+            }
+            return std::nullopt;
+        }
+
+        static void assign( const char *name, const char *value ) {
+#if defined(_WIN32)
+            _putenv_s( name, value ? value : "" );
+#else
+            if( value ) {
+                setenv( name, value, 1 );
+            } else {
+                unsetenv( name );
+            }
+#endif
+        }
+
+        static void restore( const char *name, const std::optional<std::string> &value ) {
+            assign( name, value ? value->c_str() : nullptr );
+        }
+
+        std::optional<std::string> previous_event_path;
+        std::optional<std::string> previous_run_id;
+};
+
 item powered_flashlight( const int charges = 56 )
 {
     item battery( itype_id( "medium_battery_cell" ) );
@@ -678,26 +724,8 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
                 "build_logs/first-smoke-001/adapter-events.jsonl" );
     std::filesystem::create_directories( event_path.parent_path() );
     std::filesystem::remove( event_path );
-    const char *const previous_event_path = std::getenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
-    const char *const previous_run_id = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
-    const std::optional<std::string> saved_event_path = previous_event_path == nullptr ?
-            std::nullopt : std::optional<std::string>( previous_event_path );
-    const std::optional<std::string> saved_run_id = previous_run_id == nullptr ?
-            std::nullopt : std::optional<std::string>( previous_run_id );
-    on_out_of_scope restore_transition_stream( [saved_event_path, saved_run_id]() {
-        if( saved_event_path ) {
-            setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_event_path->c_str(), 1 );
-        } else {
-            unsetenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
-        }
-        if( saved_run_id ) {
-            setenv( "OPENCLAW_HARNESS_RUN_ID", saved_run_id->c_str(), 1 );
-        } else {
-            unsetenv( "OPENCLAW_HARNESS_RUN_ID" );
-        }
-    } );
-    setenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", event_path.string().c_str(), 1 );
-    setenv( "OPENCLAW_HARNESS_RUN_ID", "smoke-adapter-test", 1 );
+    scoped_transition_environment transition_environment;
+    transition_environment.set( event_path.string(), "smoke-adapter-test" );
     const auto read_transition_stream = [&event_path]() {
         std::ifstream input( event_path );
         return std::string( std::istreambuf_iterator<char>( input ),
@@ -755,7 +783,7 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     for( const auto &member : abstract_site->members ) {
         transient_npcs.push_back( member.npc_id );
     }
-    for( const std::string &id : {
+    for( const std::string id : {
              "test:smoke_failed_route", "test:smoke_out_of_range"
          } ) {
         const auto *refused_site = find_site( id );

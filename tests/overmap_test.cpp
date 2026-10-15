@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "avatar.h"
+#include "bandit_live_world_probe.h"
 #include "calendar.h"
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
@@ -891,7 +893,16 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
     std::unordered_map<itype_id, float> item_counts;
     finalize_item_counts( item_counts );
     map &main_map = get_map();
-    point_abs_om overmap_origin = project_to<coords::om>( main_map.get_abs_sub().xy() );
+    const tripoint_abs_ms saved_player_position = get_avatar().pos_abs();
+    const tripoint_abs_sm saved_map_origin = main_map.get_abs_sub();
+    on_out_of_scope restore_location( [&main_map, saved_player_position, saved_map_origin]() {
+        g->place_player_overmap( project_to<coords::omt>( saved_player_position ), false );
+        main_map.load( saved_map_origin, false );
+        get_avatar().setpos( saved_player_position, false );
+    } );
+    // Keep this coverage pass in the default inland geography regardless of
+    // which map another test left loaded when the suite entered this test.
+    const point_abs_om overmap_origin( 0, 0 );
     g->place_player_overmap( { project_to<coords::omt>( overmap_origin + ( 6 * point::north_west ) ), 0 } );
     // Don't inherit overmap state from initialization or previous tests.
     overmap_buffer.clear();
@@ -932,6 +943,24 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
     }
 
     const std::size_t initial_expected = yet_to_be_seen.size();
+    std::optional<point_abs_om> first_requested_om;
+    std::size_t examples_shown = 0;
+    std::map<std::string, int> first_request_z0;
+    int first_request_z0_tiles = 0;
+    const auto report_content = [&]() {
+        std::vector<std::pair<std::string, int>> top( first_request_z0.begin(), first_request_z0.end() );
+        std::sort( top.begin(), top.end(), []( const auto & a, const auto & b ) {
+            return a.second != b.second ? a.second > b.second : a.first < b.first;
+        } );
+        std::cout << "batch_worldgen_coverage_content requested=" << ( first_requested_om ?
+                  first_requested_om->to_string() : "unrequested" )
+                  << " z=0 scanned_tiles=" << first_request_z0_tiles
+                  << " distinct=" << first_request_z0.size() << " top=";
+        for( std::size_t i = 0; i < std::min<std::size_t>( 8, top.size() ); ++i ) {
+            std::cout << top[i].first.substr( 0, 96 ) << ':' << top[i].second << ',';
+        }
+        std::cout << std::endl;
+    };
     std::size_t requested_regions = 0;
     std::size_t scanned_regions = 0;
     std::size_t prior_remaining = initial_expected;
@@ -1027,7 +1056,25 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
         for( const point_abs_om &om_cur : closest_points_first( overmap_origin, 0, 3 ) ) {
             point_abs_omt omt_start = project_to<coords::omt>( om_cur );
             ++requested_regions;
+            std::optional<bandit_live_world_probe::session> request_probe;
+            if( requested_regions == 1 ) {
+                first_requested_om = om_cur;
+                request_probe.emplace( bandit_live_world_probe::collection_mode::transition_events );
+                request_probe->set_overmap_request_target( om_cur.x(), om_cur.y() );
+            }
             overmap_buffer.ter( { omt_start, 0 } );
+            if( request_probe ) {
+                const auto &trace = request_probe->result();
+                for( const auto &event : trace.transition_events ) {
+                    if( event.transition == "overmap_request" ) {
+                        std::cout << "batch_worldgen_coverage_branch requested=" << om_cur.to_string()
+                                  << " game_seed=" << g->get_seed() << " stage=" << event.outcome
+                                  << " " << event.reason << std::endl;
+                    }
+                }
+                std::cout << "batch_worldgen_coverage_branch dropped=" << trace.dropped_transition_events
+                          << std::endl;
+            }
         }
         // Then we scan the generated overmaps.
         for( const point_abs_om &om_cur : closest_points_first( overmap_origin, 0, 5 ) ) {
@@ -1046,16 +1093,33 @@ TEST_CASE( "overmap_terrain_coverage", "[overmap][slow]" )
                     REQUIRE( !main_map.inbounds( tripoint_abs_ms( project_to<coords::ms>( p ), 0 ) ) );
                     for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
                         tripoint_abs_omt tp( p, z );
-                        oter_type_id id = overmap_buffer.ter( tp )->get_type_id();
+                        const oter_id terrain = overmap_buffer.ter( tp );
+                        const oter_type_id id = terrain->get_type_id();
+                        if( attempt_no == 0 && first_requested_om && om_cur == *first_requested_om && z == 0 ) {
+                            ++first_request_z0_tiles;
+                            ++first_request_z0[terrain.id().str()];
+                        }
                         auto iter_bool = stats.emplace( id, tp );
                         if( iter_bool.second ) {
-                            yet_to_be_seen.erase( id );
+                            const bool show_example = examples_shown < 8;
+                            const bool expected = show_example && yet_to_be_seen.count( id ) > 0;
+                            const std::size_t removed = yet_to_be_seen.erase( id );
+                            if( show_example ) {
+                                ++examples_shown;
+                                std::cout << "batch_worldgen_coverage_observed pos=" << tp.to_string()
+                                          << " terrain=" << terrain.id().str().substr( 0, 96 )
+                                          << " type=" << id.id().str().substr( 0, 96 )
+                                          << " expected=" << expected << " removed=" << removed << std::endl;
+                            }
                         }
                         iter_bool.first->second.last_observed = tp;
                         ++iter_bool.first->second.count;
                     }
                 }
             }
+        }
+        if( attempt_no == 0 ) {
+            report_content();
         }
         report_generation( "normal", attempt_no );
         // The second phase of this test is to perform the tile-level mapgen

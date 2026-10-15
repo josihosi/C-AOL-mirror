@@ -379,6 +379,9 @@ extern bool add_best_key_for_action_to_quick_shortcuts( action_id action,
 bandit_live_world::abstract_threat_read live_bandit_structural_abstract_threat_read_for_test(
     const bandit_live_world::site_record &site,
     const bandit_live_world::structural_threat_observer_request &request );
+std::vector<tripoint_abs_omt> live_bandit_member_route_to_for_test(
+    const npc &member, const bandit_live_world::site_record &site,
+    const tripoint_abs_omt &destination );
 std::string live_bandit_homeward_boundary_discriminator_for_test();
 std::string live_bandit_homeward_unsafe_current_route_read_for_test( character_id member_id );
 std::string live_bandit_homeward_partner_route_read_for_test(
@@ -2145,6 +2148,52 @@ std::vector<tripoint_abs_omt> live_bandit_member_route_to(
 {
     std::unordered_set<tripoint_abs_omt> route_exclusions =
         live_bandit_covert_route_exclusions( site.active_outing );
+    std::vector<std::pair<tripoint_abs_omt, int>> threat_standoffs;
+    if( site.active_outing.kind == bandit_live_world::outing_kind::structural_sortie &&
+        site.active_outing.job_type == "scout" &&
+        !bandit_live_world::scout_phase_requires_homeward_only( site.active_outing.phase ) &&
+        destination != site.anchor && !site_contains_omt( site, destination ) ) {
+        // Route away from actual party knowledge, never nearby creature existence.
+        // The same tactical/optical reader qualifies both loaded and inactive bodies.
+        scout_observation::site_reader optics;
+        std::set<tripoint_abs_omt> known_threats;
+        for( const auto id : site.active_outing.member_ids ) {
+            if( site.active_outing.member_is_resolved( id ) ) {
+                continue;
+            }
+            const auto member = overmap_buffer.find_npc( id );
+            if( !member || member->is_dead() ) {
+                continue;
+            }
+            if( member->has_active_faction_alarm() && member->faction_alarm_requires_response() ) {
+                known_threats.insert( project_to<coords::omt>( member->faction_alarm->incident ) );
+            }
+            for( const auto &position : optics.perceived_threats( *member ) ) {
+                known_threats.insert( project_to<coords::omt>( position ) );
+            }
+        }
+        for( const auto &threat : known_threats ) {
+            threat_standoffs.emplace_back( threat, rl_dist( member_npc.pos_abs_omt(), threat ) );
+        }
+    }
+    // Only lookout approaches impose this mission-specific standoff. Ordinary
+    // homeward/escape owners retain their Native step safety: a safe terrain
+    // detour home may initially reduce distance to a remembered incident.
+    // Evaluate only cells visited by the existing bounded pathfinder, rather
+    // than allocating a distance-squared exclusion square for a remote alarm.
+    std::function<bool( const tripoint_abs_omt & )> avoid_known_threat;
+    if( !threat_standoffs.empty() ) {
+        avoid_known_threat = [&]( const tripoint_abs_omt & candidate ) {
+            if( candidate == member_npc.pos_abs_omt() ) {
+                return false;
+            }
+            return std::any_of( threat_standoffs.begin(), threat_standoffs.end(),
+            [&]( const auto & threat ) {
+                return candidate.xy() == threat.first.xy() ||
+                       rl_dist( candidate, threat.first ) < threat.second;
+            } );
+        };
+    }
     const bool remembered_egress_fallback = site.active_outing.schema_version == 10 &&
                                             ( site.active_outing.phase ==
                                                     bandit_live_world::scout_phase::burned_withdrawal ||
@@ -2170,7 +2219,7 @@ std::vector<tripoint_abs_omt> live_bandit_member_route_to(
             bandit_live_world_probe::counter::loaded_covert_overmap_route_solves );
         path = overmap_buffer.get_travel_path(
                    member_npc.pos_abs_omt(), destination,
-                   overmap_path_params::for_npc(), route_exclusions ).points;
+                   overmap_path_params::for_npc(), route_exclusions, avoid_known_threat ).points;
     }
     if( !live_bandit_route_respects_covert_ring( site.active_outing, path ) ||
         ( site.active_outing.phase == bandit_live_world::scout_phase::burned_withdrawal &&
@@ -13689,6 +13738,13 @@ std::vector<live_light_delivery_stage> live_light_delivery_order_for_test()
 std::vector<live_light_delivery_stage> live_light_delivery_trace_for_test()
 {
     return live_light::delivery_trace();
+}
+
+std::vector<tripoint_abs_omt> live_bandit_member_route_to_for_test(
+    const npc &member, const bandit_live_world::site_record &site,
+    const tripoint_abs_omt &destination )
+{
+    return live_bandit_member_route_to( member, site, destination );
 }
 
 bandit_live_world::structural_route_read live_bandit_structural_route_read_for_test(

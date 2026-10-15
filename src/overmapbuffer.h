@@ -467,7 +467,8 @@ class overmapbuffer
         pf::simple_path<tripoint_abs_omt> get_travel_path(
             const tripoint_abs_omt &src, const tripoint_abs_omt &dest,
             const overmap_path_params &params,
-            const std::unordered_set<tripoint_abs_omt> &excluded_omts = {} );
+            const std::unordered_set<tripoint_abs_omt> &excluded_omts = {},
+            const std::function<bool( const tripoint_abs_omt & )> &additional_avoid = {} );
         bool reveal_route( const tripoint_abs_omt &source, const tripoint_abs_omt &dest,
                            int radius = 0, bool road_only = false );
         /**

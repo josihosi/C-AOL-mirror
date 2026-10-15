@@ -491,7 +491,8 @@ size_t site_reader::cached_view_count() const
 static bool watch_position_safe_impl( const npc &observer,
                                       vehicle_footprint_index &vehicles,
                                       std::vector<std::unique_ptr<existing_view>> &lighting_views,
-                                      std::string *reason )
+                                      std::string *reason,
+                                      std::vector<tripoint_abs_ms> *perceived = nullptr )
 {
     const auto refuse = [reason]( const char *why ) {
         if( reason ) {
@@ -503,7 +504,7 @@ static bool watch_position_safe_impl( const npc &observer,
     // and body catch-up retain the cache; its old target/danger/attack is not a
     // current off-bubble perception. Preserve it for Native AI, and read actual
     // fields and visible hostiles below for either owner instead of clearing it.
-    if( observer.is_active() ) {
+    if( observer.is_active() && perceived == nullptr ) {
         if( observer.get_ai_danger() > 0 ) {
             return refuse( "ai_danger" );
         }
@@ -518,9 +519,12 @@ static bool watch_position_safe_impl( const npc &observer,
              "narcosis", "stunned", "downed", "psi_stunned",
              "npc_flee_player", "npc_run_away", "npc_fire_bad", "onfire"
          } ) {
-        if( observer.has_effect( efftype_id( effect ) ) ) {
+        if( perceived == nullptr && observer.has_effect( efftype_id( effect ) ) ) {
             return refuse( effect );
         }
+    }
+    if( perceived == nullptr && observer.faction_alarm_requires_response() ) {
+        return refuse( "received_alarm" );
     }
     const map &here = get_map();
     std::vector<const Creature *> threats;
@@ -578,25 +582,42 @@ static bool watch_position_safe_impl( const npc &observer,
     // interruptions above and available actual fields/threats still interrupt.
     const bool origin_known = here.inbounds( observer.pos_abs() ) ||
                               ( view && view->has_geometry( observer.pos_abs() ) );
-    if( origin_known && observer.is_dangerous_fields(
+    // Watch incapacity/hazard is not loss of the party's actual perception.
+    // The collector still uses the unchanged Native sight/tactical predicates;
+    // it neither grants watch credit nor clears the partner's incident/field.
+    if( perceived == nullptr && origin_known && observer.is_dangerous_fields(
             origin_map.field_at( origin_map.get_bub( observer.pos_abs() ) ) ) ) {
         return refuse( "dangerous_field" );
     }
+    bool threatened = false;
+    bool hostile_optics_unknown = false;
+    const auto record_threat = [&]( const Creature & enemy ) {
+        threatened = true;
+        if( perceived ) {
+            perceived->push_back( enemy.pos_abs() );
+        }
+    };
     // The AI cache is transient across reload. Read available actual threats with
     // ordinary physical range for loaded and abstract observers, never magnified.
     for( const Creature *enemy : threats ) {
         if( here.inbounds( observer.pos_abs() ) && here.inbounds( enemy->pos_abs() ) ) {
             if( observer.sees_without_clairvoyance( here, *enemy ) ) {
-                return refuse( "visible_hostile" );
+                if( observer.scouting_creature_requires_response( *enemy, "watch", here ) ) {
+                    record_threat( *enemy );
+                }
             }
         } else {
             if( !view->has_ray( observer.pos_abs(), enemy->pos_abs() ) ) {
-                return refuse( "hostile_geometry_unavailable" );
+                // No sighting was established. This does not clear an existing
+                // alarm or veto an independently valid target observation.
+                hostile_optics_unknown = true;
+                continue;
             }
             const auto observer_light = existing_ambient( observer.pos_abs(), lighting_views, vehicles );
             const auto target_light = existing_ambient( enemy->pos_abs(), lighting_views, vehicles );
             if( !observer_light || !target_light ) {
-                return refuse( "hostile_lighting_unavailable" );
+                hostile_optics_unknown = true;
+                continue;
             }
             set_view_ambient( *view, observer.pos_abs(), *observer_light );
             set_view_ambient( *view, enemy->pos_abs(), *target_light );
@@ -606,13 +627,17 @@ static bool watch_position_safe_impl( const npc &observer,
             const bool seen = enemy->is_avatar() ?
                               observer.sees_without_clairvoyance_physical( *view, *enemy ) :
                               observer.sees_without_clairvoyance( *view, *enemy );
-            if( seen ) {
-                return refuse( "visible_hostile" );
+            if( seen && observer.scouting_creature_requires_response( *enemy, "watch", *view ) ) {
+                record_threat( *enemy );
             }
         }
     }
+    if( threatened ) {
+        return refuse( "visible_hostile" );
+    }
     if( reason ) {
-        *reason = origin_known ? "eligible" : "eligible_lookout_geometry_unknown";
+        *reason = hostile_optics_unknown ? "eligible_hostile_optics_unknown" :
+                  origin_known ? "eligible" : "eligible_lookout_geometry_unknown";
     }
     return true;
 }
@@ -725,6 +750,20 @@ bool site_reader::watching_member( const bandit_live_world::site_record &site, c
                                    std::string *reason )
 {
     return watching_member_impl( site, observer, impl->vehicles, impl->views, reason );
+}
+std::vector<tripoint_abs_ms> site_reader::perceived_threats( const npc &observer )
+{
+    // A movement/watch veto does not erase actual tactical vision, but an
+    // unconscious or blind partner supplies no new sighting. Its authenticated
+    // incident memory remains separately available to the party route owner.
+    if( observer.is_dead_state() || observer.is_blind() || observer.in_sleep_state() ||
+        observer.has_effect( efftype_id( "no_sight" ) ) ||
+        observer.has_effect( efftype_id( "narcosis" ) ) ) {
+        return {};
+    }
+    std::vector<tripoint_abs_ms> positions;
+    watch_position_safe_impl( observer, impl->vehicles, impl->views, nullptr, &positions );
+    return positions;
 }
 size_t site_reader::cached_vehicle_scan_count() const
 {

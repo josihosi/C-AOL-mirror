@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <set>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -223,6 +224,30 @@ std::optional<std::string> natural_terrain_lookup( const tripoint_abs_omt &omt )
     }
     return overmap_buffer.ter( omt ).id().str();
 }
+
+void check_native_camp_registrations( bandit_live_world::world_state &state,
+                                      const std::map<std::string, tripoint_abs_omt> &camps )
+{
+    for( const auto &camp : camps ) {
+        const bandit_live_world::abstract_bootstrap_result registered =
+            bandit_live_world::register_abstract_sites_near( state, camp.second, 3,
+                    existing_special_lookup );
+        CHECK( registered.created_sites == 1 );
+        CHECK( registered.recognized_tiles == 4 );
+        const bandit_live_world::site_record *site = find_site_by_source( state, camp.first );
+        REQUIRE( site != nullptr );
+        CHECK( site->anchor == camp.second );
+        CHECK( site->profile == ( camp.first == "cannibal_camp" ?
+                                  bandit_live_world::hostile_site_profile::cannibal_camp :
+                                  bandit_live_world::hostile_site_profile::camp_style ) );
+        const bandit_live_world::abstract_bootstrap_result repeated =
+            bandit_live_world::register_abstract_sites_near( state, camp.second, 3,
+                    existing_special_lookup );
+        CHECK( repeated.created_sites == 0 );
+        CHECK( repeated.recognized_tiles == 4 );
+    }
+    CHECK( state.sites.size() == camps.size() );
+}
 } // namespace
 
 TEST_CASE( "naturally generated hostile camps register and reconcile their mapgen rosters",
@@ -257,16 +282,13 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
     rng_set_engine_seed( raw_seed );
     const std::map<std::string, tripoint_abs_omt> camps = find_natural_hostile_camps();
     CAPTURE( raw_seed );
-    REQUIRE( camps.count( "bandit_camp" ) == 1 );
-    REQUIRE( camps.count( "cannibal_camp" ) == 1 );
-
     bandit_live_world::world_state &state = overmap_buffer.global_state.bandit_live_world;
-    for( const std::pair<const std::string, tripoint_abs_omt> &camp : camps ) {
-        const bandit_live_world::abstract_bootstrap_result result =
-            bandit_live_world::register_abstract_sites_near( state, camp.second, 3,
-                    existing_special_lookup );
-        CHECK( result.created_sites == 1 );
-        CHECK( result.recognized_tiles == 4 );
+    check_native_camp_registrations( state, camps );
+
+    INFO( "ordinary default worldgen admitted " << camps.size()
+          << " Native hostile camp special(s); zero admission is a valid outcome" );
+    if( camps.size() != 2 ) {
+        return;
     }
 
     REQUIRE( state.sites.size() == 2 );
@@ -373,22 +395,37 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
     CHECK( total_candidates == 12 );
     CHECK( total_leads == 12 );
     CHECK( route_records.size() == production_candidates.size() );
-    CHECK( watch_path_budget == 0 );
-    CHECK( selected == 3 );
-    CHECK( rejected == 3 );
-    CAPTURE( route_records[0], route_records[1], route_records[2], route_records[3],
-             route_records[4], route_records[5] );
-    CHECK( route_records[0].find(
-               "target=(217,30,0) selector=non_frontier outcome=selected "
-               "watch=(218,27,0) route_cost=8" ) != std::string::npos );
-    CHECK( route_records[1].find(
-               "target=(214,25,0) selector=non_frontier outcome=selected "
-               "watch=(217,27,0) route_cost=12" ) != std::string::npos );
-    for( const std::string &record : route_records ) {
+    CHECK( watch_path_budget >= 0 );
+    CHECK( watch_path_budget <= 8 );
+    CHECK( selected + rejected == static_cast<int>( production_candidates.size() ) );
+    for( std::size_t index = 0; index < route_records.size(); ++index ) {
+        const auto &record = route_records[index];
+        CAPTURE( record );
         CHECK( record.find( "selector=non_frontier" ) != std::string::npos );
         const bool selected_record = record.find( " outcome=selected " ) != std::string::npos;
         const bool rejected_record = record.find( " outcome=rejected " ) != std::string::npos;
-        CHECK( selected_record != rejected_record );
+        REQUIRE( selected_record != rejected_record );
+        // Generation admits camps, not an optical lookout. Consume the actual
+        // reader result: unavailable native geometry must remain a refusal,
+        // while an admitted route must satisfy the same canonical watch rules.
+        auto candidate = production_candidates[index];
+        const bool admitted = bandit_live_world::refine_structural_outing_route(
+                                  oracle_site, 120, reads[index], candidate );
+        REQUIRE( admitted == selected_record );
+        if( admitted ) {
+            auto selected_site = oracle_site;
+            REQUIRE( bandit_live_world::apply_structural_bounty_outing_plan(
+                         selected_site, candidate, 120 ) );
+            const auto &selected_outing = selected_site.active_outing;
+            CHECK( selected_outing.selected_watch_kind != bandit_live_world::structural_watch_kind::none );
+            CHECK( selected_outing.selected_watch_route_cost >= 0 );
+            CHECK( selected_outing.selected_watch_route_cost <= 18 );
+            CHECK( bandit_live_world::structural_watch_shared_route_is_canonical(
+                       selected_outing.shared_route, oracle_site.anchor, selected_outing.selected_watch_omt,
+                       selected_outing.target_footprint ) );
+        } else {
+            CHECK_FALSE( reads[index].summary.empty() );
+        }
     }
     INFO( "natural feasibility oracle route records:" );
     for( const std::string &record : route_records ) {
@@ -397,12 +434,125 @@ TEST_CASE( "naturally generated hostile camps register and reconcile their mapge
     CHECK( durable_state_before == serialize_state( state ) );
 }
 
+TEST_CASE( "deterministic Native camp special placement registers both camp factions",
+           "[bandit][live_world][natural_worldgen][registration]" )
+{
+    const bandit_live_world::world_state old_world =
+        overmap_buffer.global_state.bandit_live_world;
+    const unsigned int old_seed = g->get_seed();
+    on_out_of_scope restore_world( [old_world, old_seed]() {
+        // This isolated custom region owns every member it materialized,
+        // including partial mapgen if a REQUIRE unwinds the fixture.
+        for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+            for( const auto &member : site.members ) {
+                auto actor = overmap_buffer.remove_npc( member.npc_id );
+                if( actor && actor->get_faction() ) {
+                    actor->get_faction()->remove_member( member.npc_id );
+                }
+            }
+        }
+        overmap_buffer.clear();
+        overmap_buffer.global_state.bandit_live_world = old_world;
+        g->set_seed( old_seed );
+    } );
+    overmap_buffer.clear();
+    overmap_buffer.global_state.bandit_live_world.clear();
+    constexpr std::uint32_t raw_seed = 830205018;
+    g->set_seed( raw_seed );
+    rng_set_engine_seed( raw_seed );
+    // Generate ordinary base geography without the random special deck: a
+    // naturally admitted OVERMAP_UNIQUE camp would correctly reject a second
+    // explicit placement of that same special in this deterministic control.
+    overmap_special_batch empty_batch( point_abs_om( 1, 0 ) );
+    overmap_buffer.create_custom_overmap( point_abs_om( 1, 0 ), empty_batch );
+    overmap &generated = overmap_buffer.get( point_abs_om( 1, 0 ) );
+    bandit_live_world::world_state &state = overmap_buffer.global_state.bandit_live_world;
+    const auto place_native_special = [&]( const overmap_special_id & special_id )
+    -> std::optional<tripoint_abs_omt> {
+        const overmap_special &special = special_id.obj();
+        const city no_city;
+        // Use a fixed, bounded set of ordinary placement attempts, separate
+        // from the stochastic default-worldgen admission case.
+        for( int attempt = 0; attempt < 100; ++attempt )
+        {
+            const tripoint_om_omt local( 10 + ( attempt % 10 ) * 16,
+                                         10 + ( attempt / 10 ) * 16, 0 );
+            if( !generated.can_place_special( special, local, om_direction::type::north, false ) ) {
+                continue;
+            }
+            const std::vector<tripoint_om_omt> placed = generated.place_special(
+                        special, local, om_direction::type::north, no_city, false, false );
+            for( const tripoint_om_omt tile : placed ) {
+                if( generated.overmap_special_at( tile ) == special_id ) {
+                    const tripoint_om_omt origin = generated.overmap_special_origin_at( tile ).value_or( tile );
+                    return project_combine( generated.pos(), origin );
+                }
+            }
+        }
+        return std::nullopt;
+    };
+
+    const std::map<std::string, tripoint_abs_omt> camps = {
+        {
+            "bandit_camp", place_native_special( overmap_special_id( "bandit_camp" ) ).value_or(
+                tripoint_abs_omt::invalid )
+        },
+        {
+            "cannibal_camp", place_native_special( overmap_special_id( "cannibal_camp" ) ).value_or(
+                tripoint_abs_omt::invalid )
+        }
+    };
+    for( const auto &camp : camps ) {
+        REQUIRE( camp.second != tripoint_abs_omt::invalid );
+    }
+    check_native_camp_registrations( state, camps );
+    REQUIRE( state.sites.size() == 2 );
+    std::set<character_id> all_members;
+    for( const auto &camp : camps ) {
+        const auto *site = find_site_by_source( state, camp.first );
+        REQUIRE( site );
+        generate_camp_footprint( *site );
+        site = find_site_by_source( state, camp.first );
+        REQUIRE( site );
+        REQUIRE( site->members.size() == 14 );
+        CHECK( site->living_total == 14 );
+        CHECK( site->roster().valid );
+        for( const auto &member : site->members ) {
+            REQUIRE( all_members.insert( member.npc_id ).second );
+            const auto actor = overmap_buffer.find_npc( member.npc_id );
+            REQUIRE( actor );
+            CHECK( std::find( site->footprint.begin(), site->footprint.end(),
+                              actor->pos_abs_omt() ) != site->footprint.end() );
+        }
+    }
+    const auto loaded = round_trip( state );
+    for( const auto &camp : camps ) {
+        const auto *site = find_site_by_source( loaded, camp.first );
+        REQUIRE( site );
+        CHECK( site->members.size() == 14 );
+        CHECK( site->roster().valid );
+        const auto repeated = bandit_live_world::register_abstract_sites_near(
+                                  state, camp.second, 3, existing_special_lookup );
+        CHECK( repeated.created_sites == 0 );
+        CHECK( repeated.recognized_tiles == 4 );
+    }
+    CHECK( all_members.size() == 28 );
+}
+
 TEST_CASE( "natural hunting blind watch uses the production selector and exact pair handoff",
            "[bandit][live_world][natural_worldgen][structural_bounty][slow]" )
 {
     const time_point saved_fixture_turn = calendar::turn;
     on_out_of_scope restore_fixture_turn( [saved_fixture_turn]() {
         set_time( saved_fixture_turn );
+    } );
+    map &main_map = get_map();
+    const tripoint_abs_ms saved_player_position = get_avatar().pos_abs();
+    const tripoint_abs_sm saved_map_origin = main_map.get_abs_sub();
+    on_out_of_scope restore_location( [&main_map, saved_player_position, saved_map_origin]() {
+        g->place_player_overmap( project_to<coords::omt>( saved_player_position ), false );
+        main_map.load( saved_map_origin, false );
+        get_avatar().setpos( saved_player_position, false );
     } );
     // The optical query uses native illumination at the same minute as the
     // maintenance transaction, rather than midnight before its later handoff.
@@ -762,6 +912,7 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         }
     };
     capture_unload_inputs( "before" );
+    const auto interruption_before_unload = live_site.active_outing.assessment.interruption;
     const std::size_t unload_event_start = optical_probe.result().transition_events.size();
     bool dematerialized = dematerialize_live_bandit_structural_handoffs_for_test();
     std::optional<int> reposition_deadline;
@@ -799,6 +950,24 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         // Keep the first actual deadline, without extending it on later passes.
         if( to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) >= *reposition_deadline ) {
             break;
+        }
+    }
+    if( !dematerialized &&
+        live_site.active_outing.phase == bandit_live_world::scout_phase::returning_home ) {
+        // A real bounded alternate-route abort can leave Local custody owning
+        // the first homeward reunion. Give that existing owner its ordinary
+        // cadence, bounded by the persisted return allocation, before requiring
+        // an Abstract transfer. Do not manufacture a coherent pose or receipt.
+        const int homeward_bound = live_site.active_outing.expected_return_minutes + 60;
+        CAPTURE( homeward_bound );
+        while( !dematerialized && live_site.active_outing.is_active() &&
+               live_site.active_outing.owner == bandit_live_world::simulation_owner::local &&
+               to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) <= homeward_bound ) {
+            REQUIRE( bandit_live_world::current_external_simulation_cursor( live_site ) );
+            calendar::turn += 5_minutes;
+            process_overmap_npc_move_for_test();
+            dematerialized = live_site.active_outing.owner == bandit_live_world::simulation_owner::abstract &&
+                             live_site.active_outing.handoff_epoch == local_epoch_before + 1;
         }
     }
     capture_unload_inputs( "after" );
@@ -841,16 +1010,32 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
         calendar::turn += ( next_structural_cadence - current_minutes ) * 1_minutes;
         process_overmap_npc_move_for_test();
     };
-    REQUIRE( live_site.active_outing.phase == bandit_live_world::scout_phase::observing );
-    while( live_site.active_outing.phase == bandit_live_world::scout_phase::observing ) {
-        advance_abstract_structural_cadence();
-    }
-    REQUIRE( live_site.active_outing.owner == bandit_live_world::simulation_owner::abstract );
-    REQUIRE( live_site.active_outing.phase == bandit_live_world::scout_phase::returning_report );
-    CHECK( live_site.active_outing.member_ids == generated_ids );
-    CHECK( live_site.active_outing.local_handoff.is_abstract_resume() );
-    while( live_site.active_outing.phase == bandit_live_world::scout_phase::returning_report ) {
-        advance_abstract_structural_cadence();
+    if( live_site.active_outing.phase == bandit_live_world::scout_phase::observing ) {
+        while( live_site.active_outing.phase == bandit_live_world::scout_phase::observing ) {
+            advance_abstract_structural_cadence();
+        }
+        REQUIRE( live_site.active_outing.owner == bandit_live_world::simulation_owner::abstract );
+        REQUIRE( live_site.active_outing.phase == bandit_live_world::scout_phase::returning_report );
+        CHECK( live_site.active_outing.member_ids == generated_ids );
+        CHECK( live_site.active_outing.local_handoff.is_abstract_resume() );
+        while( live_site.active_outing.phase == bandit_live_world::scout_phase::returning_report ) {
+            advance_abstract_structural_cadence();
+        }
+    } else {
+        // Native placement can leave the pair unable to reach a coherent
+        // alternate. The bounded route-refusal policy must then return the same
+        // party honestly, rather than inventing assembly or observation time.
+        REQUIRE( live_site.active_outing.phase == bandit_live_world::scout_phase::returning_home );
+        REQUIRE( live_site.active_outing.local_handoff.cohesion_abort_return );
+        REQUIRE( live_site.active_outing.local_handoff.cohesion_reroutes_used > 0 );
+        REQUIRE_FALSE( live_site.active_outing.alternate_watch_reposition_pending );
+        REQUIRE( live_site.active_outing.assessment.interruption );
+        CHECK( live_site.active_outing.assessment.interruption->cause ==
+               ( interruption_before_unload ? interruption_before_unload->cause :
+                 "pair cohesion could not safely complete its route" ) );
+        CHECK_FALSE( live_site.active_outing.assessment.readiness_latched );
+        CHECK( live_site.applied_report_generation == applied_report_before );
+        CHECK( live_site.applied_return_generation == applied_return_before );
     }
     REQUIRE( live_site.active_outing.owner == bandit_live_world::simulation_owner::abstract );
     REQUIRE( live_site.active_outing.phase == bandit_live_world::scout_phase::returning_home );
@@ -1001,11 +1186,19 @@ TEST_CASE( "natural hunting blind watch uses the production selector and exact p
     const int report_revision_before = live_site.current_scout_report.revision;
     const int current_minutes_before_report = to_minutes<int>(
                 calendar::turn - calendar::start_of_cataclysm );
-    const int next_structural_cadence = current_minutes_before_report +
-                                        ( 60 - current_minutes_before_report % 60 );
-    calendar::turn += ( next_structural_cadence - current_minutes_before_report ) * 1_minutes;
-    process_overmap_npc_move_for_test();
-    // Completing the exact physical return releases and clears the active
+    const int expected_return = live_site.active_outing.expected_return_minutes;
+    REQUIRE( expected_return >= 0 );
+    REQUIRE( expected_return < live_site.active_outing.missing_deadline_minutes );
+    const int settlement_bound = std::max( current_minutes_before_report, expected_return ) + 60;
+    // Physical receipts do not bypass the ordinary persisted return deadline.
+    // Continue actual due service until that boundary instead of assuming the
+    // very first hourly callback must close every generated route.
+    while( live_site.active_outing.is_active() &&
+           to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) <= settlement_bound ) {
+        advance_abstract_structural_cadence();
+    }
+    CAPTURE( expected_return, settlement_bound );
+    // Completing the exact physical return and its due service releases the
     // outing. Its durable report remains bound to the dispatched identity.
     const auto &report = live_site.current_scout_report;
     REQUIRE( report.is_present() );

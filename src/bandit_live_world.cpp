@@ -26091,7 +26091,11 @@ scout_resolution_effect apply_active_scout_observations( site_record &site,
     site_record candidate = site;
     std::vector<character_id> newly_returned_ids;
     int newly_resolved = 0;
-    for( const character_id &member_id : candidate.active_outing.member_ids ) {
+    // Casualty settlement replaces the candidate, including its member vector.
+    // Keep the authenticated complete roster independent of those replacements;
+    // acquire each member from the current candidate inside the loop.
+    const std::vector<character_id> member_ids = candidate.active_outing.member_ids;
+    for( const character_id member_id : member_ids ) {
         const auto observation_iter = std::find_if( observations.begin(), observations.end(),
         [&member_id]( const active_member_observation & observation ) {
             return observation.npc_id == member_id;

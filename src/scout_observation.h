@@ -42,6 +42,8 @@ class site_reader
         // Optional first refusal from the actual decision; no additional geometry read.
         bool watching_member( const bandit_live_world::site_record &site, const npc &observer,
                               std::string *reason );
+        // Current native perception only; missing hostile optics supplies no position.
+        std::vector<tripoint_abs_ms> perceived_threats( const npc &observer );
         size_t cached_view_count() const;
         // Decision-local work counts, not native simulation timing.
         size_t cached_vehicle_scan_count() const;

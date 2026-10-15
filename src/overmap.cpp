@@ -268,7 +268,7 @@ tripoint displace( cube_direction d )
 static void record_requested_overmap_branch( const point_abs_om &where,
         const std::string_view stage, const std::string_view reason )
 {
-    if( where != point_abs_om( 1, 0 ) || !bandit_live_world_probe::active() ||
+    if( !bandit_live_world_probe::overmap_request_selected( where.x(), where.y() ) ||
         !bandit_live_world_probe::transition_events_enabled() ) {
         return;
     }
@@ -289,7 +289,7 @@ overmap::overmap( const point_abs_om &p ) : loc( p )
     settings = overmap_buffer.get_overmap_region( tripoint_abs_om( p, 0 ) );
     init_layers();
     hordes.set_location( loc );
-    if( loc == point_abs_om( 1, 0 ) && bandit_live_world_probe::active() ) {
+    if( bandit_live_world_probe::overmap_request_selected( loc.x(), loc.y() ) ) {
         const auto dimension = g->get_dimension_prefix();
         record_requested_overmap_branch( loc, "constructed",
                                          "dimension=" + dimension.str() + " layout=" + dimension->get_region_layout().str() +
@@ -303,7 +303,7 @@ void overmap::populate( overmap_special_batch &enabled_specials )
 {
 
     const auto record_batch = [&]( const char *stage ) {
-        if( loc != point_abs_om( 1, 0 ) || !bandit_live_world_probe::active() ||
+        if( !bandit_live_world_probe::overmap_request_selected( loc.x(), loc.y() ) ||
             !bandit_live_world_probe::transition_events_enabled() ) {
             return;
         }
@@ -353,7 +353,10 @@ void overmap::populate( overmap_special_batch &enabled_specials )
     record_batch( "batch_after_filter" );
     try {
         open( enabled_specials );
-        record_requested_overmap_branch( loc, "populate_complete", "open returned" );
+        if( bandit_live_world_probe::overmap_request_selected( loc.x(), loc.y() ) ) {
+            record_requested_overmap_branch( loc, "populate_complete",
+                                             string_format( "region=%s cities=%zu", settings.str(), cities.size() ) );
+        }
     } catch( const std::exception &err ) {
         record_requested_overmap_branch( loc, "populate_exception", "open threw std::exception" );
         debugmsg( "overmap (%d,%d) failed to load: %s", loc.x(), loc.y(), err.what() );
@@ -3377,9 +3380,31 @@ om_special_sectors get_sectors( const int sector_width )
     return om_special_sectors{ res, sector_width };
 }
 
+struct overmap::special_placement_diagnostic {
+    struct camp_counts {
+        const char *id;
+        int eligible = 0;
+        int city_refused = 0;
+        int rotation_refused = 0;
+        int placement_calls = 0;
+        std::size_t placed_tiles = 0;
+    };
+    std::array<camp_counts, 2> camps = {{ { "bandit_camp" }, { "cannibal_camp" } }};
+
+    camp_counts *find( const overmap_special_id &id ) {
+        for( camp_counts &camp : camps ) {
+            if( camp.id == id.str() ) {
+                return &camp;
+            }
+        }
+        return nullptr;
+    }
+};
+
 bool overmap::place_special_attempt(
     overmap_special_batch &enabled_specials, const point_om_omt &sector,
-    const int sector_width, const bool place_optional, const bool must_be_unexplored )
+    const int sector_width, const bool place_optional, const bool must_be_unexplored,
+    special_placement_diagnostic *diagnostic )
 {
     const point_om_omt p2( sector );
 
@@ -3409,17 +3434,33 @@ bool overmap::place_special_attempt(
             if( !place_optional && iter->instances_placed >= constraints.occurrences.min ) {
                 continue;
             }
+            special_placement_diagnostic::camp_counts *counts = diagnostic ?
+                    diagnostic->find( special.id ) : nullptr;
+            if( counts ) {
+                ++counts->eligible;
+            }
             // City check is the fastest => it goes first.
             if( !special.can_belong_to_city( p, nearest_city, *this ) ) {
+                if( counts ) {
+                    ++counts->city_refused;
+                }
                 continue;
             }
             // See if we can actually place the special there.
             const om_direction::type rotation = random_special_rotation( special, p, must_be_unexplored );
             if( rotation == om_direction::type::invalid ) {
+                if( counts ) {
+                    ++counts->rotation_refused;
+                }
                 continue;
             }
 
-            place_special( special, p, rotation, nearest_city, false, must_be_unexplored );
+            const std::size_t placed_tiles = place_special( special, p, rotation, nearest_city, false,
+                                             must_be_unexplored ).size();
+            if( counts ) {
+                ++counts->placement_calls;
+                counts->placed_tiles += placed_tiles;
+            }
 
             // Only this call site participates in deck accounting.
             if( special.has_flag( "OVERMAP_UNIQUE" ) || special.has_flag( "GLOBALLY_UNIQUE" ) ) {
@@ -3439,7 +3480,8 @@ bool overmap::place_special_attempt(
 
 void overmap::place_specials_pass(
     overmap_special_batch &enabled_specials, om_special_sectors &sectors,
-    const bool place_optional, const bool must_be_unexplored )
+    const bool place_optional, const bool must_be_unexplored,
+    special_placement_diagnostic *diagnostic )
 {
     // Walk over sectors in random order, to minimize "clumping".
     std::shuffle( sectors.sectors.begin(), sectors.sectors.end(), rng_get_engine() );
@@ -3448,7 +3490,7 @@ void overmap::place_specials_pass(
         bool placed = false;
         for( size_t i = 0; i < attempts; ++i ) {
             if( place_special_attempt( enabled_specials, *it, sectors.sector_width, place_optional,
-                                       must_be_unexplored ) ) {
+                                       must_be_unexplored, diagnostic ) ) {
                 placed = true;
                 it = sectors.sectors.erase( it );
                 if( enabled_specials.empty() ) {
@@ -3470,6 +3512,21 @@ void overmap::place_specials_pass(
 // and when a special reaches max instances it is also removed.
 void overmap::place_specials( overmap_special_batch &enabled_specials )
 {
+    std::optional<special_placement_diagnostic> diagnostic;
+    if( bandit_live_world_probe::overmap_request_selected( loc.x(), loc.y() ) ) {
+        diagnostic.emplace();
+    }
+    const auto report_attempts = [&]( const char *pass ) {
+        if( !diagnostic ) {
+            return;
+        }
+        for( const auto &camp : diagnostic->camps ) {
+            record_requested_overmap_branch( loc, "camp_attempts",
+                                             string_format( "id=%s pass=%s eligible=%d city_refused=%d rotation_refused=%d placement_calls=%d placed_tiles=%zu",
+                                                     camp.id, pass, camp.eligible, camp.city_refused, camp.rotation_refused,
+                                                     camp.placement_calls, camp.placed_tiles ) );
+        }
+    };
     // Calculate if this overmap has any lake terrain--if it doesn't, we should just
     // completely skip placing any lake specials here since they'll never place and if
     // they're mandatory they just end up causing us to spiral out into adjacent overmaps
@@ -3554,6 +3611,12 @@ void overmap::place_specials( overmap_special_batch &enabled_specials )
                 // the entry alive for chain-spawned descendants to draw fresh.
                 iter->instances_placed = constraints.occurrences.max;
             }
+            if( diagnostic && diagnostic->find( id ) ) {
+                record_requested_overmap_branch( loc, "camp_admission",
+                                                 string_format( "id=%s pending=%d cards=%d successes=%d instances=%d max=%d admitted=%d",
+                                                         id.str(), deck.to_place, deck.cards_remain, deck.successes_remain,
+                                                         iter->instances_placed, occ_max, deck.to_place > 0 ) );
+            }
         }
         ++iter;
     }
@@ -3571,7 +3634,9 @@ void overmap::place_specials( overmap_special_batch &enabled_specials )
 
     // First, place the mandatory specials to ensure that all minimum instance
     // counts are met.
-    place_specials_pass( enabled_specials, sectors, false, false );
+    place_specials_pass( enabled_specials, sectors, false, false,
+                         diagnostic ? &*diagnostic : nullptr );
+    report_attempts( "mandatory" );
 
     // Snapshot remaining specials, which will be the optional specials and
     // any unplaced mandatory specials. By passing a copy into the creation of
@@ -3631,7 +3696,9 @@ void overmap::place_specials( overmap_special_batch &enabled_specials )
         }
     }
     // Then fill in non-mandatory specials.
-    place_specials_pass( enabled_specials, sectors, true, false );
+    place_specials_pass( enabled_specials, sectors, true, false,
+                         diagnostic ? &*diagnostic : nullptr );
+    report_attempts( "cumulative" );
 
     // Clean up...
     // Because we passed a copy of the specials for placement in adjacent overmaps rather than

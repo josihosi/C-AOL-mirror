@@ -1490,6 +1490,8 @@ void options_manager::Page::removeRepeatedEmptyLines()
 void options_manager::init()
 {
     options.clear();
+    groups_.clear();
+    adding_to_group_.clear();
     for( Page &p : pages_ ) {
         p.items_.clear();
     }

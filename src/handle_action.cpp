@@ -5682,7 +5682,6 @@ bool game::handle_action()
     std::optional<semantic_surface_manager_session> semantic_session;
     std::optional<semantic_surface_scope> world_semantic_scope;
     bool semantic_action_consumed = false;
-    bool semantic_death_camera_close = false;
     std::optional<character_id> semantic_npc_inspection_actor;
     npc_ptr semantic_camp_npc_inspection_actor;
     // A Base Missions selector owns a blocking native modal.  Keep only an
@@ -5728,25 +5727,40 @@ bool game::handle_action()
     } else {
         // No auto-move, ask player for input
         const std::string semantic_run_id = openclaw_harness_bound_semantic_run_id();
+        const bool watching_dead_avatar = uquit == QUIT_WATCH && player_character.is_dead_state();
+        if( death_camera_semantic_scope &&
+            ( death_camera_semantic_run_id != semantic_run_id || !watching_dead_avatar ) ) {
+            death_camera_semantic_scope.reset();
+            death_camera_semantic_run_id.clear();
+            death_camera_semantic_close_requested = false;
+        }
         if( !semantic_run_id.empty() ) {
             semantic_surface_manager &semantic_manager = openclaw_harness_semantic_surface_manager();
             semantic_session.emplace( semantic_manager );
-            if( uquit == QUIT_WATCH && player_character.is_dead_state() ) {
-                world_semantic_scope.emplace( semantic_manager, "death_camera", "Death camera",
-                std::map<std::string, std::string> {
-                    { "native_owner", "DEFAULTMODE" },
-                    { "actual_death", "true" }
-                }, std::vector<semantic_action_descriptor> {
-                    { "death_camera.close", "", _( "Accept your fate" ), true }
-                }, [ &semantic_death_camera_close, &semantic_manager ](
-                    const semantic_action_request & request ) {
-                    if( request.action_id != "death_camera.close" ) {
-                        return semantic_action_dispatch_result{ false, "no_native_binding", "" };
-                    }
-                    semantic_death_camera_close = true;
-                    semantic_manager.withhold_parent_authority_until_recreated( request.surface_id );
-                    return semantic_action_dispatch_result{ true, "", "" };
-                } );
+            if( watching_dead_avatar ) {
+                if( !death_camera_semantic_scope ) {
+                    // This native camera spans multiple handle_action() calls
+                    // while do_turn() advances through ordinary watch turns.
+                    death_camera_semantic_run_id = semantic_run_id;
+                    death_camera_semantic_scope = std::make_unique<semantic_surface_scope>(
+                                                      semantic_manager, "death_camera", "Death camera",
+                    std::map<std::string, std::string> {
+                        { "native_owner", "DEFAULTMODE" },
+                        { "actual_death", "true" }
+                    },
+                    std::vector<semantic_action_descriptor> {
+                        { "death_camera.close", "", _( "Accept your fate" ), true }
+                    },
+                    [ this, &semantic_manager ]( const semantic_action_request & request ) {
+                        if( request.action_id != "death_camera.close" ) {
+                            return semantic_action_dispatch_result{ false, "no_native_binding", "" };
+                        }
+                        death_camera_semantic_close_requested = true;
+                        semantic_manager.withhold_parent_authority_until_recreated( request.surface_id );
+                        return semantic_action_dispatch_result{ true, "", "" };
+                    } );
+                }
+                semantic_action_consumed = death_camera_semantic_scope->consume_request();
             } else {
                 input_context world_context = get_default_mode_input_context();
                 const std::vector<std::pair<std::string, std::string>> native_world_actions =
@@ -5969,10 +5983,11 @@ bool game::handle_action()
                                                             semantic_camp_npc_inspection_actor != nullptr };
                 } );
             }
-            // The scope constructed above is the actual owner for this input
-            // turn.  Let it validate and receipt at most one queued request
-            // before the blocking native input path runs.
-            semantic_action_consumed = world_semantic_scope->consume_request();
+            // The active native scope validates and receipts at most one
+            // queued request before the blocking input path runs.
+            if( world_semantic_scope ) {
+                semantic_action_consumed = world_semantic_scope->consume_request();
+            }
         }
         if( !semantic_action_consumed ) {
             ctxt = get_player_input( action );
@@ -5982,8 +5997,9 @@ bool game::handle_action()
     // A blocked input wake returns its own action string. Apply the selected
     // close afterward so both early and late semantic requests reach the
     // ordinary QUIT_WATCH -> QUIT_DIED branch below exactly once.
-    if( semantic_death_camera_close ) {
+    if( death_camera_semantic_close_requested ) {
         action = "QUIT";
+        death_camera_semantic_close_requested = false;
     }
 
     // Requests may be consumed either before get_player_input or by its
@@ -6041,6 +6057,8 @@ bool game::handle_action()
 
     if( uquit == QUIT_WATCH && action == "QUIT" ) {
         uquit = QUIT_DIED;
+        death_camera_semantic_scope.reset();
+        death_camera_semantic_run_id.clear();
         return false;
     }
 

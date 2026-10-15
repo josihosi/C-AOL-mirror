@@ -1,10 +1,15 @@
+#include <algorithm>
 #include <map>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
 
 #include "cata_catch.h"
+#include "cata_scope_helpers.h"
 #include "options.h"
+#include "json.h"
+#include "json_loader.h"
 #include "string_formatter.h"
 #include "translation.h"
 #include "type_id.h"
@@ -90,4 +95,45 @@ TEST_CASE( "option_slider_test", "[option]" )
         }
     }
     CHECK( checked == num_slider_options );
+}
+
+TEST_CASE( "options_manager_reinitializes_options_and_groups", "[option]" )
+{
+    // Exercise registry reconstruction without replacing the caller's live values.
+    options_manager opts = get_options();
+    std::map<std::string, std::pair<std::string, std::string>> first_definitions;
+    for( int i = 0; i < 2; ++i ) {
+        opts.init();
+        REQUIRE( opts.has_option( "AUTO_PICKUP" ) );
+        const options_manager::cOpt &auto_pickup = opts.get_option( "AUTO_PICKUP" );
+        CHECK( auto_pickup.getType() == "bool" );
+        CHECK( auto_pickup.getValue() == "false" );
+        CHECK( auto_pickup.getPage() == "general" );
+        REQUIRE( opts.has_option( "AUTO_PICKUP_WEIGHT_LIMIT" ) );
+        const options_manager::cOpt &weight_limit = opts.get_option( "AUTO_PICKUP_WEIGHT_LIMIT" );
+        CHECK( weight_limit.getType() == "int" );
+        CHECK( weight_limit.getValue() == "0" );
+        CHECK( weight_limit.getPage() == "general" );
+        std::map<std::string, std::pair<std::string, std::string>> definitions;
+        for( const auto &entry : opts.get_raw_options() ) {
+            definitions.emplace( entry.first, std::make_pair( entry.second.getType(),
+                                 entry.second.getValue( true ) ) );
+        }
+        if( i == 0 ) {
+            first_definitions = definitions;
+        } else {
+            CHECK( definitions == first_definitions );
+        }
+        // init reconstructs defaults; loading saved values is a separate owner.
+        opts.get_option( "AUTO_PICKUP" ).setValue( "true" );
+    }
+    std::ostringstream saved;
+    JsonOut writer( saved );
+    opts.serialize( writer );
+    options_manager loaded = get_options();
+    loaded.init();
+    loaded.deserialize( json_loader::from_string( saved.str() ).get_array() );
+    CHECK( loaded.get_option( "AUTO_PICKUP" ).value_as<bool>() );
+    CHECK( loaded.has_option( "ITEM_HEALTH" ) );
+    CHECK( loaded.get_option( "AUTO_PICKUP_WEIGHT_LIMIT" ).getPage() == "general" );
 }

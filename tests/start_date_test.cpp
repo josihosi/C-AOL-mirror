@@ -18,11 +18,20 @@ TEST_CASE( "Test_start_dates" )
 {
     int default_season_length = 91;
     int default_year_length = default_season_length * 4;
+    const scenario *previous_scenario = get_scenario();
+    const time_point previous_turn = calendar::turn;
+    const time_point previous_start_of_cataclysm = calendar::start_of_cataclysm;
+    const time_point previous_start_of_game = calendar::start_of_game;
+    const season_type previous_initial_season = calendar::initial_season;
 
-    on_out_of_scope guard{ []()
+    on_out_of_scope guard{ [previous_scenario, previous_turn, previous_start_of_cataclysm,
+                                               previous_start_of_game, previous_initial_season]()
     {
-        set_scenario( scenario::generic() );
-        g->start_calendar();
+        set_scenario( previous_scenario );
+        calendar::turn = previous_turn;
+        calendar::start_of_cataclysm = previous_start_of_cataclysm;
+        calendar::start_of_game = previous_start_of_game;
+        calendar::initial_season = previous_initial_season;
     } };
 
     SECTION( "Scenario with custom game start date" ) {
@@ -77,9 +86,4 @@ TEST_CASE( "Test_start_dates" )
                1_days * default_year_length * 8
              );
     }
-
-    // Reset dates so other tests won't fail
-    calendar::start_of_game = calendar::turn_zero;
-    calendar::start_of_cataclysm = calendar::turn_zero;
-    calendar::turn = calendar::turn_zero;
 }

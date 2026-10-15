@@ -92,7 +92,7 @@ static monster round_trip_zombie_rider_without_neutral_predator_metadata( const 
     rider.serialize( jsout );
 
     std::string legacy = out.str();
-    for( const std::string &member : {
+    for( const std::string member : {
              "band_revision_cache", "band_reference",
              "ammo_initialization_version"
          } ) {

@@ -19,6 +19,8 @@
 #include "avatar.h"
 #include "bandit_live_world.h"
 #include "monster.h"
+#include "mtype.h"
+#include "faction.h"
 #include "field_type.h"
 #include "calendar.h"
 #include "cata_scope_helpers.h"
@@ -40,6 +42,10 @@
 #include "weather_type.h"
 #include "worldfactory.h"
 #include "zzip.h"
+
+std::vector<tripoint_abs_omt> live_bandit_member_route_to_for_test(
+    const npc &member, const bandit_live_world::site_record &site,
+    const tripoint_abs_omt &destination );
 
 TEST_CASE( "stationary binocular optics preserves physical visibility at three OMT",
            "[binocular_056][visibility]" )
@@ -362,18 +368,29 @@ TEST_CASE( "site association follows only an actually observed leaving identity"
 TEST_CASE( "loaded target remains visible to an abstract scout through existing geometry",
            "[binocular_056][abstract_visibility]" )
 {
+    const auto saved_map_origin = get_map().get_abs_sub();
     clear_avatar();
     clear_npcs();
     clear_map_with_vision( -1, 1, false );
     const auto saved_turn = calendar::turn;
     const auto saved_position = get_avatar().pos_abs();
     on_out_of_scope restore( [&]() {
+        if( get_map().get_abs_sub() != saved_map_origin ) {
+            get_map().load( saved_map_origin, false, false );
+        }
         get_avatar().setpos( saved_position, false );
         set_time( saved_turn );
     } );
     set_time_to_day();
     scoped_weather_override weather( weather_type_id( "clear" ) );
     map &here = get_map();
+    // Fixed bubble coordinates below describe target-local obstacles only when
+    // the window starts on an OMT boundary. Ordinary player relocation can leave
+    // an odd submap origin; preserve that incoming window on scope exit.
+    const auto aligned_origin = project_to<coords::sm>( project_to<coords::omt>( here.get_abs_sub() ) );
+    if( here.get_abs_sub() != aligned_origin ) {
+        here.load( aligned_origin, false, false );
+    }
     npc observer;
     observer.normalize();
     observer.set_fake( true );
@@ -609,6 +626,43 @@ TEST_CASE( "loaded target remains visible to an abstract scout through existing 
         CHECK( loaded.sees_without_clairvoyance( fixture, *enemy ) == native_threat_visible );
         CHECK( scout_observation::watching_member( site, loaded ) == !native_threat_visible );
     }
+    SECTION( "unknown hostile optics do not veto an independently visible target" ) {
+        bandit_live_world::site_record site;
+        auto &outing = site.active_outing;
+        observer.setID( character_id( 956221 ), true );
+        outing.schema_version = 10;
+        outing.kind = bandit_live_world::outing_kind::structural_sortie;
+        outing.job_type = "scout";
+        outing.phase = bandit_live_world::scout_phase::observing;
+        outing.owner = bandit_live_world::simulation_owner::abstract;
+        outing.selected_watch_kind = bandit_live_world::structural_watch_kind::exact;
+        outing.selected_watch_omt = observer.pos_abs_omt();
+        outing.target_footprint = { get_avatar().pos_abs_omt() };
+        outing.member_ids = { observer.getID() };
+        monster *enemy = g->place_critter_at( mtype_id( "mon_zombie" ), tripoint_bub_ms( 2, 66, 0 ) );
+        REQUIRE( enemy );
+        on_out_of_scope remove_enemy( [&]() {
+            g->clear_zombies();
+        } );
+        // Its ray fits the prepared remote map, but its full native-lighting
+        // neighbourhood extends into geometry this fixture has not generated.
+        enemy->setpos( here.get_abs( tripoint_bub_ms( -60, 66, 0 ) ) );
+        REQUIRE( rl_dist( observer.pos_abs(), enemy->pos_abs() ) <= MAX_VIEW_DISTANCE );
+        scout_observation::site_reader optics;
+        REQUIRE( optics.read_character( observer, get_avatar() ).visible );
+        std::string reason;
+        CHECK( optics.watching_member( site, observer, &reason ) );
+        INFO( reason );
+        CHECK( reason == "eligible_hostile_optics_unknown" );
+        CHECK( optics.perceived_threats( observer ).empty() );
+        std::ostringstream bytes;
+        JsonOut writer( bytes );
+        observer.serialize( writer );
+        npc loaded;
+        loaded.deserialize( json_loader::from_string( bytes.str() ).get_object() );
+        CHECK( optics.watching_member( site, loaded ) );
+        CHECK( optics.read_character( loaded, get_avatar() ).visible );
+    }
     SECTION( "a concealed populated horde uses one bounded observer window" ) {
         bandit_live_world::site_record site;
         auto &outing = site.active_outing;
@@ -723,6 +777,17 @@ TEST_CASE( "loaded target remains visible to an abstract scout through existing 
         here.invalidate_map_cache( 0 );
         here.build_map_cache( 0 );
         const auto blocked = scout_observation::read_character( observer, get_avatar() );
+        const auto wall = here.get_abs( tripoint_bub_ms( 54, 66, 0 ) );
+        const auto *stored = MAPBUFFER.lookup_submap_existing( project_to<coords::sm>( wall ) );
+        point_sm_ms wall_offset;
+        auto wall_local = tripoint_bub_ms( 54, 66, 0 );
+        const auto *loaded = map_meddler::unsafe_get_submap_at( wall_local, wall_offset );
+        INFO( "optical_fixture map=" << here.get_abs_sub() << " remote=" << fixture.get_abs_sub()
+              << " wall=" << wall << " terrain=" << here.ter( tripoint_bub_ms( 54, 66, 0 ) ).id()
+              << " stored=" << static_cast<bool>( stored ) << " same_submap=" << ( stored == loaded )
+              << " stored_wall=" << ( stored ? stored->get_ter( wall_offset ).id().str() : "missing" )
+              << " target=" << get_avatar().pos_abs() << " observer=" << observer.pos_abs()
+              << " reason=" << blocked.reason );
         CHECK( blocked.known );
         CHECK_FALSE( blocked.visible );
     }
@@ -1089,5 +1154,241 @@ TEST_CASE( "resident vehicle part index follows native ownership and geometry",
         CHECK( count( moved ) > 0 );
         here.destroy_vehicle( v );
         CHECK( count( moved ) == 0 );
+    }
+}
+
+TEST_CASE( "active structural scouts separate coarse hostile optics from real danger",
+           "[scout_observation][bandit][npc]" )
+{
+    const bool cannibal = GENERATE( false, true );
+    const time_point old_turn = calendar::turn;
+    const tripoint_abs_ms old_avatar_position = get_avatar().pos_abs();
+    const bandit_live_world::world_state old_world =
+        overmap_buffer.global_state.bandit_live_world;
+    g->faction_manager_ptr->create_if_needed();
+    clear_map_without_vision();
+    clear_avatar();
+    clear_npcs();
+    g->clear_zombies();
+    set_time_to_day();
+    on_out_of_scope restore( [ = ]() {
+        clear_npcs();
+        g->clear_zombies();
+        overmap_buffer.global_state.bandit_live_world = old_world;
+        get_avatar().setpos( old_avatar_position, false );
+        set_time( old_turn );
+        sounds::reset_sounds();
+    } );
+    map &here = get_map();
+    npc &observer = spawn_npc( point_bub_ms( 40, 66 ), "test_talker" );
+    npc &partner = spawn_npc( point_bub_ms( 42, 66 ), "test_talker" );
+    const faction_id camp_faction( cannibal ? "cannibal_camp" : "hells_raiders" );
+    observer.set_fac( camp_faction );
+    partner.set_fac( camp_faction );
+    observer.i_add( item( itype_id( "binoculars" ) ) );
+    observer.set_attitude( NPCATT_NULL );
+    partner.set_attitude( NPCATT_NULL );
+    observer.set_sleepiness( 0 );
+    partner.set_sleepiness( 0 );
+    get_avatar().setpos( here, tripoint_bub_ms( 112, 66, 0 ), false );
+    set_time_to_day();
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+
+    bandit_live_world::world_state &world =
+        overmap_buffer.global_state.bandit_live_world;
+    world = bandit_live_world::world_state();
+    bandit_live_world::site_record site;
+    site.site_id = cannibal ? "scout-optics-cannibal-site" : "scout-optics-bandit-site";
+    site.site_kind = cannibal ? bandit_live_world::owned_site_kind::cannibal_camp :
+                     bandit_live_world::owned_site_kind::bandit_camp;
+    site.profile = cannibal ? bandit_live_world::hostile_site_profile::cannibal_camp :
+                   bandit_live_world::hostile_site_profile::camp_style;
+    site.living_total = 2;
+    site.members = {
+        {
+            observer.getID(), "test_talker", observer.pos_abs(),
+            bandit_live_world::member_state::outbound, false, ""
+        },
+        {
+            partner.getID(), "test_talker", partner.pos_abs(),
+            bandit_live_world::member_state::outbound, false, ""
+        }
+    };
+    bandit_live_world::active_outing_state &outing = site.active_outing;
+    outing.schema_version = 10;
+    outing.kind = bandit_live_world::outing_kind::structural_sortie;
+    outing.activity_id = site.site_id + "-active-scout";
+    outing.camp_id = site.site_id;
+    outing.generation = 1;
+    outing.member_ids = { observer.getID(), partner.getID() };
+    outing.leader_id = observer.getID();
+    outing.job_type = "scout";
+    outing.phase = bandit_live_world::scout_phase::observing;
+    outing.owner = bandit_live_world::simulation_owner::abstract;
+    outing.handoff_epoch = 0;
+    outing.started_minutes = 0;
+    outing.last_progress_minutes = 0;
+    outing.last_advanced_minutes = 0;
+    outing.target_omt = get_avatar().pos_abs_omt();
+    outing.target_footprint = { outing.target_omt };
+    outing.selected_watch_kind = bandit_live_world::structural_watch_kind::exact;
+    outing.selected_watch_omt = observer.pos_abs_omt();
+    outing.selected_watch_route_cost = 0;
+    world.sites.push_back( std::move( site ) );
+    bandit_live_world::site_record &active_site = world.sites.front();
+    REQUIRE( bandit_live_world::current_external_simulation_cursor( active_site ) );
+    REQUIRE( bandit_live_world::active_operation_duty_site_for( world, observer.getID() ) ==
+             &active_site );
+    SECTION( "current perception and received attacks keep their Native priority" ) {
+        monster *coarse_hostile = g->place_critter_at( mtype_id( "mon_dog_gpyrenees" ),
+                                  tripoint_bub_ms( 43, 66, 0 ) );
+        REQUIRE( coarse_hostile );
+        coarse_hostile->anger = 0;
+        coarse_hostile->morale = 0;
+        REQUIRE( coarse_hostile->has_flag( mon_flag_HIT_AND_RUN ) );
+        REQUIRE( observer.sees_without_clairvoyance( here, *coarse_hostile ) );
+        REQUIRE( observer.attitude_to( *coarse_hostile ) == Creature::Attitude::HOSTILE );
+        REQUIRE( coarse_hostile->attitude( &observer ) == MATT_IGNORE );
+        CHECK_FALSE( observer.scouting_creature_requires_response( *coarse_hostile,
+                     "test_coarse_hostile_ignore" ) );
+        scout_observation::site_reader optics;
+        CHECK( optics.watching_member( active_site, observer ) );
+        coarse_hostile->add_effect( efftype_id( "run" ), 1_minutes );
+        REQUIRE( coarse_hostile->attitude( &observer ) == MATT_FLEE );
+        CHECK_FALSE( observer.scouting_creature_requires_response( *coarse_hostile,
+                     "test_coarse_hostile_flee" ) );
+        CHECK( optics.watching_member( active_site, observer ) );
+
+        g->clear_zombies();
+        monster *actual_attacker = g->place_critter_at( mtype_id( "mon_zombie" ),
+                                   tripoint_bub_ms( 41, 66, 0 ) );
+        REQUIRE( actual_attacker );
+        actual_attacker->anger = 100;
+        REQUIRE( observer.sees_without_clairvoyance( here, *actual_attacker ) );
+        REQUIRE( actual_attacker->attitude( &observer ) == MATT_ATTACK );
+        REQUIRE( actual_attacker->type->melee_dice > 0 );
+        REQUIRE( actual_attacker->can_reach_to( observer.pos_bub() ) );
+        CHECK( observer.scouting_creature_requires_response( *actual_attacker,
+                "test_native_melee_threat" ) );
+        CHECK_FALSE( optics.watching_member( active_site, observer ) );
+
+        g->clear_zombies();
+        get_avatar().setpos( here, observer.pos_bub() + point::north, false );
+        get_avatar().set_skill_level( skill_id( "melee" ), 8 );
+        get_avatar().set_skill_level( skill_id( "unarmed" ), 8 );
+        const int initial_hp = observer.get_hp();
+        for( int hit = 0; hit < 5 && observer.get_hp() == initial_hp; ++hit ) {
+            get_avatar().set_moves( 100 );
+            get_avatar().melee_attack( observer, false );
+        }
+        REQUIRE( observer.get_hp() < initial_hp );
+        REQUIRE( observer.faction_alarm );
+        REQUIRE( observer.faction_alarm->received_attack.value_or( false ) );
+        REQUIRE( observer.faction_alarm_requires_response() );
+
+        get_avatar().setpos( here, tripoint_bub_ms( 112, 66, 0 ), false );
+        monster *unseen_hostile = g->place_critter_at( mtype_id( "mon_zombie" ),
+                                  tripoint_bub_ms( 20, 66, 0 ) );
+        REQUIRE( unseen_hostile );
+        unseen_hostile->anger = 100;
+        unseen_hostile->setpos( here.get_abs( tripoint_bub_ms( -8, 66, 0 ) ) );
+        REQUIRE_FALSE( here.inbounds( unseen_hostile->pos_abs() ) );
+        REQUIRE( rl_dist( observer.pos_abs(), unseen_hostile->pos_abs() ) <= MAX_VIEW_DISTANCE );
+        scout_observation::site_reader unknown_optics;
+        const scout_observation::visibility_read unknown = unknown_optics.read(
+                    observer, observer.pos_abs(), unseen_hostile->pos_abs() );
+        INFO( unknown.reason );
+        CHECK_FALSE( unknown.known );
+        CHECK( unknown_optics.perceived_threats( observer ).empty() );
+        CHECK( observer.faction_alarm_requires_response() );
+        CHECK_FALSE( unknown_optics.watching_member( active_site, observer ) );
+        CHECK( unknown_optics.read_character( observer, get_avatar() ).visible );
+        CHECK( unknown_optics.read_signal( observer, observer.pos_abs(), get_avatar().pos_abs(),
+        { get_avatar().pos_abs_omt() } ).visible );
+
+        std::ostringstream bytes;
+        JsonOut writer( bytes );
+        observer.serialize( writer );
+        npc loaded;
+        loaded.deserialize( json_loader::from_string( bytes.str() ).get_object() );
+        loaded.set_fac( camp_faction );
+        CHECK( loaded.getID() == observer.getID() );
+        CHECK( bandit_live_world::active_operation_duty_site_for( world, loaded.getID() ) ==
+               &active_site );
+        CHECK( loaded.faction_alarm_requires_response() );
+        CHECK( unknown_optics.read_character( loaded, get_avatar() ).visible );
+        CHECK( unknown_optics.read_signal( loaded, loaded.pos_abs(), get_avatar().pos_abs(),
+        { get_avatar().pos_abs_omt() } ).visible );
+        SECTION( "incapacitated or field-blocked partner retains actual perceived threats" ) {
+            const bool field = GENERATE( false, true );
+            g->clear_zombies();
+            monster *threat = g->place_critter_at( mtype_id( "mon_zombie" ),
+                                                   partner.pos_bub() + point::east );
+            REQUIRE( threat );
+            threat->anger = 100;
+            REQUIRE( partner.sees_without_clairvoyance( here, *threat ) );
+            REQUIRE( partner.scouting_creature_requires_response( *threat, "partner_route_knowledge" ) );
+            REQUIRE( partner.raise_faction_alarm( threat->pos_abs() ) );
+            on_out_of_scope remove_field( [&]() {
+                if( field ) {
+                    here.remove_field( partner.pos_bub(), field_type_id( "fd_fire" ) );
+                }
+            } );
+            if( field ) {
+                REQUIRE( here.add_field( partner.pos_bub(), field_type_id( "fd_fire" ), 2 ) );
+            } else {
+                partner.add_effect( efftype_id( "stunned" ), 1_minutes );
+            }
+            REQUIRE( partner.sees_without_clairvoyance( here, *threat ) );
+            CHECK_FALSE( optics.watching_member( active_site, partner ) );
+            const auto positions = optics.perceived_threats( partner );
+            CHECK( std::find( positions.begin(), positions.end(), threat->pos_abs() ) != positions.end() );
+            partner.fall_asleep( 1_minutes );
+            CHECK( optics.perceived_threats( partner ).empty() );
+            CHECK( partner.has_active_faction_alarm() );
+            CHECK( partner.faction_alarm_requires_response() );
+        }
+    }
+    SECTION( "bounded watch avoidance does not impose an incident-distance wall on home routes" ) {
+        const tripoint_abs_omt origin = observer.pos_abs_omt();
+        active_site.anchor = origin + point( -2, 0 );
+        active_site.footprint = { active_site.anchor };
+        std::vector<std::pair<tripoint_abs_omt, oter_id>> saved_terrain;
+        for( int y = -3; y <= 3; ++y ) {
+            for( int x = -3; x <= 3; ++x ) {
+                const auto cell = origin + point( x, y );
+                saved_terrain.emplace_back( cell, overmap_buffer.ter( cell ) );
+                overmap_buffer.ter_set( cell, oter_id( "field" ) );
+            }
+        }
+        on_out_of_scope restore_terrain( [&]() {
+            for( const auto &entry : saved_terrain ) {
+                overmap_buffer.ter_set( entry.first, entry.second );
+            }
+        } );
+        // Declared authenticated incident stress input through the existing
+        // alarm API, not a claim that this fixture witnessed a remote attack.
+        // Neither alarm authentication nor reception bounds incident distance.
+        const tripoint_abs_omt remote = origin + point( -10000, 0 );
+        REQUIRE( partner.raise_faction_alarm( project_to<coords::ms>( remote ), true ) );
+        REQUIRE( partner.has_active_faction_alarm() );
+        REQUIRE( partner.faction_alarm_requires_response() );
+        const auto toward = origin + point( -1, -1 );
+        CHECK( live_bandit_member_route_to_for_test( observer, active_site, toward ).empty() );
+        CHECK_FALSE( live_bandit_member_route_to_for_test( observer, active_site,
+                     origin + point( 0, -1 ) ).empty() );
+        const auto home = live_bandit_member_route_to_for_test( observer, active_site, active_site.anchor );
+        REQUIRE_FALSE( home.empty() );
+        CHECK( home.front() == active_site.anchor );
+        // Native overmap paths retain the source as their last entry; the
+        // ordinary mover consumes that entry before taking the preceding step.
+        REQUIRE( home.size() > 1 );
+        CHECK( home.back() == origin );
+        CHECK( rl_dist( home[home.size() - 2], remote ) < rl_dist( origin, remote ) );
+        auto returning = active_site;
+        returning.active_outing.phase = bandit_live_world::scout_phase::returning_home;
+        CHECK_FALSE( live_bandit_member_route_to_for_test( observer, returning, toward ).empty() );
+        CHECK( partner.faction_alarm_requires_response() );
     }
 }

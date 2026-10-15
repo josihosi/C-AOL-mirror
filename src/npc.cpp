@@ -2759,14 +2759,24 @@ bool npc::faction_alarm_requires_response() const
 bool npc::scouting_creature_requires_response( const Creature &creature,
         const std::string_view caller ) const
 {
+    return scouting_creature_requires_response( creature, caller, get_map() );
+}
+
+bool npc::scouting_creature_requires_response( const Creature &creature,
+        const std::string_view caller, const map &here ) const
+{
     const auto *site = bandit_live_world::active_operation_duty_site_for(
                            overmap_buffer.global_state.bandit_live_world, getID() );
     if( !site || site->active_outing.kind != bandit_live_world::outing_kind::structural_sortie ||
-        site->active_outing.job_type != "scout" || !creature.is_monster() ) {
-        return true; // Other operation and hostile-character policies are unchanged.
+        site->active_outing.job_type != "scout" ) {
+        return true; // Other operation policies are unchanged.
+    }
+    if( !creature.is_monster() ) {
+        // Hostile classification alone is not a new attack. Native combat
+        // intent and authenticated received incidents retain their own priority.
+        return is_active() && current_target() == &creature && get_ai_danger() > 0;
     }
     const monster &critter = *creature.as_monster();
-    map &here = get_map();
     raid_decision_trace::scout_threat_read read;
     const auto finish = [&]( bool response, std::string_view reason ) {
         read.response = response;
@@ -2783,7 +2793,7 @@ bool npc::scouting_creature_requires_response( const Creature &creature,
     }
     read.approaching = false;
     for( const auto id : site->active_outing.member_ids ) {
-        const npc *member = g->find_npc( id );
+        const npc *member = overmap_buffer.find_npc( id ).get();
         if( member && !member->is_dead() && critter.has_dest() &&
             rl_dist( critter.get_dest(), member->pos_abs() ) <
             rl_dist( critter.pos_abs(), member->pos_abs() ) ) {
@@ -2797,12 +2807,19 @@ bool npc::scouting_creature_requires_response( const Creature &creature,
     if( critter.has_flag( json_flag_CANNOT_ATTACK ) ) {
         return finish( false, "creature cannot attack" );
     }
+    // Native reach/path predicates are tied to the active map. A genuinely
+    // perceived attacking/approaching creature outside it is not certified safe
+    // by querying unrelated bubble geometry. Its unknown reach remains a
+    // tactical interruption; unavailable optics never enter this method.
+    if( &here != &get_map() ) {
+        return finish( true, "perceived attack or approach outside native reach geometry" );
+    }
     // Qualify reach to the actual living party, not only the scout whose
     // perception first raised the alert. A creature beside the partner is real
     // danger even when this observer is farther away.
     read.route_reachable = false;
     for( const auto id : site->active_outing.member_ids ) {
-        const npc *member = g->find_npc( id );
+        const npc *member = overmap_buffer.find_npc( id ).get();
         if( !member || member->is_dead() ) {
             continue;
         }

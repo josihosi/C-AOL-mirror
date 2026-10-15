@@ -12,6 +12,7 @@
 #include <unistd.h>
 #endif
 #include "rng.h"
+#include "raid_decision_trace.h"
 #include "zzip.h"
 #include "physical_light.h"
 
@@ -64,6 +65,7 @@
 #include "pickup.h"
 #include "effect.h"
 #include "game.h"
+#include "global_vars.h"
 #include "game_constants.h"
 #include "json.h"
 #include "json_loader.h"
@@ -3047,8 +3049,81 @@ void prepare_hostile_follow_on( bandit_live_world::site_record &site, const int 
     site.current_scout_report.provisional = false;
     site.applied_report_generation = std::max( site.applied_report_generation, scout_generation );
     site.next_outing_generation = std::max( site.next_outing_generation, scout_generation + 1 );
-    REQUIRE( bandit_live_world::accept_current_scout_report_for_assessment( site ) ==
-             bandit_live_world::camp_decision_transition_result::applied );
+    const bool trace_report = std::getenv( "BATCH_DIAG_CI" ) != nullptr;
+    std::optional<bandit_live_world_probe::session> report_trace;
+    if( trace_report ) {
+        report_trace.emplace( bandit_live_world_probe::collection_mode::transition_events );
+        const auto &report = site.current_scout_report;
+        const auto &decision = site.camp_decision;
+        std::cout << "batch_report_clock turn=" << to_turn<int>( calendar::turn )
+                  << " cataclysm=" << to_turn<int>( calendar::start_of_cataclysm )
+                  << " game_start=" << to_turn<int>( calendar::start_of_game )
+                  << " minutes=" << to_minutes<int>( calendar::turn - calendar::start_of_cataclysm )
+                  << " delivered=" << report.delivered_minutes
+                  << " prior_transition=" << decision.last_transition_minutes << std::endl;
+        std::cout << "batch_report_precondition site=" << site.site_id.substr( 0, 192 )
+                  << " active=" << site.active_outing.is_active()
+                  << " present=" << report.is_present() << " provisional=" << report.provisional
+                  << " job=" << report.source_job_type.substr( 0, 32 )
+                  << " profile=" << bandit_live_world::to_string( site.profile )
+                  << " site_kind=" << bandit_live_world::to_string( site.site_kind )
+                  << " policy=" << bandit_live_world::to_string( report.action_policy )
+                  << " decision=" << bandit_live_world::to_string( decision.state )
+                  << " phase_allowed=" << bandit_live_world::is_valid_camp_decision_transition(
+                      decision.state, bandit_live_world::camp_decision_state::report_awaiting_assessment )
+                  << std::endl;
+        std::cout << "batch_report_outing activity=" << site.active_outing.activity_id.substr( 0, 192 )
+                  << " generation=" << site.active_outing.generation
+                  << " kind=" << bandit_live_world::to_string( site.active_outing.kind )
+                  << " owner=" << bandit_live_world::to_string( site.active_outing.owner )
+                  << " phase=" << bandit_live_world::to_string( site.active_outing.phase )
+                  << " epoch=" << site.active_outing.handoff_epoch
+                  << " cursor=" << site.active_outing.last_advanced_minutes << std::endl;
+        std::cout << "batch_report_identity revision=" << report.revision
+                  << " generation=" << report.source_generation
+                  << " activity=" << report.source_activity_id.substr( 0, 192 )
+                  << " key=" << report.application_key.substr( 0, 192 )
+                  << " target=" << report.target_id.substr( 0, 192 )
+                  << " target_size=" << report.target_id.size()
+                  << " target_omt=" << report.target_omt.to_string()
+                  << " lead=" << report.target_lead_id.substr( 0, 192 )
+                  << " lead_revision=" << report.target_lead_revision << std::endl;
+        std::cout << "batch_report_decision revision=" << decision.source_report_revision
+                  << " generation=" << decision.source_report_generation
+                  << " activity=" << decision.source_report_activity_id.substr( 0, 192 )
+                  << " key=" << decision.source_report_application_key.substr( 0, 192 )
+                  << " target=" << decision.target_id.substr( 0, 192 )
+                  << " target_omt=" << decision.target_omt.to_string()
+                  << " policy=" << bandit_live_world::to_string( decision.report_policy )
+                  << " lead=" << decision.target_lead_id.substr( 0, 192 )
+                  << " lead_revision=" << decision.target_lead_revision
+                  << " pinned=" << decision.has_pinned_report()
+                  << " acted_count=" << site.acted_reports.size() << std::endl;
+        for( std::size_t i = 0; i < std::min<std::size_t>( 8, site.acted_reports.size() ); ++i ) {
+            const auto &acted = site.acted_reports[i];
+            std::cout << "batch_report_acted index=" << i
+                      << " target=" << acted.target_id.substr( 0, 192 )
+                      << " target_omt=" << acted.target_omt.to_string()
+                      << " policy=" << bandit_live_world::to_string( acted.policy )
+                      << " generation=" << acted.source_generation
+                      << " revision=" << acted.report_revision
+                      << " minutes=" << acted.acted_minutes << std::endl;
+        }
+    }
+    const auto acceptance = bandit_live_world::accept_current_scout_report_for_assessment( site );
+    if( report_trace ) {
+        std::cout << "batch_report_result value=" << static_cast<int>( acceptance )
+                  << " dropped=" << report_trace->result().dropped_transition_events << std::endl;
+        for( const auto &event : report_trace->result().transition_events ) {
+            if( event.transition == "camp_decision" ) {
+                std::cout << "batch_report_guard outcome=" << event.outcome
+                          << " reason=" << event.reason
+                          << " previous=" << event.previous_phase
+                          << " next=" << event.new_phase << std::endl;
+            }
+        }
+    }
+    REQUIRE( acceptance == bandit_live_world::camp_decision_transition_result::applied );
     REQUIRE( bandit_live_world::transition_camp_decision_state(
                  site, bandit_live_world::camp_decision_state::report_awaiting_assessment,
                  bandit_live_world::camp_decision_state::preparing_follow_on,
@@ -5340,7 +5415,7 @@ TEST_CASE( "bandit_live_world_round_trips_bounded_authoritative_scout_state",
     for( const bandit_live_world::scout_phase phase : phases ) {
         original.sites.front().active_outing.phase = phase;
         const bandit_live_world::world_state loaded = round_trip_world( original );
-        REQUIRE( loaded.schema_version == 6 );
+        REQUIRE( loaded.schema_version == bandit_live_world::world_state().schema_version );
         REQUIRE( loaded.sites.size() == 1 );
         const bandit_live_world::active_outing_state &outing = loaded.sites.front().active_outing;
         CHECK( outing.schema_version == 5 );
@@ -5749,7 +5824,7 @@ TEST_CASE( "bandit_live_world_scout_phase_transitions_are_one_way_and_atomic",
            bandit_live_world::member_state::at_home );
 }
 
-TEST_CASE( "bandit_live_world_camp_decision_pins_only_final_scout_reports_and_transitions_once",
+TEST_CASE( "bandit_live_world_camp_decision_pins_final_scout_and_scavenge_reports_once",
            "[bandit][live_world][camp_decision][save][replay]" )
 {
     using bandit_live_world::camp_decision_state;
@@ -5821,11 +5896,36 @@ TEST_CASE( "bandit_live_world_camp_decision_pins_only_final_scout_reports_and_tr
            camp_decision_transition_result::rejected );
     CHECK( serialize_world( world ) == before_provisional );
     site.current_scout_report.provisional = false;
-    site.current_scout_report.source_job_type = "scavenge";
-    const std::string before_scavenge = serialize_world( world );
+    site.current_scout_report.source_job_type = "raid";
+    const std::string before_unsupported_job = serialize_world( world );
     CHECK( bandit_live_world::accept_current_scout_report_for_assessment( site ) ==
            camp_decision_transition_result::rejected );
-    CHECK( serialize_world( world ) == before_scavenge );
+    CHECK( serialize_world( world ) == before_unsupported_job );
+
+    bandit_live_world::world_state scavenge_world = world;
+    bandit_live_world::site_record &scavenge_site = scavenge_world.sites.front();
+    scavenge_site.current_scout_report.source_job_type = "scavenge";
+    CHECK( bandit_live_world::accept_current_scout_report_for_assessment( scavenge_site ) ==
+           camp_decision_transition_result::applied );
+    CHECK( scavenge_site.camp_decision.state == camp_decision_state::report_awaiting_assessment );
+    CHECK( scavenge_site.camp_decision.source_report_application_key ==
+           scavenge_site.current_scout_report.application_key );
+    CHECK( bandit_live_world::accept_current_scout_report_for_assessment( scavenge_site ) ==
+           camp_decision_transition_result::unchanged );
+    bandit_live_world::world_state loaded_scavenge = round_trip_world( scavenge_world );
+    REQUIRE( loaded_scavenge.sites.size() == 1 );
+    CHECK( loaded_scavenge.sites.front().camp_decision.state ==
+           camp_decision_state::report_awaiting_assessment );
+    CHECK( loaded_scavenge.sites.front().camp_decision.source_report_application_key ==
+           loaded_scavenge.sites.front().current_scout_report.application_key );
+    CHECK( loaded_scavenge.sites.front().current_scout_report.source_job_type == "scavenge" );
+    CHECK( loaded_scavenge.sites.front().camp_decision.source_report_generation ==
+           scavenge_site.camp_decision.source_report_generation );
+    const std::string canonical_scavenge = serialize_world( loaded_scavenge );
+    CHECK( bandit_live_world::accept_current_scout_report_for_assessment(
+               loaded_scavenge.sites.front() ) == camp_decision_transition_result::unchanged );
+    CHECK( serialize_world( loaded_scavenge ) == canonical_scavenge );
+    CHECK( serialize_world( world ) == before_unsupported_job );
     site.current_scout_report.source_job_type = "scout";
     CHECK( bandit_live_world::accept_current_scout_report_for_assessment( site ) ==
            camp_decision_transition_result::applied );
@@ -10689,6 +10789,24 @@ TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_relo
     const std::string cargo_application_key =
         site.active_outing.cargo_application_key;
     overmap_buffer.global_state.bandit_live_world = std::move( world );
+
+    // This adapter fixture declares an already-local owner.  Its durable cursor
+    // alone cannot authenticate physical bodies: missing actor claims must refuse
+    // without publishing even a provisional return.
+    const std::string unbound_state = serialize_world(
+                                          overmap_buffer.global_state.bandit_live_world );
+    note_live_bandit_aftermath_for_test();
+    CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == unbound_state );
+    const auto &local_site = overmap_buffer.global_state.bandit_live_world.sites.front();
+    const auto &local_outing = local_site.active_outing;
+    for( const character_id id : member_ids ) {
+        npc *member = g->find_npc( id );
+        REQUIRE( member != nullptr );
+        sync_bandit_live_world_projection_lease_copies( *member, {
+            true, local_site.site_id, local_outing.activity_id, "local", local_outing.generation,
+            local_outing.handoff_epoch, local_outing.last_advanced_minutes
+        } );
+    }
 
     note_live_bandit_aftermath_for_test();
     bandit_live_world::site_record &provisional_site =
@@ -48499,288 +48617,6 @@ TEST_CASE( "dispatched party survives a coupled representation interruption",
     CHECK( scene.site().current_scout_report.revision == 0 );
 }
 
-TEST_CASE( "actual earlier bandit report commits only an exact authorized level one claim",
-           "[bandit_live_world][earlier_report_063]" )
-{
-    const auto old_world = overmap_buffer.global_state.bandit_live_world;
-    const auto old_turn = calendar::turn;
-    const auto old_start = calendar::start_of_cataclysm;
-    const auto old_game_start = calendar::start_of_game;
-    std::vector<std::pair<tripoint_abs_omt, oter_id>> old_terrain;
-    r054_clear_previous_test_projections();
-    on_out_of_scope restore( [&]() {
-        clear_npcs();
-        for( const auto &actor : overmap_buffer.get_overmap_npcs() ) {
-            if( actor && actor->getID().get_value() >= 2 && actor->getID().get_value() <= 12 ) {
-                overmap_buffer.remove_npc( actor->getID() );
-            }
-        }
-        overmap_buffer.global_state.bandit_live_world = old_world;
-        calendar::turn = old_turn;
-        calendar::start_of_cataclysm = old_start;
-        calendar::start_of_game = old_game_start;
-        for( const auto &[point, terrain] : old_terrain ) {
-            overmap_buffer.ter_set( point, terrain );
-        }
-    } );
-    std::ifstream input( "build_logs/first-smoke-063/native-earlier-report-fixture.json" );
-    REQUIRE( input.good() );
-    auto fixture = json_loader::from_string(
-                       std::string( std::istreambuf_iterator<char>( input ), {} ) ).get_object();
-    fixture.allow_omitted_members();
-    calendar::start_of_cataclysm = time_point::from_turn( 4752000 );
-    calendar::start_of_game = time_point::from_turn( 5212800 );
-    calendar::turn = time_point::from_turn( 5277625 );
-    int index = 0;
-    for( JsonArray run : fixture.get_array( "overmap_terrain_z0" ) ) {
-        const oter_id terrain = oter_str_id( run.get_string( 0 ) ).id();
-        for( int count = run.get_int( 1 ); count > 0; --count, ++index ) {
-            const tripoint_abs_omt point( index % OMAPX, index / OMAPX, 0 );
-            old_terrain.emplace_back( point, overmap_buffer.ter( point ) );
-            overmap_buffer.ter_set( point, terrain );
-        }
-    }
-    REQUIRE( index == OMAPX * OMAPY );
-    auto &world = overmap_buffer.global_state.bandit_live_world;
-    world.deserialize( fixture.get_object( "world" ) );
-    for( JsonObject record : fixture.get_array( "actors" ) ) {
-        auto actor = make_shared_fast<npc>();
-        actor->deserialize( record );
-        overmap_buffer.insert_npc( actor );
-    }
-    auto *site = world.find_site( "overmap_special:bandit_camp@129,149,0" );
-    REQUIRE( site );
-    REQUIRE_FALSE( site->active_outing.is_active() );
-    REQUIRE( site->current_scout_report.delivered_minutes == 8700 );
-    REQUIRE( site->current_scout_report.assessment.certainty == 90 );
-    REQUIRE( site->current_scout_report.assessment.bounty_estimate == 1 );
-    REQUIRE( site->current_scout_report.assessment.threshold_class ==
-             bandit_live_world::scout_assessment_threshold_class::normal );
-    REQUIRE( site->current_scout_report.carrier_ids ==
-             std::vector<character_id> { character_id( 4 ), character_id( 5 ) } );
-    int optical_records = 0;
-    for( const auto &record : site->current_scout_report.observations ) {
-        if( record.sense == bandit_live_world::sortie_observation_sense::light ||
-            record.sense == bandit_live_world::sortie_observation_sense::smoke ) {
-            ++optical_records;
-            CHECK( record.expiry_minutes < site->current_scout_report.delivered_minutes );
-        }
-    }
-    REQUIRE( optical_records == 8 );
-    const auto reads = live_bandit_response_member_power_reads_for_test( *site );
-    const auto party = bandit_live_world::select_capable_response_party( *site,
-                       site->current_scout_report.action_policy,
-                       site->current_scout_report.assessment.danger_high, reads );
-    const auto authorization = bandit_live_world::evaluate_response_authorization(
-                                   *site, 8760, party, reads );
-    INFO( authorization.rejection_reason );
-    CHECK( authorization.normalized_opportunity == 333 );
-    CHECK( authorization.authorized );
-    CHECK( authorization.power_sufficient );
-    CHECK( authorization.reserve_ready );
-    const auto report = site->current_scout_report;
-    auto stale = *site;
-    CHECK_FALSE( bandit_live_world::evaluate_response_authorization(
-                     stale, 12035, party, reads ).authorized );
-    auto cannibal = *site;
-    cannibal.site_kind = bandit_live_world::owned_site_kind::cannibal_camp;
-    cannibal.profile = bandit_live_world::hostile_site_profile::cannibal_camp;
-    cannibal.current_scout_report.action_policy =
-        bandit_live_world::camp_report_policy::cannibal_night_raid;
-    const auto cannibal_party = bandit_live_world::select_capable_response_party( cannibal,
-                                cannibal.current_scout_report.action_policy,
-                                cannibal.current_scout_report.assessment.danger_high, reads );
-    CHECK_FALSE( bandit_live_world::evaluate_response_authorization(
-                     cannibal, 8760, cannibal_party, reads ).opportunity_sufficient );
-    const auto routes = live_bandit_hostile_operation_route_read_for_test( *site );
-    REQUIRE( routes );
-    auto power_reader = []( const bandit_live_world::site_record & value ) {
-        return live_bandit_response_member_power_reads_for_test( value );
-    };
-    auto route_reader = []( const bandit_live_world::site_record & value ) {
-        return live_bandit_hostile_operation_route_read_for_test( value );
-    };
-    const std::string condition = GENERATE( std::string( "register" ), std::string( "admitted" ),
-                                            std::string( "conflicting_revision" ), std::string( "consumed" ), std::string( "duplicate_claim" ),
-                                            std::string( "expired" ), std::string( "wrong_target" ), std::string( "wrong_omt" ),
-                                            std::string( "wrong_revision" ),
-                                            std::string( "wrong_application" ), std::string( "foreign_source" ), std::string( "foreign_lead" ),
-                                            std::string( "missing_carrier" ), std::string( "foreign_carrier" ),
-                                            std::string( "duplicate_carrier" ),
-                                            std::string( "route_missing" ), std::string( "route_invalid" ), std::string( "apply_failure" ),
-                                            std::string( "apply_foreign_report" ), std::string( "apply_wrong_generation" ),
-                                            std::string( "apply_wrong_target" ) );
-    CAPTURE( condition );
-    const bool positive = condition == "register" || condition == "admitted";
-    int service = 8820;
-    if( condition == "admitted" || condition == "conflicting_revision" ||
-        condition == "consumed" || condition == "duplicate_claim" ) {
-        // Declared independent admitted-target control through the existing
-        // observation API. The native report still has its exact measured level1.
-        REQUIRE( bandit_live_world::observe_authoritative_hostile_target_opportunity(
-                     world, report.target_id, report.target_omt, { 23, 2, 1 } ) );
-        auto &ledger = world.hostile_target_opportunities.back();
-        REQUIRE( ledger.target_id == report.target_id );
-        if( condition == "conflicting_revision" ) {
-            ++ledger.revision;
-        }
-        if( condition == "consumed" || condition == "duplicate_claim" ) {
-            ledger.consumed_operation_id = condition == "consumed" ? "foreign#hostile:9" :
-                                           site->site_id + "#hostile:" + std::to_string( site->next_outing_generation );
-            ledger.consumed_report_key = condition == "consumed" ? "foreign:report:9" : report.application_key;
-            ledger.consumed_generation = condition == "consumed" ? 9 : site->next_outing_generation;
-        }
-    }
-    if( condition == "expired" ) {
-        service = 12060;
-    }
-    if( condition == "wrong_target" ) {
-        site->current_scout_report.target_id += "-wrong";
-    }
-    if( condition == "wrong_omt" ) {
-        site->current_scout_report.target_omt += tripoint( 1, 0, 0 );
-    }
-    if( condition == "wrong_revision" ) {
-        ++site->current_scout_report.target_lead_revision;
-    }
-    if( condition == "wrong_application" ) {
-        site->current_scout_report.application_key += "-wrong";
-    }
-    if( condition == "foreign_source" ) {
-        site->current_scout_report.source_activity_id = "foreign#structural";
-    }
-    if( condition == "foreign_lead" ) {
-        site->intelligence_map.find_lead( report.target_lead_id )->target_id = "foreign-place";
-    }
-    if( condition == "missing_carrier" ) {
-        site->current_scout_report.carrier_ids.clear();
-    }
-    if( condition == "foreign_carrier" ) {
-        site->current_scout_report.carrier_ids = { character_id( 3 ) };
-    }
-    if( condition == "duplicate_carrier" ) {
-        site->current_scout_report.carrier_ids.push_back( character_id( 4 ) );
-    }
-    const auto record_bytes = []( const auto & value ) {
-        std::ostringstream out;
-        JsonOut json( out );
-        value.serialize( json );
-        return out.str();
-    };
-    const auto ledger_bytes = []( const bandit_live_world::world_state & value ) {
-        std::ostringstream out;
-        JsonOut json( out );
-        json.write( value.hostile_target_opportunities );
-        return out.str();
-    };
-    const std::string prior_claims = ledger_bytes( world );
-    const std::string prior_decision = record_bytes( site->camp_decision );
-    const std::string prior_operation = record_bytes( site->active_hostile_operation );
-    const int next_generation = site->next_outing_generation;
-    const auto checked_route = [&condition,
-    &route_reader]( const bandit_live_world::site_record & value ) {
-        if( condition == "route_missing" ) {
-            return std::optional<bandit_live_world::canonical_hostile_operation_route>();
-        }
-        auto route = route_reader( value );
-        if( route && condition == "route_invalid" ) {
-            route->route = { value.anchor };
-        }
-        return route;
-    };
-    const auto checked_apply = [&condition]( bandit_live_world::site_record & value,
-    const bandit_live_world::authorized_hostile_operation_plan & plan ) {
-        const bool applied = bandit_live_world::apply_hostile_operation_plan_with_authorized_response(
-                                 value, plan );
-        if( applied && condition == "apply_foreign_report" ) {
-            value.active_hostile_operation.source_report_application_key = "foreign:report:9";
-        }
-        if( applied && condition == "apply_wrong_generation" ) {
-            ++value.active_hostile_operation.reservation.generation;
-        }
-        if( applied && condition == "apply_wrong_target" ) {
-            value.current_scout_report.target_id += "-wrong";
-            value.active_hostile_operation.reservation.target_id = value.current_scout_report.target_id;
-        }
-        return applied && condition != "apply_failure";
-    };
-    calendar::turn = calendar::start_of_cataclysm + time_duration::from_minutes( service );
-    const auto result = bandit_live_world::advance_structural_bounty_maintenance(
-                            world, service, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {}, checked_route, checked_apply );
-    INFO( bandit_live_world::render_structural_bounty_maintenance_report( result ) );
-    CHECK( result.response_operations_applied == ( positive ? 1 : 0 ) );
-    CHECK( site->active_hostile_operation.is_active() == positive );
-    if( positive ) {
-        const auto &operation = site->active_hostile_operation;
-        CHECK( operation.operation_kind == bandit_live_world::hostile_operation_kind::shakedown );
-        CHECK( operation.phase == bandit_live_world::hostile_operation_phase::assembling );
-        CHECK( operation.reservation.target_id == report.target_id );
-        CHECK( operation.reservation.target_omt == report.target_omt );
-        CHECK( operation.reservation.target_lead_revision == report.target_lead_revision );
-        CHECK( operation.source_report_revision == report.revision );
-        CHECK( operation.source_report_generation == report.source_generation );
-        CHECK( operation.source_report_activity_id == report.source_activity_id );
-        CHECK( operation.source_report_application_key == report.application_key );
-        CHECK( operation.reservation.generation == next_generation );
-        CHECK( operation.reservation.member_ids == party.member_ids );
-        CHECK( operation.shakedown_pending_branch.empty() );
-        const auto *ledger = world.find_hostile_target_opportunity( report.target_id, report.target_omt );
-        REQUIRE( ledger );
-        CHECK( ledger->revision == report.target_lead_revision );
-        CHECK( ledger->goods_value == ( condition == "admitted" ? 23 : 0 ) );
-        CHECK( ledger->population == ( condition == "admitted" ? 2 : 0 ) );
-        CHECK( ledger->activity == ( condition == "admitted" ? 1 : 0 ) );
-        CHECK( ledger->consumed_operation_id == operation.reservation.activity_id );
-        CHECK( ledger->consumed_report_key == report.application_key );
-        CHECK( ledger->consumed_generation == operation.reservation.generation );
-        CHECK( site->current_scout_report.revision == report.revision );
-        CHECK( site->current_scout_report.assessment.bounty_estimate == 1 );
-        auto reloaded = round_trip_world( world );
-        CHECK( serialize_world( reloaded ) == serialize_world( world ) );
-        const auto reload_bytes = serialize_world( reloaded );
-        const auto repeated = bandit_live_world::advance_structural_bounty_maintenance(
-                                  reloaded, service, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {}, checked_route, checked_apply );
-        CHECK( repeated.scheduler_replay_suppressed );
-        CHECK( serialize_world( reloaded ) == reload_bytes );
-        const auto later = bandit_live_world::advance_structural_bounty_maintenance(
-                               reloaded, service + 60, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {}, checked_route,
-                               checked_apply );
-        CHECK( later.response_operations_applied == 0 );
-        CHECK( ledger_bytes( reloaded ) == ledger_bytes( world ) );
-        REQUIRE( reloaded.find_site( site->site_id ) );
-        const auto &later_site = *reloaded.find_site( site->site_id );
-        const auto &later_operation = later_site.active_hostile_operation;
-        // A later service may advance the existing operation from assembly;
-        // replay must conserve its identity and claim, not freeze its clock.
-        CHECK( later_operation.reservation.activity_id == operation.reservation.activity_id );
-        CHECK( later_operation.reservation.generation == operation.reservation.generation );
-        CHECK( later_operation.reservation.member_ids == operation.reservation.member_ids );
-        CHECK( later_operation.reservation.target_id == report.target_id );
-        CHECK( later_operation.reservation.target_omt == report.target_omt );
-        CHECK( later_operation.reservation.target_lead_revision == report.target_lead_revision );
-        CHECK( later_operation.source_report_revision == report.revision );
-        CHECK( later_operation.source_report_generation == report.source_generation );
-        CHECK( later_operation.source_report_activity_id == report.source_activity_id );
-        CHECK( later_operation.source_report_application_key == report.application_key );
-        CHECK( later_site.next_outing_generation == site->next_outing_generation );
-    } else {
-        CHECK( ledger_bytes( world ) == prior_claims );
-        if( condition == "expired" ) {
-            // Expiry legitimately releases the decision for rescout; it must
-            // still leave no target consumption or hostile reservation.
-            CHECK( site->camp_decision.state == bandit_live_world::camp_decision_state::idle );
-        } else {
-            CHECK( record_bytes( site->camp_decision ) == prior_decision );
-        }
-        CHECK( record_bytes( site->active_hostile_operation ) == prior_operation );
-        CHECK( site->next_outing_generation == next_generation );
-    }
-    const auto after = serialize_world( world );
-    bandit_live_world::advance_structural_bounty_maintenance(
-        world, service, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {}, checked_route, checked_apply );
-    CHECK( serialize_world( world ) == after );
-
-}
 
 namespace
 {
@@ -61140,9 +60976,9 @@ static void check_payment_property_knowledge( bool resident, const std::string &
         CHECK( fact.receiver_id == payer_id );
         CHECK( fact.collector_id == collector_id );
         CHECK( fact.wronged_faction == faction_id( "free_merchants" ) );
-        CHECK( fact.property.size() == ( pocket_control ? 1 : 8 + ( knows_pickup ||
-                                         outcome == "returned" ? 1 : 0 ) +
-                                         ( outcome == "speaker_merge" ? 1 : 0 ) ) );
+        CHECK( fact.property.size() == static_cast<decltype( fact.property.size() )>(
+                   pocket_control ? 1 : 8 + ( knows_pickup || outcome == "returned" ? 1 : 0 ) +
+                   ( outcome == "speaker_merge" ? 1 : 0 ) ) );
         CHECK( std::any_of( fact.property.begin(), fact.property.end(), [&]( const auto & goods ) {
             return goods.source_uid == ( pocket_control ? hidden_uid : first_uid );
         } ) );
@@ -63653,6 +63489,17 @@ class r067_fresh_scout_journey
             std::move( overmap_buffer.global_state.bandit_live_world );
         time_point previous_turn = calendar::turn;
         tripoint_abs_omt previous_player = get_avatar().pos_abs_omt();
+        // Registered game load adds recurring campaign EOCs. This fixture also
+        // restores an earlier world/clock, so restore its incoming campaign
+        // queues and values rather than leaking reload-created events to the
+        // next historical scene (including when a REQUIRE unwinds the journey).
+        queued_eocs previous_global_eocs = g->queued_global_effect_on_conditions;
+        std::vector<effect_on_condition_id> previous_inactive_global_eocs =
+            g->inactive_global_effect_on_condition_vector;
+        queued_eocs previous_avatar_eocs = get_avatar().queued_effect_on_conditions;
+        std::vector<effect_on_condition_id> previous_inactive_avatar_eocs =
+            get_avatar().inactive_effect_on_condition_vector;
+        global_variables::impl_t previous_global_values = get_globals().get_global_values();
         std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
         std::set<character_id> owned_ids;
         std::string site_id;
@@ -63995,6 +63842,14 @@ class r067_fresh_scout_journey
                 }
                 // Declared sensor/cargo equipment, not a fabricated sighting.
                 actor->i_add( item( itype_id( "binoculars" ) ) );
+                // Generated scouts can be nearsighted. This optical journey
+                // declares usable sensor equipment, so supply ordinary vision
+                // correction instead of assuming binoculars remove that limit.
+                if( ( actor->has_flag( json_character_flag( "MYOPIC" ) ) ||
+                      actor->has_flag( json_character_flag( "MYOPIC_IN_LIGHT" ) ) ) &&
+                    !actor->worn_with_flag( flag_id( "FIX_NEARSIGHT" ) ) ) {
+                    REQUIRE( actor->wear_item( item( itype_id( "glasses_eye" ) ), false ) );
+                }
                 item token( itype_id( "rock" ) );
                 token.set_var( "r067_fresh_cargo", std::to_string( id.get_value() ) );
                 cargo_uids[id] = actor->i_add( token )->uid().get_value();
@@ -64045,6 +63900,20 @@ class r067_fresh_scout_journey
             world() = std::move( previous_world );
             calendar::turn = previous_turn;
             g->place_player_overmap( previous_player );
+            if( std::getenv( "BATCH_DIAG_CI" ) ) {
+                std::cout << "batch_fixture_campaign incoming_global_queue=" << previous_global_eocs.list.size()
+                          << " outgoing_global_queue=" << g->queued_global_effect_on_conditions.list.size()
+                          << " incoming_avatar_queue=" << previous_avatar_eocs.list.size()
+                          << " outgoing_avatar_queue=" << get_avatar().queued_effect_on_conditions.list.size()
+                          << " incoming_global_values=" << previous_global_values.size()
+                          << " outgoing_global_values=" << get_globals().get_global_values().size() << '\n';
+            }
+            g->queued_global_effect_on_conditions = std::move( previous_global_eocs );
+            g->inactive_global_effect_on_condition_vector = std::move( previous_inactive_global_eocs );
+            get_avatar().queued_effect_on_conditions = std::move( previous_avatar_eocs );
+            get_avatar().inactive_effect_on_condition_vector = std::move( previous_inactive_avatar_eocs );
+            get_globals().set_global_values( std::move( previous_global_values ) );
+            set_time( previous_turn );
         }
 
         bandit_live_world::world_state &world() {
@@ -64404,6 +64273,24 @@ class r067_fresh_scout_journey
                 INFO( "observer=" << id.get_value() << " position=" << actor->pos_abs()
                       << " known=" << view.known << " visible=" << view.visible
                       << " optical_reason=" << view.reason );
+                INFO( "optical_fixture map=" << get_map().get_abs_sub()
+                      << " source_light=" << get_map().ambient_light_at( get_map().get_bub( source ) )
+                      << " natural_light=" << g->natural_light_level( 0 )
+                      << " daylight_range=" << actor->sight_range( 100.0f, 100.0f )
+                      << " blind=" << actor->is_blind()
+                      << " asleep=" << actor->in_sleep_state()
+                      << " season=" << static_cast<int>( season_of_year( calendar::turn ) ) );
+                if( std::getenv( "BATCH_DIAG_CI" ) ) {
+                    std::cout << "batch_optical_fixture actor=" << id.get_value()
+                              << " position=" << actor->pos_abs() << " map=" << get_map().get_abs_sub()
+                              << " distance=" << rl_dist( actor->pos_abs(), source )
+                              << " source_light=" << get_map().ambient_light_at( get_map().get_bub( source ) )
+                              << " natural_light=" << g->natural_light_level( 0 )
+                              << " max_day=" << actor->sight_range( default_daylight_level(),
+                                      g->natural_light_level( 0 ) )
+                              << " max_dark=" << actor->sight_range( 0, g->natural_light_level( 0 ) )
+                              << " known=" << view.known << " visible=" << view.visible << '\n';
+                }
                 REQUIRE( view.known );
                 REQUIRE( view.visible );
                 REQUIRE_FALSE( actor->duty_incapacitated() );
@@ -65073,29 +64960,42 @@ class r067_fresh_scout_journey
 
         void reach_watch( const int eligible_after = -1, const bool initially_unobserved = true ) {
             using namespace bandit_live_world;
-            const auto &outing = site().active_outing;
-            REQUIRE( outing.started_minutes >= 0 );
-            REQUIRE( outing.expected_return_minutes > outing.started_minutes );
+            // Minute advancement can append ordinary registrations to
+            // world.sites, invalidating references into this vector. Keep only
+            // stable outing identity and scalar route data across that call.
+            const std::string site_identity = site().site_id;
+            const int outing_generation = site().active_outing.generation;
+            const int started_minutes = site().active_outing.started_minutes;
+            const int expected_return_minutes = site().active_outing.expected_return_minutes;
+            const tripoint_abs_omt selected_watch_omt = site().active_outing.selected_watch_omt;
+            REQUIRE( started_minutes >= 0 );
+            REQUIRE( expected_return_minutes > started_minutes );
             // The persisted allocation clock bounds the entire native route.
             // local_contact_minutes is unset until a later physical contact.
-            const int route_window = outing.expected_return_minutes - outing.started_minutes;
-            const int deadline = std::max( outing.expected_return_minutes,
+            const int route_window = expected_return_minutes - started_minutes;
+            const int deadline = std::max( expected_return_minutes,
                                            eligible_after + route_window ) + 60;
+            const auto find_outing = [&]() -> site_record & {
+                site_record *current = overmap_buffer.global_state.bandit_live_world.find_site( site_identity );
+                REQUIRE( current );
+                REQUIRE( current->active_outing.generation == outing_generation );
+                return *current;
+            };
             while( minute() <= deadline &&
-                   ( site().active_outing.phase != scout_phase::observing ||
-                     site().active_outing.assessment.observation_started_minutes < 0 ) ) {
+                   ( find_outing().active_outing.phase != scout_phase::observing ||
+                     find_outing().active_outing.assessment.observation_started_minutes < 0 ) ) {
                 next_minute();
             }
             INFO( "outbound deadline=" << deadline );
-            REQUIRE( site().active_outing.phase == scout_phase::observing );
-            REQUIRE( site().active_outing.assessment.observation_started_minutes >= 0 );
+            REQUIRE( find_outing().active_outing.phase == scout_phase::observing );
+            REQUIRE( find_outing().active_outing.assessment.observation_started_minutes >= 0 );
             for( const auto id : ids ) {
-                REQUIRE( overmap_buffer.find_npc( id )->pos_abs_omt() == outing.selected_watch_omt );
+                REQUIRE( overmap_buffer.find_npc( id )->pos_abs_omt() == selected_watch_omt );
             }
             if( initially_unobserved ) {
-                REQUIRE( site().active_outing.observations.empty() );
+                REQUIRE( find_outing().active_outing.observations.empty() );
             }
-            REQUIRE_FALSE( site().active_outing.assessment.readiness_latched );
+            REQUIRE_FALSE( find_outing().active_outing.assessment.readiness_latched );
         }
 
         void reach_loaded_watch() {
@@ -65568,6 +65468,338 @@ class r067_fresh_scout_journey
             REQUIRE_FALSE( site().current_scout_report.is_present() );
         }
 };
+
+
+TEST_CASE( "C++-built normal level-one report commits only an exact authorized claim",
+           "[bandit_live_world][fresh_report_claim_067]" )
+{
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+
+    // Use the real journey only to provide the Native camp, home NPCs, terrain,
+    // and returned-carrier identities. Its unacquired report is deliberately
+    // left intact; the separate claim copy below receives declared contract data.
+    r067_fresh_scout_journey journey;
+    journey.start( false, false );
+    journey.reach_watch();
+    journey.finish_watch_and_return( false );
+    REQUIRE_FALSE( journey.site().active_outing.is_active() );
+    REQUIRE_FALSE( journey.site().active_hostile_operation.is_active() );
+    const auto &native_report = journey.site().current_scout_report;
+    REQUIRE( native_report.is_present() );
+    REQUIRE_FALSE( native_report.carrier_ids.empty() );
+    for( const character_id id : native_report.carrier_ids ) {
+        const auto *member = journey.site().find_member( id );
+        const auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( member );
+        REQUIRE( actor );
+        CHECK( member->state == bandit_live_world::member_state::at_home );
+        CHECK( actor->pos_abs_omt() == journey.home );
+    }
+
+    // Copy the physical camp into an independent model fixture with a fresh
+    // scheduler. It is not a continuation of the journey's decision history.
+    bandit_live_world::world_state base_world;
+    base_world.sites.push_back( journey.site() );
+    bandit_live_world::site_record *base_site = base_world.find_site( journey.site().site_id );
+    REQUIRE( base_site );
+    REQUIRE_FALSE( base_site->active_outing.is_active() );
+    REQUIRE_FALSE( base_site->active_hostile_operation.is_active() );
+    REQUIRE_FALSE( base_site->intelligence_map.leads.empty() );
+    const bandit_live_world::camp_map_lead *lead =
+        base_site->intelligence_map.find_lead( native_report.target_lead_id );
+    REQUIRE( lead );
+    REQUIRE( lead->revision > 0 );
+    REQUIRE_FALSE( lead->target_id.empty() );
+    REQUIRE( journey.minute() > 120 );
+
+    // This is explicit C++-built contract input, not a recreated or acquired
+    // historical observation packet. Keep its optical facts expired at delivery
+    // so the claim tests retain that data condition without claiming provenance.
+    bandit_live_world::scout_report_record report;
+    report.revision = native_report.revision + 1;
+    report.action_policy = bandit_live_world::camp_report_policy::bandit_shakedown;
+    report.source_generation = std::max( base_site->applied_report_generation,
+                                         base_site->next_outing_generation ) + 1;
+    report.source_activity_id = base_site->site_id + "#scout:" +
+                                std::to_string( report.source_generation );
+    report.source_job_type = "scout";
+    report.target_id = lead->target_id;
+    report.target_omt = lead->omt;
+    report.target_lead_id = lead->lead_id;
+    report.target_lead_revision = lead->revision;
+    report.application_key = report.source_activity_id + ":report:" +
+                             std::to_string( report.source_generation );
+    report.delivered_minutes = journey.minute() - 60;
+    report.carrier_ids = native_report.carrier_ids;
+    report.assessment.observation_started_minutes = report.delivered_minutes - 60;
+    report.assessment.last_progress_minutes = report.delivered_minutes - 10;
+    report.assessment.pinned_target_revision = report.target_lead_revision;
+    report.assessment.certainty = 90;
+    report.assessment.readiness_latched = true;
+    report.assessment.threshold_class =
+        bandit_live_world::scout_assessment_threshold_class::normal;
+    report.assessment.danger_low = 8;
+    report.assessment.danger_high = 12;
+    report.assessment.bounty_estimate = 1;
+    report.assessment.route_danger_high = 8;
+    for( int index = 0; index < 8; ++index ) {
+        bandit_live_world::sortie_observation optical;
+        optical.record_schema_version = 1;
+        optical.fact_key = "declared-expired-optical-" + std::to_string( index );
+        optical.summary = "declared expired optical claim input";
+        optical.confidence = 90;
+        optical.observed_minutes = report.delivered_minutes - 30;
+        optical.expiry_minutes = report.delivered_minutes - 1;
+        optical.kind = bandit_live_world::sortie_observation_kind::certainty;
+        optical.sense = index % 2 == 0 ? bandit_live_world::sortie_observation_sense::light :
+                        bandit_live_world::sortie_observation_sense::smoke;
+        optical.source_omt = report.target_omt;
+        optical.receiver_omt = journey.legal_watch;
+        optical.observer_id = report.carrier_ids[index % report.carrier_ids.size()];
+        optical.source_id = "declared-expired-optical-source-" + std::to_string( index );
+        optical.bucket_start_minutes = optical.observed_minutes - optical.observed_minutes % 30;
+        optical.simultaneity_start_minutes = optical.bucket_start_minutes;
+        optical.simultaneity_end_minutes = optical.observed_minutes;
+        optical.target_revision = report.target_lead_revision;
+        optical.share_state = bandit_live_world::sortie_observation_share_state::reported;
+        report.observations.push_back( std::move( optical ) );
+    }
+    CHECK( report.assessment.bounty_estimate == 1 );
+    CHECK( report.assessment.threshold_class ==
+           bandit_live_world::scout_assessment_threshold_class::normal );
+    CHECK( std::all_of( report.observations.begin(), report.observations.end(),
+    [&]( const auto & record ) {
+        return ( record.sense == bandit_live_world::sortie_observation_sense::light ||
+                 record.sense == bandit_live_world::sortie_observation_sense::smoke ) &&
+               record.expiry_minutes < report.delivered_minutes;
+    } ) );
+    // Start this isolated report contract from an unpinned decision while
+    // retaining the real Native site, members, and map state in the copy.
+    base_site->camp_decision = bandit_live_world::camp_decision_record();
+    base_site->acted_reports.clear();
+    base_site->next_routine_dispatch_eligible_minutes = -1;
+    base_site->current_scout_report = report;
+    base_site->applied_report_generation = report.source_generation;
+    base_site->next_outing_generation = report.source_generation + 1;
+    REQUIRE( bandit_live_world::accept_current_scout_report_for_assessment( *base_site ) ==
+             bandit_live_world::camp_decision_transition_result::applied );
+    const auto reads = live_bandit_response_member_power_reads_for_test( *base_site );
+    const auto party = bandit_live_world::select_capable_response_party(
+                           *base_site, report.action_policy, report.assessment.danger_high, reads );
+    REQUIRE( party.eligible );
+    const auto authorization = bandit_live_world::evaluate_response_authorization(
+                                   *base_site, report.delivered_minutes + 60, party, reads );
+    INFO( authorization.rejection_reason );
+    REQUIRE( authorization.authorized );
+    CHECK( authorization.power_sufficient );
+    CHECK( authorization.reserve_ready );
+    CHECK_FALSE( bandit_live_world::evaluate_response_authorization(
+                     *base_site, report.delivered_minutes + 3275, party, reads ).authorized );
+    auto cannibal = *base_site;
+    cannibal.site_kind = bandit_live_world::owned_site_kind::cannibal_camp;
+    cannibal.profile = bandit_live_world::hostile_site_profile::cannibal_camp;
+    cannibal.current_scout_report.action_policy =
+        bandit_live_world::camp_report_policy::cannibal_night_raid;
+    const auto cannibal_party = bandit_live_world::select_capable_response_party(
+                                    cannibal, cannibal.current_scout_report.action_policy,
+                                    cannibal.current_scout_report.assessment.danger_high, reads );
+    CHECK_FALSE( bandit_live_world::evaluate_response_authorization(
+                     cannibal, report.delivered_minutes + 60, cannibal_party, reads ).opportunity_sufficient );
+    REQUIRE( live_bandit_hostile_operation_route_read_for_test( *base_site ) );
+
+    auto power_reader = []( const bandit_live_world::site_record & value ) {
+        return live_bandit_response_member_power_reads_for_test( value );
+    };
+    auto route_reader = []( const bandit_live_world::site_record & value ) {
+        return live_bandit_hostile_operation_route_read_for_test( value );
+    };
+    const int claim_service_minutes = journey.minute();
+    const std::vector<std::string> conditions = {
+        "register", "admitted", "conflicting_revision", "consumed", "duplicate_claim",
+        "expired", "wrong_target", "wrong_omt", "wrong_revision", "wrong_application",
+        "foreign_source", "foreign_lead", "missing_carrier", "foreign_carrier",
+        "duplicate_carrier", "route_missing", "route_invalid", "apply_failure",
+        "apply_foreign_report", "apply_wrong_generation", "apply_wrong_target"
+    };
+    for( const std::string &condition : conditions ) {
+        CAPTURE( condition );
+        bandit_live_world::world_state world = base_world;
+        bandit_live_world::site_record *site = world.find_site( base_site->site_id );
+        REQUIRE( site );
+        auto report = site->current_scout_report;
+        const auto reads = live_bandit_response_member_power_reads_for_test( *site );
+        const auto party = bandit_live_world::select_capable_response_party(
+                               *site, report.action_policy, report.assessment.danger_high, reads );
+        REQUIRE( party.eligible );
+        const bool positive = condition == "register" || condition == "admitted";
+        int service = claim_service_minutes;
+        if( condition == "admitted" || condition == "conflicting_revision" ||
+            condition == "consumed" || condition == "duplicate_claim" ) {
+            REQUIRE( bandit_live_world::observe_authoritative_hostile_target_opportunity(
+                         world, report.target_id, report.target_omt, { 23, 2, 1 } ) );
+            auto &ledger = world.hostile_target_opportunities.back();
+            REQUIRE( ledger.target_id == report.target_id );
+            if( condition == "conflicting_revision" ) {
+                ++ledger.revision;
+            }
+            if( condition == "consumed" || condition == "duplicate_claim" ) {
+                ledger.consumed_operation_id = condition == "consumed" ? "foreign#hostile:9" :
+                                               site->site_id + "#hostile:" +
+                                               std::to_string( site->next_outing_generation );
+                ledger.consumed_report_key = condition == "consumed" ? "foreign:report:9" :
+                                             report.application_key;
+                ledger.consumed_generation = condition == "consumed" ? 9 : site->next_outing_generation;
+            }
+        }
+        if( condition == "expired" ) {
+            // Pure negative callback-time input: the stale report must refuse
+            // before executing a route or physical action. This supplies no
+            // future Native health, movement or observation evidence.
+            service = report.delivered_minutes + 48 * 60 + 1;
+        }
+        if( condition == "wrong_target" ) {
+            site->current_scout_report.target_id += "-wrong";
+        }
+        if( condition == "wrong_omt" ) {
+            site->current_scout_report.target_omt += tripoint( 1, 0, 0 );
+        }
+        if( condition == "wrong_revision" ) {
+            ++site->current_scout_report.target_lead_revision;
+        }
+        if( condition == "wrong_application" ) {
+            site->current_scout_report.application_key += "-wrong";
+        }
+        if( condition == "foreign_source" ) {
+            site->current_scout_report.source_activity_id = "foreign#structural";
+        }
+        if( condition == "foreign_lead" ) {
+            site->intelligence_map.find_lead( report.target_lead_id )->target_id = "foreign-place";
+        }
+        if( condition == "missing_carrier" ) {
+            site->current_scout_report.carrier_ids.clear();
+        }
+        if( condition == "foreign_carrier" ) {
+            site->current_scout_report.carrier_ids = { character_id( 1 ) };
+        }
+        if( condition == "duplicate_carrier" ) {
+            site->current_scout_report.carrier_ids.push_back( report.carrier_ids.front() );
+        }
+        const auto record_bytes = []( const auto & value ) {
+            std::ostringstream out;
+            JsonOut json( out );
+            value.serialize( json );
+            return out.str();
+        };
+        const auto ledger_bytes = []( const bandit_live_world::world_state & value ) {
+            std::ostringstream out;
+            JsonOut json( out );
+            json.write( value.hostile_target_opportunities );
+            return out.str();
+        };
+        const std::string prior_claims = ledger_bytes( world );
+        const std::string prior_decision = record_bytes( site->camp_decision );
+        const std::string prior_operation = record_bytes( site->active_hostile_operation );
+        const int next_generation = site->next_outing_generation;
+        const auto checked_route = [&condition,
+        &route_reader]( const bandit_live_world::site_record & value ) {
+            if( condition == "route_missing" ) {
+                return std::optional<bandit_live_world::canonical_hostile_operation_route>();
+            }
+            auto route = route_reader( value );
+            if( route && condition == "route_invalid" ) {
+                route->route = { value.anchor };
+            }
+            return route;
+        };
+        const auto checked_apply = [&condition]( bandit_live_world::site_record & value,
+        const bandit_live_world::authorized_hostile_operation_plan & plan ) {
+            const bool applied = bandit_live_world::apply_hostile_operation_plan_with_authorized_response(
+                                     value, plan );
+            if( applied && condition == "apply_foreign_report" ) {
+                value.active_hostile_operation.source_report_application_key = "foreign:report:9";
+            }
+            if( applied && condition == "apply_wrong_generation" ) {
+                ++value.active_hostile_operation.reservation.generation;
+            }
+            if( applied && condition == "apply_wrong_target" ) {
+                value.current_scout_report.target_id += "-wrong";
+                value.active_hostile_operation.reservation.target_id = value.current_scout_report.target_id;
+            }
+            return applied && condition != "apply_failure";
+        };
+        calendar::turn = calendar::start_of_cataclysm + time_duration::from_minutes( service );
+        const auto result = bandit_live_world::advance_structural_bounty_maintenance(
+                                world, service, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {},
+                                checked_route, checked_apply );
+        INFO( bandit_live_world::render_structural_bounty_maintenance_report( result ) );
+        CHECK( result.response_operations_applied == ( positive ? 1 : 0 ) );
+        CHECK( site->active_hostile_operation.is_active() == positive );
+        if( positive ) {
+            const auto &operation = site->active_hostile_operation;
+            CHECK( operation.operation_kind == bandit_live_world::hostile_operation_kind::shakedown );
+            CHECK( operation.phase == bandit_live_world::hostile_operation_phase::assembling );
+            CHECK( operation.reservation.target_id == report.target_id );
+            CHECK( operation.reservation.target_omt == report.target_omt );
+            CHECK( operation.reservation.target_lead_revision == report.target_lead_revision );
+            CHECK( operation.source_report_revision == report.revision );
+            CHECK( operation.source_report_generation == report.source_generation );
+            CHECK( operation.source_report_activity_id == report.source_activity_id );
+            CHECK( operation.source_report_application_key == report.application_key );
+            CHECK( operation.reservation.generation == next_generation );
+            CHECK( operation.reservation.member_ids == party.member_ids );
+            CHECK( operation.shakedown_pending_branch.empty() );
+            const auto *ledger = world.find_hostile_target_opportunity( report.target_id, report.target_omt );
+            REQUIRE( ledger );
+            CHECK( ledger->revision == report.target_lead_revision );
+            CHECK( ledger->goods_value == ( condition == "admitted" ? 23 : 0 ) );
+            CHECK( ledger->population == ( condition == "admitted" ? 2 : 0 ) );
+            CHECK( ledger->activity == ( condition == "admitted" ? 1 : 0 ) );
+            CHECK( ledger->consumed_operation_id == operation.reservation.activity_id );
+            CHECK( ledger->consumed_report_key == report.application_key );
+            CHECK( ledger->consumed_generation == operation.reservation.generation );
+            CHECK( site->current_scout_report.revision == report.revision );
+            CHECK( site->current_scout_report.assessment.bounty_estimate == 1 );
+            auto reloaded = round_trip_world( world );
+            CHECK( serialize_world( reloaded ) == serialize_world( world ) );
+            const auto reload_bytes = serialize_world( reloaded );
+            const auto repeated = bandit_live_world::advance_structural_bounty_maintenance(
+                                      reloaded, service, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {},
+                                      checked_route, checked_apply );
+            CHECK( repeated.scheduler_replay_suppressed );
+            CHECK( serialize_world( reloaded ) == reload_bytes );
+            CHECK( ledger_bytes( reloaded ) == ledger_bytes( world ) );
+            REQUIRE( reloaded.find_site( site->site_id ) );
+            const auto &later_site = *reloaded.find_site( site->site_id );
+            const auto &later_operation = later_site.active_hostile_operation;
+            CHECK( later_operation.reservation.activity_id == operation.reservation.activity_id );
+            CHECK( later_operation.reservation.generation == operation.reservation.generation );
+            CHECK( later_operation.reservation.member_ids == operation.reservation.member_ids );
+            CHECK( later_operation.reservation.target_id == report.target_id );
+            CHECK( later_operation.reservation.target_omt == report.target_omt );
+            CHECK( later_operation.reservation.target_lead_revision == report.target_lead_revision );
+            CHECK( later_operation.source_report_revision == report.revision );
+            CHECK( later_operation.source_report_generation == report.source_generation );
+            CHECK( later_operation.source_report_activity_id == report.source_activity_id );
+            CHECK( later_operation.source_report_application_key == report.application_key );
+            CHECK( later_site.next_outing_generation == site->next_outing_generation );
+        } else {
+            CHECK( ledger_bytes( world ) == prior_claims );
+            if( condition == "expired" ) {
+                CHECK( site->camp_decision.state == bandit_live_world::camp_decision_state::idle );
+            } else {
+                CHECK( record_bytes( site->camp_decision ) == prior_decision );
+            }
+            CHECK( record_bytes( site->active_hostile_operation ) == prior_operation );
+            CHECK( site->next_outing_generation == next_generation );
+        }
+        const auto after = serialize_world( world );
+        bandit_live_world::advance_structural_bounty_maintenance(
+            world, service, 0, 0, {}, {}, {}, {}, {}, {}, power_reader, {}, checked_route, checked_apply );
+        CHECK( serialize_world( world ) == after );
+    }
+}
 } // namespace
 
 TEST_CASE( "fresh allocated scouts watch before departure and settle honest whole journeys",
@@ -65640,6 +65872,120 @@ TEST_CASE( "fresh acquired watch facts survive source unload without fabricated 
                  r067_return_record_bytes( acquired[index] ) );
     }
     journey.check();
+}
+
+TEST_CASE( "fresh watch acquires real signals while hostile optics remain unknown",
+           "[bandit_live_world][stateful_scout_067][unknown_hostile_optics_067]" )
+{
+    using namespace bandit_live_world;
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    const bool cannibal = GENERATE( false, true );
+    CAPTURE( cannibal );
+    r067_fresh_scout_journey journey;
+    journey.start( cannibal, true );
+    journey.reach_watch( -1, false );
+    // Keep the player at the source, beyond the hostile actor's loaded window.
+    // The real source remains registered on its ordinary discovery cadence.
+    const auto ids = journey.members();
+    const auto observer = overmap_buffer.find_npc( ids.front() );
+    REQUIRE( observer );
+
+    // Retain a genuine hostile NPC at the edge of the existing native-lighting
+    // window. Its ray is available while the ambient-light neighborhood crosses
+    // the ungenerated edge, matching the focused optics control in
+    // scout_observation_test.cpp without manufacturing a visibility result.
+    auto hostile = make_shared_fast<npc>();
+    hostile->normalize();
+    hostile->setID( g->assign_npc_id(), true );
+    hostile->set_fac( faction_id( "your_followers" ) );
+    const int boundary_offset = MAX_VIEW_DISTANCE * 2 / 3;
+    hostile->spawn_at_precise( observer->pos_abs() + point( -boundary_offset, -boundary_offset ) );
+    hostile->fall_asleep( 1_days );
+    overmap_buffer.insert_npc( hostile );
+    journey.own_fixture_npc( hostile->getID() );
+    REQUIRE( observer->attitude_to( *hostile ) == Creature::Attitude::HOSTILE );
+
+    // Put the hostile beyond the currently loaded avatar map while keeping the
+    // registered observer and its physical lookout in the native read window.
+    journey.move_player( journey.target );
+    REQUIRE( rl_dist( observer->pos_abs(), hostile->pos_abs() ) <= MAX_VIEW_DISTANCE );
+    REQUIRE_FALSE( get_map().inbounds( hostile->pos_abs() ) );
+    scout_observation::site_reader optics;
+    const auto hostile_view = optics.read( *observer, observer->pos_abs(), hostile->pos_abs() );
+    INFO( "hostile optics reason=" << hostile_view.reason << " known=" << hostile_view.known );
+    // Target-local point optics can be available while the wider native
+    // creature-lighting neighborhood is not. The actual watch reader below
+    // supplies the decisive unavailable-hostile result.
+    std::string refusal;
+    REQUIRE( optics.watching_member( journey.site(), *observer, &refusal ) );
+    REQUIRE( refusal == "eligible_hostile_optics_unknown" );
+    REQUIRE( optics.perceived_threats( *observer ).empty() );
+
+    const int unknown_watch_started = journey.minute();
+    while( journey.minute() <= unknown_watch_started || journey.minute() % 30 != 0 ) {
+        journey.next_minute();
+    }
+    const auto packets = journey.sample_source();
+    journey.require_source_visible();
+    const auto &signal = packets.front();
+    REQUIRE( signal.source_ms );
+    const auto source_view = optics.read_signal( *observer, observer->pos_abs(), *signal.source_ms,
+                             journey.site().active_outing.target_footprint );
+    REQUIRE( source_view.known );
+    REQUIRE( source_view.visible );
+    const int recorded = record_live_bandit_stationary_watch_signals_for_test( journey.world(), packets,
+                         true );
+    INFO( "new signal facts recorded=" << recorded );
+    INFO( journey.watch_diagnostic() );
+    const auto fact_matches_packet = [&]( const sortie_observation & record ) {
+        return record.sense == sortie_observation_sense::smoke &&
+               record.source_id == "structural-smoke@" + signal.source_omt.to_string() &&
+               record.source_omt == signal.source_omt && record.emitter_ms == signal.source_ms &&
+               record.observed_minutes == signal.observed_minutes &&
+               std::find( ids.begin(), ids.end(), record.observer_id ) != ids.end() &&
+               record.share_state != sortie_observation_share_state::reported;
+    };
+    REQUIRE( std::any_of( journey.site().active_outing.observations.begin(),
+                          journey.site().active_outing.observations.end(), fact_matches_packet ) );
+    const auto acquired = journey.site().active_outing.observations;
+    CHECK( record_live_bandit_stationary_watch_signals_for_test( journey.world(), packets,
+            true ) == 0 );
+    REQUIRE( journey.site().active_outing.observations.size() == acquired.size() );
+
+    journey.reload();
+    const auto reloaded_observer = overmap_buffer.find_npc( ids.front() );
+    REQUIRE( reloaded_observer );
+    const auto reloaded_hostile = overmap_buffer.find_npc( hostile->getID() );
+    REQUIRE( reloaded_hostile );
+    scout_observation::site_reader reloaded_optics;
+    std::string reloaded_reason;
+    INFO( journey.watch_diagnostic() );
+    REQUIRE( reloaded_optics.watching_member( journey.site(), *reloaded_observer,
+             &reloaded_reason ) );
+    REQUIRE( reloaded_reason == "eligible_hostile_optics_unknown" );
+    journey.complete_watch( true );
+    journey.finish_return();
+    const auto &report = journey.site().current_scout_report;
+    REQUIRE( report.is_present() );
+    REQUIRE( report.source_generation == journey.scout_generation() );
+    // The bounded record owner may retain a shared receipt ahead of a later
+    // private packet. Require exact acquired evidence from this unknown-optics
+    // interval to reach the report, without changing the existing cap policy.
+    REQUIRE( std::any_of( report.observations.begin(), report.observations.end(),
+    [&]( const sortie_observation & record ) {
+        return std::any_of( acquired.begin(), acquired.end(), [&]( sortie_observation original ) {
+            if( original.sense != sortie_observation_sense::smoke ||
+                original.source_omt != signal.source_omt || original.emitter_ms != signal.source_ms ||
+                original.observed_minutes < unknown_watch_started ) {
+                return false;
+            }
+            original.share_state = sortie_observation_share_state::reported;
+            return r067_return_record_bytes( original ) == r067_return_record_bytes( record );
+        } );
+    } ) );
+    REQUIRE( journey.site().applied_report_generation == journey.scout_generation() );
 }
 
 TEST_CASE( "fresh scout bodies recover finite incapacity without borrowing watch time",
@@ -67826,6 +68172,9 @@ TEST_CASE( "allocated scout safety distinguishes present threats from departed n
     const float cached_danger = observer->get_ai_danger();
     REQUIRE( cached_target == enemy );
     REQUIRE( cached_danger > 0 );
+    REQUIRE_FALSE( safe( journey.site(), reason ) );
+    REQUIRE( reason == "ai_danger" );
+    REQUIRE_FALSE( safe( fallback, reason ) );
     const auto incident = enemy->pos_abs();
     bool warning = false;
     SECTION( "actual received warning remains a refusal" ) {
@@ -67845,10 +68194,13 @@ TEST_CASE( "allocated scout safety distinguishes present threats from departed n
     REQUIRE( observer->get_ai_target().lock() == cached_target );
     REQUIRE( observer->get_ai_danger() == cached_danger );
     REQUIRE( enemy->get_wielded_item()->uid().get_value() == enemy_weapon_uid );
+    // The native perception producer raised a credible alarm even in the
+    // arm without an explicitly forwarded warning. Keep that incident; an
+    // inactive source cannot clear it merely because its cache is now stale.
+    REQUIRE( observer->faction_alarm_requires_response() );
     REQUIRE_FALSE( safe( journey.site(), reason ) );
-    REQUIRE( reason == "visible_hostile" );
+    REQUIRE( reason == "received_alarm" );
     REQUIRE_FALSE( safe( fallback, reason ) );
-    REQUIRE( reason == "visible_hostile" );
     // An unrelated enemy follows three adjacent Native overmap motor steps
     // through the declared ordinary field. Scout positions/orders/cache stay.
     const auto scout_position = observer->pos_abs();
@@ -67865,10 +68217,11 @@ TEST_CASE( "allocated scout safety distinguishes present threats from departed n
     REQUIRE( observer->pos_abs() == scout_position );
     REQUIRE( observer->get_ai_target().lock() == cached_target );
     REQUIRE( observer->get_ai_danger() == cached_danger );
-    REQUIRE( safe( journey.site(), reason ) );
-    REQUIRE( safe( fallback, reason ) );
+    REQUIRE_FALSE( safe( journey.site(), reason ) );
+    REQUIRE_FALSE( safe( fallback, reason ) );
     if( warning ) {
         REQUIRE( observer->faction_alarm_requires_response() );
+        CHECK( reason == "received_alarm" );
         const auto assessment = r067_return_record_bytes( journey.site().active_outing.assessment );
         advance_live_bandit_local_scout_assessments_for_test();
         REQUIRE( journey.site().active_outing.phase == scout_phase::observing );
@@ -67878,6 +68231,19 @@ TEST_CASE( "allocated scout safety distinguishes present threats from departed n
         REQUIRE( journey.site().active_outing.assessment.interruption->pending() );
         INFO( "before received-warning assessment=" << assessment );
     }
+    REQUIRE( observer->faction_alarm );
+    const auto alarm_expiry = observer->faction_alarm->until;
+    while( calendar::turn <= alarm_expiry ) {
+        calendar::turn += time_between_npc_OM_moves;
+    }
+    // The actual enemy departed beyond range and the unchanged finite warning
+    // naturally expired. No target, alarm, effect or perception cache is reset.
+    REQUIRE_FALSE( observer->faction_alarm_requires_response() );
+    REQUIRE( observer->pos_abs() == scout_position );
+    REQUIRE( observer->get_ai_target().lock() == cached_target );
+    REQUIRE( observer->get_ai_danger() == cached_danger );
+    REQUIRE( safe( journey.site(), reason ) );
+    REQUIRE( safe( fallback, reason ) );
     SECTION( "actual current field refuses both watch decisions" ) {
         tinymap physical;
         physical.load( observer->pos_abs_omt(), false );
@@ -68426,4 +68792,213 @@ TEST_CASE( "later ordinary dispatch does not inherit the previous journey leases
     process_overmap_npc_move_for_test();
     process_overmap_npc_move_for_test();
     REQUIRE( serialize_world( journey.world() ) == once );
+}
+
+
+TEST_CASE( "ordinary scout route retains identity through site storage growth",
+           "[bandit_live_world][batch_lifetime_067]" )
+{
+    using namespace bandit_live_world;
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    r067_fresh_scout_journey journey;
+    journey.start( false, false, true );
+    const bool ordinary_discovery = GENERATE( false, true );
+    std::optional<tripoint_abs_omt> discovered;
+    if( ordinary_discovery ) {
+        overmap &region = overmap_buffer.get( point_abs_om( 1, 0 ) );
+        const auto find_camp = [&]() {
+            for( int x = 0; x < OMAPX && !discovered; ++x ) {
+                for( int y = 0; y < OMAPY && !discovered; ++y ) {
+                    const tripoint_om_omt local( x, y, 0 );
+                    const auto special = region.overmap_special_at( local );
+                    if( special && ( special->str() == "bandit_camp" || special->str() == "cannibal_camp" ) ) {
+                        discovered = project_combine( region.pos(), local );
+                    }
+                }
+            }
+        };
+        find_camp();
+        if( !discovered ) {
+            REQUIRE( overmap_buffer.place_special( overmap_special_id( "bandit_camp" ),
+                                                   tripoint_abs_omt( OMAPX + OMAPX / 2, OMAPY / 2, 0 ), 40 ) );
+            find_camp();
+        }
+        REQUIRE( discovered );
+        journey.move_player( *discovered + point( 15, 0 ) );
+    }
+    const std::string identity = journey.site().site_id;
+    const int generation = journey.site().active_outing.generation;
+    const auto *storage = journey.world().sites.data();
+    const std::size_t initial_count = journey.world().sites.size();
+    // The repaired helper itself crosses ordinary registration, rather than a
+    // hand-written loop that stops before exercising its retained-reference bug.
+    journey.reach_watch();
+    const auto *current = journey.world().find_site( identity );
+    REQUIRE( current );
+    CHECK( current->active_outing.generation == generation );
+    CHECK( current->active_outing.phase == scout_phase::observing );
+    if( ordinary_discovery ) {
+        CHECK( journey.world().sites.size() > initial_count );
+        CHECK( journey.world().sites.data() != storage );
+    }
+
+}
+
+
+TEST_CASE( "scouts reunite after ordinary departure clears real perceived danger",
+           "[bandit_live_world][batch_r051_guard_067]" )
+{
+    const bool cannibal = GENERATE( false, true );
+    r055_scene scene;
+    scene.load( cannibal );
+    bandit_live_world_probe::session probe(
+        bandit_live_world_probe::collection_mode::transition_events );
+    std::set<std::string> emitted;
+    const auto report = [&]( const char *stage ) {
+        const auto &site = scene.site();
+        const auto &outing = site.active_outing;
+        std::cout << "batch_r051 stage=" << stage << " cannibal=" << cannibal
+                  << " cursor=" << static_cast<bool>( bandit_live_world::current_external_simulation_cursor( site ) )
+                  << " roster=" << site.roster().valid
+                  << " phase=" << bandit_live_world::to_string( outing.phase )
+                  << " assembled=" << outing.local_handoff.cohesion_assembled
+                  << " abort=" << outing.local_handoff.cohesion_abort_return
+                  << " egress=" << outing.local_handoff.egress_omt.to_string() << '\n';
+        for( const auto id : outing.member_ids ) {
+            const auto stored = overmap_buffer.find_npc( id );
+            REQUIRE( stored );
+            std::cout << "batch_r051_actor id=" << id.get_value()
+                      << " copies_same=" << ( g->find_npc( id ) == stored.get() )
+                      << " active=" << stored->is_active()
+                      << " position=" << stored->pos_abs().to_string()
+                      << " goal=" << stored->goal.to_string()
+                      << " path=" << stored->omt_path.size()
+                      << " moves=" << stored->get_moves()
+                      << " speed=" << stored->get_speed()
+                      << " suspend=" << stored->has_effect( efftype_id( "npc_suspend" ) )
+                      << " ridden=" << stored->has_effect( efftype_id( "ridden" ) )
+                      << " incapable=" << stored->duty_incapacitated()
+                      << " danger=" << stored->get_ai_danger()
+                      << " alarm=" << stored->faction_alarm.has_value()
+                      << " hp=" << stored->hp_percentage()
+                      << " attitude=" << static_cast<int>( stored->get_attitude() );
+            if( stored->faction_alarm ) {
+                const auto &alarm = *stored->faction_alarm;
+                std::cout << " alarm_source=" << alarm.source_id.get_value()
+                          << " alarm_incident=" << alarm.incident.to_string()
+                          << " attack_known=" << alarm.received_attack.has_value()
+                          << " received_attack=" << alarm.received_attack.value_or( false )
+                          << " until=" << to_turn<int>( alarm.until );
+            }
+            std::cout << '\n';
+        }
+    };
+    report( "before" );
+    const bool through_clearance = true;
+    // The opt-in process-wide writer must flush while its journal/mutex owner
+    // remains alive. Last generated arm closes the existing recorder explicitly.
+    on_out_of_scope finish_trace( [&]() {
+        if( through_clearance && cannibal ) {
+            raid_decision_trace::native_recorder().closeout();
+        }
+    } );
+    std::optional<time_point> first_alarm_expiry;
+    const bool native_departure = true;
+    int departure_steps = 0;
+    bool departure_blocked = false;
+    int departure_leg = 0;
+    std::vector<tripoint_abs_ms> player_route;
+    int ordinary_limit = 300;
+    for( int turns = 0; turns < ordinary_limit; ++turns ) {
+        if( native_departure ) {
+            // Ordinary player bookkeeping/movement changes the real encounter.
+            // Keep NPC alarms, effects, orders and perception caches untouched.
+            get_avatar().process_turn();
+            if( first_alarm_expiry && departure_leg < 3 && !departure_blocked ) {
+                const auto before = get_avatar().pos_abs();
+                if( departure_leg == 1 ) {
+                    // The retained roof ladder has its real matching ground access.
+                    // Native descent owns position, map/view updates and move cost.
+                    g->vertical_move( -1, false );
+                    departure_blocked = get_avatar().pos_abs().z() == before.z();
+                    departure_leg = departure_blocked ? 1 : 2;
+                    player_route.clear();
+                } else {
+                    const tripoint_abs_ms target = departure_leg == 0 ?
+                                                   tripoint_abs_ms( 3149, 3454, 1 ) : tripoint_abs_ms( 3149, 3454, 0 );
+                    if( before == target ) {
+                        ++departure_leg;
+                        player_route.clear();
+                    } else {
+                        if( player_route.empty() ) {
+                            const auto planned = get_map().route( get_avatar(), pathfinding_target::point(
+                                    get_map().get_bub( target ) ) );
+                            for( const auto &step : planned ) {
+                                player_route.push_back( get_map().get_abs( step ) );
+                            }
+                        }
+                        while( !player_route.empty() && player_route.front() == get_avatar().pos_abs() ) {
+                            player_route.erase( player_route.begin() );
+                        }
+                        const bool adjacent = !player_route.empty() &&
+                                              player_route.front().z() == before.z() &&
+                                              rl_dist( before, player_route.front() ) <= 1;
+                        const bool moved = adjacent && g->walk_move( get_map().get_bub( player_route.front() ) );
+                        departure_blocked = !moved;
+                        if( moved ) {
+                            CHECK( get_avatar().pos_abs() == player_route.front() );
+                            player_route.erase( player_route.begin() );
+                            ++departure_steps;
+                        }
+                    }
+                }
+                std::cout << "batch_r051_native_departure step=" << departure_steps
+                          << " leg=" << departure_leg << " blocked=" << departure_blocked
+                          << " before=" << before.to_string()
+                          << " after=" << get_avatar().pos_abs().to_string() << '\n';
+            }
+        }
+        scene.step();
+        if( through_clearance && !first_alarm_expiry ) {
+            for( const int id : {
+                     4, 5
+                 } ) {
+                if( scene.actor( id ).faction_alarm ) {
+                    first_alarm_expiry = scene.actor( id ).faction_alarm->until;
+                    ordinary_limit = turns + 1 + to_turns<int>( *first_alarm_expiry - calendar::turn ) + 60;
+                    std::cout << "batch_r051_first_alarm turn=" << to_turn<int>( calendar::turn )
+                              << " expiry=" << to_turn<int>( *first_alarm_expiry )
+                              << " ordinary_limit=" << ordinary_limit << '\n';
+                    break;
+                }
+            }
+        }
+        if( through_clearance && turns == 299 ) {
+            report( "original_bound" );
+        }
+        if( first_alarm_expiry && calendar::turn == *first_alarm_expiry ) {
+            report( "first_expiry" );
+        }
+        for( const auto &event : probe.result().transition_events ) {
+            if( event.site_id != scene.site().site_id ) {
+                continue;
+            }
+            const std::string key = event.transition + ':' + event.outcome + ':' + event.reason;
+            if( emitted.insert( key ).second && emitted.size() <= 20 ) {
+                std::cout << "batch_r051_event transition=" << event.transition
+                          << " outcome=" << event.outcome << " reason=" << event.reason << '\n';
+            }
+        }
+    }
+    report( "after" );
+    std::cout << "batch_r051_final_turn=" << to_turn<int>( calendar::turn ) << '\n';
+    REQUIRE( first_alarm_expiry );
+    CHECK( calendar::turn >= *first_alarm_expiry );
+    CHECK_FALSE( scene.actor( 4 ).faction_alarm_requires_response() );
+    CHECK_FALSE( scene.actor( 5 ).faction_alarm_requires_response() );
+    REQUIRE( bandit_live_world::current_external_simulation_cursor( scene.site() ) );
+    CHECK( rl_dist( scene.actor( 4 ).pos_abs(), scene.actor( 5 ).pos_abs() ) <=
+           bandit_live_world::local_pair_cohesion_radius() );
 }

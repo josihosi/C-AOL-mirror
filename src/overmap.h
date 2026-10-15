@@ -982,6 +982,7 @@ class overmap
          * @param enabled_specials specifies what specials to place, and tracks how many have been placed.
          **/
         void place_specials( overmap_special_batch &enabled_specials );
+        struct special_placement_diagnostic;
         /**
          * Walk over the overmap and attempt to place specials.
          * @param enabled_specials vector of objects that track specials being placed.
@@ -989,7 +990,8 @@ class overmap
          * @param place_optional restricts attempting to place specials that have met their minimum count in the first pass.
          */
         void place_specials_pass( overmap_special_batch &enabled_specials,
-                                  om_special_sectors &sectors, bool place_optional, bool must_be_unexplored );
+                                  om_special_sectors &sectors, bool place_optional, bool must_be_unexplored,
+                                  special_placement_diagnostic *diagnostic );
 
         /**
          * Attempts to place specials within a sector.
@@ -999,7 +1001,8 @@ class overmap
          */
         bool place_special_attempt(
             overmap_special_batch &enabled_specials, const point_om_omt &sector, int sector_width,
-            bool place_optional, bool must_be_unexplored );
+            bool place_optional, bool must_be_unexplored,
+            special_placement_diagnostic *diagnostic );
 
         void place_mongroups();
         void place_radios();

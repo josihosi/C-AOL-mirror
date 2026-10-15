@@ -46,9 +46,11 @@
 #include "overmap.h"
 #include "overmap_connection.h"
 #include "overmap_types.h"
+#include "overmap_worldgen.h"
 #include "path_info.h"
 #include "point.h"
 #include "physical_light.h"
+#include "regional_settings.h"
 #include "rng.h"
 #include "simple_pathfinding.h"
 #include "string_formatter.h"
@@ -117,8 +119,10 @@ cata_path overmapbuffer::player_filename( const point_abs_om &p )
 
 overmap &overmapbuffer::get( const point_abs_om &p )
 {
-    const auto record_branch = [&]( const char *branch ) {
-        if( p != point_abs_om( 1, 0 ) || !bandit_live_world_probe::active() ||
+    // Recursive lookups of the same map must not flood the first request receipt.
+    const bool trace_request = bandit_live_world_probe::begin_overmap_request( p.x(), p.y() );
+    const auto record_branch = [&]( const char *branch, const overmap *existing = nullptr ) {
+        if( !trace_request ||
             !bandit_live_world_probe::transition_events_enabled() ) {
             return;
         }
@@ -128,16 +132,25 @@ overmap &overmapbuffer::get( const point_abs_om &p )
         event.site_id = "overmap@" + p.to_string();
         event.operation_id = event.site_id;
         event.outcome = branch;
-        event.reason = "overmapbuffer::get";
+        if( existing ) {
+            const auto dimension = g->get_dimension_prefix();
+            event.reason = string_format( "dimension=%s layout=%s region=%s cities=%zu",
+                                          dimension.str(), dimension->get_region_layout().str(),
+                                          existing->get_settings().id.str(), existing->cities.size() );
+        } else {
+            event.reason = "overmapbuffer::get";
+        }
         event.turn = to_turn<int>( calendar::turn );
         bandit_live_world_probe::record_transition_event( std::move( event ) );
     };
     if( last_requested_overmap != nullptr && last_requested_overmap->pos() == p ) {
+        record_branch( "cached_last", last_requested_overmap );
         return *last_requested_overmap;
     }
 
     const auto it = overmaps.find( p );
     if( it != overmaps.end() ) {
+        record_branch( "cached_map", it->second.get() );
         return *( last_requested_overmap = it->second.get() );
     }
 
@@ -1393,14 +1406,15 @@ bool overmap_travel_step_valid( const tripoint_abs_omt &from,
 pf::simple_path<tripoint_abs_omt> overmapbuffer::get_travel_path(
     const tripoint_abs_omt &src, const tripoint_abs_omt &dest,
     const overmap_path_params &params,
-    const std::unordered_set<tripoint_abs_omt> &excluded_omts )
+    const std::unordered_set<tripoint_abs_omt> &excluded_omts,
+    const std::function<bool( const tripoint_abs_omt & )> &additional_avoid )
 {
     if( src.is_invalid() || dest.is_invalid() ) {
         return {};
     }
 
     const pf::omt_scoring_fn estimate = [&]( tripoint_abs_omt pos ) {
-        if( excluded_omts.count( pos ) > 0 ) {
+        if( excluded_omts.count( pos ) > 0 || ( additional_avoid && additional_avoid( pos ) ) ) {
             return pf::omt_score::rejected;
         }
         int cur_cost = get_terrain_cost( pos, params );
@@ -2779,7 +2793,7 @@ bool overmapbuffer::place_special( const overmap_special_id &special_id,
 
         // Attempt to place the specials using our batch and sectors. We
         // require they be placed in unexplored terrain right now.
-        om->place_specials_pass( batch, sectors_in_range, true, true );
+        om->place_specials_pass( batch, sectors_in_range, true, true, nullptr );
 
         // The place special pass will erase specials that have reached their
         // maximum number of instances so first check if its been erased.

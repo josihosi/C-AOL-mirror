@@ -926,6 +926,12 @@ session::~session()
     active_session = previous_;
 }
 
+void session::set_overmap_request_target( const int x, const int y ) noexcept
+{
+    overmap_request_target_ = {{ x, y }};
+    overmap_request_started_ = false;
+}
+
 const snapshot &session::result()
 {
     if( timing_state_ ) {
@@ -1037,6 +1043,22 @@ void record_site_service( const std::string &site_id, const site_service target,
         record_index = existing->second;
     }
     records[record_index].counts[enum_index( target )] += amount;
+}
+
+bool overmap_request_selected( const int x, const int y ) noexcept
+{
+    return active_session != nullptr && active_session->result_.transition_events_collected &&
+           active_session->overmap_request_target_[0] == x &&
+           active_session->overmap_request_target_[1] == y;
+}
+
+bool begin_overmap_request( const int x, const int y ) noexcept
+{
+    if( !overmap_request_selected( x, y ) || active_session->overmap_request_started_ ) {
+        return false;
+    }
+    active_session->overmap_request_started_ = true;
+    return true;
 }
 
 bool active() noexcept

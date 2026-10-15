@@ -498,6 +498,7 @@ game::game() :
 
 game::~game()
 {
+    death_camera_semantic_scope.reset();
     // event_bus_ptr about to die; let debug_capture drop its sticky
     // subscribe flag and release the JSONL file. Without this, a later
     // `game` instance would never resubscribe.
@@ -3139,12 +3140,18 @@ bool game::try_get_right_click_action( action_id &act, const tripoint_bub_ms &mo
 
 bool game::is_game_over()
 {
+    if( death_camera_semantic_scope && ( uquit != QUIT_WATCH || !u.is_dead_state() ) ) {
+        death_camera_semantic_scope.reset();
+        death_camera_semantic_run_id.clear();
+        death_camera_semantic_close_requested = false;
+    }
     // Death can be detected after the World input scope has unwound.  Keep
     // its harness manager active through both the end screen and the native
     // death-camera choice that follows it.
     std::optional<semantic_surface_manager_session> death_semantic_session;
     if( ( u.is_dead_state() || uquit == QUIT_SUICIDE ) &&
-        active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        !death_camera_semantic_scope && active_semantic_surface_manager() == nullptr &&
+        openclaw_harness_semantic_session_active() ) {
         death_semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
     }
     map &here = get_map();

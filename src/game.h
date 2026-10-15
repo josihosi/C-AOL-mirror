@@ -46,6 +46,7 @@ extern const int savegame_version;
 extern int savegame_loading_version;
 
 class input_context;
+class semantic_surface_scope;
 
 input_context get_default_mode_input_context();
 std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
@@ -1442,6 +1443,13 @@ class game
     private:
         // the currently occupied dimension
         dimension_id dimension_prefix;
+
+        // The death camera survives multiple handle_action() calls while the
+        // same dead avatar remains in QUIT_WATCH.  Its native close owner must
+        // keep one semantic identity across those ordinary watch turns.
+        std::unique_ptr<semantic_surface_scope> death_camera_semantic_scope;
+        std::string death_camera_semantic_run_id;
+        bool death_camera_semantic_close_requested = false;
 };
 
 // Returns temperature modifier from direct heat radiation of nearby sources

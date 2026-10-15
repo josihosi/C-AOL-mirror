@@ -1777,6 +1777,8 @@ class npc : public Character
         bool faction_alarm_requires_response() const;
         bool scouting_creature_requires_response( const Creature &creature,
                 std::string_view caller ) const;
+        bool scouting_creature_requires_response( const Creature &creature,
+                std::string_view caller, const map &perception_map ) const;
         bool has_active_alarm_response() const;
         void reconcile_alarm_response();
         bool has_active_operation_duty() const;

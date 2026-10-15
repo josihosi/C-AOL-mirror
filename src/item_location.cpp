@@ -753,6 +753,39 @@ class item_location::impl::item_in_container : public item_location::impl
         item_in_container( const item_location &container, item *which ) :
             impl( which ), container( container ) {}
 
+        item_in_container( const item_location &container, int idx, int64_t uid ) :
+            impl( idx, uid ), container( container ) {}
+
+        item *unpack( int idx ) const override {
+            if( !container ) {
+                debugmsg( "parent location does not point to valid item" );
+                return nullptr;
+            }
+            const std::list<const item *> parent_contents = container->all_items_container_top();
+            if( idx < 0 || idx >= static_cast<int>( parent_contents.size() ) ) {
+                debugmsg( "contents index greater than contents size" );
+                return nullptr;
+            }
+            auto iter = parent_contents.begin();
+            std::advance( iter, idx );
+            return const_cast<item *>( *iter );
+        }
+
+        item *unpack_by_uid( int64_t uid ) const override {
+            if( !container ) {
+                debugmsg( "parent location does not point to valid item" );
+                return nullptr;
+            }
+            const std::list<const item *> parent_contents = container->all_items_container_top();
+            for( const item *it : parent_contents ) {
+                if( it->uid().get_value() == uid ) {
+                    return const_cast<item *>( it );
+                }
+            }
+            debugmsg( "item_location UID not found in container contents" );
+            return nullptr;
+        }
+
         void serialize( JsonOut &js ) const override {
             if( !target() ) {
                 item_location::nowhere.serialize( js );
@@ -771,20 +804,6 @@ class item_location::impl::item_in_container : public item_location::impl
                 js.member( "uid", target()->uid().get_value() );
             }
             js.end_object();
-        }
-
-        item *unpack( int idx ) const override {
-            if( idx < 0 || static_cast<size_t>( idx ) >= target()->num_item_stacks() ) {
-                return nullptr;
-            }
-            std::list<const item *> all_items = container->all_items_ptr();
-            auto iter = all_items.begin();
-            std::advance( iter, idx );
-            if( iter != all_items.end() ) {
-                return const_cast<item *>( *iter );
-            } else {
-                return nullptr;
-            }
         }
 
         Character *carrier() const override {
@@ -1007,43 +1026,53 @@ void item_location::deserialize( const JsonObject &obj )
     } else if( type == "in_container" ) {
         item_location parent;
         obj.read( "parent", parent );
-        if( !parent.ptr->valid() ) {
-            if( parent == nowhere ) {
-                debugmsg( "parent location doesn't exist.  Item_location has lost its target over a save/load cycle." );
-                ptr = std::make_shared<impl::nowhere>();
-                return;
-            }
-            debugmsg( "parent location does not point to valid item" );
-            ptr = std::make_shared<impl::item_on_map>( map_cursor( parent.pos_abs() ), idx ); // drop on ground
+        if( parent.where_recursive() == item_location::type::character ) {
+            // Do not compare against `nowhere` here: item_location equality
+            // resolves the target and the character may not be registered yet.
+            // Resolve the child after its owner becomes available.
+            ptr = std::make_shared<impl::item_in_container>( parent, idx, uid );
             return;
         }
-        const std::list<item *> parent_contents = parent->all_items_container_top();
-
-        item *found = nullptr;
-        if( uid > 0 ) {
-            for( item *it : parent_contents ) {
-                if( it->uid().get_value() == uid ) {
-                    found = it;
-                    break;
-                }
-            }
-            if( !found ) {
-                debugmsg( "item_location UID not found in container contents" );
-                ptr = std::make_shared<impl::nowhere>();
+        if( parent == nowhere ) {
+            debugmsg( "parent location doesn't exist.  Item_location has lost its target over a save/load cycle." );
+            ptr = std::make_shared<impl::nowhere>();
+            return;
+        }
+        {
+            if( !parent.ptr->valid() ) {
+                debugmsg( "parent location does not point to valid item" );
+                ptr = std::make_shared<impl::item_on_map>( map_cursor( parent.pos_abs() ), idx );
                 return;
             }
-        } else if( idx > -1 && idx < static_cast<int>( parent_contents.size() ) ) {
-            // Legacy save: no UID, use index
-            auto iter = parent_contents.begin();
-            std::advance( iter, idx );
-            found = *iter;
-        }
+            const std::list<item *> parent_contents = parent->all_items_container_top();
 
-        if( found ) {
-            ptr = std::make_shared<impl::item_in_container>( parent, found );
-        } else {
-            debugmsg( "contents index greater than contents size" );
-            ptr = std::make_shared<impl::nowhere>();
+            item *found = nullptr;
+            if( uid > 0 ) {
+                for( item *it : parent_contents ) {
+                    if( it->uid().get_value() == uid ) {
+                        found = it;
+                        break;
+                    }
+                }
+                if( !found ) {
+                    debugmsg( "item_location UID not found in container contents" );
+                    ptr = std::make_shared<impl::nowhere>();
+                    return;
+                }
+            } else if( idx > -1 && idx < static_cast<int>( parent_contents.size() ) ) {
+                // Legacy save: no UID, use index
+                auto iter = parent_contents.begin();
+                std::advance( iter, idx );
+                found = *iter;
+            }
+
+            if( found ) {
+                ptr = std::make_shared<impl::item_in_container>( parent, found );
+            } else {
+                debugmsg( "contents index greater than contents size" );
+                ptr = std::make_shared<impl::nowhere>();
+            }
+            return;
         }
     }
 }

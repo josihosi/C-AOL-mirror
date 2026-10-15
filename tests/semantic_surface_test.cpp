@@ -3255,7 +3255,6 @@ TEST_CASE( "debug file is bounded during one long running process", "[debug][nat
 
 
 extern "C" int flushinp();
-void handle_key_blocking_activity();
 
 #if !defined(TILES)
 TEST_CASE( "avatar activity driver publishes its actual tired travel decision",
