@@ -223,9 +223,18 @@ TEST_CASE( "string prompt rejects malformed text payloads before accepting its b
     string_input_popup_imgui prompt( 20, "", "Set hour to?" );
     CHECK( prompt.query() == "12" );
     CHECK_FALSE( prompt.cancelled() );
-    // Rejections are acknowledged immediately.  The accepted request is
-    // consumed by the prompt owner and demonstrated by its returned value.
-    REQUIRE( receipts.size() == 4 );
+    // Each consumed request has one receipt, including the valid submission.
+    REQUIRE( receipts.size() == 5 );
+    CHECK( receipts[0].request_id == "wrong-owner" );
+    CHECK( receipts[1].request_id == "stale-owner" );
+    CHECK( receipts[2].request_id == "missing-text" );
+    CHECK( receipts[3].request_id == "extra-field" );
+    CHECK( receipts[4].request_id == "submit" );
+    CHECK( receipts[4].action_id == "prompt.submit" );
+    CHECK( receipts[4].accepted );
+    CHECK( receipts[4].rejection_reason.empty() );
+    CHECK( receipts[4].requested_surface_id == receipts[4].consuming_surface_id );
+    CHECK( receipts[4].requested_frame_id == receipts[4].consuming_frame_id );
     CHECK_FALSE( receipts[0].accepted );
     CHECK( receipts[0].rejection_reason == "wrong_surface" );
     CHECK_FALSE( receipts[1].accepted );
