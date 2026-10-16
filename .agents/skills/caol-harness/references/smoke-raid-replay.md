@@ -347,6 +347,17 @@ python3 tools/openclaw_harness/cockpit_file_bridge.py log-query \
 For scout/report transitions and signal channels, use the bound transition/channel records
 and selected fields; tested historical selectors
 show the actual schema. Historical sequence numbers are not reusable filters.
+
+Establish the final report with the actual outing identity/generation and return/report records.
+Separate player-facing carrier wording is not an additional gate unless the assigned outcome
+explicitly tests that UI text. Unobserved wording does not invalidate an otherwise bound report
+or require replaying a completed raid. The83b Indoor baseline recorded physical returns,
+the report-secured phase and same-lead follow-on dispatch; distinct carrier prose was not observed.
+
+For optional automatic fuel maintenance, use the successful native bounds-edit sequence in
+[Normalized firewood zones and stock](../GAME-MANUAL.md#normalized-firewood-zones-and-stock).
+Manual fuelling remains valid; expanding a source zone is not mandatory setup.
+
 The damage trace requires a build with the harness-only R017 hook. Missing source attribution
 is an evidence gap, not proof that no attack occurred. Names, gunshots and shot counters alone
 do not establish the killer. Do not infer gore without an observed native record.

@@ -111,6 +111,14 @@ Both are ordinary nonpersonal, nonvehicle zones, with identical start/end z=0 an
 
 Widen a source across the **whole accessible wood pile** through the current native zone controls when useful; no one-tile restriction applies. Inspect both sources, stock, actor/fire positions and access before attributing a maintenance failure. Mixed tools or payment goods can be selected and burned; keep the intended fuel supply explicit without inventing a universal ban on brazier or tool coordinates. Fire expiry plus an unassessed report does not establish that one zone caused the failed assessment. The closed Fight run's full initial stock and selected refuel tile were not retained, so that causal conclusion is withdrawn.
 
+Verified native Zone Manager route for optional source expansion:
+
+1. Open `world.zone_manager` from World and select the existing `SOURCE_FIREWOOD` zone by its current advertised target. In the Indoor baseline this was saved zone 11, initially covering the brazier at `[3159,3449,0]`.
+2. Edit its start/end bounds with the current native cursor controls to include the plank pile at `[3157,3449,0]` while retaining the brazier. Inspect the resulting bounds, then accept the current save confirmation with **YES**.
+3. Confirm the change took effect. The baseline recorded a changed zone revision and subsequent native messages dropping planks/splinters into the brazier. A revision number alone does not prove refuelling.
+
+Historical request IDs, JSON payloads, cursor steps and literal final bounds were not retained; do not invent them or reuse a guessed target. Retrieve current controls and bounds for the new session. This is optional automatic refuelling setup: ordinary manual fuelling also works and zone expansion is not a prerequisite for the raid.
+
 ### Walk upstairs and approach the roof fire
 
 From the current ground-floor tile, inspect native terrain and take a passable local route to
@@ -208,6 +216,20 @@ for nearby entry/combat; an OMT cannot distinguish inside from outside a house. 
 retain the initial ally/attacker IDs so a missing member is noticed. Retrieve terrain/door,
 mission/goal/path, gate inputs, health or saved roster when needed to explain the divergence.
 A saved-state claim requires a verified fresh saved turn. Do not dump every field on every tick.
+
+For an assigned camp worker, select the current World's advertised `world.inspect_camp_npc`
+action with its current `character:ID` target, then use `npc_inspection.close` on that inspection.
+The native [inspection producer](../../../src/npc_inspection.cpp) supplies actor ID, calendar turn,
+body-part HP, orders, assigned camp, Patrol priority and cached shift diagnostics. Follow the returned
+payload or full-evidence handle when needed. Missing effects or unavailable shift cache are not
+evidence of no effects or completed duty; these diagnostics are not avatar knowledge.
+
+Dialogue **Examine status** opens the separate native `BODYGRAPH` view. Use that concrete owner's
+advertised `bodygraph.close`; closing a nested graph returns to its parent, whose current controls
+then apply. The [native display](../../../src/bodygraph.cpp) retains its owner across timeout polls.
+The 5949 native adoption verified Close back to World and same-save reload; the old83b missing-Close
+finding is historical. Use the bound build's actual controls and supported recovery rather than
+inventing a key or sending an action from another owner.
 
 Repeated two-tile repositioning without assault, a hold-off gate during committed attack, or a
 missing roster member changes the next action from more waiting to targeted inspection. Preserve
