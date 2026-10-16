@@ -253,6 +253,9 @@ std::string npc_outing_member_diagnostic( const character_id id, const bool incl
             json.member( "local_path_length", actor.path.size() );
             // This projection neither reads nor refreshes the transient AI cache.
             json.member( "runtime_target_available", false );
+            json.member( "runtime_target_provenance", "not_sampled" );
+            json.member( "runtime_target_present" );
+            json.write_null();
             json.member( "llm_pending_available", false );
         }
         json.member( "lease" );

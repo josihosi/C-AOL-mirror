@@ -9959,6 +9959,17 @@ void hostile_operation_state::serialize( JsonOut &json ) const
     json.member( "shakedown_receiver_is_avatar", shakedown_receiver_is_avatar );
     json.member( "shakedown_contact_by_shout", shakedown_contact_by_shout );
     json.member( "shakedown_waiting_local", shakedown_waiting_local );
+    json.member( "defender_observation_started_minutes", defender_observation_started_minutes );
+    std::vector<int> raw_defenders;
+    std::vector<int> raw_deaths;
+    for( const character_id id : defender_ids ) {
+        raw_defenders.push_back( id.get_value() );
+    }
+    for( const character_id id : defender_death_ids ) {
+        raw_deaths.push_back( id.get_value() );
+    }
+    json.member( "defender_ids", raw_defenders );
+    json.member( "defender_death_ids", raw_deaths );
     json.member( "site_search_waypoint", site_search_waypoint );
     json.member( "site_search_initial_goods_value", site_search_initial_goods_value );
     json.member( "site_search_waypoint_attempted", site_search_waypoint_attempted );
@@ -9981,8 +9992,8 @@ void hostile_operation_state::deserialize( const JsonObject &jo )
 {
     hostile_operation_state candidate;
     jo.read( "schema_version", candidate.schema_version );
-    if( candidate.schema_version > 4 ) {
-        jo.throw_error( "hostile operation schema version is newer than supported schema v4" );
+    if( candidate.schema_version > 5 ) {
+        jo.throw_error( "hostile operation schema version is newer than supported schema v5" );
     }
     std::string kind_string = "none";
     jo.read( "operation_kind", kind_string );
@@ -10015,6 +10026,36 @@ void hostile_operation_state::deserialize( const JsonObject &jo )
     jo.read( "shakedown_receiver_is_avatar", candidate.shakedown_receiver_is_avatar );
     jo.read( "shakedown_contact_by_shout", candidate.shakedown_contact_by_shout );
     jo.read( "shakedown_waiting_local", candidate.shakedown_waiting_local );
+    jo.read( "defender_observation_started_minutes", candidate.defender_observation_started_minutes );
+    std::vector<int> raw_defenders;
+    std::vector<int> raw_deaths;
+    jo.read( "defender_ids", raw_defenders );
+    jo.read( "defender_death_ids", raw_deaths );
+    for( const int id : raw_defenders ) {
+        candidate.defender_ids.emplace_back( id );
+    }
+    for( const int id : raw_deaths ) {
+        candidate.defender_death_ids.emplace_back( id );
+    }
+    std::set<character_id> defenders;
+    for( const character_id id : candidate.defender_ids ) {
+        if( !id.is_valid() || !defenders.insert( id ).second ||
+            std::find( candidate.reservation.member_ids.begin(),
+                       candidate.reservation.member_ids.end(), id ) != candidate.reservation.member_ids.end() ) {
+            jo.throw_error( "hostile defender roster has an invalid, duplicate or attacking member" );
+        }
+    }
+    std::set<character_id> deaths;
+    for( const character_id id : candidate.defender_death_ids ) {
+        if( defenders.count( id ) == 0 || !deaths.insert( id ).second ) {
+            jo.throw_error( "hostile defender death has no unique participant" );
+        }
+    }
+    if( ( !defenders.empty() && candidate.defender_observation_started_minutes <
+          candidate.reservation.started_minutes ) ||
+        ( !candidate.defender_death_ids.empty() && candidate.defender_observation_started_minutes < 0 ) ) {
+        jo.throw_error( "hostile defender observation precedes its encounter" );
+    }
     jo.read( "site_search_waypoint", candidate.site_search_waypoint );
     jo.read( "site_search_initial_goods_value", candidate.site_search_initial_goods_value );
     jo.read( "site_search_waypoint_attempted", candidate.site_search_waypoint_attempted );
@@ -10038,7 +10079,7 @@ void hostile_operation_state::deserialize( const JsonObject &jo )
     jo.read( "rally_omt", candidate.rally_omt );
     jo.read( "last_transition_reason", candidate.last_transition_reason );
     jo.read( "legacy_unpinned", candidate.legacy_unpinned );
-    candidate.schema_version = 4;
+    candidate.schema_version = 5;
     candidate.site_search_waypoint = std::clamp( candidate.site_search_waypoint, 0,
                                      5 * OVERMAP_LAYERS );
     candidate.site_search_retry_after_turn = std::max( 0, candidate.site_search_retry_after_turn );
@@ -10116,9 +10157,6 @@ void site_record::serialize( JsonOut &json ) const
     json.member( "shakedown_bandit_losses", shakedown_bandit_losses );
     json.member( "shakedown_anger", shakedown_anger );
     json.member( "shakedown_caution", shakedown_caution );
-    json.member( "shakedown_basecamp_defenders_at_fight", shakedown_basecamp_defenders_at_fight );
-    json.member( "shakedown_basecamp_defender_observation_pending",
-                 shakedown_basecamp_defender_observation_pending );
     json.member( "shakedown_reopen_available", shakedown_reopen_available );
     json.member( "shakedown_reopen_used", shakedown_reopen_used );
     json.member( "origin_disposition", to_string( origin ) );
@@ -10530,7 +10568,8 @@ void site_record::deserialize( const JsonObject &jo,
             }
             hostile_operation_json.read( "schema_version", hostile_operation_schema_version );
             if( hostile_operation_schema_version != 1 && hostile_operation_schema_version != 2 &&
-                hostile_operation_schema_version != 3 && hostile_operation_schema_version != 4 ) {
+                hostile_operation_schema_version != 3 && hostile_operation_schema_version != 4 &&
+                hostile_operation_schema_version != 5 ) {
                 hostile_operation_json.allow_omitted_members();
                 hostile_operation_json.throw_error(
                     "v10 site contains an unsupported hostile operation schema version" );
@@ -10657,9 +10696,11 @@ void site_record::deserialize( const JsonObject &jo,
     jo.read( "shakedown_bandit_losses", shakedown_bandit_losses );
     jo.read( "shakedown_anger", shakedown_anger );
     jo.read( "shakedown_caution", shakedown_caution );
-    jo.read( "shakedown_basecamp_defenders_at_fight", shakedown_basecamp_defenders_at_fight );
-    jo.read( "shakedown_basecamp_defender_observation_pending",
-             shakedown_basecamp_defender_observation_pending );
+    // Old population counts cannot authenticate participants or deaths.
+    int legacy_defenders = 0;
+    bool legacy_observation_pending = false;
+    jo.read( "shakedown_basecamp_defenders_at_fight", legacy_defenders );
+    jo.read( "shakedown_basecamp_defender_observation_pending", legacy_observation_pending );
     jo.read( "shakedown_reopen_available", shakedown_reopen_available );
     jo.read( "shakedown_reopen_used", shakedown_reopen_used );
     const bool any_origin_field = jo.has_member( "origin_disposition" ) ||
@@ -21040,6 +21081,9 @@ bool apply_hostile_operation_plan( site_record &site, const hostile_operation_pl
 
     site_record candidate = site;
     candidate.active_hostile_operation = operation;
+    if( operation.operation_kind == hostile_operation_kind::shakedown ) {
+        candidate.last_shakedown_outcome.clear();
+    }
     candidate.next_outing_generation++;
     const camp_map_lead *lead = find_camp_map_dispatch_lead_for_target(
                                     candidate, reservation.target_omt,
@@ -21117,6 +21161,9 @@ bool apply_hostile_operation_plan_with_authorized_response( site_record &site,
 
     site_record candidate = site;
     candidate.active_hostile_operation = operation;
+    if( operation.operation_kind == hostile_operation_kind::shakedown ) {
+        candidate.last_shakedown_outcome.clear();
+    }
     candidate.next_outing_generation++;
     const camp_map_lead *lead = find_camp_map_dispatch_lead_for_target(
                                     candidate, reservation.target_omt,
@@ -21318,7 +21365,8 @@ local_gate_decision choose_local_gate_posture( const site_record &site,
         return decision;
     }
 
-    if( site.last_shakedown_outcome == "fight_unresolved" && input.local_contact_established ) {
+    if( hostile_shakedown_combat_is_ongoing( site ) && input.local_contact_established &&
+        !( site.shakedown_reopen_available && !site.shakedown_reopen_used ) ) {
         decision.posture = local_gate_posture::attack_now;
         decision.combat_forward = true;
         decision.notes.push_back( "fight branch is already selected; active shakedown pressure commits to hostile contact instead of reopening the demand" );
@@ -23946,7 +23994,7 @@ bool scout_sortie_should_return_home( const site_record &site, const int current
 {
     if( !site.active_outing.is_active() || site.active_outing.member_ids.empty() ||
         sortie_limit_minutes <= 0 || current_minutes < 0 ||
-        site.last_shakedown_outcome == "fight_unresolved" ) {
+        hostile_shakedown_combat_is_ongoing( site ) ) {
         return false;
     }
 
@@ -24101,8 +24149,12 @@ hostile_operation_player_relationship hostile_operation_player_relationship_for(
         if( paid_return ) {
             return matched( hostile_operation_player_relationship::paid_departure );
         }
-        if( operation.shakedown_pending_branch == "fight" ||
-            site.last_shakedown_outcome.rfind( "fight", 0 ) == 0 ) {
+        // A genuine attack can release parley during approach, before the
+        // committed-contact reducer runs. That pending native choice is not a
+        // casualty outcome, and must not retain covert/peaceful neutrality.
+        if( hostile_shakedown_combat_is_ongoing( site ) ||
+            ( site.last_shakedown_outcome.empty() && operation.shakedown_pending_branch == "fight" &&
+              operation.phase != hostile_operation_phase::lost ) ) {
             return matched( hostile_operation_player_relationship::combat_released );
         }
         // Social intent belongs to the exact reserved visit, independently of
@@ -24154,10 +24206,7 @@ bool is_active_local_assault_member( const site_record &site, const character_id
         operation.phase != hostile_operation_phase::committed_contact ||
         outing != &operation.reservation || outing->owner != simulation_owner::local ||
         ( operation.operation_kind != hostile_operation_kind::raid &&
-          !( operation.operation_kind == hostile_operation_kind::shakedown &&
-             ( ( site.last_shakedown_outcome.empty() &&
-                 operation.shakedown_pending_branch == "fight" ) ||
-               site.last_shakedown_outcome.rfind( "fight", 0 ) == 0 ) ) ) ||
+          !hostile_shakedown_combat_is_ongoing( site ) ) ||
         outing->member_is_resolved( npc_id ) ||
         std::find( operation.withdrawing_member_ids.begin(),
                    operation.withdrawing_member_ids.end(), npc_id ) !=
@@ -25679,38 +25728,88 @@ bool apply_terminal_hostile_shakedown_aftermath( world_state &state, site_record
 }
 
 
-void begin_shakedown_basecamp_defender_observation( site_record &site, const int live_defenders )
+bool hostile_shakedown_combat_is_ongoing( const site_record &site )
 {
-    site.shakedown_basecamp_defenders_at_fight = std::max( 0, live_defenders );
-    site.shakedown_basecamp_defender_observation_pending =
-        site.shakedown_basecamp_defenders_at_fight > 0;
+    const hostile_operation_state &operation = site.active_hostile_operation;
+    const active_outing_state &reservation = operation.reservation;
+    const std::string &outcome = site.last_shakedown_outcome;
+    return !site.retired_empty_site && operation.is_active() &&
+           operation.operation_kind == hostile_operation_kind::shakedown &&
+           operation.phase == hostile_operation_phase::committed_contact &&
+           operation.shakedown_pending_branch == "fight" &&
+           site.active_external_outing() == &reservation &&
+           ( reservation.camp_id.empty() || reservation.camp_id == site.site_id ) &&
+           ( outcome == "fight_unresolved" || outcome == "fight_defender_loss" ||
+             outcome == "fight_bandit_loss" || outcome.empty() );
+}
+
+bool begin_shakedown_basecamp_defender_observation( site_record &site,
+        const simulation_advance_cursor &expected_cursor,
+        const std::vector<character_id> &defender_ids, const int current_minutes )
+{
+    hostile_operation_state &operation = site.active_hostile_operation;
+    if( !hostile_shakedown_combat_is_ongoing( site ) ||
+        !simulation_cursor_matches( operation.reservation, expected_cursor ) ||
+        operation.reservation.owner != simulation_owner::local ||
+        current_minutes < operation.reservation.last_advanced_minutes ||
+        operation.defender_observation_started_minutes >= 0 ) {
+        return false;
+    }
+    std::set<character_id> unique;
+    for( const character_id id : defender_ids ) {
+        if( !id.is_valid() || !unique.insert( id ).second ||
+            std::find( operation.reservation.member_ids.begin(), operation.reservation.member_ids.end(),
+                       id ) != operation.reservation.member_ids.end() ) {
+            return false;
+        }
+    }
+    operation.defender_observation_started_minutes = current_minutes;
+    operation.defender_ids = defender_ids;
+    return true;
 }
 
 shakedown_aftermath_effect apply_shakedown_basecamp_defender_observation( site_record &site,
-        const int live_defenders )
+        const simulation_advance_cursor &expected_cursor,
+        const std::vector<character_id> &confirmed_death_ids, const int current_minutes )
 {
-    if( !site.shakedown_basecamp_defender_observation_pending ) {
-        shakedown_aftermath_effect effect;
-        effect.notes.push_back( "basecamp defender observation ignored: no pending shakedown fight" );
+    hostile_operation_state &operation = site.active_hostile_operation;
+    shakedown_aftermath_effect effect;
+    if( !hostile_shakedown_combat_is_ongoing( site ) ||
+        !simulation_cursor_matches( operation.reservation, expected_cursor ) ||
+        operation.reservation.owner != simulation_owner::local ||
+        operation.defender_observation_started_minutes < 0 ||
+        current_minutes < operation.defender_observation_started_minutes ||
+        current_minutes < operation.reservation.last_advanced_minutes ) {
         return effect;
     }
-
-    const int current_live_defenders = std::max( 0, live_defenders );
-    const int defender_losses = site.shakedown_basecamp_defenders_at_fight - current_live_defenders;
-    if( defender_losses <= 0 ) {
-        shakedown_aftermath_effect effect;
-        effect.notes.push_back( "basecamp defender observation unchanged: no defender strength drop" );
+    std::set<character_id> unique;
+    std::vector<character_id> new_deaths;
+    for( const character_id id : confirmed_death_ids ) {
+        if( !unique.insert( id ).second ||
+            std::find( operation.defender_ids.begin(), operation.defender_ids.end(), id ) ==
+            operation.defender_ids.end() ) {
+            return effect;
+        }
+        if( std::find( operation.defender_death_ids.begin(), operation.defender_death_ids.end(), id ) ==
+            operation.defender_death_ids.end() ) {
+            new_deaths.push_back( id );
+        }
+    }
+    if( new_deaths.empty() ) {
         return effect;
     }
-
     shakedown_outcome outcome;
     outcome.fought = true;
     outcome.basecamp_or_camp_scene = true;
     outcome.demanded_value = std::max( 1, site.shakedown_last_demanded_value );
     outcome.reachable_goods_value = site.shakedown_last_reachable_value;
-    outcome.defender_losses = defender_losses;
-    site.shakedown_basecamp_defender_observation_pending = false;
-    return apply_shakedown_outcome( site, outcome );
+    outcome.defender_losses = static_cast<int>( new_deaths.size() );
+    effect = apply_shakedown_outcome( site, outcome );
+    if( effect.valid ) {
+        operation.defender_death_ids.insert( operation.defender_death_ids.end(),
+                                             new_deaths.begin(), new_deaths.end() );
+    }
+    return effect;
 }
 
 bool mark_shakedown_reopen_used( site_record &site )
@@ -25884,7 +25983,9 @@ bool apply_return_packet( site_record &site, const bandit_pursuit_handoff::retur
                                      packet.current_target_or_mark;
     const std::string base_summary = "return " + bandit_pursuit_handoff::to_string( packet.result ) +
                                      " from " + target_label;
-    bool shakedown_fight_outing = site.last_shakedown_outcome == "fight_unresolved";
+    bool shakedown_fight_outing = site.last_shakedown_outcome == "fight_unresolved" ||
+                                  site.last_shakedown_outcome == "fight_defender_loss" ||
+                                  site.last_shakedown_outcome == "fight_bandit_loss";
     for( const character_id &member_id : site.active_outing.member_ids ) {
         const member_record *member = site.find_member( member_id );
         shakedown_fight_outing |= member != nullptr &&

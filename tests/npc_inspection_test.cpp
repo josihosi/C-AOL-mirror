@@ -1044,6 +1044,8 @@ TEST_CASE( "site scoped outing catalog preserves the requested retained body and
         CHECK( body.get_string( "attitude" ) == npc_attitude_name( NPCATT_KILL ) );
         CHECK( body.get_string( "selected_object_source" ) == "persistent_overmap_in_memory" );
         CHECK_FALSE( body.get_bool( "runtime_target_available" ) );
+        CHECK( body.get_string( "runtime_target_provenance" ) == "not_sampled" );
+        CHECK( body.get_member( "runtime_target_present" ).test_null() );
         CHECK_FALSE( body.get_bool( "llm_pending_available" ) );
         CHECK( r067_diagnostic_actor_bytes( *actor ) == actor_before );
         std::ostringstream world_after;

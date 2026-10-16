@@ -164,19 +164,32 @@ TEST_CASE( "committed local assault keeps an unseen tired raider on its search o
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     clear_npcs();
     clear_map_without_vision();
+    const time_point saved_turn = calendar::turn;
+    set_time_to_day();
     const tripoint_abs_ms saved_avatar_position = get_avatar().pos_abs();
     bandit_live_world::world_state saved_world =
         overmap_buffer.global_state.bandit_live_world;
-    on_out_of_scope restore( [saved_avatar_position, saved_world = std::move( saved_world )]() mutable {
+    on_out_of_scope restore( [saved_turn, saved_avatar_position,
+                saved_world = std::move( saved_world )]() mutable {
         overmap_buffer.global_state.bandit_live_world = std::move( saved_world );
         clear_npcs();
         get_avatar().setpos( saved_avatar_position, false );
+        calendar::turn = saved_turn;
     } );
 
     npc &raider = spawn_npc( { 50, 50 }, "test_talker" );
     clear_character( raider, true );
     map &here = get_map();
     get_avatar().setpos( here, here.get_bub( raider.pos_abs() + point( 40, 40 ) ) );
+    // Clearing vision caches does not make an open daylight field unseen.
+    // A real wall hides this distant avatar without blocking the search steps
+    // near x=50. The later close-contact phase remains on this side of it.
+    REQUIRE( raider.sees( here, get_avatar() ) );
+    for( int y = 45; y <= 95; ++y ) {
+        here.ter_set( tripoint_bub_ms( 70, y, 0 ), ter_str_id( "t_wall" ) );
+    }
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0, true );
     REQUIRE_FALSE( raider.sees( here, get_avatar() ) );
     raider.set_attitude( NPCATT_KILL );
     raider.set_sleepiness( 800 );
@@ -228,8 +241,11 @@ TEST_CASE( "committed local assault keeps an unseen tired raider on its search o
     CHECK( assault_for() == &live_site );
     live_operation.shakedown_pending_branch.clear();
     live_site.last_shakedown_outcome = "fight_unresolved";
+    CHECK( assault_for() == nullptr ); // Historical site outcome is not this operation's choice.
+    live_operation.shakedown_pending_branch = "fight";
     CHECK( assault_for() == &live_site );
     live_site.last_shakedown_outcome.clear();
+    live_operation.shakedown_pending_branch.clear();
     live_operation.operation_kind = bandit_live_world::hostile_operation_kind::raid;
     live_operation.reservation.resolved_member_ids = { raider.getID() };
     CHECK( assault_for() == nullptr );
@@ -490,10 +506,12 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
             overmap_buffer.ter_set( ground, old_ground );
             overmap_buffer.ter_set( home, old_home );
         } );
-        const tripoint_bub_ms roof_start( 60, 60, 1 );
-        const tripoint_bub_ms stair_up( 52, 67, 0 );
-        const tripoint_bub_ms stair_down( 52, 67, 1 );
         const tripoint_bub_ms floor_origin = here.get_bub( project_to<coords::ms>( ground ) );
+        // Bubble coordinates need not align with an OMT boundary. Keep the
+        // complete roof-to-stair route on the floor this fixture creates.
+        const tripoint_bub_ms roof_start( floor_origin.x() + 12, floor_origin.y() + 12, 1 );
+        const tripoint_bub_ms stair_up( floor_origin.x() + 4, floor_origin.y() + 19, 0 );
+        const tripoint_bub_ms stair_down( stair_up.x(), stair_up.y(), 1 );
         for( int x = 0; x < 2 * SEEX; ++x ) {
             for( int y = 0; y < 2 * SEEY; ++y ) {
                 here.ter_set( tripoint_bub_ms( floor_origin.x() + x,
@@ -507,7 +525,7 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         here.build_map_cache( 0, true );
         here.build_map_cache( 1, true );
         sighted.setpos( here, roof_start );
-        get_avatar().setpos( here, tripoint_bub_ms( 64, 66, 1 ) );
+        get_avatar().setpos( here, roof_start + point( 4, 6 ) );
         live_operation.reservation.target_omt = ground + tripoint( 0, 0, 1 );
         live_site.camp_decision.target_omt = live_operation.reservation.target_omt;
         live_site.current_scout_report.target_omt = live_operation.reservation.target_omt;
@@ -515,6 +533,9 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         live_operation.site_search_waypoint = 5;
         live_operation.site_search_waypoint_attempted = false;
         sighted.set_attitude( NPCATT_FLEE_TEMP );
+        REQUIRE_FALSE( here.route( sighted.pos_bub( here ), pathfinding_target::point(
+                                      floor_origin + point( 12, 12 ) ),
+                                   sighted.get_pathfinding_settings( false ), sighted.get_path_avoid() ).empty() );
         REQUIRE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
         REQUIRE( sighted.goto_to_this_pos.has_value() );
         CHECK( sighted.goto_to_this_pos->z() == 0 );
@@ -580,8 +601,8 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
 
     SECTION( "blocked roof stair retains the frightened actor and retries physical egress" ) {
         const tripoint_abs_omt ground = sighted.pos_abs_omt();
-        const tripoint_bub_ms roof_start( 60, 60, 1 );
         const tripoint_bub_ms floor_origin = here.get_bub( project_to<coords::ms>( ground ) );
+        const tripoint_bub_ms roof_start( floor_origin.x() + 12, floor_origin.y() + 12, 1 );
         for( int x = 0; x < 2 * SEEX; ++x ) {
             for( int y = 0; y < 2 * SEEY; ++y ) {
                 here.ter_set( tripoint_bub_ms( floor_origin.x() + x,
@@ -601,12 +622,17 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         CHECK( sighted.posz() == 1 );
         CHECK( live_operation.phase ==
                bandit_live_world::hostile_operation_phase::committed_contact );
-        here.ter_set( tripoint_bub_ms( 52, 67, 0 ), ter_str_id( "t_ladder_up" ) );
-        here.ter_set( tripoint_bub_ms( 52, 67, 1 ), ter_str_id( "t_ladder_down" ) );
+        here.ter_set( tripoint_bub_ms( floor_origin.x() + 4, floor_origin.y() + 19, 0 ),
+                      ter_str_id( "t_ladder_up" ) );
+        here.ter_set( tripoint_bub_ms( floor_origin.x() + 4, floor_origin.y() + 19, 1 ),
+                      ter_str_id( "t_ladder_down" ) );
         here.invalidate_map_cache( 0 );
         here.invalidate_map_cache( 1 );
         here.build_map_cache( 0, true );
         here.build_map_cache( 1, true );
+        REQUIRE_FALSE( here.route( sighted.pos_bub( here ), pathfinding_target::point(
+                                      floor_origin + point( 12, 12 ) ),
+                                   sighted.get_pathfinding_settings( false ), sighted.get_path_avoid() ).empty() );
         live_cannibal_raid_advance_site_search_for_test( live_site );
         REQUIRE( sighted.goto_to_this_pos.has_value() );
         CHECK( sighted.goto_to_this_pos->z() == 0 );
@@ -895,6 +921,8 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         live_operation.site_search_waypoint_attempted = false;
         CHECK_FALSE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
         live_site.last_shakedown_outcome = "fight_unresolved";
+        CHECK_FALSE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
+        live_operation.shakedown_pending_branch = "fight";
         CHECK( live_cannibal_raid_advance_site_search_for_test( live_site ) );
         CHECK( first.goto_to_this_pos.has_value() );
     }
@@ -33201,19 +33229,18 @@ TEST_CASE( "bandit_live_world_records_shakedown_aftermath_for_renegotiation_pres
     fight_opened.demanded_value = first_surface.demanded_value;
     fight_opened.reachable_goods_value = first_surface.reachable_goods_value;
     REQUIRE( bandit_live_world::apply_shakedown_outcome( site, fight_opened ).valid );
-    bandit_live_world::begin_shakedown_basecamp_defender_observation( site, 2 );
-    CHECK( site.shakedown_basecamp_defender_observation_pending );
-    CHECK_FALSE( bandit_live_world::apply_shakedown_basecamp_defender_observation( site, 2 ).valid );
-    CHECK( site.shakedown_basecamp_defender_observation_pending );
+    // This pure aftermath test owns demand arithmetic, not native casualty
+    // discovery. Participant authentication is exercised through Fight below.
+    bandit_live_world::shakedown_outcome confirmed_loss = fight_opened;
+    confirmed_loss.defender_losses = 1;
     const bandit_live_world::shakedown_aftermath_effect harsh_effect =
-        bandit_live_world::apply_shakedown_basecamp_defender_observation( site, 1 );
+        bandit_live_world::apply_shakedown_outcome( site, confirmed_loss );
     CHECK( harsh_effect.valid );
     CHECK( harsh_effect.stronger_reopen );
     CHECK_FALSE( harsh_effect.cools_later_pressure );
     CHECK( harsh_effect.demand_modifier_percent == 140 );
     CHECK( site.last_shakedown_outcome == "fight_defender_loss" );
     CHECK( site.shakedown_defender_losses == 1 );
-    CHECK_FALSE( site.shakedown_basecamp_defender_observation_pending );
     CHECK( site.shakedown_reopen_available );
     CHECK_FALSE( site.shakedown_reopen_used );
     CHECK( site.remembered_threat_estimate == 3 );
@@ -33227,7 +33254,6 @@ TEST_CASE( "bandit_live_world_records_shakedown_aftermath_for_renegotiation_pres
     REQUIRE( loaded.sites.size() == 1 );
     CHECK( loaded.sites.front().shakedown_reopen_available );
     CHECK( loaded.sites.front().shakedown_defender_losses == 1 );
-    CHECK_FALSE( loaded.sites.front().shakedown_basecamp_defender_observation_pending );
     CHECK( loaded.sites.front().last_shakedown_outcome == "fight_defender_loss" );
 
     const bandit_live_world::shakedown_surface reopened_surface =
@@ -49932,10 +49958,12 @@ struct r066_visit_scene {
     npc *collector = nullptr;
     npc *escort = nullptr;
     npc *recipient = nullptr;
+    std::vector<character_id> owned_member_ids;
     bool camp_added = false;
 
-    explicit r066_visit_scene( bool unloaded = false,
-                               bool raid = false ) : previous( overmap_buffer.global_state.bandit_live_world ),
+    explicit r066_visit_scene( bool unloaded = false, bool raid = false,
+                               const std::string &prior_outcome = "",
+                               bool authorized_response = false ) : previous( overmap_buffer.global_state.bandit_live_world ),
         previous_turn( calendar::turn ), previous_player( get_avatar().pos_abs() ) {
         clear_map();
         clear_avatar();
@@ -49976,6 +50004,7 @@ struct r066_visit_scene {
             actor->set_thirst( 0 );
             actor->set_stored_kcal( actor->get_healthy_kcal() );
             bandit_live_world::member_record member;
+            owned_member_ids.push_back( actor->getID() );
             member.npc_id = actor->getID();
             member.npc_template_id = "thug";
             member.home_spawn_tile = home;
@@ -49988,14 +50017,36 @@ struct r066_visit_scene {
         }
         // Declared report/setup drives the real reservation and phase writers.
         // This controlled scene is not credited as native discovery/reporting.
-        prepare_hostile_follow_on( site, 1, 1, "camp-response@" + target.to_string(), target,
-                                   minutes() - 6 );
-        const auto plan = bandit_live_world::plan_hostile_operation( site,
-                          raid ? bandit_live_world::hostile_operation_kind::raid :
-                          bandit_live_world::hostile_operation_kind::shakedown,
-        { site.anchor, target }, site.anchor, minutes() - 5 );
-        REQUIRE( plan.valid );
-        REQUIRE( bandit_live_world::apply_hostile_operation_plan( site, plan ) );
+        if( !prior_outcome.empty() ) {
+            site.last_shakedown_outcome = prior_outcome;
+            site.shakedown_defender_losses = 2;
+            site.shakedown_bandit_losses = 1;
+            site.next_outing_generation = 4;
+        }
+        const int report_generation = prior_outcome.empty() ? 1 : 3;
+        prepare_hostile_follow_on( site, report_generation, report_generation,
+                                   "camp-response@" + target.to_string(), target, minutes() - 6 );
+        const auto kind = raid ? bandit_live_world::hostile_operation_kind::raid :
+                          bandit_live_world::hostile_operation_kind::shakedown;
+        if( authorized_response ) {
+            std::vector<bandit_live_world::response_member_power_read> reads;
+            for( const auto &member : site.members ) {
+                reads.push_back( { member.npc_id, true, true, true, 10 } );
+            }
+            const auto selection = bandit_live_world::select_capable_response_party( site,
+                                   site.current_scout_report.action_policy,
+                                   site.current_scout_report.assessment.danger_high, reads );
+            REQUIRE( selection.eligible );
+            const auto plan = bandit_live_world::plan_hostile_operation_with_authorized_response(
+                                  site, kind, selection, { site.anchor, target }, site.anchor, minutes() - 5 );
+            REQUIRE( plan.plan.valid );
+            REQUIRE( bandit_live_world::apply_hostile_operation_plan_with_authorized_response( site, plan ) );
+        } else {
+            const auto plan = bandit_live_world::plan_hostile_operation( site, kind,
+                              { site.anchor, target }, site.anchor, minutes() - 5 );
+            REQUIRE( plan.valid );
+            REQUIRE( bandit_live_world::apply_hostile_operation_plan( site, plan ) );
+        }
         REQUIRE( site.active_hostile_operation.reservation.member_ids ==
                  std::vector<character_id>( { collector->getID(), escort->getID() } ) );
         int phase_minutes = minutes() - 4;
@@ -50021,6 +50072,13 @@ struct r066_visit_scene {
             overmap_buffer.remove_camp( target.xy() );
         }
         clear_npcs();
+        // Home reserves are deliberately inactive. clear_npcs removes loaded
+        // actors only; leaving these IDs pollutes later retained-save fixtures.
+        for( const character_id id : owned_member_ids ) {
+            if( overmap_buffer.find_npc( id ) ) {
+                overmap_buffer.remove_npc( id );
+            }
+        }
         sounds::reset_sounds();
         overmap_buffer.global_state.bandit_live_world = previous;
         calendar::turn = previous_turn;
@@ -50974,7 +51032,7 @@ TEST_CASE( "only exact living peaceful reservation grants parley while raid stay
             scene.collector->getID() ) == ( variant == "paid_return" ?
                                             hostile_operation_player_relationship::paid_departure :
                                             hostile_operation_player_relationship::none ) );
-    CHECK( establish_bandit_shakedown_communication_for_test( site ) == ( variant == "resolved" ) );
+    CHECK( scene.communicate() == ( variant == "resolved" ) );
     CHECK( op.shakedown_contact_established == ( variant == "resolved" ) );
     if( variant == "resolved" ) {
         CHECK( op.reservation.resolved_member_ids == std::vector<character_id>( { scene.collector->getID() } ) );
@@ -50998,9 +51056,14 @@ TEST_CASE( "combat released local visitors and raids use actual combat while pre
     // Declared capable attacker and vulnerable defender isolate the combat
     // motor; survival reactions remain independently exercised above.
     scene.collector->personality.bravery = 10;
+    scene.collector->personality.aggression = 0;
     scene.collector->set_str_base( 14 );
     scene.collector->op_of_u.fear = -100;
-    defender.set_dodge_bonus( -100 );
+    // Negative artificial dodge and random aggression can make a visible
+    // defender's assessed threat negative, so native AI selects no target.
+    defender.set_dodge_bonus( 0 );
+    REQUIRE( scene.collector->evaluate_character_threat_without_perception_fuzz(
+                 defender, false, true ) > 0 );
     if( raid ) {
         calendar::turn += 1_minutes;
         advance_live_bandit_hostile_approaches_for_test();
@@ -51029,6 +51092,9 @@ TEST_CASE( "combat released local visitors and raids use actual combat while pre
         CHECK( scene.collector->pos_abs() == initial );
         CHECK( scene.collector->has_effect( efftype_id( "narcosis" ) ) );
     } else {
+        scene.collector->regen_ai_cache();
+        REQUIRE( scene.collector->sees( get_map(), defender ) );
+        REQUIRE( scene.collector->current_target() == &defender );
         const int hp = defender.get_hp();
         for( int action = 0; action < 16 && defender.get_hp() == hp; ++action ) {
             scene.collector->set_moves( 100 );
@@ -69683,7 +69749,9 @@ TEST_CASE( "saved burned travel does not bind or move a foreign native copy",
     scene.load( false, true, false, fixture );
     SECTION( "empty routes remain unbound" ) {}
     SECTION( "existing routes confer no authority to the foreign copy" ) {
-        for( const int id : { 5, 6 } ) {
+        for( const int id : {
+                 5, 6
+             } ) {
             scene.actor( id ).omt_path = { scene.site().active_outing.local_handoff.egress_omt };
         }
     }
@@ -69699,7 +69767,9 @@ TEST_CASE( "saved burned travel does not bind or move a foreign native copy",
     };
     process_overmap_npc_move_for_test();
     live_bandit_elevated_recovery_npc_turn_for_test( false );
-    for( const int id : { 5, 6 } ) {
+    for( const int id : {
+             5, 6
+         } ) {
         CAPTURE( id, scene.actor( id ).goal, scene.actor( id ).omt_path );
         CHECK( scene.actor( id ).omt_path == orders[id - 5] );
         CHECK( scene.actor( id ).pos_abs() == positions[id - 5] );
@@ -69764,7 +69834,8 @@ TEST_CASE( "cohesive inward continuation revalidates geometry independently of O
         REQUIRE( actor.sees_dangerous_field( here.get_bub( inward ) ) );
     } else if( condition == "occupied" ) {
         occupant = make_shared_fast<npc>();
-        occupant->deserialize( json_loader::from_string( r054_actor_bytes( scene.actor( anchor_id ) ) ).get_object() );
+        occupant->deserialize( json_loader::from_string( r054_actor_bytes( scene.actor(
+                    anchor_id ) ) ).get_object() );
         occupant->setID( character_id( 99 ), true );
         occupant->set_bandit_live_world_projection_lease( {} );
         occupant->spawn_at_precise( inward );
@@ -69773,10 +69844,13 @@ TEST_CASE( "cohesive inward continuation revalidates geometry independently of O
         overmap_buffer.insert_npc( occupant );
         g->load_npcs();
     }
-    for( const int id : { 5, 6 } ) {
+    for( const int id : {
+             5, 6
+         } ) {
         scene.actor( id ).set_moves( 0 ); // One ordinary process_turn action budget.
     }
-    bandit_live_world_probe::session probe( bandit_live_world_probe::collection_mode::transition_events );
+    bandit_live_world_probe::session probe(
+        bandit_live_world_probe::collection_mode::transition_events );
     live_bandit_elevated_recovery_npc_turn_for_test( false );
     const bool selected_cached_step = std::any_of( probe.result().transition_events.begin(),
                                      probe.result().transition_events.end(), [&]( const auto & event ) {
@@ -69815,4 +69889,457 @@ TEST_CASE( "cohesive inward continuation revalidates geometry independently of O
     CHECK( scene.site().active_outing.phase == bandit_live_world::scout_phase::burned_withdrawal );
     CHECK( scene.site().active_outing.member_return_receipts.empty() );
     CHECK( scene.site().applied_report_generation == 0 );
+}
+
+
+TEST_CASE( "native Fight defender observation separates actor fate from avatar travel",
+           "[bandit_live_world][defender_boundary_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const std::string mode = GENERATE( std::string( "near" ), std::string( "far" ),
+                                       std::string( "unloaded" ), std::string( "missing" ),
+                                       std::string( "flight" ), std::string( "death" ),
+                                       std::string( "death_and_unrelated_arrival" ) );
+    INFO( mode );
+    r066_visit_scene scene;
+    npc &first = scene.camp_receiver( "thug" );
+    npc &second = spawn_npc( first.pos_bub().xy() + point( 0, 2 ), "thug" );
+    second.set_fac( faction_id( "your_followers" ) );
+    second.set_attitude( NPCATT_NULL );
+    second.assigned_camp = scene.target;
+    REQUIRE( first.is_player_ally() );
+    REQUIRE( second.is_player_ally() );
+    scene.distant_adjacent_avatar();
+    REQUIRE( scene.communicate() );
+    REQUIRE( scene.site().active_hostile_operation.shakedown_receiver_id == first.getID() );
+    // The native choice establishes the actual encounter before any controlled
+    // geometry/fate change. This is not discovery or native story credit.
+    get_avatar().setpos( first.pos_abs() + point( -3, -3 ), false );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( first ), first );
+    REQUIRE( scene.site().last_shakedown_outcome == "fight_unresolved" );
+    REQUIRE( scene.site().active_hostile_operation.defender_ids.size() == 2 );
+    const auto operation = scene.site().active_hostile_operation.reservation.activity_id;
+    const auto generation = scene.site().active_hostile_operation.reservation.generation;
+    const auto first_position = first.pos_abs();
+    const auto second_position = second.pos_abs();
+    const auto second_id = second.getID();
+    shared_ptr_fast<npc> absent;
+    if( mode == "far" ) {
+        const auto far = first.pos_abs() + point( 52, 0 );
+        REQUIRE( get_map().inbounds( far ) );
+        get_avatar().setpos( far, false );
+    } else if( mode == "unloaded" || mode == "missing" ) {
+        g->remove_npc( second_id );
+        REQUIRE_FALSE( second.is_active() );
+        if( mode == "missing" ) {
+            absent = overmap_buffer.remove_npc( second_id );
+            REQUIRE( absent );
+        }
+    } else if( mode == "flight" ) {
+        second.set_attitude( NPCATT_FLEE );
+    } else if( mode == "death" || mode == "death_and_unrelated_arrival" ) {
+        second.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+        REQUIRE( second.is_dead() );
+        if( mode == "death_and_unrelated_arrival" ) {
+            npc &unrelated = spawn_npc( first.pos_bub().xy() + point( 0, 3 ), "thug" );
+            unrelated.set_fac( faction_id( "your_followers" ) );
+            unrelated.assigned_camp = scene.target + point( 0, 2 );
+            REQUIRE( unrelated.is_player_ally() );
+        }
+    }
+    REQUIRE( first.is_active() );
+    REQUIRE_FALSE( first.is_dead() );
+    REQUIRE( first.pos_abs() == first_position );
+    REQUIRE( second.pos_abs() == second_position );
+    const bool actual_death = mode == "death" || mode == "death_and_unrelated_arrival";
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    auto &site = scene.site();
+    CHECK( site.active_hostile_operation.reservation.activity_id == operation );
+    CHECK( site.active_hostile_operation.reservation.generation == generation );
+    CHECK( site.active_hostile_operation.phase == hostile_operation_phase::committed_contact );
+    // Diagnostic BEFORE expectations express identity-based casualty meaning;
+    // absence, movement and a replacement do not authenticate a death.
+    CHECK( site.shakedown_defender_losses == ( actual_death ? 1 : 0 ) );
+    CHECK( site.last_shakedown_outcome == ( actual_death ? "fight_defender_loss" :
+                                            "fight_unresolved" ) );
+    CHECK( active_local_assault_site_for( overmap_buffer.global_state.bandit_live_world,
+                                          scene.collector->getID() ) == &site );
+    CHECK( site.active_hostile_operation.site_search_initial_goods_value >= 0 );
+    std::cout << "R067_DEFENDER_BOUNDARY mode=" << mode
+              << " first=" << first.getID().get_value() << ':' << first.pos_abs()
+              << " second=" << second_id.get_value() << ':' << second.pos_abs()
+              << " avatar=" << get_avatar().pos_abs()
+              << " second_dead=" << second.is_dead()
+              << " losses=" << site.shakedown_defender_losses
+              << " outcome=" << site.last_shakedown_outcome
+              << " search_init=" << site.active_hostile_operation.site_search_initial_goods_value
+              << " search_wp=" << site.active_hostile_operation.site_search_waypoint
+              << " goto=" << scene.collector->goto_to_this_pos.has_value() << '\n';
+    if( mode == "missing" ) {
+        overmap_buffer.insert_npc( absent );
+    }
+    if( mode == "missing" || mode == "unloaded" ) {
+        g->load_npcs();
+        REQUIRE( second.is_active() );
+        REQUIRE_FALSE( second.is_dead() );
+        calendar::turn += 1_minutes;
+        note_live_bandit_aftermath_for_test();
+        CHECK( scene.site().shakedown_defender_losses == 0 );
+    }
+    const int recorded_losses = scene.site().shakedown_defender_losses;
+    overmap_buffer.global_state.bandit_live_world = round_trip_world(
+            overmap_buffer.global_state.bandit_live_world );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == recorded_losses );
+}
+
+
+TEST_CASE( "native Fight casualty aftermath keeps physical search and reconciliation live",
+           "[bandit_live_world][defender_boundary_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const std::string mode = GENERATE( std::string( "unseen_search" ),
+                                       std::string( "visible_combat" ),
+                                       std::string( "attacker_death_after_defender_loss" ) );
+    INFO( mode );
+    r066_visit_scene scene;
+    npc &first = scene.camp_receiver( "thug" );
+    npc &second = spawn_npc( first.pos_bub().xy() + point( 0, 2 ), "thug" );
+    second.set_fac( faction_id( "your_followers" ) );
+    second.assigned_camp = scene.target;
+    scene.distant_adjacent_avatar();
+    REQUIRE( scene.communicate() );
+    get_avatar().setpos( first.pos_abs() + point( -3, -3 ), false );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( first ), first );
+    REQUIRE( scene.site().active_hostile_operation.defender_ids.size() == 2 );
+    const auto operation = scene.site().active_hostile_operation.reservation.activity_id;
+    const auto generation = scene.site().active_hostile_operation.reservation.generation;
+    second.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+    REQUIRE( second.is_dead() );
+    // Isolate a report-owned search goal from visible combat. These declared
+    // walls/cloaking are test geometry, not an attribution for the live save.
+    const bool was_cloaked = get_avatar().has_trait( trait_id( "DEBUG_CLOAK" ) );
+    on_out_of_scope restore_cloak( [&]() {
+        if( !was_cloaked ) {
+            get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        }
+    } );
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    if( mode != "visible_combat" ) {
+        const auto wall = scene.collector->pos_bub() + point( 1, 0 );
+        for( int y = -8; y <= 8; ++y ) {
+            get_map().ter_set( wall + point( 0, y ), ter_id( "t_wall" ) );
+        }
+    }
+    scene.rebuild();
+    REQUIRE_FALSE( scene.collector->sees( get_map(), get_avatar() ) );
+    CHECK( scene.collector->sees( get_map(), first ) == ( mode == "visible_combat" ) );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    REQUIRE( scene.site().last_shakedown_outcome == "fight_defender_loss" );
+    REQUIRE( scene.site().shakedown_defender_losses == 1 );
+    const auto initial = scene.collector->pos_abs();
+    if( mode == "attacker_death_after_defender_loss" ) {
+        const auto dead_id = scene.escort->getID();
+        scene.escort->set_part_hp_cur( bodypart_id( "torso" ), 0 );
+        REQUIRE( scene.escort->is_dead() );
+        calendar::turn += 1_minutes;
+        note_live_bandit_aftermath_for_test();
+        const auto &casualties = scene.site().active_hostile_operation.reservation.casualty_ids;
+        CHECK( std::find( casualties.begin(), casualties.end(), dead_id ) != casualties.end() );
+    } else {
+        scene.collector->regen_ai_cache();
+        const Creature *target = scene.collector->current_target();
+        const bool target_present_before = target != nullptr;
+        if( mode == "visible_combat" ) {
+            REQUIRE( target == &first );
+        } else {
+            REQUIRE_FALSE( target_present_before );
+            const auto goal = project_to<coords::ms>( scene.target ) + point( 12, 12 );
+            REQUIRE_FALSE( get_map().route( scene.collector->pos_bub(),
+                                            pathfinding_target::point( get_map().get_bub( goal ) ),
+                                            scene.collector->get_pathfinding_settings( false ),
+                                            scene.collector->get_path_avoid() ).empty() );
+            CHECK( scene.site().active_hostile_operation.site_search_initial_goods_value >= 0 );
+            CHECK( scene.collector->goto_to_this_pos.has_value() );
+        }
+        const int initial_hp = first.get_hp();
+        for( int action = 0; action < 4; ++action ) {
+            scene.collector->set_moves( 100 );
+            scene.collector->move();
+            calendar::turn += 1_turns;
+        }
+        if( mode == "unseen_search" ) {
+            CHECK( scene.collector->pos_abs() != initial );
+        } else {
+            CHECK( ( scene.collector->pos_abs() != initial || first.get_hp() < initial_hp ) );
+        }
+        std::cout << "R067_FIGHT_ACTION mode=" << mode
+                  << " target_observed=" << target_present_before
+                  << " actor_before=" << initial << " actor_after=" << scene.collector->pos_abs()
+                  << " defender_hp_before=" << initial_hp << " defender_hp_after=" << first.get_hp()
+                  << " search_init=" << scene.site().active_hostile_operation.site_search_initial_goods_value
+                  << " goto=" << scene.collector->goto_to_this_pos.has_value() << '\n';
+    }
+    CHECK( scene.site().active_hostile_operation.reservation.activity_id == operation );
+    CHECK( scene.site().active_hostile_operation.reservation.generation == generation );
+    CHECK( scene.site().active_hostile_operation.phase == hostile_operation_phase::committed_contact );
+    CHECK( scene.site().active_hostile_operation.reservation.member_return_receipts.empty() );
+}
+
+TEST_CASE( "Fight defender receipts reject foreign and stale observations and survive native removal",
+           "[bandit_live_world][defender_boundary_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    r066_visit_scene scene;
+    npc &first = scene.camp_receiver( "thug" );
+    npc &second = spawn_npc( first.pos_bub().xy() + point( 0, 2 ), "thug" );
+    second.set_fac( faction_id( "your_followers" ) );
+    second.assigned_camp = scene.target;
+    npc &remote_worker = spawn_npc( first.pos_bub().xy() + point( 45, 0 ), "thug" );
+    remote_worker.set_fac( faction_id( "your_followers" ) );
+    remote_worker.assigned_camp = scene.target;
+    npc &foreign_worker = spawn_npc( first.pos_bub().xy() + point( 0, 3 ), "thug" );
+    foreign_worker.set_fac( faction_id( "your_followers" ) );
+    foreign_worker.assigned_camp = scene.target + point( 3, 0 );
+    scene.distant_adjacent_avatar();
+    REQUIRE( scene.communicate() );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( first ), first );
+    REQUIRE( scene.site().active_hostile_operation.defender_ids.size() == 2 );
+    for( const std::string variant : {
+             "foreign_death", "duplicate", "old_clock", "future_schema"
+         } ) {
+        auto invalid = scene.site().active_hostile_operation;
+        if( variant == "foreign_death" ) {
+            invalid.defender_death_ids = { foreign_worker.getID() };
+        } else if( variant == "duplicate" ) {
+            invalid.defender_ids.push_back( first.getID() );
+        } else if( variant == "old_clock" ) {
+            invalid.defender_observation_started_minutes = invalid.reservation.started_minutes - 1;
+        } else {
+            invalid.schema_version = 6;
+        }
+        std::ostringstream bytes;
+        JsonOut out( bytes );
+        invalid.serialize( out );
+        hostile_operation_state rejected;
+        INFO( variant );
+        CHECK_THROWS( rejected.deserialize( json_loader::from_string( bytes.str() ).get_object() ) );
+    }
+    const auto cursor = *current_external_simulation_cursor( scene.site() );
+    const int now = scene.minutes();
+    const auto original = scene.site();
+    auto stale = cursor;
+    ++stale.generation;
+    CHECK_FALSE( apply_shakedown_basecamp_defender_observation( scene.site(), stale,
+    { second.getID() }, now ).valid );
+    CHECK_FALSE( apply_shakedown_basecamp_defender_observation( scene.site(), cursor,
+    { scene.collector->getID() }, now ).valid );
+    CHECK_FALSE( apply_shakedown_basecamp_defender_observation( scene.site(), cursor,
+    { second.getID(), second.getID() }, now ).valid );
+    CHECK_FALSE( begin_shakedown_basecamp_defender_observation( scene.site(), cursor,
+    { first.getID() }, now ) );
+    CHECK( scene.site().shakedown_defender_losses == 0 );
+    CHECK( scene.site().active_hostile_operation.defender_ids ==
+           original.active_hostile_operation.defender_ids );
+    const auto second_id = second.getID();
+    second.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+    REQUIRE( second.is_dead() );
+    // Real cleanup emits the persisted character_dies fact and removes the
+    // actor. The next ordinary aftermath still authenticates that same ID.
+    g->cleanup_dead();
+    REQUIRE_FALSE( overmap_buffer.find_npc( second_id ) );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    REQUIRE( scene.site().shakedown_defender_losses == 1 );
+    CHECK( scene.site().active_hostile_operation.defender_death_ids ==
+           std::vector<character_id> { second_id } );
+    const auto reopened = scene.surface( first );
+    REQUIRE( reopened.valid );
+    CHECK( reopened.opening_id == "reopened_demand" );
+    REQUIRE( mark_shakedown_reopen_used( scene.site() ) );
+    CHECK_FALSE( scene.surface( first ).valid );
+    overmap_buffer.global_state.bandit_live_world = round_trip_world(
+            overmap_buffer.global_state.bandit_live_world );
+    npc &unrelated = spawn_npc( first.pos_bub().xy() + point( 0, 3 ), "thug" );
+    unrelated.set_fac( faction_id( "your_followers" ) );
+    unrelated.assigned_camp = scene.target;
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == 1 );
+    CHECK( scene.site().active_hostile_operation.defender_ids ==
+           original.active_hostile_operation.defender_ids );
+    first.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == 2 );
+    CHECK( scene.site().active_hostile_operation.defender_death_ids.size() == 2 );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == 2 );
+}
+
+TEST_CASE( "ongoing Fight lifecycle is finite and cannot revive paid or terminal encounters",
+           "[bandit_live_world][defender_boundary_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const std::string mode = GENERATE( std::string( "unresolved" ), std::string( "defender_loss" ),
+                                       std::string( "bandit_loss" ), std::string( "paid" ),
+                                       std::string( "robbed" ), std::string( "searched_empty" ),
+                                       std::string( "unknown_fight_suffix" ), std::string( "withdrawn" ),
+                                       std::string( "resolved" ), std::string( "foreign" ),
+                                       std::string( "retired" ), std::string( "pay_waiting_route" ),
+                                       std::string( "paid_pending_return" ) );
+    INFO( mode );
+    r066_visit_scene scene;
+    npc &receiver = scene.camp_receiver( "thug" );
+    scene.distant_adjacent_avatar();
+    REQUIRE( scene.communicate() );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( receiver ), receiver );
+    REQUIRE( hostile_shakedown_combat_is_ongoing( scene.site() ) );
+    auto &site = scene.site();
+    const bool supported = mode == "unresolved" || mode == "defender_loss" || mode == "bandit_loss";
+    site.last_shakedown_outcome = mode == "unresolved" ? "fight_unresolved" :
+                                  mode == "defender_loss" ? "fight_defender_loss" :
+                                  mode == "bandit_loss" ? "fight_bandit_loss" :
+                                  mode == "unknown_fight_suffix" ? "fight_future" : mode;
+    if( mode == "withdrawn" || mode == "resolved" ) {
+        site.last_shakedown_outcome = "fight_defender_loss";
+        site.active_hostile_operation.phase = mode == "withdrawn" ?
+                                              hostile_operation_phase::returning_home : hostile_operation_phase::lost;
+    } else if( mode == "foreign" ) {
+        site.last_shakedown_outcome = "fight_defender_loss";
+        site.active_hostile_operation.reservation.camp_id = "another_camp";
+    } else if( mode == "pay_waiting_route" || mode == "paid_pending_return" ) {
+        site.last_shakedown_outcome = "fight_defender_loss";
+        site.active_hostile_operation.shakedown_pending_branch = mode;
+    } else if( mode == "retired" ) {
+        site.last_shakedown_outcome = "fight_defender_loss";
+        site.retired_empty_site = true;
+    }
+    CHECK( hostile_shakedown_combat_is_ongoing( site ) == supported );
+    CHECK( is_active_local_assault_member( site, scene.collector->getID() ) == supported );
+    const auto cursor = current_external_simulation_cursor( site );
+    REQUIRE( cursor );
+    receiver.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+    const auto effect = apply_shakedown_basecamp_defender_observation( site, *cursor,
+    { receiver.getID() }, scene.minutes() );
+    CHECK( effect.valid == supported );
+    CHECK( site.shakedown_defender_losses == ( supported ? 1 : 0 ) );
+    const auto before_search = site.active_hostile_operation.site_search_initial_goods_value;
+    const bool search = live_cannibal_raid_advance_site_search_for_test( site );
+    if( !supported ) {
+        CHECK_FALSE( search );
+        CHECK( site.active_hostile_operation.site_search_initial_goods_value == before_search );
+    }
+}
+
+TEST_CASE( "legacy defender population cannot create identities or casualty receipts",
+           "[bandit_live_world][defender_boundary_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    r066_visit_scene scene;
+    npc &receiver = scene.camp_receiver( "thug" );
+    scene.distant_adjacent_avatar();
+    REQUIRE( scene.communicate() );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( receiver ), receiver );
+    // An old operation carries no participant evidence. Preserve the original
+    // aggregate fields in its JSON to exercise real migration, not a reset.
+    const int historical_losses = GENERATE( 0, 2 );
+    scene.site().shakedown_defender_losses = historical_losses;
+    scene.site().last_shakedown_outcome = historical_losses == 0 ? "fight_unresolved" :
+                                          "fight_defender_loss";
+    auto &operation = scene.site().active_hostile_operation;
+    operation.schema_version = 4;
+    operation.defender_ids.clear();
+    operation.defender_death_ids.clear();
+    operation.defender_observation_started_minutes = -1;
+    std::ostringstream bytes;
+    JsonOut out( bytes );
+    scene.site().serialize( out );
+    std::string legacy = bytes.str();
+    // These fields did not exist in v4. Exercise actual field absence.
+    for( const std::string field : {
+             "defender_ids", "defender_death_ids",
+             "defender_observation_started_minutes"
+         } ) {
+        const auto begin = legacy.find( "\"" + field + "\"" );
+        REQUIRE( begin != std::string::npos );
+        const auto end = legacy.find( ',', begin );
+        REQUIRE( end != std::string::npos );
+        legacy.erase( begin, end - begin + 1 );
+    }
+    legacy.insert( legacy.find( '{' ) + 1,
+                   "\"shakedown_basecamp_defenders_at_fight\":2,"
+                   "\"shakedown_basecamp_defender_observation_pending\":true," );
+    site_record loaded;
+    loaded.deserialize( json_loader::from_string( legacy ).get_object() );
+    REQUIRE( loaded.active_hostile_operation.defender_ids.empty() );
+    REQUIRE( loaded.active_hostile_operation.defender_death_ids.empty() );
+    overmap_buffer.global_state.bandit_live_world.sites = { loaded };
+    receiver.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == historical_losses );
+    CHECK( scene.site().last_shakedown_outcome == ( historical_losses == 0 ? "fight_unresolved" :
+            "fight_defender_loss" ) );
+    CHECK( scene.site().active_hostile_operation.site_search_initial_goods_value >= 0 );
+    CHECK( scene.site().active_hostile_operation.defender_ids.empty() );
+}
+
+TEST_CASE( "fresh shakedown cannot inherit an earlier operation's Fight outcome",
+           "[bandit_live_world][defender_boundary_067][defender_operation_067]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const std::string history = GENERATE( std::string( "fight_defender_loss" ),
+                                        std::string( "fight_bandit_loss" ) );
+    const bool authorized = GENERATE( false, true );
+    INFO( history << " authorized_response=" << authorized );
+    // A valid retained aggregate is deliberately declared without inventing
+    // its old participants. Both actual fresh-reservation writers must start
+    // the new report-owned generation as a visit, not as inherited combat.
+    r066_visit_scene scene( false, false, history, authorized );
+    CHECK( scene.site().last_shakedown_outcome.empty() );
+    CHECK( scene.site().shakedown_defender_losses == 2 );
+    CHECK( scene.site().shakedown_bandit_losses == 1 );
+    CHECK( scene.site().active_hostile_operation.reservation.generation == 4 );
+    CHECK( scene.site().active_hostile_operation.shakedown_pending_branch.empty() );
+    npc &first = scene.camp_receiver( "thug" );
+    npc &second = spawn_npc( first.pos_bub().xy() + point( 0, 2 ), "thug" );
+    second.set_fac( faction_id( "your_followers" ) );
+    second.assigned_camp = scene.target;
+    scene.distant_adjacent_avatar();
+    calendar::turn += 1_minutes;
+    advance_live_bandit_hostile_approaches_for_test();
+    REQUIRE( scene.site().active_hostile_operation.phase == hostile_operation_phase::committed_contact );
+    CHECK_FALSE( hostile_shakedown_combat_is_ongoing( scene.site() ) );
+    CHECK_FALSE( is_active_local_assault_member( scene.site(), scene.collector->getID() ) );
+    CHECK_FALSE( live_cannibal_raid_advance_site_search_for_test( scene.site() ) );
+    CHECK( scene.site().active_hostile_operation.site_search_initial_goods_value == -1 );
+    REQUIRE( scene.communicate() );
+    CHECK( scene.collector->attitude_to( first ) == Creature::Attitude::NEUTRAL );
+    REQUIRE( scene.site().active_hostile_operation.defender_ids.empty() );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( first ), first );
+    REQUIRE( hostile_shakedown_combat_is_ongoing( scene.site() ) );
+    REQUIRE( scene.site().active_hostile_operation.defender_ids.size() == 2 );
+    CHECK( scene.site().active_hostile_operation.defender_death_ids.empty() );
+    second.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == 3 );
+    CHECK( scene.site().shakedown_bandit_losses == 1 );
+    overmap_buffer.global_state.bandit_live_world = round_trip_world(
+                overmap_buffer.global_state.bandit_live_world );
+    calendar::turn += 1_minutes;
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().shakedown_defender_losses == 3 );
+    CHECK( scene.site().active_hostile_operation.reservation.generation == 4 );
 }

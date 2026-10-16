@@ -216,8 +216,7 @@ bool reserved_local_actor( const bandit_live_world::site_record &site,
         operation.phase != bandit_live_world::hostile_operation_phase::committed_contact ||
         reservation.owner != bandit_live_world::simulation_owner::local ||
         ( operation.operation_kind != bandit_live_world::hostile_operation_kind::raid &&
-          !( operation.operation_kind == bandit_live_world::hostile_operation_kind::shakedown &&
-             site.last_shakedown_outcome == "fight_unresolved" ) ) ) {
+          !bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) ) {
         return false;
     }
     for( const character_id id : reservation.member_ids ) {

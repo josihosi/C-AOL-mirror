@@ -884,7 +884,7 @@ struct active_outing_state {
 };
 
 struct hostile_operation_state {
-    int schema_version = 4;
+    int schema_version = 5;
     hostile_operation_kind operation_kind = hostile_operation_kind::none;
     hostile_operation_phase phase = hostile_operation_phase::assembling;
     active_outing_state reservation;
@@ -914,6 +914,12 @@ struct hostile_operation_state {
     bool shakedown_receiver_is_avatar = false;
     bool shakedown_contact_by_shout = false;
     bool shakedown_waiting_local = false;
+    // Snapshotted living participants at Fight admission, owned by this exact
+    // reservation. Absence is unknown; only authenticated native deaths enter
+    // the receipt set. Legacy aggregate saves intentionally have no roster.
+    int defender_observation_started_minutes = -1;
+    std::vector<character_id> defender_ids;
+    std::vector<character_id> defender_death_ids;
     int site_search_waypoint = 0;
     int site_search_initial_goods_value = -1;
     bool site_search_waypoint_attempted = false;
@@ -1182,8 +1188,6 @@ struct site_record {
         int shakedown_bandit_losses = 0;
         int shakedown_anger = 0;
         int shakedown_caution = 0;
-        int shakedown_basecamp_defenders_at_fight = 0;
-        bool shakedown_basecamp_defender_observation_pending = false;
         bool shakedown_reopen_available = false;
         bool shakedown_reopen_used = false;
         origin_disposition origin = origin_disposition::active_hostile;
@@ -2306,9 +2310,14 @@ shakedown_aftermath_effect apply_shakedown_outcome( site_record &site,
         const shakedown_outcome &outcome );
 bool apply_terminal_hostile_shakedown_aftermath( world_state &state, site_record &site,
         const std::string &expected_activity_id, int expected_generation );
-void begin_shakedown_basecamp_defender_observation( site_record &site, int live_defenders );
+// Supported ongoing Fight outcomes, with the current operation/phase identity.
+bool hostile_shakedown_combat_is_ongoing( const site_record &site );
+bool begin_shakedown_basecamp_defender_observation( site_record &site,
+        const simulation_advance_cursor &expected_cursor,
+        const std::vector<character_id> &defender_ids, int current_minutes );
 shakedown_aftermath_effect apply_shakedown_basecamp_defender_observation( site_record &site,
-        int live_defenders );
+        const simulation_advance_cursor &expected_cursor,
+        const std::vector<character_id> &confirmed_death_ids, int current_minutes );
 bool mark_shakedown_reopen_used( site_record &site );
 enum class hostile_operation_player_relationship {
     none,

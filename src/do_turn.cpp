@@ -1035,16 +1035,24 @@ int live_bandit_current_vehicle_goods_value( const avatar &u )
     return value;
 }
 
-int live_bandit_nearby_basecamp_defender_count( const Character &u )
+std::vector<character_id> live_bandit_basecamp_defender_ids(
+    const bandit_live_world::site_record &site )
 {
-    static constexpr int nearby_defender_radius = 30;
-    int defenders = 0;
-    for( const npc &guy : g->all_npcs() ) {
-        if( !guy.is_player_ally() || guy.is_dead() ||
-            rl_dist( guy.pos_abs(), u.pos_abs() ) > nearby_defender_radius ) {
-            continue;
+    const tripoint_abs_omt target = site.active_hostile_operation.reservation.target_omt;
+    const auto center = project_to<coords::ms>( target ) + point( 12, 12 );
+    std::vector<character_id> defenders;
+    // The existing encounter radius is centered on its target camp. Snapshot
+    // actual living participants, not remote assigned workers or later arrivals.
+    // Movement/unloading after admission never changes these identities.
+    constexpr int encounter_radius = 30;
+    constexpr int submap_radius = ( encounter_radius + SEEX - 1 ) / SEEX;
+    for( const auto &actor : overmap_buffer.get_npcs_near(
+             project_to<coords::sm>( center ), submap_radius ) ) {
+        if( !actor->is_dead() && actor->is_player_ally() &&
+            rl_dist( actor->pos_abs(), center ) <= encounter_radius &&
+            ( !actor->assigned_camp || actor->assigned_camp->xy() == target.xy() ) ) {
+            defenders.push_back( actor->getID() );
         }
-        defenders++;
     }
     return defenders;
 }
@@ -1485,7 +1493,7 @@ bool live_bandit_commit_paid_return( bandit_live_world::site_record &site,
 }
 
 void live_bandit_choose_fight( bandit_live_world::site_record &site,
-                               const bandit_live_world::shakedown_surface &surface, const Character &u )
+                               const bandit_live_world::shakedown_surface &surface, const Character & )
 {
     const bandit_live_world::active_outing_state *outing = site.active_external_outing();
     if( outing == nullptr ) {
@@ -1499,13 +1507,9 @@ void live_bandit_choose_fight( bandit_live_world::site_record &site,
     operation.shakedown_pending_surrendered_value = 0;
     operation.shakedown_pending_reachable_value = surface.reachable_goods_value;
     operation.shakedown_pending_basecamp_scene = surface.includes_basecamp_inventory;
-    if( surface.includes_basecamp_inventory ) {
-        bandit_live_world::begin_shakedown_basecamp_defender_observation( site,
-                live_bandit_nearby_basecamp_defender_count( u ) );
-    }
 
     const std::string summary = string_format( "shakedown_surface fight demanded=%d reachable=%d",
-                                surface.demanded_value, surface.reachable_goods_value );
+        surface.demanded_value, surface.reachable_goods_value );
     DebugLog( D_INFO, DC_ALL ) << summary << '\n';
     for( const character_id &member_id : member_ids ) {
         if( outing->member_is_resolved( member_id ) ) {
@@ -1523,8 +1527,13 @@ void live_bandit_choose_fight( bandit_live_world::site_record &site,
     }
     if( const std::optional<bandit_live_world::simulation_advance_cursor> cursor =
             bandit_live_world::current_external_simulation_cursor( site ) ) {
-        bandit_live_world::begin_matching_hostile_shakedown_combat( site, *cursor,
-                to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ), summary );
+        if( bandit_live_world::begin_matching_hostile_shakedown_combat( site, *cursor,
+            live_bandit_current_minutes(), summary ) && surface.includes_basecamp_inventory ) {
+            if( const auto fight_cursor = bandit_live_world::current_external_simulation_cursor( site ) ) {
+                bandit_live_world::begin_shakedown_basecamp_defender_observation( site, *fight_cursor,
+                    live_bandit_basecamp_defender_ids( site ), live_bandit_current_minutes() );
+            }
+        }
     }
 }
 
@@ -2414,9 +2423,8 @@ bool complete_live_bandit_structural_burned_egress( bandit_live_world::site_reco
            bandit_live_world::fail_live_covert_scout_burned_egress( exposed->npc_id );
 }
 
-bool live_bandit_confirmed_member_death(
-    const bandit_live_world::active_outing_state &reservation,
-    const character_id member_id, const int current_minutes )
+bool live_bandit_confirmed_character_death( const character_id member_id,
+        const int started_minutes, const int current_minutes )
 {
     const shared_ptr_fast<npc> actor = overmap_buffer.find_npc( member_id );
     if( actor ) {
@@ -2434,10 +2442,18 @@ bool live_bandit_confirmed_member_death(
         }
         const int death_minutes = to_minutes<int>( entry.second.last -
                                   calendar::start_of_cataclysm );
-        return death_minutes >= reservation.started_minutes &&
+        return death_minutes >= started_minutes &&
                death_minutes <= current_minutes;
     }
     return false;
+}
+
+bool live_bandit_confirmed_member_death(
+    const bandit_live_world::active_outing_state &reservation,
+    const character_id member_id, const int current_minutes )
+{
+    return live_bandit_confirmed_character_death( member_id, reservation.started_minutes,
+            current_minutes );
 }
 
 bool live_bandit_reconcile_hostile_approach_deaths( bandit_live_world::site_record &site,
@@ -4025,7 +4041,7 @@ bool live_bandit_reconcile_hostile_shakedown_combat( bandit_live_world::site_rec
         bandit_live_world::hostile_operation_kind::shakedown ||
         operation.phase != bandit_live_world::hostile_operation_phase::committed_contact ||
         reservation.owner != bandit_live_world::simulation_owner::local ||
-        site.last_shakedown_outcome != "fight_unresolved" ) {
+        !bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
         return false;
     }
 
@@ -4258,7 +4274,7 @@ bool live_cannibal_raid_advance_site_search( bandit_live_world::site_record &sit
     const bandit_live_world::active_outing_state &outing = operation.reservation;
     const bool fight_shakedown = operation.operation_kind ==
                                  bandit_live_world::hostile_operation_kind::shakedown &&
-                                 site.last_shakedown_outcome == "fight_unresolved";
+                                 bandit_live_world::hostile_shakedown_combat_is_ongoing( site );
     if( ( operation.operation_kind != bandit_live_world::hostile_operation_kind::raid &&
           !fight_shakedown ) ||
         operation.phase != bandit_live_world::hostile_operation_phase::committed_contact ||
@@ -5086,7 +5102,7 @@ bool live_bandit_handle_hostile_shakedown_contact( bandit_live_world::site_recor
     if( !site.last_shakedown_outcome.empty() ) {
         bool changed = live_bandit_reconcile_hostile_shakedown_combat( site );
         outing = site.active_external_outing();
-        if( site.last_shakedown_outcome == "fight_unresolved" &&
+        if( bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) &&
             site.active_hostile_operation.phase ==
             bandit_live_world::hostile_operation_phase::committed_contact && outing != nullptr ) {
             for( const character_id member_id : outing->member_ids ) {
@@ -5100,7 +5116,7 @@ bool live_bandit_handle_hostile_shakedown_contact( bandit_live_world::site_recor
                 }
             }
         }
-        if( site.last_shakedown_outcome == "fight_unresolved" ) {
+        if( bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
             changed |= live_cannibal_raid_advance_site_search( site );
         }
         return changed;
@@ -5122,8 +5138,14 @@ bool live_bandit_handle_hostile_shakedown_contact( bandit_live_world::site_recor
             const std::optional<bandit_live_world::simulation_advance_cursor> cursor =
                 bandit_live_world::current_external_simulation_cursor( site );
             if( cursor ) {
-                bandit_live_world::begin_matching_hostile_shakedown_combat( site, *cursor,
-                        live_bandit_current_minutes(), "player attacked shakedown participant" );
+                if( bandit_live_world::begin_matching_hostile_shakedown_combat( site, *cursor,
+                        live_bandit_current_minutes(), "player attacked shakedown participant" ) ) {
+                    const auto fight_cursor = bandit_live_world::current_external_simulation_cursor( site );
+                    if( fight_cursor ) {
+                        bandit_live_world::begin_shakedown_basecamp_defender_observation( site, *fight_cursor,
+                                live_bandit_basecamp_defender_ids( site ), live_bandit_current_minutes() );
+                    }
+                }
             }
         }
     }
@@ -5181,24 +5203,30 @@ bool live_bandit_handle_hostile_shakedown_contact( bandit_live_world::site_recor
     return false;
 }
 
-bool live_bandit_apply_shakedown_defender_aftermath( bandit_live_world::site_record &site,
-        const avatar &u )
+bool live_bandit_apply_shakedown_defender_aftermath( bandit_live_world::site_record &site )
 {
-    if( site.retired_empty_site || !site.shakedown_basecamp_defender_observation_pending ) {
+    const auto &operation = site.active_hostile_operation;
+    const auto cursor = bandit_live_world::current_external_simulation_cursor( site );
+    if( !cursor || operation.defender_observation_started_minutes < 0 ||
+        !bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
         return false;
     }
-    const int live_defenders = live_bandit_nearby_basecamp_defender_count( u );
-    const bandit_live_world::shakedown_aftermath_effect defender_effect =
-        bandit_live_world::apply_shakedown_basecamp_defender_observation( site, live_defenders );
-    if( !defender_effect.valid ) {
-        return false;
+    std::vector<character_id> confirmed_deaths;
+    for( const character_id id : operation.defender_ids ) {
+        if( live_bandit_confirmed_character_death( id,
+                operation.defender_observation_started_minutes, live_bandit_current_minutes() ) ) {
+            confirmed_deaths.push_back( id );
+        }
     }
-    DebugLog( D_INFO, DC_ALL )
-            << "bandit shakedown aftermath: basecamp defender strength dropped from "
-            << site.shakedown_basecamp_defenders_at_fight << " to " << live_defenders
-            << "; stronger reopen available="
-            << ( site.shakedown_reopen_available ? "yes" : "no" );
-    return true;
+    const auto effect = bandit_live_world::apply_shakedown_basecamp_defender_observation(
+                            site, *cursor, confirmed_deaths, live_bandit_current_minutes() );
+    if( effect.valid ) {
+        DebugLog( D_INFO, DC_ALL ) << "bandit shakedown aftermath: authenticated defender deaths="
+                                   << operation.defender_death_ids.size()
+                                   << " operation=" << operation.reservation.activity_id
+                                   << " generation=" << operation.reservation.generation;
+    }
+    return effect.valid;
 }
 
 bool note_live_bandit_local_turn_sight_avoid()
@@ -6371,7 +6399,7 @@ bool note_live_bandit_aftermath()
                     std::to_string( assault_reservation.generation ) );
         }
         changed |= live_bandit_establish_shakedown_communication( site );
-        changed |= live_bandit_apply_shakedown_defender_aftermath( site, u );
+        changed |= live_bandit_apply_shakedown_defender_aftermath( site );
         bandit_live_world::active_outing_state *external_outing = site.active_external_outing();
         if( external_outing != nullptr && external_outing != &site.active_outing ) {
             if( site.active_hostile_operation.operation_kind ==
@@ -6536,7 +6564,7 @@ bool note_live_bandit_aftermath()
                 } else {
                     observation.summary = "member not currently loaded; awaiting bounded missing grace";
                 }
-                if( site.last_shakedown_outcome == "fight_unresolved" ) {
+                if( bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
                     DebugLog( D_INFO, DC_ALL )
                             << "bandit shakedown aftermath: active member "
                             << member_id.get_value() << " not currently loaded for "
@@ -6552,7 +6580,7 @@ bool note_live_bandit_aftermath()
             if( member_npc->is_dead() ) {
                 observation.state = bandit_live_world::active_member_observation_state::dead;
                 observation.summary = "npc dead";
-                if( site.last_shakedown_outcome == "fight_unresolved" ) {
+                if( bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
                     DebugLog( D_INFO, DC_ALL )
                             << "bandit shakedown aftermath: active member "
                             << member_id.get_value() << " dead during active outing near "
@@ -6597,7 +6625,7 @@ bool note_live_bandit_aftermath()
                        ( member_npc->is_active() || !member_npc->is_travelling() ) ) {
                 observation.state = bandit_live_world::active_member_observation_state::local_contact;
                 observation.summary = "local contact near player target";
-                if( site.last_shakedown_outcome == "fight_unresolved" ) {
+                if( bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
                     DebugLog( D_INFO, DC_ALL )
                             << "bandit shakedown aftermath: active member "
                             << member_id.get_value() << " in local contact at "
@@ -6644,7 +6672,7 @@ bool note_live_bandit_aftermath()
                     observation.summary = "travelling back toward home footprint";
                 } else {
                     observation.summary = "local contact unresolved";
-                    if( site.last_shakedown_outcome == "fight_unresolved" ) {
+                    if( bandit_live_world::hostile_shakedown_combat_is_ongoing( site ) ) {
                         DebugLog( D_INFO, DC_ALL )
                                 << "bandit shakedown aftermath: active member "
                                 << member_id.get_value() << " unresolved at "
