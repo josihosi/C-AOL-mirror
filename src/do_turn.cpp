@@ -1969,6 +1969,15 @@ bool live_bandit_member_routing_burn_egress(
            member_npc.goal == outing.local_handoff.egress_omt;
 }
 
+// The ordinary local handoff adds the v11 return-eligibility receipt without
+// changing the v10 covert-watch behavior. Future outing schemas need an explicit
+// compatibility decision; receipt and cursor validation remain with each owner.
+bool live_bandit_covert_watch_schema_is_supported(
+    const bandit_live_world::active_outing_state &outing )
+{
+    return outing.schema_version == 10 || outing.schema_version == 11;
+}
+
 bool live_bandit_abandon_unreachable_return( character_id member_id );
 bool live_bandit_abort_alternate_watch_reposition( character_id member_id );
 
@@ -2194,7 +2203,8 @@ std::vector<tripoint_abs_omt> live_bandit_member_route_to(
             } );
         };
     }
-    const bool remembered_egress_fallback = site.active_outing.schema_version == 10 &&
+    const bool remembered_egress_fallback = live_bandit_covert_watch_schema_is_supported(
+            site.active_outing ) &&
                                             ( site.active_outing.phase ==
                                                     bandit_live_world::scout_phase::burned_withdrawal ||
                                                     site.active_outing.phase ==
@@ -3346,7 +3356,7 @@ bool live_bandit_abandon_unreachable_return( const character_id member_id )
     bandit_live_world::site_record *owner = nullptr;
     for( bandit_live_world::site_record &site :
          overmap_buffer.global_state.bandit_live_world.sites ) {
-        if( site.active_outing.schema_version != 10 ||
+        if( !live_bandit_covert_watch_schema_is_supported( site.active_outing ) ||
             site.active_outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             site.active_outing.owner != bandit_live_world::simulation_owner::local ||
             ( site.active_outing.phase != bandit_live_world::scout_phase::returning_exposed &&
@@ -3395,7 +3405,7 @@ bool live_bandit_abort_alternate_watch_reposition( const character_id member_id 
          overmap_buffer.global_state.bandit_live_world.sites ) {
         if( site.active_outing.kind !=
             bandit_live_world::outing_kind::structural_sortie ||
-            site.active_outing.schema_version != 10 ||
+            !live_bandit_covert_watch_schema_is_supported( site.active_outing ) ||
             site.active_outing.owner != bandit_live_world::simulation_owner::local ||
             !site.active_outing.alternate_watch_reposition_pending ||
             std::find( site.active_outing.member_ids.begin(),
@@ -5173,7 +5183,8 @@ int burn_live_bandit_covert_scouts()
         []( const tripoint_abs_omt & target_omt ) {
             return overmap_buffer.is_player_camp_omt( target_omt );
         } );
-        if( site.retired_empty_site || !targets_player_camp || outing.schema_version != 10 ||
+        if( site.retired_empty_site || !targets_player_camp ||
+            !live_bandit_covert_watch_schema_is_supported( outing ) ||
             outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             outing.owner != bandit_live_world::simulation_owner::local ||
             outing.phase != bandit_live_world::scout_phase::observing ||
@@ -5799,7 +5810,8 @@ int record_live_bandit_covert_vehicle_wealth_cues()
         []( const tripoint_abs_omt & target_omt ) {
             return overmap_buffer.is_player_camp_omt( target_omt );
         } );
-        if( site.retired_empty_site || !targets_player_camp || outing.schema_version != 10 ||
+        if( site.retired_empty_site || !targets_player_camp ||
+            !live_bandit_covert_watch_schema_is_supported( outing ) ||
             outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             outing.owner != bandit_live_world::simulation_owner::local ||
             outing.phase != bandit_live_world::scout_phase::observing ||
@@ -5916,7 +5928,8 @@ int record_live_bandit_covert_generation_infrastructure_cues()
         []( const tripoint_abs_omt & target_omt ) {
             return overmap_buffer.is_player_camp_omt( target_omt );
         } );
-        if( site.retired_empty_site || !targets_player_camp || outing.schema_version != 10 ||
+        if( site.retired_empty_site || !targets_player_camp ||
+            !live_bandit_covert_watch_schema_is_supported( outing ) ||
             outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             outing.owner != bandit_live_world::simulation_owner::local ||
             outing.phase != bandit_live_world::scout_phase::observing ||
@@ -6052,7 +6065,8 @@ int record_live_bandit_covert_cargo_handling_cues()
         []( const tripoint_abs_omt & target_omt ) {
             return overmap_buffer.is_player_camp_omt( target_omt );
         } );
-        if( site.retired_empty_site || !targets_player_camp || outing.schema_version != 10 ||
+        if( site.retired_empty_site || !targets_player_camp ||
+            !live_bandit_covert_watch_schema_is_supported( outing ) ||
             outing.kind != bandit_live_world::outing_kind::structural_sortie ||
             outing.owner != bandit_live_world::simulation_owner::local ||
             outing.phase != bandit_live_world::scout_phase::observing ||
