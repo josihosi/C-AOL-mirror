@@ -128,10 +128,14 @@ class diagnostic_terminal
             if( owns_imgui ) {
                 ImGui::CreateContext();
             }
-            root.on_redraw( []( ui_adaptor & ) {} );
+            root.emplace();
+            root->on_redraw( []( ui_adaptor & ) {} );
             ui_manager::redraw();
         }
         ~diagnostic_terminal() {
+            // endwin marks remaining adaptors as shutting down; they then
+            // skip deregistration, so retire this reusable fixture's owner first.
+            root.reset();
             if( owns_terminal ) {
                 catacurses::endwin();
             }
@@ -142,7 +146,7 @@ class diagnostic_terminal
     private:
         bool owns_terminal;
         bool owns_imgui;
-        ui_adaptor root;
+        std::optional<ui_adaptor> root;
 };
 struct diagnostic_boundary : std::exception {};
 } // namespace
@@ -543,6 +547,20 @@ TEST_CASE( "batch nested references refuse genuinely missing or foreign ownershi
 }
 
 #if !defined(TILES)
+TEST_CASE( "batch diagnostic terminal teardown retires its redraw owner",
+           "[batch_causal_067][batch_terminal_lifetime_067]" )
+{
+    const bool initializes_terminal = !catacurses::stdscr;
+    std::size_t owners_with_terminal = 0;
+    {
+        diagnostic_terminal terminal;
+        owners_with_terminal = ui_adaptor::ui_stack_size();
+        REQUIRE( owners_with_terminal > 0 );
+    }
+    CAPTURE( initializes_terminal );
+    CHECK( ui_adaptor::ui_stack_size() + 1 == owners_with_terminal );
+}
+
 TEST_CASE( "batch native epilogue Close changes each concrete owner despite equal kind",
            "[batch_causal_067][batch_epilogue_067]" )
 {
