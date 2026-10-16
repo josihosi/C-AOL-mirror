@@ -1,12 +1,18 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cerrno>
+#include <csignal>
 #include <cstdlib>
+#include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "activity_actor_definitions.h"
@@ -24,6 +30,7 @@
 #include "do_turn.h"
 #include "game.h"
 #include "imgui/imgui.h"
+#include "input.h"
 #include "item.h"
 #include "item_location.h"
 #include "json.h"
@@ -49,6 +56,18 @@
 #include "ui_manager.h"
 #include "visitable.h"
 #include "worldfactory.h"
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <pthread.h>
+#endif
+#if !defined(TILES) && !defined(_WIN32)
+extern "C" int ungetch( int );
+extern "C" const char *keyname( int );
+#endif
 
 namespace
 {
@@ -79,7 +98,7 @@ void copy_json_value( JsonOut &out, const JsonValue &value )
         out.write( value.get_float() );
     }
 }
-#if !defined(TILES)
+#if !defined(TILES) || !defined(_WIN32)
 void diagnostic_environment( const std::string &key, const std::optional<std::string> &value )
 {
 #if defined(_WIN32)
@@ -1099,3 +1118,373 @@ TEST_CASE( "batch unseen monster occupancy does not cross walls or floors",
     CHECK_FALSE( attacker.has_effect( efftype_id( "stumbled_into_invisible" ) ) );
     CHECK_FALSE( here.has_field_at( destination, field_type_str_id( "fd_last_known" ) ) );
 }
+
+#if !defined(_WIN32)
+TEST_CASE( "batch adopted wake endpoints do not escape into exec descendants",
+           "[.][batch_wake_exec_067]" )
+{
+    const auto fifo = std::filesystem::temp_directory_path() /
+                      ( "batch-wake-exec-" + std::to_string( ::getpid() ) + ".fifo" );
+    REQUIRE( ::mkfifo( fifo.c_str(), 0600 ) == 0 );
+    int reader = -1;
+    int keeper = -1;
+    on_out_of_scope close_fifo( [&]() {
+        if( reader >= 0 ) {
+            ::close( reader );
+        }
+        if( keeper >= 0 ) {
+            ::close( keeper );
+        }
+        std::filesystem::remove( fifo );
+    } );
+    // High descriptors avoid reuse by the shell's own startup/stdio work.
+    const int original_reader = ::open( fifo.c_str(), O_RDONLY | O_NONBLOCK );
+    REQUIRE( original_reader >= 0 );
+    reader = ::fcntl( original_reader, F_DUPFD, 200 );
+    ::close( original_reader );
+    REQUIRE( reader >= 0 );
+    const int original_keeper = ::open( fifo.c_str(), O_WRONLY | O_NONBLOCK );
+    REQUIRE( original_keeper >= 0 );
+    keeper = ::fcntl( original_keeper, F_DUPFD, 200 );
+    ::close( original_keeper );
+    REQUIRE( keeper >= 0 );
+    REQUIRE( ( ::fcntl( reader, F_GETFD ) & FD_CLOEXEC ) == 0 );
+    REQUIRE( ( ::fcntl( keeper, F_GETFD ) & FD_CLOEXEC ) == 0 );
+    const std::string read_key = "OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD";
+    const std::string keeper_key = "OPENCLAW_HARNESS_SEMANTIC_WAKE_KEEPER_FD";
+    const auto saved = []( const std::string & key ) -> std::optional<std::string> {
+        const char *value = std::getenv( key.c_str() );
+        return value ? std::optional<std::string>( value ) : std::nullopt;
+    };
+    const auto old_read = saved( read_key );
+    const auto old_keeper = saved( keeper_key );
+    on_out_of_scope restore_environment( [&]() {
+        diagnostic_environment( read_key, old_read );
+        diagnostic_environment( keeper_key, old_keeper );
+    } );
+    diagnostic_environment( read_key, std::to_string( reader ) );
+    diagnostic_environment( keeper_key, std::to_string( keeper ) );
+    // The shared main entrypoint adopts these before Tiles/terminal dispatch
+    // or game/LLM construction; no renderer or input context is needed.
+    prevent_semantic_wake_descriptor_inheritance();
+    CHECK( ( ::fcntl( reader, F_GETFD ) & FD_CLOEXEC ) != 0 );
+    CHECK( ( ::fcntl( keeper, F_GETFD ) & FD_CLOEXEC ) != 0 );
+    REQUIRE( ::write( keeper, "w", 1 ) == 1 );
+    char byte;
+    REQUIRE( ::read( reader, &byte, 1 ) == 1 );
+
+    int replies[2];
+    int commands[2];
+    REQUIRE( ::pipe( replies ) == 0 );
+    on_out_of_scope close_replies( [&]() {
+        ::close( replies[0] );
+        ::close( replies[1] );
+    } );
+    REQUIRE( ::pipe( commands ) == 0 );
+    on_out_of_scope close_commands( [&]() {
+        ::close( commands[0] );
+        ::close( commands[1] );
+    } );
+    const std::string command = "test ! -e /dev/fd/" + std::to_string( reader ) +
+                                " && test ! -e /dev/fd/" + std::to_string( keeper ) +
+                                " || exit 1; printf r; read -r done";
+    const pid_t child = ::fork();
+    REQUIRE( child >= 0 );
+    if( child == 0 ) {
+        ::dup2( commands[0], STDIN_FILENO );
+        ::dup2( replies[1], STDOUT_FILENO );
+        ::close( commands[0] );
+        ::close( commands[1] );
+        ::close( replies[0] );
+        ::close( replies[1] );
+        ::execl( "/bin/sh", "sh", "-c", command.c_str(), static_cast<char *>( nullptr ) );
+        ::_exit( 127 );
+    }
+    ::close( commands[0] );
+    commands[0] = -1;
+    ::close( replies[1] );
+    replies[1] = -1;
+    int status = 0;
+    on_out_of_scope reap( [&]() {
+        ::close( commands[1] );
+        commands[1] = -1;
+        ::waitpid( child, &status, 0 );
+    } );
+    REQUIRE( ::read( replies[0], &byte, 1 ) == 1 );
+    REQUIRE( byte == 'r' );
+    // The exec descendant is still alive, but cannot keep either endpoint
+    // alive after the game's own copies close (including abnormal game exit).
+    REQUIRE( ::write( keeper, "w", 1 ) == 1 );
+    REQUIRE( ::read( reader, &byte, 1 ) == 1 );
+    ::close( reader );
+    reader = -1;
+    ::close( keeper );
+    keeper = -1;
+    errno = 0;
+    const int producer = ::open( fifo.c_str(), O_WRONLY | O_NONBLOCK );
+    const int open_error = errno;
+    if( producer >= 0 ) {
+        ::close( producer );
+    }
+    CHECK( producer == -1 );
+    CHECK( open_error == ENXIO );
+    REQUIRE( ::write( commands[1], "done\n", 5 ) == 5 );
+    REQUIRE( ::waitpid( child, &status, 0 ) == child );
+    CHECK( WIFEXITED( status ) );
+    CHECK( WEXITSTATUS( status ) == 0 );
+}
+
+#endif
+
+#if !defined(TILES) && !defined(_WIN32)
+namespace
+{
+volatile std::sig_atomic_t wake_test_interrupts = 0;
+void wake_test_interrupt( int )
+{
+    ++wake_test_interrupts;
+}
+} // namespace
+
+
+TEST_CASE( "batch inert semantic wake returns to native wait rather than any input",
+           "[.][batch_inert_wake_067]" )
+{
+    const std::string mode = GENERATE( std::string( "open" ), std::string( "repeated" ),
+                                       std::string( "physical" ), std::string( "closed" ),
+                                       std::string( "fifo_reopen" ), std::string( "invalidated" ),
+                                       std::string( "resize" ), std::string( "interrupted" ),
+                                       std::string( "fifo_delayed" ) );
+    diagnostic_terminal terminal;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    const int old_timeout = inp_mngr.get_timeout();
+    on_out_of_scope restore_timeout( [&]() {
+        inp_mngr.set_timeout( old_timeout );
+    } );
+    // A live, empty stdin pipe prevents the test runner's EOF from disguising
+    // a wake as a physical input. Only the physical arm writes a native key.
+    int native[2];
+    REQUIRE( ::pipe( native ) == 0 );
+    const int saved_stdin = ::dup( STDIN_FILENO );
+    REQUIRE( saved_stdin >= 0 );
+    on_out_of_scope restore_stdin( [&]() {
+        ::dup2( saved_stdin, STDIN_FILENO );
+        ::close( saved_stdin );
+        ::close( native[0] );
+        ::close( native[1] );
+        std::clearerr( stdin );
+    } );
+    REQUIRE( ::dup2( native[0], STDIN_FILENO ) == STDIN_FILENO );
+    int wake[2];
+    REQUIRE( ::pipe( wake ) == 0 );
+    std::filesystem::path fifo;
+    on_out_of_scope close_wake( [&]() {
+        if( wake[0] >= 0 ) {
+            ::close( wake[0] );
+        }
+        if( wake[1] >= 0 ) {
+            ::close( wake[1] );
+        }
+        if( !fifo.empty() ) {
+            std::filesystem::remove( fifo );
+        }
+    } );
+    if( mode == "fifo_reopen" || mode == "fifo_delayed" ) {
+        ::close( wake[0] );
+        ::close( wake[1] );
+        wake[0] = wake[1] = -1;
+        fifo = std::filesystem::temp_directory_path() /
+               ( "batch-wake-" + std::to_string( ::getpid() ) + ".fifo" );
+        REQUIRE( ::mkfifo( fifo.c_str(), 0600 ) == 0 );
+        wake[0] = ::open( fifo.c_str(), O_RDONLY | O_NONBLOCK );
+        REQUIRE( wake[0] >= 0 );
+        // Same lifetime contract as the launcher: the child retains this
+        // endpoint while each actual producer opens, writes and closes its own.
+        wake[1] = ::open( fifo.c_str(), O_WRONLY | O_NONBLOCK );
+        REQUIRE( wake[1] >= 0 );
+    }
+    const std::string key = "OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD";
+    const char *previous = std::getenv( key.c_str() );
+    const std::optional<std::string> previous_value = previous ?
+            std::optional<std::string>( previous ) : std::nullopt;
+    on_out_of_scope restore_environment( [&]() {
+        diagnostic_environment( key, previous_value );
+    } );
+    diagnostic_environment( key, std::to_string( wake[0] ) );
+    semantic_surface_manager manager( "inert-wake-control" );
+    semantic_surface_manager_session session( manager );
+    int accepted = 0;
+    semantic_surface_scope world( manager, "world", "World", {},
+    { { "world.pause", "", "Pause", true } }, [&]( const semantic_action_request & ) {
+        ++accepted;
+        return semantic_action_dispatch_result{ true, "", "" };
+    } );
+    REQUIRE( manager.top() );
+    const auto owner = *manager.top();
+    input_context context( "DEFAULTMODE" );
+    context.register_action( "ANY_INPUT" );
+    const auto write_wake = [&]() {
+        if( fifo.empty() ) {
+            REQUIRE( ::write( wake[1], "w", 1 ) == 1 );
+        } else {
+            const int producer = ::open( fifo.c_str(), O_WRONLY | O_NONBLOCK );
+            REQUIRE( producer >= 0 );
+            const ssize_t written = ::write( producer, "w", 1 );
+            ::close( producer );
+            REQUIRE( written == 1 );
+        }
+    };
+    if( mode == "closed" ) {
+        ::close( wake[1] );
+        wake[1] = -1;
+        CHECK_THROWS_WITH( context.handle_input( 125 ), "semantic wake pipe closed" );
+        CHECK( accepted == 0 );
+        return;
+    }
+    if( mode == "invalidated" ) {
+        CHECK( context.handle_input( 1 ) == "TIMEOUT" );
+        // Prime the source, then invalidate its exact descriptor: a real
+        // select error is reported, not converted to input or a lost-wake mode.
+        const int invalid = wake[0];
+        ::close( invalid );
+        wake[0] = -1;
+        CHECK_THROWS_WITH( context.handle_input( 125 ),
+                           Catch::Matchers::Contains( "native input/wake select failed:" ) );
+        return;
+    }
+    write_wake();
+    if( mode == "fifo_delayed" ) {
+        const auto request_path = fifo.string() + ".jsonl";
+        const std::string path_key = "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH";
+        const char *old_path = std::getenv( path_key.c_str() );
+        const std::optional<std::string> saved_path = old_path ?
+                std::optional<std::string>( old_path ) : std::nullopt;
+        on_out_of_scope restore_path( [&]() {
+            diagnostic_environment( path_key, saved_path );
+            std::filesystem::remove( request_path );
+        } );
+        diagnostic_environment( path_key, request_path );
+        // The first inert wake is already queued. Only after native waiting
+        // begins does an independent producer publish and reopen its writer.
+        const std::string record = "{\"run_id\":\"" + manager.run_id() +
+                                   "\",\"surface_id\":\"" + owner.surface_id +
+                                   "\",\"frame_id\":\"" + owner.frame_id +
+                                   "\",\"request_id\":\"delayed-pause\",\"action_id\":\"world.pause\"}\n";
+        std::atomic<bool> delivered{ false };
+        std::thread producer( [&]() {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 25 ) );
+            std::ofstream stream( request_path, std::ios::binary );
+            stream << record;
+            stream.close();
+            if( !stream.fail() ) {
+                const int writer = ::open( fifo.c_str(), O_WRONLY | O_NONBLOCK );
+                if( writer >= 0 ) {
+                    delivered = ::write( writer, "w", 1 ) == 1;
+                    ::close( writer );
+                }
+            }
+        } );
+        on_out_of_scope join_producer( [&]() {
+            if( producer.joinable() ) {
+                producer.join();
+            }
+        } );
+        CHECK( context.handle_input( 500 ) != "TIMEOUT" );
+        producer.join();
+        CHECK( delivered.load() );
+        CHECK( accepted == 1 );
+        CHECK( context.handle_input( 5 ) == "TIMEOUT" );
+        CHECK( accepted == 1 );
+        return;
+    }
+    if( mode == "physical" || mode == "resize" ) {
+        // Ncurses owns a separate input queue. As in native menu controls,
+        // inject its key there; the pipe supplies simultaneous fd readiness.
+        REQUIRE( ::ungetch( 'x' ) != -1 );
+        if( mode == "resize" ) {
+            // The game headers own a global clear enum, so importing the
+            // curses header here conflicts with its clear() declaration.
+            // Resolve the actual native key by name instead of hardcoding a
+            // platform-specific KEY_RESIZE number.
+            int resize = -1;
+            for( int keycode = 0; keycode < 1024; ++keycode ) {
+                const char *name = ::keyname( keycode );
+                if( name && std::string( name ) == "KEY_RESIZE" ) {
+                    resize = keycode;
+                    break;
+                }
+            }
+            REQUIRE( resize >= 0 );
+            REQUIRE( ::ungetch( resize ) != -1 );
+        }
+        REQUIRE( ::write( native[1], "x", 1 ) == 1 );
+        CHECK( context.handle_input( 125 ) == "ANY_INPUT" );
+        CHECK( context.get_raw_input().get_first_input() == 'x' );
+    } else {
+        std::atomic<bool> stop{ false };
+        struct sigaction previous_signal {};
+        if( mode == "interrupted" ) {
+            struct sigaction signal {};
+            signal.sa_handler = wake_test_interrupt;
+            sigemptyset( &signal.sa_mask );
+            REQUIRE( ::sigaction( SIGUSR1, &signal, &previous_signal ) == 0 );
+            wake_test_interrupts = 0;
+        }
+        on_out_of_scope restore_signal( [&]() {
+            if( mode == "interrupted" ) {
+                ::sigaction( SIGUSR1, &previous_signal, nullptr );
+            }
+        } );
+        std::thread writer;
+        if( mode == "repeated" ) {
+            writer = std::thread( [&]() {
+                for( int n = 0; n < 80 && !stop.load(); ++n ) {
+                    ::write( wake[1], "w", 1 );
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 5 ) );
+                }
+            } );
+        }
+        if( mode == "interrupted" ) {
+            const pthread_t waiting_thread = pthread_self();
+            writer = std::thread( [ &, waiting_thread]() {
+                for( int n = 0; n < 4 && !stop.load(); ++n ) {
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+                    pthread_kill( waiting_thread, SIGUSR1 );
+                }
+            } );
+        }
+        on_out_of_scope stop_writer( [&]() {
+            stop = true;
+            if( writer.joinable() ) {
+                writer.join();
+            }
+        } );
+        const auto begin = std::chrono::steady_clock::now();
+        const std::string result = context.handle_input( 125 );
+        const auto elapsed = std::chrono::steady_clock::now() - begin;
+        CAPTURE( mode, result, std::chrono::duration_cast<std::chrono::milliseconds>( elapsed ).count() );
+        CHECK( result == "TIMEOUT" );
+        CHECK( elapsed >= std::chrono::milliseconds( 100 ) );
+        CHECK( elapsed < std::chrono::milliseconds( 300 ) );
+        if( mode == "interrupted" ) {
+            CHECK( wake_test_interrupts > 0 );
+        }
+    }
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->surface_id == owner.surface_id );
+    CHECK( manager.top()->frame_id == owner.frame_id );
+    CHECK( accepted == 0 );
+    // After the inert wake, the same input context still receives a later
+    // authenticated request. Reopened FIFO producers must continue to wake it.
+    REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                       "pause-once", "world.pause", std::nullopt, {} } ) );
+    write_wake();
+    CHECK( context.handle_input( 125 ) != "ANY_INPUT" );
+    CHECK( accepted == 1 );
+    REQUIRE_FALSE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
+                                           "pause-once", "world.pause", std::nullopt, {} } ) );
+    CHECK( context.handle_input( 5 ) == "TIMEOUT" );
+    CHECK( accepted == 1 );
+}
+#endif

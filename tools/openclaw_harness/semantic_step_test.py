@@ -7,6 +7,8 @@ import inspect
 import hashlib
 import json
 import os
+import select
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -50,14 +52,93 @@ class SemanticStepChannelTest(unittest.TestCase):
             root = Path(temp)
             read_fd, write_fd, environment = startup_harness.open_semantic_wake_pipe(root, self.run_id)
             try:
-                self.assertTrue(environment["OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD"].isdigit())
+                self.assertEqual(environment["OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD"], str(read_fd))
+                self.assertEqual(environment["OPENCLAW_HARNESS_SEMANTIC_WAKE_KEEPER_FD"], str(write_fd))
                 self.assertFalse(os.get_blocking(read_fd))
                 self.assertEqual(startup_harness.semantic_wake_pipe_contract(root, self.run_id)["status"], "bound")
-                self.assertEqual(write_fd, -1)  # Named FIFO writers are opened per submission.
+                self.assertGreaterEqual(write_fd, 0)  # Child owns the lifetime writer.
+                self.assertEqual(startup_harness.write_semantic_wake_pipe(root, self.run_id), 1)
+                self.assertEqual(os.read(read_fd, 1), b"w")
+                with self.assertRaises(BlockingIOError):
+                    os.read(read_fd, 1)  # EAGAIN, never EOF after producer close.
+                self.assertFalse(select.select([read_fd], [], [], 0)[0])
                 self.assertEqual(startup_harness.write_semantic_wake_pipe(root, self.run_id), 1)
                 self.assertEqual(os.read(read_fd, 1), b"w")
             finally:
                 os.close(read_fd)
+                os.close(write_fd)
+
+    def test_wake_fifo_endpoints_follow_child_after_launcher_copies_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            reader, keeper, _ = startup_harness.open_semantic_wake_pipe(root, self.run_id)
+            code = """import os,sys,select
+rd,wr=map(int,sys.argv[1:])
+print('ready',flush=True)
+for n in range(2):
+    assert select.select([rd],[],[],2)[0], 'wake not delivered'
+    assert os.read(rd,1)==b'w'
+    try:
+        os.read(rd,1)
+    except BlockingIOError:
+        pass
+    else:
+        raise AssertionError('closed per-request writer caused EOF')
+    print('drained',flush=True)
+assert not select.select([rd],[],[],.025)[0]
+os.close(rd);os.close(wr)
+"""
+            child = subprocess.Popen([sys.executable, "-c", code, str(reader), str(keeper)],
+                                     pass_fds=(reader, keeper), stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            os.close(reader)
+            os.close(keeper)
+            try:
+                for expected in ("ready", "drained"):
+                    self.assertTrue(select.select([child.stdout], [], [], 3)[0])
+                    self.assertEqual(child.stdout.readline().strip(), expected)
+                    self.assertEqual(startup_harness.write_semantic_wake_pipe(root, self.run_id), 1)
+                stdout, stderr = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, stderr)
+                self.assertEqual(stdout.strip(), "drained")
+                with self.assertRaises(OSError):
+                    startup_harness.write_semantic_wake_pipe(root, self.run_id)
+            finally:
+                if child.poll() is None:
+                    child.kill()  # Only this isolated helper, never a game.
+                    child.communicate()
+
+    def test_launch_passes_both_wake_endpoints_and_closes_launcher_copies(self) -> None:
+        real_open = startup_harness.open_semantic_wake_pipe
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                descriptors = []
+                def opened(*args):
+                    result = real_open(*args)
+                    descriptors.extend(result[:2])
+                    return result
+                with patch.object(startup_harness, "should_use_curses_terminal", return_value=False), \
+                        patch.object(startup_harness, "current_owner", return_value=None), \
+                        patch.object(startup_harness, "open_semantic_wake_pipe", side_effect=opened), \
+                        patch.object(startup_harness, "record_bridge_game_process"), \
+                        patch.object(startup_harness.threading, "Thread"), \
+                        patch.object(startup_harness.subprocess, "Popen") as launch:
+                    if failure:
+                        launch.side_effect = RuntimeError("isolated launch failure")
+                        with self.assertRaisesRegex(RuntimeError, "isolated launch failure"):
+                            startup_harness.launch_game("wake-fixture", "TestSetup00", root,
+                                                        executable="/bin/cataclysm")
+                    else:
+                        launch.return_value.pid = None
+                        startup_harness.launch_game("wake-fixture", "TestSetup00", root,
+                                                    executable="/bin/cataclysm")
+                        for stream in ("stdout", "stderr"):
+                            launch.call_args.kwargs[stream].close()
+                    self.assertEqual(launch.call_args.kwargs["pass_fds"], tuple(descriptors))
+                    for fd in descriptors:
+                        with self.assertRaises(OSError):
+                            os.fstat(fd)
 
     def test_adaptive_session_identity_generates_when_no_supervisor_value_exists(self) -> None:
         with patch.dict("os.environ", {"OPENCLAW_ADAPTIVE_SESSION_ID": ""}):

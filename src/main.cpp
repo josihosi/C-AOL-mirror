@@ -58,6 +58,7 @@
 #include "output.h"
 #include "path_info.h"
 #include "rng.h"
+#include "semantic_surface.h"
 #include "system_locale.h"
 #include "translations.h"
 #include "type_id.h"
@@ -687,6 +688,15 @@ int main( int argc, const char *argv[] )
 #endif
 
     cata::init_allocator();
+
+    // Both Tiles and terminal launches inherit the same run-owned wake pair.
+    // Adopt it before renderer dispatch or any game/worker construction.
+    try {
+        prevent_semantic_wake_descriptor_inheritance();
+    } catch( const std::exception &err ) {
+        std::cerr << "Error adopting native wake descriptors: " << err.what() << std::endl;
+        return 1;
+    }
 
     ordered_static_globals();
     init_crash_handlers();

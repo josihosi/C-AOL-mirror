@@ -26,6 +26,7 @@
 
 #include <cstddef>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -64,6 +65,7 @@ std::unique_ptr<cataimgui::client> imclient;
 namespace
 {
 #if !defined(_WIN32)
+
 class semantic_wake_source
 {
     public:
@@ -93,10 +95,25 @@ class semantic_wake_source
             return fd_;
         }
 
-        void drain() const {
+        bool drain() const {
             char buffer[64];
-            while( read( fd_, buffer, sizeof( buffer ) ) > 0 ) {
+            // Bound each drain so a stream of inert wakes cannot postpone a
+            // native input timeout indefinitely. A wake carries no action.
+            const ssize_t count = read( fd_, buffer, sizeof( buffer ) );
+            if( count > 0 ) {
+                return true;
             }
+            if( count == 0 ) {
+                throw std::runtime_error( "semantic wake pipe closed" );
+            }
+            if( errno == EINTR ) {
+                return false;
+            }
+            if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+                return false;
+            }
+            throw std::runtime_error( std::string( "semantic wake read failed: " ) +
+                                      std::strerror( errno ) );
         }
 
     private:
@@ -116,6 +133,7 @@ enum class curses_wait_result {
     use_curses_input,
     input_ready,
     semantic_wake,
+    retry,
     timed_out,
 };
 
@@ -144,16 +162,18 @@ curses_wait_result wait_for_curses_input_or_semantic_wake( const int timeout_ms 
     if( console_input == INVALID_HANDLE_VALUE ) {
         throw std::runtime_error( "native terminal console input handle unavailable" );
     }
-    const HANDLE handles[] = { wake_handle, console_input };
+    // Lowest ready index wins. As on POSIX, service an already-ready native
+    // key before another inert wake; the native path still polls requests.
+    const HANDLE handles[] = { console_input, wake_handle };
     const DWORD timeout = timeout_ms < 0 ? INFINITE : static_cast<DWORD>( timeout_ms );
     const DWORD result = WaitForMultipleObjects( 2, handles, FALSE, timeout );
-    if( result == WAIT_OBJECT_0 ) {
+    if( result == WAIT_OBJECT_0 + 1 ) {
         return curses_wait_result::semantic_wake;
     }
     if( result == WAIT_TIMEOUT ) {
         return curses_wait_result::timed_out;
     }
-    if( result != WAIT_OBJECT_0 + 1 ) {
+    if( result != WAIT_OBJECT_0 ) {
         throw std::runtime_error( "native terminal input/wake wait failed" );
     }
     return curses_wait_result::input_ready;
@@ -181,11 +201,19 @@ curses_wait_result wait_for_curses_input_or_semantic_wake( const int timeout_ms 
     if( selected == 0 ) {
         return curses_wait_result::timed_out;
     }
-    if( selected > 0 && FD_ISSET( wake_fd, &readable ) ) {
-        wake_source.drain();
-        return curses_wait_result::semantic_wake;
+    if( selected < 0 ) {
+        if( errno == EINTR ) {
+            return curses_wait_result::retry;
+        }
+        throw std::runtime_error( std::string( "native input/wake select failed: " ) +
+                                  std::strerror( errno ) );
     }
-    return curses_wait_result::input_ready;
+    // Do not let a busy wake writer starve a physical key. The native input
+    // path also polls durable semantic requests before returning its event.
+    if( FD_ISSET( STDIN_FILENO, &readable ) ) {
+        return curses_wait_result::input_ready;
+    }
+    return wake_source.drain() ? curses_wait_result::semantic_wake : curses_wait_result::retry;
 #endif
 }
 } // namespace
@@ -570,11 +598,29 @@ input_event input_manager::get_input_event( const keyboard_mode /*preferred_keyb
 
     int key = ERR;
     input_event rval;
-    do {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds( input_timeout < 0 ? 0 : input_timeout );
+    bool first_wait = true;
+    while( true ) {
         previously_pressed_key = 0;
         // flush any output
         catacurses::doupdate();
-        const curses_wait_result wait_result = wait_for_curses_input_or_semantic_wake( input_timeout );
+        // Inert wakes and interrupted waits share this one native timeout
+        // budget; restarting the full timeout on each retry can starve idle UI.
+        const auto now = std::chrono::steady_clock::now();
+        const bool expired = !first_wait && input_timeout >= 0 && now >= deadline;
+        int remaining = input_timeout;
+        if( input_timeout > 0 && !expired ) {
+            const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          deadline - now ).count();
+            remaining = milliseconds > 0 ? static_cast<int>( milliseconds ) : 1;
+        }
+        first_wait = false;
+        const curses_wait_result wait_result = expired ? curses_wait_result::timed_out :
+                                               wait_for_curses_input_or_semantic_wake( remaining );
+        if( wait_result == curses_wait_result::retry ) {
+            continue;
+        }
         if( wait_result == curses_wait_result::semantic_wake ) {
             bool request_polled = poll_active_semantic_surface_request();
             // The request file is durable before the harness writes the wake
@@ -701,9 +747,10 @@ input_event input_manager::get_input_event( const keyboard_mode /*preferred_keyb
             rval.add_input( key );
         }
         imclient->process_input( &rval );
-    } while( key == KEY_RESIZE );
-
-    return rval;
+        if( key != KEY_RESIZE ) {
+            return rval;
+        }
+    }
 }
 
 void input_manager::set_timeout( const int delay )

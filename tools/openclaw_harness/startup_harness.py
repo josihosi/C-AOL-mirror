@@ -23457,21 +23457,34 @@ def open_semantic_wake_pipe(run_dir: Path, run_id: str) -> Tuple[int, int, Dict[
         raise RuntimeError("semantic wake FIFO already exists for this run")
     os.mkfifo(wake_path, 0o600)
     read_fd = os.open(wake_path, os.O_RDONLY | os.O_NONBLOCK)
-    os.set_inheritable(read_fd, True)
-    contract = {
-        "schema": "caol-semantic-wake-pipe-v2",
-        "transport": "named_fifo",
-        "run_id": run_id,
-        "read_descriptor": "inherited_nonblocking_read_fd",
-        "writer_owner": "worker_session",
-        "writer_endpoint": str(wake_path.resolve()),
-    }
-    path = semantic_wake_pipe_contract_path(run_dir)
-    with path.open("w", encoding="utf-8") as stream:
-        stream.write(json.dumps(contract, ensure_ascii=False, separators=(",", ":")) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    return read_fd, -1, {"OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD": str(read_fd)}
+    write_fd = -1
+    try:
+        # The game inherits both endpoints. Keep a writer alive until the game
+        # exits so closing a per-request writer cannot leave a readable EOF.
+        write_fd = os.open(wake_path, os.O_WRONLY | os.O_NONBLOCK)
+        os.set_inheritable(read_fd, True)
+        contract = {
+            "schema": "caol-semantic-wake-pipe-v2",
+            "transport": "named_fifo",
+            "run_id": run_id,
+            "read_descriptor": "inherited_nonblocking_read_fd",
+            "writer_owner": "worker_session",
+            "writer_endpoint": str(wake_path.resolve()),
+        }
+        path = semantic_wake_pipe_contract_path(run_dir)
+        with path.open("w", encoding="utf-8") as stream:
+            stream.write(json.dumps(contract, ensure_ascii=False, separators=(",", ":")) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        return read_fd, write_fd, {
+            "OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD": str(read_fd),
+            "OPENCLAW_HARNESS_SEMANTIC_WAKE_KEEPER_FD": str(write_fd),
+        }
+    except BaseException:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+        raise
 
 
 def semantic_wake_pipe_contract(run_dir: Path, run_id: str) -> Dict[str, Any]:
@@ -24040,7 +24053,7 @@ def launch_game(
                 cmd, cwd=str(repo_root()), stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
                 text=False, env=env, start_new_session=True,
                 preexec_fn=CursesTerminalTransport.make_controlling_terminal,
-                pass_fds=(read_fd, *inherited_lease),
+                pass_fds=(read_fd, write_fd, *inherited_lease),
             )
             process._openclaw_launch_term = env["TERM"]
             generation = stable_terminal_process_generation(process.pid) if isinstance(process.pid, int) else {}
@@ -24060,6 +24073,7 @@ def launch_game(
         finally:
             os.close(slave_fd)
         os.close(read_fd)
+        os.close(write_fd)
         wake_key = (str(run_dir.resolve()), binding["run_id"])
         append_semantic_wake_observation(run_dir, {
             "schema": "caol-semantic-wake-observation-v1",
@@ -24106,7 +24120,7 @@ def launch_game(
     # command returns.  Give Tiles the same independent session ownership as
     # the PTY route so launcher teardown cannot turn a live semantic request
     # into ESRCH.
-    wake_fds = {"pass_fds": (read_fd, *inherited_lease)} if read_fd >= 0 else {}
+    wake_fds = {"pass_fds": (read_fd, write_fd, *inherited_lease)} if read_fd >= 0 else {}
     try:
         if lease is not None:
             lease.begin_launch()
@@ -24133,6 +24147,8 @@ def launch_game(
         raise
     if read_fd >= 0:
         os.close(read_fd)
+    if write_fd >= 0:
+        os.close(write_fd)
     wake_key = (str(run_dir.resolve()), binding["run_id"])
     append_semantic_wake_observation(run_dir, {
         "schema": "caol-semantic-wake-observation-v1",

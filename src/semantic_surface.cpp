@@ -9,9 +9,15 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#endif
 
 #include "debug.h"
 #include "filesystem.h"
@@ -383,6 +389,35 @@ bool write_native_event( const std::string &event, native_record_format format )
 }
 
 } // namespace
+
+void prevent_semantic_wake_descriptor_inheritance()
+{
+#if !defined(_WIN32)
+    // pass_fds makes these inheritable for launcher -> game exec only. Keep
+    // both endpoints alive in the game, not in later LLM/other exec children.
+    for( const char *key : {
+             "OPENCLAW_HARNESS_SEMANTIC_WAKE_READ_FD",
+             "OPENCLAW_HARNESS_SEMANTIC_WAKE_KEEPER_FD"
+         } ) {
+        const char *descriptor = std::getenv( key );
+        if( descriptor == nullptr ) {
+            continue;
+        }
+        char *end = nullptr;
+        errno = 0;
+        const long parsed = std::strtol( descriptor, &end, 10 );
+        if( errno != 0 || end == descriptor || *end != '\0' || parsed < 0 ||
+            parsed > std::numeric_limits<int>::max() ) {
+            throw std::runtime_error( "invalid inherited semantic wake descriptor" );
+        }
+        const int fd = static_cast<int>( parsed );
+        const int flags = fcntl( fd, F_GETFD );
+        if( flags < 0 || fcntl( fd, F_SETFD, flags | FD_CLOEXEC ) != 0 ) {
+            throw std::runtime_error( "cannot prevent semantic wake descriptor inheritance" );
+        }
+    }
+#endif
+}
 
 bool write_native_semantic_event( const std::string &event )
 {

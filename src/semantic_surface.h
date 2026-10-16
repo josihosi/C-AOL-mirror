@@ -17,6 +17,11 @@ struct semantic_action_descriptor {
     bool enabled = true;
 };
 
+// Adopt launcher-inherited POSIX wake endpoints before any renderer/worker
+// startup: retain them in the game, but not in later exec descendants.
+// Native Windows uses a noninheritable named-event handle instead.
+void prevent_semantic_wake_descriptor_inheritance();
+
 // One run-owned journal shared by native input, turn and encounter producers.
 // Diagnostic history is disposable; current input/receipt records are lossless.
 bool write_native_semantic_event( const std::string &event );
