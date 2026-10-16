@@ -31,6 +31,8 @@
 #include "map.h"
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
+#include "monster.h"
+#include "mtype.h"
 #include "npc.h"
 #include "npctrade.h"
 #include "options.h"
@@ -921,4 +923,179 @@ TEST_CASE( "batch repeated options initialization retains grouped interface defi
               << " region_after=" << local.has_option( "DEFAULT_REGION" )
               << " duplicate_group=" << ( messages.find( "already exists" ) != std::string::npos ) << '\n';
     CHECK( local.has_option( "ITEM_HEALTH" ) );
+}
+
+TEST_CASE( "batch invisible monster collision preserves melee sight admission",
+           "[batch_causal_067][batch_monster_sight_guard_067]" )
+{
+    clear_map();
+    clear_avatar();
+    const time_point previous_turn = calendar::turn;
+    on_out_of_scope restore_turn( [previous_turn]() {
+        calendar::turn = previous_turn;
+    } );
+    calendar::turn = calendar::turn_zero + 12_hours;
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+    monster &attacker = spawn_test_monster( "mon_zombie_scientist",
+                                            tripoint_bub_ms( 65, 65, 0 ) );
+    const bool invisible = GENERATE( true, false );
+    monster &target = spawn_test_monster( invisible ? "mon_star_vampire" : "mon_dog",
+                                          tripoint_bub_ms( 66, 65, 0 ) );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    CAPTURE( invisible, attacker.pos_abs(), target.pos_abs() );
+    REQUIRE( attacker.pos_abs().z() == target.pos_abs().z() );
+    REQUIRE( attacker.is_adjacent( &target, true ) );
+    REQUIRE( attacker.attitude_to( target ) == Creature::Attitude::HOSTILE );
+    REQUIRE( attacker.sees( here, target ) == !invisible );
+    const int original_hp = target.get_hp();
+    for( int attempt = 0; attempt < 2; ++attempt ) {
+        attacker.set_moves( 200 );
+        bool attacked = false;
+        const std::string warning = capture_debugmsg_during( [&]() {
+            attacked = attacker.attack_at( target.pos_bub() );
+        } );
+        CAPTURE( attempt, warning );
+        CHECK( attacked == !invisible );
+        CHECK( ( attacker.get_moves() < 200 ) == !invisible );
+        CHECK( warning.empty() );
+        if( invisible ) {
+            CHECK( target.get_hp() == original_hp );
+        }
+    }
+}
+
+TEST_CASE( "batch unseen occupied movement step recovers after ordinary target departure",
+           "[batch_causal_067][batch_monster_sight_guard_067]" )
+{
+    clear_map();
+    clear_avatar();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+    monster &attacker = spawn_test_monster( "mon_zombie_scientist",
+                                            tripoint_bub_ms( 65, 65, 0 ) );
+    monster &target = spawn_test_monster( "mon_star_vampire",
+                                          tripoint_bub_ms( 66, 65, 0 ) );
+    const tripoint_bub_ms occupied = target.pos_bub();
+    REQUIRE_FALSE( attacker.sees( here, target ) );
+    const int hp_before = target.get_hp();
+    attacker.set_dest( target.pos_abs() );
+    attacker.set_moves( 200 );
+    const std::string warning = capture_debugmsg_during( [&]() {
+        attacker.move();
+    } );
+    CAPTURE( warning, attacker.pos_abs(), target.pos_abs(), attacker.get_moves() );
+    CHECK( warning.empty() );
+    CHECK( attacker.get_moves() < 200 );
+    CHECK( target.get_hp() == hp_before );
+    CHECK_FALSE( attacker.has_effect( efftype_id( "stumbled_into_invisible" ) ) );
+    CHECK_FALSE( here.has_field_at( occupied, field_type_str_id( "fd_last_known" ) ) );
+    REQUIRE( target.move_to( target.pos_bub() + tripoint::north ) );
+    REQUIRE( target.move_to( target.pos_bub() + tripoint::north ) );
+    REQUIRE( rl_dist( attacker.pos_abs(), target.pos_abs() ) > 1 );
+    const tripoint_bub_ms before = attacker.pos_bub();
+    const tripoint_bub_ms goal = before + tripoint::east;
+    REQUIRE( here.passable( goal ) );
+    attacker.set_dest( here.get_abs( goal ) );
+    attacker.set_moves( 200 );
+    const std::string after = capture_debugmsg_during( [&]() {
+        attacker.move();
+    } );
+    CHECK( after.empty() );
+    CHECK( attacker.pos_bub() == goal );
+    CHECK( target.get_hp() == hp_before );
+    CHECK_FALSE( here.has_field_at( occupied, field_type_str_id( "fd_last_known" ) ) );
+}
+
+TEST_CASE( "batch monster sight admission preserves attack restrictions and hallucinations",
+           "[batch_causal_067][batch_monster_sight_guard_067]" )
+{
+    clear_map();
+    clear_avatar();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+    monster &attacker = spawn_test_monster( "mon_zombie_scientist",
+                                            tripoint_bub_ms( 65, 65, 0 ) );
+    const std::string mode = GENERATE( "pacifist", "no_melee", "attackmon",
+                                       "unseen_attackmon", "hallucination" );
+    monster &target = spawn_test_monster(
+                          mode == "unseen_attackmon" || mode == "hallucination" ?
+                          "mon_star_vampire" : "mon_dog", tripoint_bub_ms( 66, 65, 0 ) );
+    const mtype *const original_type = attacker.type;
+    mtype restricted_type = *original_type;
+    on_out_of_scope restore_type( [&]() {
+        attacker.type = original_type;
+    } );
+    attacker.type = &restricted_type;
+    if( mode == "pacifist" ) {
+        restricted_type.set_flag( mon_flag_str_id( "PACIFIST" ) );
+    } else if( mode == "no_melee" ) {
+        restricted_type.melee_dice = 0;
+    } else if( mode == "attackmon" || mode == "unseen_attackmon" ) {
+        restricted_type.set_flag( mon_flag_str_id( "ATTACKMON" ) );
+        target.faction = attacker.faction;
+        REQUIRE( attacker.attitude_to( target ) != Creature::Attitude::HOSTILE );
+    } else {
+        attacker.hallucination = true;
+        target.hallucination = true;
+    }
+    if( mode == "unseen_attackmon" || mode == "hallucination" ) {
+        REQUIRE_FALSE( attacker.sees( here, target ) );
+    }
+    const bool expected = mode == "attackmon" || mode == "hallucination";
+    const int hp_before = target.get_hp();
+    bool attacked = false;
+    const std::string warning = capture_debugmsg_during( [&]() {
+        attacked = attacker.attack_at( target.pos_bub() );
+    } );
+    CAPTURE( mode, warning );
+    CHECK( warning.empty() );
+    CHECK( attacked == expected );
+    if( !expected ) {
+        CHECK( target.get_hp() == hp_before );
+    }
+    CHECK_FALSE( attacker.has_effect( efftype_id( "stumbled_into_invisible" ) ) );
+    CHECK_FALSE( here.has_field_at( target.pos_bub(), field_type_str_id( "fd_last_known" ) ) );
+}
+
+TEST_CASE( "batch unseen monster occupancy does not cross walls or floors",
+           "[batch_causal_067][batch_monster_sight_guard_067]" )
+{
+    clear_map();
+    clear_avatar();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+    const bool upper_floor = GENERATE( false, true );
+    const tripoint_bub_ms start( 65, 65, 0 );
+    const tripoint_bub_ms destination = upper_floor ?
+                                        tripoint_bub_ms( 65, 65, 1 ) : tripoint_bub_ms( 67, 65, 0 );
+    if( upper_floor ) {
+        here.ter_set( destination, ter_id( "t_floor" ) );
+    } else {
+        here.ter_set( tripoint_bub_ms( 66, 65, 0 ), ter_id( "t_rock" ) );
+    }
+    monster &attacker = spawn_test_monster( "mon_zombie_scientist", start );
+    monster &target = spawn_test_monster( "mon_dog", destination );
+    here.invalidate_map_cache( 0 );
+    here.invalidate_map_cache( destination.z() );
+    here.build_map_cache( 0 );
+    here.build_map_cache( destination.z() );
+    REQUIRE_FALSE( attacker.sees( here, target ) );
+    const int hp_before = target.get_hp();
+    bool attacked = false;
+    const std::string warning = capture_debugmsg_during( [&]() {
+        attacked = attacker.attack_at( destination );
+        attacker.set_dest( target.pos_abs() );
+        attacker.set_moves( 200 );
+        attacker.move();
+    } );
+    CAPTURE( upper_floor, warning, attacker.pos_abs(), target.pos_abs() );
+    CHECK( warning.empty() );
+    CHECK_FALSE( attacked );
+    CHECK( target.get_hp() == hp_before );
+    CHECK( attacker.pos_bub().z() == start.z() );
+    CHECK( attacker.pos_bub() != destination );
+    CHECK_FALSE( attacker.has_effect( efftype_id( "stumbled_into_invisible" ) ) );
+    CHECK_FALSE( here.has_field_at( destination, field_type_str_id( "fd_last_known" ) ) );
 }

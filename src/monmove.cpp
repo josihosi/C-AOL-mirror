@@ -3680,6 +3680,12 @@ bool monster::attack_at( const tripoint_bub_ms &p )
         Creature::Attitude attitude = attitude_to( mon );
         // mon_flag_ATTACKMON == hulk behavior, whack everything in your way
         if( attitude == Attitude::HOSTILE || has_flag( mon_flag_ATTACKMON ) ) {
+            // Occupancy can select an unseen creature as the next movement step.
+            // Keep that collision on the ordinary movement fallback; it is not
+            // sight, damage, or the avatar's last-known-position memory.
+            if( !mon.is_hallucination() && !sees( here, mon ) ) {
+                return false;
+            }
             if( type->id == mon_writhing_stalker && is_adjacent( &mon, true ) &&
                 sees( here, mon ) ) {
                 writhing_stalker::record_attack_attempt( *this );
