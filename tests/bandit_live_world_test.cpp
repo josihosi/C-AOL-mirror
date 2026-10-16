@@ -69408,3 +69408,411 @@ TEST_CASE( "scouts reunite after ordinary departure clears real perceived danger
     CHECK( rl_dist( scene.actor( 4 ).pos_abs(), scene.actor( 5 ).pos_abs() ) <=
            bandit_live_world::local_pair_cohesion_radius() );
 }
+
+TEST_CASE( "retained native burned pair keeps its egress through ordinary travel owners",
+           "[.][covert_egress_saved_067]" )
+{
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const char *fixture = std::getenv( "CAOL_R067_EGRESS_FIXTURE" );
+    REQUIRE( fixture != nullptr );
+    const bool cannibal = GENERATE( false, true );
+    r055_scene scene;
+    scene.load( cannibal, true, false, fixture );
+    const auto ids = scene.site().active_outing.member_ids;
+    REQUIRE( ids == std::vector<character_id> { character_id( 5 ), character_id( 6 ) } );
+    REQUIRE( scene.site().active_outing.schema_version == 11 );
+    REQUIRE( scene.site().active_outing.phase == bandit_live_world::scout_phase::burned_withdrawal );
+    if( cannibal ) {
+        // A controlled faction variant, not historical cannibal save evidence.
+        for( const auto id : ids ) {
+            scene.actor( id.get_value() ).set_fac( faction_id( "cannibal_camp" ) );
+        }
+    }
+    const auto egress = scene.site().active_outing.local_handoff.egress_omt;
+    const auto epoch = scene.site().active_outing.handoff_epoch;
+    const auto generation = scene.site().active_outing.generation;
+    const auto cursor_minutes = scene.site().active_outing.last_advanced_minutes;
+    const auto observation_count = scene.site().active_outing.observations.size();
+    SECTION( "repair unchanged saved empty routes" ) {}
+    SECTION( "preserve the recorded one-node egress order" ) {
+        // Native 7953 records this remaining node, goal and positions. Full
+        // actors/geometry are the later saved state, not claimed earlier bytes.
+        for( const auto id : ids ) {
+            auto &actor = scene.actor( id.get_value() );
+            REQUIRE( actor.goal == egress );
+            actor.omt_path = { egress };
+        }
+    }
+    const std::array<tripoint_abs_ms, 2> before = {
+        scene.actor( ids[0].get_value() ).pos_abs(), scene.actor( ids[1].get_value() ).pos_abs()
+    };
+    process_overmap_npc_move_for_test();
+    for( std::size_t i = 0; i < ids.size(); ++i ) {
+        const auto &actor = scene.actor( ids[i].get_value() );
+        CAPTURE( cannibal, ids[i], actor.goal, actor.omt_path );
+        CHECK( actor.pos_abs() == before[i] );
+        REQUIRE( actor.goal == egress );
+        REQUIRE_FALSE( actor.omt_path.empty() );
+        CHECK( actor.omt_path.front() == egress );
+        CHECK( actor.get_bandit_live_world_projection_lease().generation == generation );
+        CHECK( actor.get_bandit_live_world_projection_lease().handoff_epoch == epoch );
+        CHECK( actor.get_bandit_live_world_projection_lease().last_advanced_minutes ==
+               scene.site().active_outing.last_advanced_minutes );
+    }
+    CHECK( scene.site().active_outing.last_advanced_minutes == cursor_minutes );
+    CHECK( scene.site().active_outing.observations.size() == observation_count );
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK( scene.site().applied_report_generation == 0 );
+    // The native boundary selector must use the current egress leg, whose
+    // centre is inside this real loaded map, rather than the distant camp.
+    CHECK( get_map().inbounds( project_to<coords::ms>( egress ) + point( SEEX, SEEY ) ) );
+    CHECK( live_bandit_homeward_boundary_steps_for_test().empty() );
+    bandit_live_world_probe::session probe(
+        bandit_live_world_probe::collection_mode::transition_events );
+    live_bandit_elevated_recovery_npc_turn_for_test( false );
+    bool moved = false;
+    for( std::size_t i = 0; i < ids.size(); ++i ) {
+        moved |= scene.actor( ids[i].get_value() ).pos_abs() != before[i];
+    }
+    // The fixed-size transition probe may truncate this save's unusually
+    // large accumulated native move budget. Require the captured maneuver,
+    // while actual positions and ordinary progression establish its outcome.
+    CHECK( std::any_of( probe.result().transition_events.begin(),
+                       probe.result().transition_events.end(), []( const auto & event ) {
+        return event.scout_homeward &&
+               event.scout_homeward->action == "move_to_next" &&
+               event.reason == "safe homeward reunion route" && event.outcome == "moved";
+    } ) );
+    std::cout << "saved_egress captured=" << probe.result().transition_events.size()
+              << " dropped=" << probe.result().dropped_transition_events << '\n';
+    REQUIRE( moved );
+    CHECK( scene.actor( 5 ).pos_abs() == before[0] ); // Stationary rendezvous anchor.
+    CHECK( scene.actor( 6 ).pos_abs() != before[1] );
+    int turns = 0;
+    while( scene.site().active_outing.phase == bandit_live_world::scout_phase::burned_withdrawal &&
+           turns < 60 ) {
+        // Match do_turn: the normal aftermath observer precedes monmove.
+        // r055_scene::step alone intentionally exercises only the motor.
+        note_live_bandit_aftermath_for_test();
+        scene.step();
+        ++turns;
+    }
+    CAPTURE( cannibal, turns, scene.actor( 5 ).pos_abs(), scene.actor( 6 ).pos_abs(),
+             scene.site().active_outing.phase );
+    REQUIRE( scene.site().active_outing.phase == bandit_live_world::scout_phase::returning_report );
+    CHECK( scene.site().active_outing.generation == generation );
+    CHECK( scene.site().active_outing.handoff_epoch == epoch );
+    CHECK( scene.site().active_outing.observations.size() == observation_count );
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK( scene.site().applied_report_generation == 0 );
+    for( const auto id : ids ) {
+        CHECK( scene.actor( id.get_value() ).goal == scene.site().anchor );
+    }
+    const auto completed = overmap_buffer.global_state.bandit_live_world.canonical_snapshot();
+    note_live_bandit_aftermath_for_test();
+    CHECK( overmap_buffer.global_state.bandit_live_world.canonical_snapshot() == completed );
+    overmap_buffer.global_state.bandit_live_world.deserialize(
+        json_loader::from_string( completed ).get_object() );
+    REQUIRE( bandit_live_world::current_external_simulation_cursor( scene.site() ) );
+    CHECK( scene.site().active_outing.member_ids == ids );
+    CHECK( scene.site().active_outing.phase == bandit_live_world::scout_phase::returning_report );
+    const std::array<tripoint_abs_ms, 2> arrived = {
+        scene.actor( 5 ).pos_abs(), scene.actor( 6 ).pos_abs()
+    };
+    const auto world_name = world_generator->active_world->world_name;
+    g->save_is_dirty = false;
+    REQUIRE( g->save() );
+    r067_handover_reload( world_name );
+    REQUIRE( bandit_live_world::current_external_simulation_cursor( scene.site() ) );
+    CHECK( scene.site().active_outing.member_ids == ids );
+    CHECK( scene.site().active_outing.generation == generation );
+    CHECK( scene.site().active_outing.handoff_epoch == epoch );
+    CHECK( scene.site().active_outing.phase == bandit_live_world::scout_phase::returning_report );
+    for( std::size_t index = 0; index < ids.size(); ++index ) {
+        const auto &actor = scene.actor( ids[index].get_value() );
+        CHECK( actor.pos_abs() == arrived[index] );
+        CHECK( actor.goal == scene.site().anchor );
+        CHECK( actor.get_bandit_live_world_projection_lease().last_advanced_minutes ==
+               scene.site().active_outing.last_advanced_minutes );
+    }
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK( scene.site().applied_report_generation == 0 );
+    std::cout << "saved_egress completed turns=" << turns
+              << " actors=" << arrived[0].to_string() << ':' << arrived[1].to_string()
+              << " reload_phase=" << bandit_live_world::to_string( scene.site().active_outing.phase )
+              << '\n';
+}
+
+TEST_CASE( "native structural rally completion authenticates actual survivor and visibility reads",
+           "[.][covert_egress_arrival_067]" )
+{
+    const char *fixture = std::getenv( "CAOL_R067_EGRESS_FIXTURE" );
+    REQUIRE( fixture != nullptr );
+    const bool cannibal = GENERATE( false, true );
+    r055_scene scene;
+    scene.load( cannibal, true, false, fixture );
+    if( cannibal ) {
+        scene.actor( 5 ).set_fac( faction_id( "cannibal_camp" ) );
+        scene.actor( 6 ).set_fac( faction_id( "cannibal_camp" ) );
+    }
+    enum class condition { concealed, blocked, stale, visible, missing, casualty_away, casualty_arrived };
+    condition input = condition::concealed;
+    SECTION( "concealed real pair completes once" ) {}
+    SECTION( "blocked partner outside rally is not arrival" ) {
+        input = condition::blocked;
+    }
+    SECTION( "foreign generation lease cannot authorize completion" ) {
+        input = condition::stale;
+    }
+    SECTION( "visible rally requires ordinary retry rather than report" ) {
+        input = condition::visible;
+    }
+    SECTION( "missing unresolved member is not arrival" ) {
+        input = condition::missing;
+    }
+    SECTION( "confirmed casualty does not imply the living partner arrived" ) {
+        input = condition::casualty_away;
+    }
+    SECTION( "confirmed casualty permits only the actually arrived survivor to complete" ) {
+        input = condition::casualty_arrived;
+    }
+    map &here = get_map();
+    const auto egress = scene.site().active_outing.local_handoff.egress_omt;
+    std::vector<tripoint_bub_ms> slots;
+    for( const auto &point : here.points_on_zlevel( 0 ) ) {
+        if( project_to<coords::omt>( here.get_abs( point ) ) == egress &&
+            here.passable( point ) && g->is_empty( point ) &&
+            !scene.actor( 5 ).sees_dangerous_field( point ) ) {
+            if( slots.empty() || rl_dist( point, slots.front() ) == 1 ) {
+                slots.push_back( point );
+                if( slots.size() == 3 ) {
+                    break;
+                }
+            }
+        }
+    }
+    REQUIRE( slots.size() == 3 );
+    // This is a native arrival-consumer fixture, not proof of route traversal.
+    // Place only the controlled endpoint bodies; the native reader/reducer must
+    // still establish perception, complete identity/custody and settlement.
+    if( input != condition::casualty_away ) {
+        scene.position( 5, slots[0] );
+    }
+    if( input != condition::blocked ) {
+        scene.position( 6, slots[1] );
+    } else {
+        scene.actor( 6 ).add_effect( efftype_id( "downed" ), 1_hours );
+    }
+    if( input == condition::casualty_away || input == condition::casualty_arrived ) {
+        scene.actor( 6 ).set_part_hp_cur( bodypart_id( "torso" ), 0 );
+        REQUIRE( scene.actor( 6 ).is_dead() );
+    }
+    if( input == condition::stale ) {
+        auto lease = scene.actor( 6 ).get_bandit_live_world_projection_lease();
+        ++lease.generation;
+        scene.actor( 6 ).set_bandit_live_world_projection_lease( lease );
+    }
+    shared_ptr_fast<npc> missing;
+    if( input == condition::missing ) {
+        g->remove_npc( character_id( 6 ) );
+        missing = overmap_buffer.remove_npc( character_id( 6 ) );
+        REQUIRE( missing );
+    }
+    if( input == condition::visible ) {
+        get_avatar().setpos( here, slots[2], false );
+    }
+    g->reset_light_level();
+    here.invalidate_visibility_cache();
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    get_avatar().recalc_sight_limits();
+    scene.actor( 5 ).recalc_sight_limits();
+    if( input != condition::missing ) {
+        scene.actor( 6 ).recalc_sight_limits();
+    }
+    if( input == condition::visible ) {
+        REQUIRE( get_avatar().sees_without_clairvoyance( here, scene.actor( 5 ) ) );
+    } else {
+        REQUIRE_FALSE( get_avatar().sees_without_clairvoyance( here, scene.actor( 5 ) ) );
+        REQUIRE_FALSE( scene.actor( 5 ).sees_without_clairvoyance( here, get_avatar() ) );
+    }
+    const auto before = overmap_buffer.global_state.bandit_live_world.canonical_snapshot();
+    note_live_bandit_aftermath_for_test();
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK( scene.site().applied_report_generation == 0 );
+    if( input == condition::casualty_away || input == condition::casualty_arrived ) {
+        CHECK( scene.site().active_outing.casualty_ids ==
+               std::vector<character_id> { character_id( 6 ) } );
+        CHECK_FALSE( scene.actor( 6 ).get_bandit_live_world_projection_lease().present );
+    }
+    if( input != condition::concealed && input != condition::casualty_arrived ) {
+        CHECK( scene.site().active_outing.phase != bandit_live_world::scout_phase::returning_report );
+        return;
+    }
+    REQUIRE( scene.site().active_outing.phase == bandit_live_world::scout_phase::returning_report );
+    CHECK( overmap_buffer.global_state.bandit_live_world.canonical_snapshot() != before );
+    CHECK( scene.actor( 5 ).goal == scene.site().anchor );
+    if( input == condition::concealed ) {
+        CHECK( scene.actor( 6 ).goal == scene.site().anchor );
+    }
+    for( const int id : {
+             5, 6
+         } ) {
+        if( scene.actor( id ).is_dead() ) {
+            continue;
+        }
+        const auto &lease = scene.actor( id ).get_bandit_live_world_projection_lease();
+        CHECK( lease.last_advanced_minutes == scene.site().active_outing.last_advanced_minutes );
+        CHECK( lease.handoff_epoch == scene.site().active_outing.handoff_epoch );
+    }
+    const auto completed = overmap_buffer.global_state.bandit_live_world.canonical_snapshot();
+    note_live_bandit_aftermath_for_test();
+    CHECK( overmap_buffer.global_state.bandit_live_world.canonical_snapshot() == completed );
+    overmap_buffer.global_state.bandit_live_world.deserialize(
+        json_loader::from_string( completed ).get_object() );
+    note_live_bandit_aftermath_for_test();
+    CHECK( overmap_buffer.global_state.bandit_live_world.canonical_snapshot() == completed );
+}
+
+TEST_CASE( "saved burned travel does not bind or move a foreign native copy",
+           "[.][covert_egress_auth_067]" )
+{
+    const char *fixture = std::getenv( "CAOL_R067_EGRESS_FIXTURE" );
+    REQUIRE( fixture != nullptr );
+    r055_scene scene;
+    scene.load( false, true, false, fixture );
+    SECTION( "empty routes remain unbound" ) {}
+    SECTION( "existing routes confer no authority to the foreign copy" ) {
+        for( const int id : { 5, 6 } ) {
+            scene.actor( id ).omt_path = { scene.site().active_outing.local_handoff.egress_omt };
+        }
+    }
+    const std::array<std::vector<tripoint_abs_omt>, 2> orders = {
+        scene.actor( 5 ).omt_path, scene.actor( 6 ).omt_path
+    };
+    auto lease = scene.actor( 6 ).get_bandit_live_world_projection_lease();
+    ++lease.generation;
+    scene.actor( 6 ).set_bandit_live_world_projection_lease( lease );
+    const auto before = overmap_buffer.global_state.bandit_live_world.canonical_snapshot();
+    const std::array<tripoint_abs_ms, 2> positions = {
+        scene.actor( 5 ).pos_abs(), scene.actor( 6 ).pos_abs()
+    };
+    process_overmap_npc_move_for_test();
+    live_bandit_elevated_recovery_npc_turn_for_test( false );
+    for( const int id : { 5, 6 } ) {
+        CAPTURE( id, scene.actor( id ).goal, scene.actor( id ).omt_path );
+        CHECK( scene.actor( id ).omt_path == orders[id - 5] );
+        CHECK( scene.actor( id ).pos_abs() == positions[id - 5] );
+    }
+    CHECK( scene.actor( 6 ).get_bandit_live_world_projection_lease().generation == lease.generation );
+    CHECK( overmap_buffer.global_state.bandit_live_world.canonical_snapshot() == before );
+}
+
+TEST_CASE( "cohesive inward continuation revalidates geometry independently of OMT alignment",
+           "[.][covert_egress_maneuver_067]" )
+{
+    const char *fixture = std::getenv( "CAOL_R067_EGRESS_FIXTURE" );
+    REQUIRE( fixture != nullptr );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const bool cannibal = GENERATE( false, true );
+    const int dy = GENERATE( 0, -6 );
+    const bool mover_is_leader = GENERATE( false, true );
+    const std::string condition = GENERATE( "eligible", "stale", "field", "occupied" );
+    CAPTURE( cannibal, dy, mover_is_leader, condition );
+    r055_scene scene;
+    // A controlled open-terrain component of the saved owner/body input, not
+    // historical geometry evidence. The preceding test owns actual traversal.
+    scene.load( cannibal, false, false, fixture );
+    if( cannibal ) {
+        scene.actor( 5 ).set_fac( faction_id( "cannibal_camp" ) );
+        scene.actor( 6 ).set_fac( faction_id( "cannibal_camp" ) );
+    }
+    // Keep declared leader/cursor identity intact; put the cached route on
+    // either the actual leader or follower, rather than invent a new leader.
+    const int mover_id = mover_is_leader ? 5 : 6;
+    const int anchor_id = mover_is_leader ? 6 : 5;
+    REQUIRE( bandit_live_world::current_external_simulation_cursor( scene.site() ) );
+    map &here = get_map();
+    const tripoint_abs_ms anchor( 3083, 3480 + dy, 0 );
+    const tripoint_abs_ms mover( 3086, 3474 + dy, 0 );
+    const tripoint_abs_ms inward( 3085, 3475 + dy, 0 );
+    scene.position( anchor_id, here.get_bub( anchor ) );
+    scene.position( mover_id, here.get_bub( mover ) );
+    REQUIRE( rl_dist( anchor, mover ) == bandit_live_world::local_pair_cohesion_radius() );
+    CHECK( ( project_to<coords::omt>( inward ) == project_to<coords::omt>( anchor ) ) == ( dy != 0 ) );
+    process_overmap_npc_move_for_test();
+    auto &actor = scene.actor( mover_id );
+    actor.path = here.route( actor.pos_bub( here ), pathfinding_target::point( here.get_bub( inward ) ),
+                             actor.get_pathfinding_settings( false ), actor.get_path_avoid() );
+    REQUIRE_FALSE( actor.path.empty() );
+    REQUIRE( actor.path.back() == here.get_bub( inward ) );
+    // Cache produced by the ordinary native route solver. The motor must
+    // re-solve it against current occupancy, hazards and exact copies.
+    shared_ptr_fast<npc> occupant;
+    on_out_of_scope remove_occupant( [&]() {
+        if( occupant ) {
+            g->remove_npc( occupant->getID() );
+            overmap_buffer.remove_npc( occupant->getID() );
+        }
+    } );
+    if( condition == "stale" ) {
+        auto lease = actor.get_bandit_live_world_projection_lease();
+        ++lease.generation;
+        actor.set_bandit_live_world_projection_lease( lease );
+    } else if( condition == "field" ) {
+        here.add_field( here.get_bub( inward ), field_type_id( "fd_fire" ), 3 );
+        REQUIRE( actor.sees_dangerous_field( here.get_bub( inward ) ) );
+    } else if( condition == "occupied" ) {
+        occupant = make_shared_fast<npc>();
+        occupant->deserialize( json_loader::from_string( r054_actor_bytes( scene.actor( anchor_id ) ) ).get_object() );
+        occupant->setID( character_id( 99 ), true );
+        occupant->set_bandit_live_world_projection_lease( {} );
+        occupant->spawn_at_precise( inward );
+        occupant->add_effect( efftype_id( "sleep" ), 1_days );
+        occupant->add_effect( efftype_id( "narcosis" ), 1_days );
+        overmap_buffer.insert_npc( occupant );
+        g->load_npcs();
+    }
+    for( const int id : { 5, 6 } ) {
+        scene.actor( id ).set_moves( 0 ); // One ordinary process_turn action budget.
+    }
+    bandit_live_world_probe::session probe( bandit_live_world_probe::collection_mode::transition_events );
+    live_bandit_elevated_recovery_npc_turn_for_test( false );
+    const bool selected_cached_step = std::any_of( probe.result().transition_events.begin(),
+                                     probe.result().transition_events.end(), [&]( const auto & event ) {
+        return event.scout_homeward && event.reason == "safe homeward reunion route" &&
+               event.scout_homeward->next_step_ms == inward.to_string();
+    } );
+    if( condition == "eligible" ) {
+        REQUIRE( selected_cached_step );
+        const auto &events = probe.result().transition_events;
+        const auto maneuver = std::find_if( events.begin(), events.end(), [&]( const auto & event ) {
+            return event.scout_homeward && event.reason == "safe homeward reunion route" &&
+                   event.scout_homeward->next_step_ms == inward.to_string();
+        } );
+        const auto anchor_turn = std::find_if( events.begin(), events.end(), [&]( const auto & event ) {
+            return event.transition == "scout_homeward_motor" &&
+                   event.actor_ids == std::vector<std::int64_t> { anchor_id };
+        } );
+        REQUIRE( anchor_turn != events.end() );
+        REQUIRE_FALSE( anchor_turn->scout_homeward->members.empty() );
+        const auto &read = anchor_turn->scout_homeward->members.front();
+        CHECK( read.position_ms == anchor.to_string() );
+        if( anchor_turn < maneuver ) {
+            CHECK( read.position_after_ms == anchor.to_string() );
+        }
+        // If the mover runs first, the anchor may resume ordinary travel
+        // after the one-step maneuver finishes in that same native turn.
+        CHECK( scene.actor( mover_id ).pos_abs() == inward );
+    } else {
+        CHECK_FALSE( selected_cached_step );
+        CHECK( scene.actor( mover_id ).pos_abs() != inward );
+    }
+    if( occupant ) {
+        CHECK( occupant->pos_abs() == inward );
+    }
+    CHECK( probe.result().dropped_transition_events == 0 );
+    CHECK( scene.site().active_outing.phase == bandit_live_world::scout_phase::burned_withdrawal );
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    CHECK( scene.site().applied_report_generation == 0 );
+}
