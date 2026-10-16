@@ -109,7 +109,11 @@ class semantic_wake_source
             if( errno == EINTR ) {
                 return false;
             }
+#if EAGAIN != EWOULDBLOCK
             if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+#else
+            if( errno == EAGAIN ) {
+#endif
                 return false;
             }
             throw std::runtime_error( std::string( "semantic wake read failed: " ) +
