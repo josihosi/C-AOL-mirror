@@ -216,9 +216,6 @@ class WritableRunOwner:
             if not str(prior.get('run_id', '')).strip():
                 raise WritableRootConflict(f"incomplete owner record retained: {self.path}",
                                            reason="incomplete_owner")
-            if prior.get('launcher_state') != 'returned':
-                raise WritableRootConflict(f"previous launcher has not returned: {self.path}",
-                                           reason="incomplete_owner")
             launch_state = prior.get('launch_state')
             if launch_state not in ('not_started', 'launching', 'bound'):
                 raise WritableRootConflict(f"missing or invalid launch state retained: {self.path}",
@@ -240,6 +237,15 @@ class WritableRunOwner:
                     raise WritableRootConflict(f"bound owner lacks game generation: {self.path}",
                                                reason="incomplete_generation")
                 self._inspect_generation(game_generation, source=str(self.path))
+            if prior.get('launcher_state') != 'returned':
+                # An interrupted launcher cannot publish its normal return.
+                # Reuse only a fully bound, now-dead pair while the stable
+                # file and directory leases are exclusively held. A launch
+                # without a game binding remains ambiguous above.
+                if prior.get('launcher_state') is not None or launch_state != 'bound':
+                    raise WritableRootConflict(f"previous launcher has not returned: {self.path}",
+                                               reason="incomplete_owner")
+                self._inspect_generation(launcher_generation, source=str(self.path))
         elif existed:
             # Empty files are only valid while this instance has just created
             # the stable lock inode. An existing empty record is interrupted

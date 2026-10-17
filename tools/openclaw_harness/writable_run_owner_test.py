@@ -211,6 +211,64 @@ class WritableRunOwnerTest(unittest.TestCase):
                 WritableRunOwner(ambiguous_root, "next-run", inspect_process, matches)
             self.assertEqual(caught.exception.reason, "incomplete_owner")
 
+    def test_interrupted_bound_owner_reuses_only_a_dead_pair(self) -> None:
+        # Reboot/interruption can prevent close() from recording returned.
+        # A completed binding still authenticates the two processes to inspect.
+        cases = [("dead-pair", {}, None),
+                 ("live-launcher", {424240: "live"}, "live_generation"),
+                 ("live-game", {424241: "live"}, "live_generation"),
+                 ("unknown-launcher", {424240: "unknown"}, "identity_unavailable"),
+                 ("unknown-game", {424241: "unknown"}, "identity_unavailable"),
+                 ("reused-launcher", {424240: "reused"}, "generation_mismatch"),
+                 ("reused-game", {424241: "reused"}, "generation_mismatch")]
+        with tempfile.TemporaryDirectory() as temp:
+            for label, states, reason in cases:
+                with self.subTest(label=label):
+                    root = Path(temp).resolve() / label
+                    root.mkdir()
+                    sentinel = root / "save-state"
+                    sentinel.write_bytes(b"authentic saved bytes")
+                    generations = {pid: {"schema": "caol-owned-process-generation-v1",
+                                         "pid": pid, "birth_identity": f"owned:{pid}",
+                                         "command": "harmless owned process"}
+                                   for pid in (424240, 424241)}
+                    prior = {"schema": "caol-writable-run-owner-v1", "host": socket.gethostname(),
+                             "userdir": str(root), "run_id": "interrupted", "launch_state": "bound",
+                             "launcher_generation": generations[424240],
+                             "game_generation": generations[424241]}
+                    marker = root / ".harness-owner.lock"
+                    marker.write_text(json.dumps(prior))
+                    before, inode = marker.read_bytes(), marker.stat().st_ino
+
+                    def inspector(pid):
+                        if pid not in generations:
+                            return inspect_process(pid)
+                        state = states.get(pid, "dead")
+                        observed = dict(generations[pid], alive=state != "dead")
+                        if state == "unknown":
+                            observed["alive"] = None
+                        if state == "reused":
+                            observed["birth_identity"] = "different birth"
+                        return observed
+
+                    if reason:
+                        with self.assertRaises(WritableRootConflict) as caught:
+                            WritableRunOwner(root, "contender", inspector, matches)
+                        # The old implementation refuses earlier, before the
+                        # specific identity check; either refusal is safe.
+                        self.assertIn(caught.exception.reason, {reason, "incomplete_owner"})
+                        self.assertEqual(marker.read_bytes(), before)
+                    else:
+                        owner = WritableRunOwner(root, "fresh-recovery", inspector, matches)
+                        try:
+                            self.assertEqual(owner.record["run_id"], "fresh-recovery")
+                            self.assertEqual(owner.record["launch_state"], "not_started")
+                            self.assertNotIn("child_exit_code", owner.record)
+                        finally:
+                            owner.close()
+                    self.assertEqual(marker.stat().st_ino, inode)
+                    self.assertEqual(sentinel.read_bytes(), b"authentic saved bytes")
+
     def test_symlink_root_and_subtree_aliases_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp).resolve()
