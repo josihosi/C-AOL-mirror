@@ -1,3 +1,9 @@
+#include "calendar.h"
+#include "color.h"
+#include "debug.h"
+#include "json_loader.h"
+#include "item.h"
+#include "json.h"
 #include "damage.h"
 #include "dialogue_helpers.h"
 #include "cata_catch.h"
@@ -66,4 +72,57 @@ TEST_CASE( "monster_special_attack_cooldown_inheritance", "[json][monster][load]
 
     CHECK( base.constant() == 5.0 );
     CHECK( overwrite.constant() == 7.0 );
+}
+
+TEST_CASE( "item_color_defaults_and_inheritance", "[json][item][color]" )
+{
+    itype definition;
+    SECTION( "a new item with no color keeps the documented white default" ) {
+        const JsonObject data = json_loader::from_string(
+                                    R"({"id":"test_color_default","name":"test item","symbol":","})" );
+        definition.load( data, "dda" );
+        CHECK( definition.color == c_white );
+        const std::string warning = capture_debugmsg_during( [&]() {
+            CHECK( invert_color( definition.color ) == invert_color( c_white ) );
+        } );
+        CHECK( warning.empty() );
+    }
+    SECTION( "explicit and inherited colors remain authoritative" ) {
+        const JsonObject parent = json_loader::from_string(
+                                      R"({"id":"test_color_parent","name":"test item","symbol":",","color":"red"})" );
+        definition.load( parent, "dda" );
+        REQUIRE( definition.color == c_red );
+        definition.was_loaded = true;
+        const JsonObject child = json_loader::from_string(
+                                     R"({"id":"test_color_child","copy-from":"test_color_parent"})" );
+        definition.load( child, "dda" );
+        CHECK( definition.color == c_red );
+        const JsonObject override_color = json_loader::from_string(
+                    R"({"id":"test_color_child","color":"blue"})" );
+        definition.load( override_color, "dda" );
+        CHECK( definition.color == c_blue );
+    }
+}
+
+TEST_CASE( "colorless_plastic_sheet_can_be_highlighted", "[json][item][color]" )
+{
+    const item sheet( itype_id( "plastic_sheet_small" ), calendar::turn );
+    CHECK( sheet.color() == c_white );
+    const std::string warning = capture_debugmsg_during( [&]() {
+        CHECK( invert_color( sheet.color() ) == invert_color( c_white ) );
+        CHECK( hilite( sheet.color() ) == hilite( c_white ) );
+    } );
+    CHECK( warning.empty() );
+}
+
+TEST_CASE( "invalid_item_color_is_still_reported", "[json][item][color]" )
+{
+    itype definition;
+    const JsonObject data = json_loader::from_string(
+                                R"({"id":"test_invalid_item_color","name":"test item","color":"nonexistent_test_color"})" );
+    const std::string warning = capture_debugmsg_during( [&]() {
+        definition.load( data, "dda" );
+    } );
+    CHECK( warning.find( "couldn't parse color" ) != std::string::npos );
+    CHECK( definition.color == c_unset );
 }
