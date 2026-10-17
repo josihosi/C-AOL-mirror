@@ -16,9 +16,10 @@ Reuse the controls below with the selected build, not historical timing or actor
 
 ## Start
 
-For the current full-suite pass and four normal parallel trials, select the arm's initial pre-signal save and perform the complete relevant journey. A late ready-report/pre-raid checkpoint may reproduce a defect but cannot replace admission, scouting or report evidence in that pass. Preserve current live closeouts and held scenes; this document does not authorize their restart.
-
-The successful ordinary roof journey R068/run24c535 began at turn5216234/min7737 from a 45-file prepared pre-signal copy, raw tree `3154e8f09eacee04e3e1a6a3353dd80ffefab2615337ac79ef4f447859a84326`. Its original prepared manifest derives from archive `josef-basecamp-closed-windows-20260924-122642.zip`, SHA256 `4b11469931507c49f0b373934730fed6b729b7a29b87c6f78eca0f728e8320c3`; the manifest records the prepared overmap change, so the raw archive is not the prepared tree. Old executable0bdc/product74c64 and historical timing/IDs prove that run only. Use the existing current-source selection and a byte-bound disposable initial copy, with the roof route below.
+For a fresh full-story test, select the designated coherent pre-signal save and perform the
+selected journey. For a focused missing stage, use a compatible checkpoint and retain the earlier
+proof at its original scope. Follow [selection and launch](selection-and-launch.md); this recipe
+does not schedule campaign restarts or override an active owner's input.
 
 Coordinator supplies the selected scenario/session, start-save identity, current completed
 setup and remaining outcome. Include `RUN` (native run directory), `PROFILE` and `RUN_ID`
@@ -100,9 +101,9 @@ run with ten individual Tabs reached the same turn. `play repeat --resume` conti
 recorded request after a pending result. Check requested/completed/unused counts, stop reason and
 raw receipt handles before another action. A separate single Tab attempted a strike on a nearby
 zombie, spent moves and stamina, and missed without advancing the displayed turn. Native
-`world.pause` passed one turn; a ten-pause native batch has not been run. The accepted native
-control receipts remain distinct from the packaged report: R043 currently has a false-red clean-exit
-classification under investigation; do not call that report fully clean until corrected.
+`world.pause` passed one turn; a ten-pause native batch has not been run. The historical clean-exit classification issue is corrected in current startup finalization;
+see [capture map](playtest-evidence-map.md#bounded-implementation-gaps-for-the-existing-tooling-owner).
+A fresh contrary result needs its own bound evidence, not a replay of the old pilot.
 
 Use a counted repeat only when those discrete actions are the intended behavior and the World
 owner, safe mode, nearby creatures and interruption policy have been checked. Tab can attack any
@@ -178,16 +179,9 @@ ladder ascent, roof fire approach, current lighter controls and maintenance chec
 Check actual geometry, fuel, weather and each channel's admission separately. A product bug
 can leave a gameplay stage unproved without invalidating the successful access/ignition controls.
 
-The ordinary R051 roof run on 2026-10-04 used this checked route from its observed start
-`[3156,3449,0]`: southwest, south three times, southwest, west five times to the real ladder
-`[3149,3454,0]`; `world.level_up` to `[3149,3454,1]`; east, northeast, north twice, northeast
-four times to `[3155,3447,1]`; south once to the working tile `[3155,3448,1]`. Confirm the live
-position after each segment and use the actual ladder. From the working tile the unlit brazier
-`[3156,3447,1]` is northeast. The run used the current lighter Activate action, answered the live
-“Light where?” prompt with northeast, and then observed `f_brazier`, `fd_fire`, and hot-air fields.
-Some local snapshots lacked `fd_smoke` even though the bound overmap sample recorded actual smoke
-admission; check both the local fire and the native signal packet. The R051 result file was consumed; the stage and route facts here are historical comparison
-only, not current input authority.
+The following R051 route is a reusable geometry example for the normalized save. Check current
+terrain and position. A local snapshot without `fd_smoke` does not negate a separately recorded
+signal packet; inspect the source and channel actually being tested.
 
 ### Exact command batches from the retained roof route
 
@@ -228,56 +222,18 @@ the brazier. This is an ordinary local-fuel control, not an ignition or debug-fu
 Historical R050 pickup/Drop requests and continuation steps were consumed. The table preserves
 usable control patterns, not current UIDs or live authority; resolve item rows from this run.
 
-For the observed 900-turn sample, the save at 5216328 began with `fd_fire` but no smoke. The logged
-start action was `act world.wait`; the current “Wait a while” menu entry was chosen before
-`wait.5m`. That wait was interrupted after 90 turns by the native stop-waiting prompt; the current prompt's
-YES stopped that wait and the state was saved at 5216418. After reload, each selected wait began
-with `act world.wait`; the current “Wait a while” menu entry was chosen before `wait.5m` ×2,
-`wait.1m` ×3, and `wait.20s`. Then `act world.pause` ×10 advanced the remaining 10 turns. The
-interval ended at 5217228. Do not treat the menu's chosen duration as elapsed time; use the
-returned turn and re-observe any prompt.
-
-Historical R050 scan `4a87fd6267e05739793dfd15dd0b9b049f58a7d146133dd7867b7341995740cf:2`
-recorded both local-field light and smoke at3156,3447,1/min7750. This was one positive observation,
-not continuous emission proof. Its endpoint5217228 retained intensity1 fire but no smoke field.
-The raw channel/action/World records were consumed. For a new claim use the current run-bound
-structured channel evidence; searching only the debug text can miss an independently logged light
-row. These historical wait choices are examples, not the assigned run's schedule.
-
-The retained run's full `wait.2h` intervals began at minutes 7738, 7858, 7978, 8098, 8278, and
-8398; `wait.1h` began at 8218. The final two-hour choice was interrupted at minute 8424 by the
-dangerously-close prompt. For a safe, bounded two-hour batch, the current CLI spelling is:
+The historical R050 exposed-roof run recorded a positive smoke and light sample at minute7750,
+then scouting, return/report, hostile contact and an attributed fatal attack. This establishes that
+run's outcome, not a fixed timetable or other faction's proof. Current waits should cover the next
+useful stage under the selected interruption policy:
 
 ```sh
 python3 tools/openclaw_harness/play_cli.py --session "$SESSION" wait 2h safe
 ```
 
-This is a maximum useful interval, not proof that it fully elapsed or that a distant scout event
-interrupted it. Read returned elapsed game time and query the current native site/actor state at the
-chosen endpoint. After first attributed combat harm, use `wait 1m ignore` only when the intent is to
-let that combat continue. The original action and timing records are the bound roof run's
-[semantic requests](../../../../.userdata/r051-r067-roof-fire-comparison-20261004/harness_runs/20261004_230703_95d5cf2e0afc4867893479a76595852a/semantic.requests.jsonl)
-and [semantic steps](../../../../.userdata/r051-r067-roof-fire-comparison-20261004/harness_runs/20261004_230703_95d5cf2e0afc4867893479a76595852a/semantic.steps.jsonl) at that historical source/run. Its separate interpreted result file was consumed.
-
-For the cadence used there, choose the supported `Wait a while` action with a useful long interval
-and recheck the saved/current signal, same-ID scouts, and current activity when that interval
-returns or an event interrupts it. The actual run used two-hour wait choices; native progress
-included minute-7757 smoke admission, minute-7800 scout dispatch, minute-7860 watch arrival,
-minute-7995 physical return, minute-8040 report delivery, minute-8100 follow-on dispatch, and
-minute-8420 physical contact. An interval choice is not proof that the whole interval elapsed.
-At minute 8424 the first “dangerously close” prompt was answered YES to stop and inspect Marion.
-After the native attacked prompt and attributed first hit, IGNORE was deliberately chosen so this
-lethal-combat arm could continue; the same actor later delivered the attributed fatal hit. Use
-IGNORE only when intentionally allowing this combat outcome to unfold. The run briefly selected
-the wrong `Light Step` mutation and removed it before selecting exact Debug Life Support. In this
-run the correct trait was activated at minute 7978, after the first two two-hour wait choices, so
-this is not evidence of pre-wait Life Support setup. Life Support did not clear the recorded “Very
-thirsty” / “Dehydrated” labels. Follow the setup/get control above and confirm the exact trait
-before long waits instead of repeating that menu mistake.
-
-This evidence is a cannibal smoke-found assault and death, not a bandit or indoor/closed-room
-result; the scouts' selected target in this run was not an exact-three-OMT watch proof. Keep those
-claims on their own evidence arms.
+Read actual elapsed time and interruptions. After first attributed harm, choose an explicit
+`ignore` wait when the assigned goal is combat through its outcome. Do not reproduce the old
+run's fragmented waits or late Life Support setup. Apply the selected setup before long waits.
 
 Use [Save a checkpoint](live-operation.md#save-a-checkpoint) for native saving and skipped writes;
 no movement or other setup action is part of that segment.
@@ -366,4 +322,4 @@ do not establish the killer. Do not infer gore without an observed native record
 
 Report outcome/first divergence, working action/query corrections, evidence handles and current
 save/session ownership. Close through the existing native lifecycle when finished.
-Update this recipe only where actual use changed it; keep detailed chronology in the run report.
+Use the [manual maintenance rule](../GAME-MANUAL.md#add-prune-and-correct-notes) for a verified reusable correction; there is no automatic recipe update after a run.

@@ -4,7 +4,7 @@ For dismissible native game debug warnings during playtesting. Search this file 
 fragment; character IDs, item names and source line numbers may change.
 
 Known warning: retain its occurrence in the run evidence, Ignore, reobserve and continue.
-New warning: add its message/signature and evidence here, send a compact report to the
+New warning: retain its message/signature in the run notes, send a compact report to the
 coordinator, then Ignore, reobserve and continue without waiting for a reply. Reporting and
 investigating the underlying bug happen alongside the playtest. Do not repeatedly report the
 same warning unless its consequence changes. A crash or recovery that cannot restore progress
@@ -58,8 +58,7 @@ operable controller, not clean item deserialization, smoke admission or faction 
 
 ## Maintenance
 
-Luna/Sol workers may add observed warning signatures and update outcomes from evidence.
-Merge equivalent messages; keep decisive logs only while the active diagnosis needs them, then
-retain concise run/outcome facts here and remove consumed raw artifacts. Revise an
-entry when observed consequences change; do not accumulate speculative warnings or duplicate
-recovery procedures. Keep one short entry per meaningful error family.
+Keep new warnings and unresolved consequences in task notes. Update this catalogue only when
+verified meaning or recovery helps future play, using the [manual maintenance rule](../GAME-MANUAL.md#add-prune-and-correct-notes).
+Merge equivalent signatures and replace obsolete handling; no entry per occurrence or speculative
+warning. Keep only concise evidence and remove finished raw artifacts under normal cleanup.

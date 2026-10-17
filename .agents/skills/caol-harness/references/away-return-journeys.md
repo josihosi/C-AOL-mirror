@@ -6,7 +6,7 @@ Owner-expanded suite arm 6. These are coverage definitions, not a current run-st
 
 Prefer the rural dual-camp fixture for simultaneous cannibal/bandit logging, once native loading is validated. Keep the city variant for zombie pressure; it answers a different survival question. Both factions should progress naturally: do not synchronize dispatch, seed knowledge or force hostility to make the comparison tidy. Track each site's operation/generation, actual members and outcome separately. If one faction interferes with the other, retain that result and use a separate compatible single-faction arm only to isolate an unresolved mechanism.
 
-Leave through ordinary doors/stairs, travel far enough that the relevant actors actually unload, spend a full 24 game hours away for the day-away variants, and return. Time away starts at the declared departure boundary; record travel time separately. Do real looting and ordinary survival maintenance. Before departure, [get and verify avatar Debug Life Support](setup-and-interactions.md#get-and-verify-debug-life-support); keep it on for the day-away faction/handover arms. A separately named ordinary-needs survival comparison leaves it off with real supplies. Record setup consistently; no clairvoyance/cloak in ordinary exposure proof. Do not repair a failing handover by moving tested actors or editing missions/knowledge. The separately authorized [X4 casualty variant](playtest-suite.md#x4-party-survivor-and-casualty-handover) uses avatar teleportation/invisibility and one exact debug kill to create controlled boundary conditions; it does not claim ordinary travel or combat-death proof.
+Use ordinary doors/stairs and travel when testing that route; otherwise use permitted avatar teleportation to establish the required separation. Move far enough that the relevant actors actually unload, spend a full 24 game hours away for the day-away variants, and return. Time away starts at the declared departure boundary; record travel time separately. Do real looting when it is part of the assigned journey; use practical survival setup for continuity-only questions. Before departure, [get and verify avatar Debug Life Support](setup-and-interactions.md#get-and-verify-debug-life-support); keep it on for the day-away faction/handover arms. A separately named ordinary-needs survival comparison leaves it off with real supplies. Record setup consistently; no clairvoyance/cloak in ordinary exposure proof. Do not repair a failing handover by moving tested actors or editing missions/knowledge. The separately authorized [X4 casualty variant](playtest-suite.md#x4-party-survivor-and-casualty-handover) uses avatar teleportation/invisibility and one exact debug kill to create controlled boundary conditions; it does not claim ordinary travel or combat-death proof.
 
 A short walk outside the house does not prove an unloaded handover. Native owner/cursor records and saved actor location/identity establish loading transitions; visibility alone does not. Capture relevant real IDs before crossing, including actual response parties rather than their scouts. Existing local NPC action trace does not cover abstract simulation: combine transition/owner records with retained actor saves and mark missing coverage honestly.
 
@@ -46,7 +46,15 @@ At meaningful crossings compare same-ID position/z, life/HP, mission/goal/path, 
 
 6n — Vertical and terrain boundary. Leave/return via actual house stairs and, in separate compatible terrain, bridge/ramp or underground connection. Vary avatar floor while scouts travel on ground. Evidence source z, physical route z and loaded actor z remain distinct; no through-floor movement. An unavailable connection is an honest terrain limit, not permission to alter the map midrun.
 
-6o — Signal burnout and relight. During an away day let ordinary braziers burn as they do. On return inspect both before refueling/reigniting. Follow newly observed signal changes without wiping remembered base knowledge. This can extend another day-away arm; no duplicate journey is needed solely to record fire state.
+6o — Signal burnout and relight. Establish finite fuel and inspect automatic refueling sources
+before leaving. Use the [fuel rules](../GAME-MANUAL.md#normalized-firewood-zones-and-stock) to
+prevent unintended replenishment when burnout is the question; a maintained fire remaining lit
+does not exercise burnout. Avatar teleportation can establish timely absence. Check actual loading
+and elapsed time rather than assuming unloaded fire behaves identically to loaded fire. On return,
+inspect both braziers before adding fuel: verify actual extinction/residual signals, then relight
+through native controls and follow new observations without wiping remembered base knowledge.
+If the first setup never burns out, adapt and complete that missing segment. This can extend a
+compatible day-away journey; it does not need a duplicate campaign merely to record fire state.
 
 ## Why these boundaries
 

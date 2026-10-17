@@ -7,13 +7,16 @@ Extend the existing [suite](playtest-suite.md); keep assignments and verdicts in
 
 ## Reuse the common procedure
 
-The preserved pre-signal R050 fixture is [`r050_rural_roof_bandit_only_v1/manifest.json`](../../../../tools/openclaw_harness/fixtures/saves/live-debug/r050_rural_roof_bandit_only_v1/manifest.json): 45 files, raw tree `b71d2c2ae067256bdf27cb272e7a7bab322e48aa0c5058e96f3435ccfeca5972`; the historical preparation recorded derived camp terrain and unchanged player/faction bytes, but its raw record was consumed. Added camp129,149 and inherited distant cabin103,167 are distinct sites. This establishes fixture provenance, not native success. Bind a disposable copy/current source through the existing registry; do not copy the progressed `.userdata` profile. Historical run1fe resumed saved gold/fire state; its coordinator brief was consumed. Its recorded downstream outcome is comparison context, not inspectable evidence for the current run, which must perform and record its own setup/ignition/admission.
+The [R050 pre-signal fixture](../../../../tools/openclaw_harness/fixtures/saves/live-debug/r050_rural_roof_bandit_only_v1/manifest.json)
+is a prepared bandit start. Its camp129,149 and distant cabin103,167 are distinct sites; select
+actual compatible bytes through the registry. A progressed profile is a continuation, not a
+fresh start. Historical R051 payment proof remains scoped to its original funded/fire state.
 
 Use the [smoke recipe](smoke-raid-replay.md#start) for bound start/current-state checks, ordinary ignition, explicit `safe` waits, saving without movement, and actor/evidence retrieval. Reuse its controls and query shapes, **not cannibal night gates, actor IDs, operation IDs or assumed timing**. Resolve menus and IDs live. Reuse setup already completed in this same full-start run; read returned observations instead of adding routine look/save calls. A historical setup checkpoint cannot replace the new journey's beginning.
 
-Before long waits or travel, use the shared [mutation setup](setup-and-interactions.md#mutation-setup-for-suite-runs): avatar `DEBUG_LS` on, ordinary vision and normal combat; no blanket debug bundle.
+Use the shared [practical setup policy](setup-and-interactions.md#mutation-setup-for-suite-runs) to remove irrelevant travel and survival friction, including useful avatar mutations and teleportation. Keep ordinary sight or combat conditions when the measured segment requires them; setup shortcuts do not establish the natural behavior they bypass.
 
-Select a compatible registered bandit start. The existing suite identifies prepared seeds and their setup limits; do not duplicate that catalogue here. Preserve an independent pre-signal start when testing discovery. For the current full suite and four parallel trials, each selected payment/Fight story starts at its specified initial save and reaches its choice naturally. Historical pre-choice copies remain useful diagnostic starts only.
+Select a compatible registered bandit start. The existing suite identifies prepared seeds and their setup limits; do not duplicate that catalogue here. Preserve an independent pre-signal start when testing discovery. A fresh full-story payment/Fight run starts before its required stages; a focused payment or return check can use a compatible pre-choice checkpoint. Preserve the scope of each.
 
 Coordinator selects the full story; Sol oversight gives the direct playing Luna its initial-save binding and complete relevant protocol, followed by current-run checkpoint deltas: selected build/save/run,
 sole input owner, pending control, completed proof, intended branch and first open boundary.
@@ -30,30 +33,24 @@ After scouts physically reach home, allow the natural return finalization and re
 
 ### Field note 1: party alarm delayed scouting return — resolved, normal behavior
 
-Observed on gameplay4a7c/runtime28e583, run1f6c2094. The first recorded alarm for both scouts5/6 was at native turn5227201, game minute7920 (one second into that minute). Repeated qualifying perception renewed finite30-minute alarms. The exact creature was not recorded; the nearby bullpup remains a candidate, not an attributed trigger. The scouts paused under their normal survival response. After the final alarm expired at5239801, they resumed cohesive homeward movement at8130 and reached home at8140. This interruption resolved naturally and is accepted as a valid, non-problem playtest deviation. Preserve real danger and watch safe resumption; do not force route priority or diagnose a delay alone as a bug.
-
-Evidence: [first alarm and renewals](../../../../.de67/task-logs/R-MAINT-SCENARIO-CONSOLIDATION-mac-capacity-001/bulky-m240-fixed-cursor-restart1-native/alarm-renewal-caller-finding.json), [natural resumption and home arrival](../../../../.de67/task-logs/R-MAINT-SCENARIO-CONSOLIDATION-mac-capacity-001/bulky-m240-fixed-cursor-restart1-native/natural-alarm-resumption-home-cursor-finding.json).
+On gameplay4a7c/runtime28e583, run1f6c2094's scouts5/6 renewed finite alarms through
+qualifying perception, then resumed homeward travel after the final alarm expired. The nearby
+bullpup was only a candidate stimulus. A survival interruption alone is not a scouting failure;
+inspect actual danger and safe resumption rather than forcing route priority.
 
 ### Field note 2: home arrival preceded report service — resolved, normal cadence
 
-In the same run, physical return receipts committed at8222, just after the8220 hourly structural service. At8226 the outing still said returning_home. Waiting through the next service at8280 delivered the actual report (transition724), and the outing was absent at8287. This timing gap resolved normally and is accepted as a non-problem. In this build structural maintenance runs once every60 game minutes; allow the next actual report service after recorded physical return before diagnosing that label alone. Use current source-bound cadence if it changes. These observed times are not universal wait quotas. Report delivery does not by itself prove the typed assessment result or payment readiness.
-
-Evidence: [hourly service cadence](../../../../.de67/task-logs/R-MAINT-SCENARIO-CONSOLIDATION-mac-capacity-001/bulky-m240-fixed-cursor-restart1-native/natural-report-cadence-finding.json), [actual report delivery](../../../../.de67/task-logs/R-MAINT-SCENARIO-CONSOLIDATION-mac-capacity-001/bulky-m240-fixed-cursor-restart1-native/report-assessment-boundary-8287.json).
+That run's physical return at8222 followed the8220 hourly service; report delivery occurred at8280.
+Allow the actual next report service before diagnosing `returning_home` after physical arrival.
+The build used60-minute structural cadence; those timestamps are examples, not universal wait
+quotas. Report delivery still does not establish assessment readiness or payment eligibility.
 
 ### Field note 3: returned report lacked acquired watch evidence — historical scope
 
-On source/gameplay4a7c with runtime28e583, saved8407/turn5256461 retained generation1/report1
-delivered8280 by carriers5/6, but observations were empty, readiness false and bounty0. Physical
-return/report did not establish a completed site assessment or payment eligibility. Its48-hour
-report expiry later released the operation at11160; generation2 selected a terrain opportunity,
-and a later generation selected frontier work. Those were real progress, not smoke-watch proof.
-
-Reusable lessons: do not add observations to an already delivered report by waiting; inspect actual
-fire when a signal becomes stale; use advertised wait durations; distinguish the intended site
-from a separate distant cabin. A World view outside its detail radius does not prove the brazier
-is cold, and visible firewood does not prove it fits a pickup pocket. An accepted item action with
-an unknown successor must not be replayed. These are historical lessons, not a live session,
-current repair assignment, fixed wait quota or permission to preserve an old controller.
+The same source/run delivered a report with no acquired observations and later selected other
+work after expiry. Waiting cannot add observations to an already delivered report. Check the
+actual fire and original watch evidence; a distant World view does not prove a cold brazier.
+Useful source readers are listed below; historical raw records are not current prerequisites.
 
 Current defects and continuations belong in the ledger and current task results. The source readers
 `evaluate_scout_report_at`, `evaluate_response_authorization` and
@@ -118,16 +115,9 @@ is not permission to omit local funding. Use the selected save's actual coordina
 coordinates copied from another branch. The [resident-payment command table](#ready-report-resident-payment--home-stash)
 provides the Drop, departure and Trade controls; read a row when that interaction is needed.
 
-Historical comparison: R051 carried300 coins and Auto Balance selected167 against a $761.52 demand,
-leaving133. At5248280 Mason (#4) carried167 in worn pockets and both collectors were alive at
-home129,149,0. This is that run's successful receiver/setup branch, not today's resident-funding
-recipe or a fixed basket quota. Native copies regenerated UIDs, so the extraction proves counted
-conservation, not old-to-new UID continuity. The raw final-save extraction was consumed.
-
-Keep the insufficient-payment/Fight branch separate. The owner accepted historical
-underfunded escalation and defender flight; its raw candidate record was consumed.
-Ernest attacked the player and Tilda/Casey fled. That branch does not prove player death or
-reciprocal defender attacks. Preserve completed segments when continuing either branch.
+Historical R051 proved a carried-coin payment and surviving-party return on40bfb2be/ec6008b5.
+It is a different receiver/setup branch from today's resident funding recipe, not a basket quota
+or current full-start proof. Keep insufficient-payment/Fight outcomes separate from successful Pay.
 
 ## Branches to work through
 
@@ -197,7 +187,7 @@ are needed, name their coordinate units and preserve z (only map-square x/y divi
 The current compact site/actor projections retain source labels and full retrieval handles;
 missing fields are unknown, not inactivity.
 
-Return the achieved outcome or concrete divergence, tested action/query corrections, evidence handles and save/input ownership. Add successful reusable segments to the existing recipe; leave unobserved outcomes unvalidated. A gameplay failure does not invalidate working ignition, waiting, saving or proof collection. No extra protocol review gate or separate protocol database.
+Return the achieved outcome or concrete divergence, tested action/query corrections, evidence handles and save/input ownership. Propose only missing reusable lessons under the [manual maintenance rule](../GAME-MANUAL.md#add-prune-and-correct-notes); ordinary run results stay in task notes. A gameplay failure does not invalidate working ignition, waiting, saving or proof collection. No extra protocol review gate or separate protocol database.
 
 
 ## Continue and batch on the current controls

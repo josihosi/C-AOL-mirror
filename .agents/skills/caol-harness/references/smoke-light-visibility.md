@@ -74,11 +74,13 @@ contained light has additional penalty. Inspect the actual packet rather than as
 
 ## Terrain, height and actual reach
 
-**Intended behavior:** exposed smoke and light can be seen across z-levels with a clear physical
-path; a roof one floor above is not automatically hidden. Current light already has a cross-z
-exposure path. The inspected smoke reader still rejects differing z in
-`live_bandit_overmap_los_from`; the roof-smoke repair is pending. Do not describe that rejection
-as intended gameplay or claim waiting fixes it. Recheck the repaired build before retaining this caveat.
+Exposed smoke and light can be seen across z-levels when their physical visibility conditions
+hold. Current `do_turn.cpp::live_bandit_overmap_smoke_los_from` uses the observable plume position
+or exposed-to-sky source for cross-level smoke and pays intervening terrain costs. A current loaded
+source with neither observable plume nor sky exposure is rejected. The generic
+`live_bandit_overmap_los_from` still rejects differing z, but it is not the complete smoke path.
+Use the bound run's actual smoke support and admission result; neither roof height alone nor
+extra waiting establishes visibility. Light has its own exposure/vertical path.
 
 The current coarse overmap sight model uses `line_to(observer, source)` and terrain see costs:
 clear/none0, low1, medium2, spaced-high4, high5, full-high10, opaque999.

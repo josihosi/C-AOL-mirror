@@ -8,9 +8,9 @@ should be run or judged. Do not paste a worker transcript or duplicate a run rep
 ## Start with a story; reuse proven command batches
 
 Before a first run, provide the scenario story, compatible starting state, intended observable
-outcome and relevant known controls. Mark borrowed or untried segments honestly. After a successful
-run, distill its actual command/output transcript into concrete ordered batches alongside that
-story. Preserve CLI syntax and parameter names, not just instructions such as “drop the gold.”
+outcome and relevant known controls. Mark borrowed or untried segments honestly. When actual use reveals a missing reusable control, distill that segment into the owning reference
+under [note maintenance](#add-prune-and-correct-notes). Preserve useful CLI syntax and parameters,
+not the whole transcript or another copy of an already documented procedure.
 Use existing supported wait/move/selection mechanisms; a list of commands is not automatically
 an executable batch-file format.
 
@@ -43,6 +43,34 @@ spike alarm. General spike/slow/stall assessment requires the scenario-owned per
 without it, those measurements remain unassessed. Read-only `performance` remains available while
 a request is pending. Monitoring must not require splitting every quiet native wait into short
 gameplay actions.
+
+## Compose a useful scenario
+
+Start from the behavior to judge and the conditions that let it occur. Reuse the nearest compatible
+fixture and proven controls. Fresh full-story tests start before their first required stage;
+focused tests can begin at a compatible checkpoint. Combine related questions in one journey
+when the setup and observations support both, rather than repeating the whole campaign.
+
+Choose practical setup from [mutations and interactions](references/setup-and-interactions.md).
+Avatar teleportation can get the observer away while a fire is still burning; invisibility can
+reduce interference while following a party. These are useful experimental tools, not failures
+of play. Keep ordinary sight when testing reciprocal detection, natural needs when testing
+survival, and actual terrain/actors when testing their route. Never substitute a debug arrival,
+report or edited NPC mission for the mechanism whose behavior is the question.
+
+| Question | Establish useful conditions | Follow through to |
+| --- | --- | --- |
+| Camp progress while the player is away | A real active operation and burning source; teleport or travel away as appropriate, checking actual unloading | Required elapsed time, same-ID progress, return/report and persistence |
+| Fire burnout and renewed discovery | Finite fuel, known source zones and no unintended ongoing refueling | Actual fire/signal loss, remembered knowledge, relight and subsequent observations |
+| Survivor continuity | Compatible real party; X4's exact controlled casualty and observation setup | Surviving member's actual continuation, casualty persistence and reload |
+| Interrupted work | A named NPC performing a real resumable local activity, with visible progress/materials | Actual interruption, supported resumption or attributable refusal, completed work without duplicated goods |
+| Natural encounter or pursuit | Real visibility, hostility and reachable geometry appropriate to the arm | Native response, contact/combat/escape and its consequences |
+
+A long wait is useful only when the expected change can occur in the current conditions. If the
+fire is being refueled, waiting longer is not a burnout experiment. If sorting already finished,
+a later abstract mission story is not an interruption of that activity. Change the irrelevant
+setup, preserve the actual observation and continue toward the missing condition. Keep elapsed
+time, actor identity and real simulation ownership honest through every shortcut.
 
 ## Contents and agent routing
 
@@ -126,21 +154,10 @@ From the current ground-floor tile, inspect native terrain and take a passable l
 an arbitrary starting position. At the ladder use `world.level_up`, then check the player is
 on `[3149,3454,1]`. A down staircase elsewhere is not the roof ladder.
 
-From that verified roof endpoint, six East and six North steps reached `[3155,3448,1]` in
-the successful run. Check hazards and passability as you walk; use the coordinates to adapt
-if your position differs. Do not step onto the fire. Historical R040 route facts (raw checkpoint
-consumed):
-receipt67 ascended at turn5,295,930; receipts75–97 reached the watch tile at turn5,295,951.
-The same ladder supported descent at turn5,295,928. Level-down from roof shingles at the
-watch tile was a no-op and is a recovery note, not a route step.
-
-R051 applied this route on the basic-template continuation: native `world.level_up` reached
-`[3149,3454,1]` at turn5,216,278. From the roof working tile, the current lighter menu opened
-**Light where?**, Northeast began `ACT_START_FIRE`, and turn5,216,353 showed the roof brazier's
-`fd_fire` plus the successful ignition message. The compact
-[native action records](../../../.de67/task-logs/r051-verified-roof-actions-20261002.json)
-retain exact response paths and hashes. That run advertised item-action1 successfully; the
-old downstairs rejection of that ID is not a general ban. Always use the current menu.
+From that roof endpoint, choose a passable route to `[3155,3448,1]`, southwest of the
+brazier. `world.level_down` needs an actual downward connection; shingles at the working tile
+are not the ladder. Use current terrain and hazards rather than replaying historical footsteps.
+The successful R040/R051 routes establish this geometry at their saved source, not current access.
 
 ### Light, maintain or extinguish the fire
 
@@ -238,14 +255,6 @@ to the coordinator. It preserves the unfinished outcome and routes the repair. A
 actor may revisit a tile while fighting or avoiding an obstacle; a justified retreat is not a
 stall. Compare actions and state changes, not a position pair alone.
 
-Example: run06099f… had NPC5 at `[3149,3442,0]` and `[3150,3442,0]` on successive observations,
-committed raid contact but `hold_off`/`combat_forward=false`, and NPC3 absent from the later roster.
-That contradicts expected assault and warrants inspection without another hour of waiting.
-It does not prove the entry route or who killed the Casey-named corpse. First local tile was
-retained only after arrival; the viewer had clairvoyance. Original report:
-[retained finding](../../../.de67/task-logs/review-owner-b52302a9f956-20260926/mutation-suggestions.md.before).
-Use this as a reasoning example, not as the current state of another session.
-
 Screenshots can reveal where to investigate; native actions/saves/logs establish movement,
 combat and identity. If the needed fact is unavailable, name the exact missing observation and
 improve its existing retrieval/trace route rather than adding repeated warnings or fabricating it.
@@ -286,9 +295,8 @@ danger and targeting before input; stop on an unexpected scene.
 `DEBUG_LS` holds hunger, thirst and sleepiness stable; `DEBUG_CLOAK` is a separate invisibility
 trait in `data/json/mutations/debug.json`. Record them separately because invisibility can
 change hostile sight. Melee skill or an axe can be recorded survival setup. Debug HP-to-zero
-on incidental travel zombies is setup and cannot prove native combat. To assess ordinary
-survival, include an interval without life support and read player status rather than assuming
-that a debug-aided trip tested food or water management. Preserve encounters, damage and
+on incidental travel zombies is setup and cannot prove native combat. For an ordinary needs-survival test, leave life support off from the declared start and provide
+real supplies; a debug-aided interval does not test food or water management. Preserve encounters, damage and
 interruptions; use the wait mode that matches the fact being observed.
 
 Use existing run-bound descriptors, exact event handles and fresh saves first. If an actor
@@ -355,12 +363,9 @@ a different attacker or a reason to change raid behavior. A terminal death surfa
 wait recipe before its requested duration: inspect that surface and the native evidence before
 interpreting a generic macro error as a product failure.
 
-In the R013 signal-off wait, eating pemmican left a native **Consume item** picker open while the
-bridge still owned the original one-minute wait request. The game was alive; a second collector
-or new game command would have conflicted with that request. Luna identified the exact PID and
-current picker, sent one Escape through the verified Mac input route, saw World and “You finish
-waiting,” then collected the original request. Check the actual current picker and session
-before using this recovery; the successful key delivery alone does not establish a fresh save.
+An interruption can leave a native picker open while the original wait request is still pending.
+Resolve the actual current picker through its advertised controls, then collect the original
+request. Do not launch a second collector or assume that a delivered key completed the activity.
 
 Record starting and ending turns, interruptions and the observed outcome. On an inspection stop,
 assess the relevant health and NPC state, then choose a continuation from current live controls;
@@ -431,12 +436,9 @@ Before game input, verify the resolved userdir has the intended `save/TestSetup0
 expected save hashes, then require a same-run native World descriptor. A live PID or startup
 `ok` alone does not establish that the intended world loaded.
 
-In failed run `60f29426e764a36eb5f41da49f3310ddcbe22023b7c1313a77ad6aada6dc5a3c`, an
-absolute `--profile` path was sanitized into a new directory with zero save files. The prepared
-profile still had `TestSetup00`; startup recorded Main Menu and the bridge ended with
-`pre_descriptor_no_progress`. See that run's `startup.result.json`, bridge `status.json`, and
-`startup_harness.py::sanitize_profile_name`. Preserve the failed run and relaunch with the
-profile name after confirming the effective save. The blank launch is not gameplay evidence.
+A sanitized absolute profile path previously launched an empty userdir and Main Menu instead
+of the prepared world. Check the effective profile on that specific failure; it is setup evidence,
+not a gameplay defect.
 
 ## Dismiss the known reload dialog
 
@@ -505,16 +507,8 @@ fire-only cap of 6 OMT was one tile short of the target; continue or resume from
 burning-fire turn until actual smoke is sampled before judging that range gate. An open-window
 or rooftop light test needs its own verified geometry and separate disposable run.
 
-In the R013 downstairs example, the player stood on `[3158,3449,0]`, directly west of the
-brazier `[3159,3449,0]`. Open Inventory, select the **charged lighter**, then choose the
-currently advertised **activate** action in its item menu. The live menu advertised
-`inventory-item-action:21`; an attempted `inventory-item-action:1` was rejected as
-`stable_id_not_advertised` and did not use the lighter. At **Light where?**, choose **East**
-from that player tile. The next prompt asks whether to burn the firewood source; read its
-current choices and choose **YES** for this prepared fuel. Confirm `fd_fire` on the brazier
-after the action, rather than treating the accepted item/menu input as ignition proof.
-These historical action IDs are an example of why the worker must copy the current menu target;
-the direction depends on the current player and brazier tiles.
+For the normalized downstairs working tile, the brazier is East. Use the current lighter
+and Activate targets; their numeric IDs change between menus and builds.
 
 ```text
 play act world.inventory
@@ -558,34 +552,11 @@ check adjacency, then current fire and useful items. When the current World list
 `world.examine`, `play act world.examine` opens the same native adjacent-tile chooser. Read
 its returned menu and copy the current `menu.choose` target; never reuse a prior target ID.
 
-In the current bound Mac session, Luna opened Examine with an exact-PID native `e` press through
-the authorized Peekaboo bridge after confirming the adjacent tile. The next semantic menu
-already supported choosing **Extinguish fire**. Read the current menu and its enabled target;
-the historical `uilist-entry:66` ID below is evidence, not a reusable target. The shared
-`world.examine` semantic opener has focused source tests; a separate source-bound
-native CLI pilot remains open. The exact-PID `e` result is historical proof of the native menu,
-not proof of that CLI pilot.
-
-```text
-/opt/homebrew/bin/peekaboo type "e" --pid PID --bridge-socket "/Users/josefhorvath/Library/Application Support/Peekaboo/bridge.sock" --json
-play look
-play act menu.choose --target CURRENT_ENABLED_EXTINGUISH_ENTRY
-```
-
-Replace `PID` with the session's verified game PID and the target with the currently advertised
-enabled entry. In R013 this opened the brazier action menu directly, with no direction prompt.
-Only Luna uses this live fallback. The normal CLI action should replace the
-Peekaboo press once source-bound native verification proves it.
-
-In the R013 disposable scene the downstairs brazier is `[3159,3449,0]`. Luna first tried from
-`[3156,3449,0]`, three tiles away, and an inventory filter returned no matches. A bounded
-reposition to `[3158,3449,0]` put the player beside it. The exact-PID native `e` opened
-**Select an action**;
-**Extinguish fire** was enabled and the existing semantic menu accepted its current
-`uilist-entry:66` choice. At turn 5,216,493, the exact brazier tile no longer had `fd_fire`,
-and a real quicksave confirmed that turn. Residual `fd_smoke` and `fd_hot_air1` remained;
-track their decay before calling the signal off. These coordinates describe that saved scene,
-not a general path for every profile.
+Use the advertised `world.examine` route first. If that operation is unavailable in the bound
+build, Luna may use the verified exact-PID Peekaboo `e` fallback, then select the actual native
+menu entry. The R013 fallback proved extinguishing at the adjacent downstairs tile with residual
+smoke/heat; it does not establish that any current CLI route is unavailable. See
+[item controls](references/setup-interaction.md#gui-setup-on-this-mac) for the current host route.
 
 ## Readable play output
 
@@ -601,7 +572,6 @@ sequence and current game result before adding a macro or more output fields.
 
 | Finding | Scope and evidence | Use in later tests |
 | --- | --- | --- |
-| An already travelling reserved attacker can retain an obsolete rally guard that blocks loaded approach. | Failing-before and passing production path tests plus Mac build in historical R009 (raw worker receipt consumed); repair in `src/do_turn.cpp`. Native assault remains a separate proof. | Check same-ID goal/path and both persistent/cached guard after reload; require physical OMT arrival before contact. |
 | Debug clairvoyance has two mutations: `DEBUG_CLAIRVOYANCE_PLUS` and `DEBUG_CLAIRVOYANCE`. | `data/json/mutations/debug.json`; verified viewing setup above. | In a disposable viewing run, record both mutations, pass one real turn and verify the view. Do not credit either as a signal cause. |
 | Local hostile posture reads the player's view of reserved members. Clairvoyance may change exposure and `hold_off` decisions. | `src/do_turn.cpp::live_bandit_make_gate_input` and `live_bandit_try_sight_avoid_reposition`; run `06099f7263e37a362941a1fc57bc56d550ad77539e1b8aed76d06326515a0106` is a limited viewer example. | Preserve a separate no-clairvoyance copy for concealed-player assault proof; inspect local-gate exposure logs before interpreting a visible standoff. |
 | Cannibal routine members remain abstract until a valid signal admits their response. Terrain alone can create suspected leads without a scout. | `src/do_turn.cpp::live_bandit_materialize_abstract_members_for_routine`; historical R012 (raw no-fire result consumed) ran 1,441 native minutes with 12 suspected leads, no ready observer and no outing or raid. | Treat an unlit default camp with no scouts as the careful-player baseline. For post-signal routine behavior, admit a short real signal, record any knowledge it creates, extinguish the source, then follow the same NPC IDs through visits and returns. Do not call that a no-signal discovery test. |
@@ -610,15 +580,24 @@ sequence and current game result before adding a macro or more output fields.
 
 ## Add, prune and correct notes
 
-At a meaningful game transition, write a short local note with: question, run/source identity,
-turn range, actor/operation IDs, exact evidence handles, observed fact, alternative explanation,
-claim limit and next decision. Keep current owner instructions in the WEC/assignment, not duplicated in this manual. Promote only
-reusable, verified knowledge into the table above.
-When a new result corrects a note, replace obsolete advice and record the concise finding and
-reproduction recipe. Do not require old artifact links to stay live: completed playtest saves,
-logs, captures and proof archives are disposable. Report failures honestly before removing their
-temporary files. Git preserves source history; current task context preserves the useful outcome.
-Cleanup is part of delivery, with user data and active owner operations protected.
+Run observations, hypotheses, exact receipts and current status belong in the existing task/run
+notes. There is no protocol-writing obligation after a run, successful action or discovered bug.
+Current owner decisions belong in owner context/assignments, not WEC or a recipe's historical tail.
+
+Promote a finding only when it is verified and reusable: it changes a later agent's choice of
+setup, action, interpretation or recovery. Put mechanics in this manual, control syntax in the
+owning control reference, and scenario-specific changes in that scenario's recipe. Replace the
+obsolete instruction and remove conflicting duplicates. Keep only the condition, useful action,
+expected observable result and material limitation; include a concise source/run reference where
+it supports the lesson. A chronological story, full receipt/hash list or transient blocker stays
+in task notes. A one-off mistake does not become a universal ban, mandatory check or approval gate.
+
+A player proposes the concrete lesson in its normal return. The owner of the affected document
+integrates it when useful, preserving other editors' custody. This is ordinary maintenance, not
+a new review ceremony or prerequisite for continued play. Check changed advice against the current
+controls/source and related recipes; text alone proves neither native behavior nor player adoption.
+Git retains prior wording. Keep concise outcomes and reproduction steps in task context and remove
+finished generated logs/saves under the existing cleanup rules; do not create protocol archives.
 
 ## Logging scope
 

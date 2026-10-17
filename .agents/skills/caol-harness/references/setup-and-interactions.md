@@ -6,11 +6,12 @@ activation/placement, use the current native prompt and [setup interaction](setu
 
 ## Mutation setup for suite runs
 
-**Default for long faction, roof and away/return journeys: avatar Debug Life Support (`DEBUG_LS`)
-on; ordinary vision; no invisibility or combat boosts.** Apply it to the player only, never to the
-NPCs whose sleep, stamina, injuries and combat are being tested. It removes needs-maintenance noise,
-not the raid's ability to injure or kill. A dedicated food/water/sleep-survival arm instead leaves it
-off and plans ordinary supplies. Short CLI comparisons retain identical declared setup in both arms.
+Josef authorizes practical avatar mutation setup liberally, including invisibility and avatar
+teleportation. Choose shelter, fuel, routes and waiting positions that reach the assigned test
+condition. Debug Life Support (`DEBUG_LS`) is useful for long journeys; it removes needs noise,
+not incoming damage. Preserve the variable actually under test: a needs-survival check keeps
+natural needs, and a natural-combat check retains the relevant damage and survival conditions.
+Leave tested NPC mechanics intact except for the explicitly selected controlled intervention, such as the panic or casualty variant. Record meaningful setup changes and their evidence scope.
 
 ### Get and verify Debug Life Support
 
@@ -18,8 +19,8 @@ off and plans ordinary supplies. Short CLI comparisons retain identical declared
 2. If missing, open the currently advertised `world.debug_menu`, choose **Player → Mutate**
    through its returned menu entries, search/select **Debug Life Support**, and enable that
    individual trait. Resolve current action/target IDs rather than copying old menu numbers.
-   Do **not** use Game → Toggle debug mutations: that bundle includes unrelated traits such as
-   debug light and can change the very signal or visibility being tested.
+   Prefer individual traits so their effects are known. The debug mutation bundle includes
+   debug light, which would confound a light or ordinary-visibility measurement.
 3. Return to World, verify `DEBUG_LS` active in native mutation state, and pass one advertised
    `world.pause` if needed for setup to apply. Record its turn and current needs/HP. Do not use
    Tab for this setup because it may attack. Retain setup in the next useful checkpoint; no
@@ -37,7 +38,7 @@ if this setup changes them, label the disposable run as a setup variant rather t
 Owner-selected setup: enable avatar **Debug Stamina (`DEBUG_STAMINA`)** individually for
 future non-stamina journeys. Use current `world.debug_menu` → Player → Mutate, resolve the
 advertised Debug Stamina entry, enable only if missing, then verify native mutation state.
-Do not use Toggle debug mutations or change owner saves. `Character::mod_stamina` returns
+Select this trait individually and leave owner saves unchanged. `Character::mod_stamina` returns
 without changing stamina in either direction for this trait, including ordinary recovery;
 it also excludes the tired-activity query. The JSON regeneration modifier is +9, but
 recovery still calls this skipped mod_stamina path. It does not refill existing low stamina. It does not suppress hunger, thirst, sleep, damage or death. Apply to
@@ -55,24 +56,21 @@ in both pre-input and post-action drivers; it is not a stamina-specific adapter.
 
 ### Vision and other mutations by arm
 
-**Owner-selected exceptions (2026-10-05):** [suite X2–X4](playtest-suite.md#shared-execution-and-debug-boundaries) permit avatar debug teleportation in X2/X3 and avatar invisibility/teleportation plus one exact bandit debug kill in X4. The separate [X4b return ambush](playtest-suite.md#x4b-rider-ambush-during-bandit-return) permits one hostile zombie rider debug spawn near the bandit party and the same avatar observation setup; combat and any resulting death must occur natively. These are named controlled variants; the ordinary-arm defaults below still apply elsewhere. Use current native debug controls, preserve intervention evidence and distinguish induced setup from subsequent native behavior. No blanket debug bundle or NPC relocation is implied.
+Use the authorized avatar setup to observe the NPC mechanism without unrelated travel or
+survival friction. This is not a global mutation allowlist. Preserve each measurement:
 
-- Ordinary smoke, roof, rural, bandit payment/Fight, patrol, light-only and away/return: `DEBUG_LS`
-  as above; no added clairvoyance, night/map vision, cloak, invisibility or debug light. Use selected
-  actor logs to inspect off-screen behavior. Keep normal combat capability unless the assigned
-  fixture explicitly records another setup.
-- The named clairvoyance raid variant: `DEBUG_LS` plus `DEBUG_CLAIRVOYANCE` and
-  `DEBUG_CLAIRVOYANCE_PLUS`, enabling only missing traits. Verify after returning to World.
-  No cloak. This is viewer coverage, not ordinary-view discovery/stalking proof.
-- Exposed stalking, unseen escape and pursuit knowledge (6h–6j): ordinary vision is the main
-  proof. A separate viewer copy may diagnose position/path, but do not use hidden information to
-  steer the ordinary run or count debug sight as reciprocal exposure. Current do_turn.cpp burn
-  checks use `sees_without_clairvoyance` for both participants; that protects this specific gate,
-  not every visibility-dependent system or the worker's choices.
-- Cloak/invisibility, debug light, invulnerability/healing, speed boosts, temperature
-  immunity and mind control are not defaults. Each changes a relevant detection, light, survival,
-  movement or combat variable. Use only in an explicitly identified diagnostic/setup branch,
-  with the ordinary arm retained. Never grant the blanket debug mutation bundle for convenience.
+- Actual reciprocal scout exposure still requires native ordinary sight; debug vision is not
+  exposure proof. If invisibility prevents the required contact, disable and verify it for that
+  segment, then restore useful observation setup when appropriate.
+- Light-only and smoke comparisons retain their actual emitter and ambient-light conditions;
+  debug light would change those inputs. Viewer traits establish viewer coverage, not ordinary
+  detection. Keep the named clairvoyance variant distinct.
+- Avatar teleportation can establish departure, return or loading geometry. Verify actual map
+  bounds, actor ownership and elapsed time; it does not prove walked travel or NPC movement.
+- Do not bypass the tested NPC behavior by editing its mission or moving it to the expected endpoint. Preserve explicitly selected controlled variants: the [panic branch](rural-roof-replay.md#panic-and-withdrawal-regression) induces flight, the night-alarm arm permits its stated threat setup, and the [X4 procedure](playtest-suite.md#x4-party-survivor-and-casualty-handover)
+  separately permits one identified bandit debug kill; [X4b](playtest-suite.md#x4b-rider-ambush-during-bandit-return)
+  permits one hostile zombie rider spawn. These controlled interventions do not authorize other
+  actor creation, casualties, mission edits or forced outcomes.
 
 For comparisons, keep setup fixed or label the mutation difference as the tested variable. Keep
 existing viewer evidence; do not silently remove traits from its saved continuation and call it
@@ -82,9 +80,9 @@ Choose waiting behavior from the test goal; see [Wait and observe](../GAME-MANUA
 for the existing `safe`, `stop` and `ignore` modes and their actual behavior. Damage or death during
 an intended combat test can be the result being tested, not a defect. Use `safe` when you need to
 inspect the first harm and `ignore` when deliberately observing combat through its outcome.
-No cloak or extra approval is required merely because fictional danger is expected. Exact-identity
-creature zapping remains a zero-credit diagnostic/setup intervention; it cannot prove natural
-route, ecology, combat, lifecycle, qualification or certification behavior.
+No extra approval is required merely because fictional danger is expected. An induced casualty
+does not prove natural combat lethality; subsequent native survivor, ownership and persistence
+behavior can establish the assigned controlled X4 outcome.
 
 ## Speech and NPC replies
 

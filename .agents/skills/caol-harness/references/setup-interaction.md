@@ -58,19 +58,16 @@ item and direction IDs in each run. A brazier alone, an accepted command, hot ai
 preseeded fire does not prove this run ignited the brazier. After confirming actual fire, step
 about two tiles away without stepping onto the burning tile. Check that fuel and fire persist.
 
-The prepared smoke/light saves need no routine inventory or fuel collection. Do not open a bulk
-pickup on the plank or splintered-wood stack, and do not substitute a smokebomb. If ordinary
-lighter use fails, inspect that exact failure before changing setup. If the owner has already
-lit the fire in the live session, attribute that input to the owner, verify `fd_fire`, and continue
-the smoke/camp watch without trying to light it again.
+Prepared saves often supply fuel and a lighter; use what is actually present. If fuel, access or
+source-zone geometry cannot support the intended interval, arrange practical setup through current
+controls rather than treating an old recipe as a prohibition on maintenance. Follow the
+[shared setup policy](setup-and-interactions.md#mutation-setup-for-suite-runs). Avoid unnecessary
+bulk pickup: moving a whole wood pile is different from selecting enough fuel for this fire.
 
-For the owner's closed-room smoke and open-room light comparisons, use the prepared separate save
-copies and ordinary fires. Keep the windows and curtains at their stated starting positions;
-avoid a smokebomb or injected signal as a substitute. For the prepared closed-window smoke case, use the existing fuel and source zone without
-adding fuel setup. Investigate actual ignition or maintenance failure through current controls;
-use an intervention only when the current assignment specifically authorizes it, with zero natural
-signal credit. An old run's wood-spawn permission is not standing authority. Read [behavior and movement](behavior-and-movement.md) for the
-long observation and quicksave decision loop.
+For closed-room smoke and open-room light comparisons, retain the selected window/curtain geometry
+and a real fire; a smokebomb or injected signal tests a different source. If the fire was already lit,
+verify it and continue without relighting, preserving who supplied the ignition. Fuel interventions
+establish setup; subsequent native signal and NPC behavior retain their own proof.
 
 The reusable isolated scenario `r029.setup_information_diagnostic_mcw` and its matching brief/charter
 under `tools/openclaw_harness/charters/r029-setup-information-diagnostic*.json` exercise this route
