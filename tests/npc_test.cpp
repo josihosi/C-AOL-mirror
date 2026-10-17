@@ -12083,6 +12083,8 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
                       << " position=" << worker->pos_abs().to_string()
                       << " flee_effect=" << worker->has_effect( efftype_id( "npc_flee_player" ) )
                       << " fire_escape=" << worker->has_effect( efftype_id( "npc_fire_bad" ) )
+                      << " alive=" << !worker->is_dead_state()
+                      << " dangerous_field=" << worker->sees_dangerous_field( worker->pos_bub() )
                       << " current=" << worker->activity.id().str()
                       << " route_steps=" << worker->path.size() << '\n';
             REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
@@ -12092,9 +12094,13 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
             CHECK( here.i_at( source ).size() == 1 );
             CHECK( here.i_at( target ).empty() );
         }
-        here.remove_field( corpse_pos, field_type_id( "fd_fire" ) );
         REQUIRE( worker->pos_abs() != origin ); // Native hazard escape, not displacement injection.
-        REQUIRE( rl_dist( worker->pos_abs(), here.get_abs( corpse_pos ) ) > 1 );
+        // Equally safe adjacent tiles are chosen randomly; three native moves
+        // do not promise a particular distance from the original fire.  Check
+        // survival and actual field safety before removing the hazard instead.
+        REQUIRE_FALSE( worker->is_dead_state() );
+        REQUIRE_FALSE( worker->sees_dangerous_field( worker->pos_bub() ) );
+        here.remove_field( corpse_pos, field_type_id( "fd_fire" ) );
         worker->set_moves( 100 );
         worker->move();
         CHECK( worker->activity.id() != activity_id( "ACT_PULP" ) );
