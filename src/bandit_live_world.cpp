@@ -3166,7 +3166,13 @@ bool local_handoff_snapshot_matches_outing(
     const bool scored_burn_egress = outing.schema_version >= 10 &&
                                     active_outing_has_current_covert_burn_receipt( outing ) &&
                                     scout_phase_requires_homeward_only( snapshot.phase ) &&
-                                    snapshot.route_position == outing.selected_watch_omt &&
+                                    ( snapshot.route_position == outing.selected_watch_omt ||
+                                      ( snapshot.phase == scout_phase::burned_withdrawal &&
+                                        physical_homeward_cursor &&
+                                        std::find( outing.current_covert_egress_route_omts.begin(),
+                                                outing.current_covert_egress_route_omts.end(),
+                                                snapshot.route_position ) !=
+                                        outing.current_covert_egress_route_omts.end() ) ) &&
                                     ( outing.covert_egress_attempts > 0 ||
                                       ( outing.covert_egress_attempts == 0 &&
                                         outing.covert_egress_revision == 1 &&
@@ -5030,7 +5036,9 @@ local_dematerialization_plan plan_local_pair_dematerialization( const site_recor
         snapshot.route_position = *physical_homeward_cursor;
         snapshot.approach_from = snapshot.route_position == prior_local_route_position ?
                                  prior_local_approach : prior_local_route_position;
-        snapshot.egress_omt = outing.shared_route.back();
+        if( outing.phase != scout_phase::burned_withdrawal ) {
+            snapshot.egress_omt = outing.shared_route.back();
+        }
     }
     if( std::find( snapshot.casualty_ids.begin(), snapshot.casualty_ids.end(),
                    snapshot.cohesion_leader_id ) != snapshot.casualty_ids.end() ) {
@@ -5470,7 +5478,9 @@ std::optional<site_record> local_pair_abstract_resume_progress_candidate( const 
     const tripoint_abs_omt prior_route_position = resume.route_position;
     resume.route_position = *progressed_omt;
     resume.approach_from = prior_route_position;
-    resume.egress_omt = next.shared_route.back();
+    if( next.phase != scout_phase::burned_withdrawal ) {
+        resume.egress_omt = next.shared_route.back();
+    }
     resume.committed_minutes = current_minutes;
     resume.cohesion_best_staging_distances.clear();
     for( local_handoff_member_snapshot &snapshot : resume.members ) {
@@ -24103,6 +24113,21 @@ std::string render_shakedown_surface_report( const site_record &site,
     return out.str();
 }
 
+// A Fight departure retains hostility; it does not grant payment protection.
+static bool hostile_shakedown_fight_identity_matches( const site_record &site )
+{
+    const hostile_operation_state &operation = site.active_hostile_operation;
+    const active_outing_state &reservation = operation.reservation;
+    const std::string &outcome = site.last_shakedown_outcome;
+    return !site.retired_empty_site && operation.is_active() &&
+           operation.operation_kind == hostile_operation_kind::shakedown &&
+           operation.shakedown_pending_branch == "fight" &&
+           site.active_external_outing() == &reservation &&
+           ( reservation.camp_id.empty() || reservation.camp_id == site.site_id ) &&
+           ( outcome == "fight_unresolved" || outcome == "fight_defender_loss" ||
+             outcome == "fight_bandit_loss" || outcome.empty() );
+}
+
 hostile_operation_player_relationship hostile_operation_player_relationship_for(
     const world_state &state, const character_id npc_id )
 {
@@ -24153,6 +24178,8 @@ hostile_operation_player_relationship hostile_operation_player_relationship_for(
         // committed-contact reducer runs. That pending native choice is not a
         // casualty outcome, and must not retain covert/peaceful neutrality.
         if( hostile_shakedown_combat_is_ongoing( site ) ||
+            ( operation.phase == hostile_operation_phase::returning_home &&
+              hostile_shakedown_fight_identity_matches( site ) ) ||
             ( site.last_shakedown_outcome.empty() && operation.shakedown_pending_branch == "fight" &&
               operation.phase != hostile_operation_phase::lost ) ) {
             return matched( hostile_operation_player_relationship::combat_released );
@@ -25056,7 +25083,11 @@ bool complete_covert_scout_burned_egress(
     const active_outing_state &outing = site.active_outing;
     if( !simulation_cursor_matches( outing, expected_cursor ) ||
         outing.schema_version < 10 || outing.kind != outing_kind::structural_sortie ||
-        outing.owner != simulation_owner::local ||
+        ( outing.owner != simulation_owner::local &&
+          !( outing.owner == simulation_owner::abstract &&
+             outing.local_handoff.is_abstract_resume() &&
+             crossing_receipt_allows_runtime_progress( outing ) ) ) ||
+        !simulation_owner_state_is_consistent( outing ) ||
         outing.phase != scout_phase::burned_withdrawal ||
         outing.local_handoff.phase != outing.phase || current_minutes < 0 ||
         current_minutes < outing.last_advanced_minutes ) {
@@ -25101,6 +25132,11 @@ bool complete_covert_scout_burned_egress(
     const scout_phase next_phase = scout_phase_after_burned_evacuation( true );
     candidate.active_outing.phase = next_phase;
     candidate.active_outing.local_handoff.phase = next_phase;
+    if( outing.owner == simulation_owner::abstract ) {
+        // Actual concealed-rally arrival, not a homeward label or an owner
+        // transfer, authorizes the retained motor's next camp-bound leg.
+        candidate.active_outing.local_handoff.egress_omt = outing.shared_route.back();
+    }
     candidate.active_outing.last_progress_minutes = current_minutes;
     candidate.active_outing.last_advanced_minutes = current_minutes;
     if( !simulation_owner_state_is_consistent( candidate.active_outing ) ||
@@ -25730,17 +25766,8 @@ bool apply_terminal_hostile_shakedown_aftermath( world_state &state, site_record
 
 bool hostile_shakedown_combat_is_ongoing( const site_record &site )
 {
-    const hostile_operation_state &operation = site.active_hostile_operation;
-    const active_outing_state &reservation = operation.reservation;
-    const std::string &outcome = site.last_shakedown_outcome;
-    return !site.retired_empty_site && operation.is_active() &&
-           operation.operation_kind == hostile_operation_kind::shakedown &&
-           operation.phase == hostile_operation_phase::committed_contact &&
-           operation.shakedown_pending_branch == "fight" &&
-           site.active_external_outing() == &reservation &&
-           ( reservation.camp_id.empty() || reservation.camp_id == site.site_id ) &&
-           ( outcome == "fight_unresolved" || outcome == "fight_defender_loss" ||
-             outcome == "fight_bandit_loss" || outcome.empty() );
+    return site.active_hostile_operation.phase == hostile_operation_phase::committed_contact &&
+           hostile_shakedown_fight_identity_matches( site );
 }
 
 bool begin_shakedown_basecamp_defender_observation( site_record &site,

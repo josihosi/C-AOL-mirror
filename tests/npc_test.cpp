@@ -11902,7 +11902,8 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
            "[npc][pulp_job_continuation_067]" )
 {
     const std::string mode = GENERATE( "ordinary", "backlog", "corpse_gone", "blocked",
-                                       "fire", "reload", "nonpulp", "flee", "flee_reload", "flee_expired_reload", "guard_order" );
+                                       "fire", "reload", "nonpulp", "flee", "flee_reload", "flee_expired_reload", "guard_order", "reassigned", "reassigned_reload" );
+    const bool reassigned = mode == "reassigned" || mode == "reassigned_reload";
     CAPTURE( mode );
     override_option food( "NO_NPC_FOOD", "true" );
     override_option llm( "LLM_INTENT_ENABLE", "false" );
@@ -11945,6 +11946,7 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
     REQUIRE( delivery.get_var( "pulp_continuation_067" ) == "one" );
     delivery.set_owner( *worker );
     here.add_item_or_charges( source, delivery );
+    const int64_t source_uid = here.i_at( source ).begin()->uid().get_value();
     here.build_map_cache( 0 );
     REQUIRE( zones.get_near_zone_type_for_item( delivery, worker->pos_abs(), MAX_VIEW_DISTANCE,
              worker->get_faction_id() ) == zone_type_id( "LOOT_FOOD" ) );
@@ -11991,6 +11993,16 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
         } );
         CHECK( guard_error.empty() );
         CHECK_FALSE( worker->has_effect( effect_npc_suspend ) );
+    }
+    if( reassigned ) {
+        REQUIRE( worker->activity.id() == activity_id( "ACT_PULP" ) );
+        talk_function::sort_loot( *worker );
+        REQUIRE( worker->activity.id() == ACT_MOVE_LOOT );
+        REQUIRE_FALSE( worker->has_destination() );
+        REQUIRE( worker->peek_destination_activity().is_null() );
+        REQUIRE( worker->backlog.size() == 2 );
+        CHECK( worker->backlog.front().id() == activity_id( "ACT_PULP" ) );
+        CHECK( worker->backlog.back().str_values == backlog.str_values );
     }
     if( mode == "corpse_gone" ) {
         here.i_clear( corpse_pos );
@@ -12088,7 +12100,8 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
         CHECK( worker->activity.id() != activity_id( "ACT_PULP" ) );
         CHECK( worker->get_attitude() == NPCATT_FLEE_TEMP );
     }
-    if( mode == "reload" || mode == "flee_reload" || mode == "flee_expired_reload" ) {
+    if( mode == "reload" || mode == "flee_reload" || mode == "flee_expired_reload" ||
+        mode == "reassigned_reload" ) {
         const auto id = worker->getID();
         const auto position = worker->pos_abs();
         REQUIRE( world_generator->active_world );
@@ -12108,12 +12121,20 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
             REQUIRE( worker->has_effect( efftype_id( "npc_flee_player" ) ) );
             CHECK( worker->activity.id() != activity_id( "ACT_PULP" ) );
         } else {
-            REQUIRE( worker->activity.id() == activity_id( "ACT_PULP" ) );
+            REQUIRE( worker->activity.id() == ( reassigned ? ACT_MOVE_LOOT : activity_id( "ACT_PULP" ) ) );
         }
-        REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
-        REQUIRE( worker->backlog.size() == 1 );
-        CHECK( worker->backlog.front().auto_resume );
-        CHECK( worker->backlog.front().str_values == backlog.str_values );
+        if( reassigned ) {
+            REQUIRE_FALSE( worker->has_destination() );
+            REQUIRE( worker->peek_destination_activity().is_null() );
+            REQUIRE( worker->backlog.size() == 2 );
+            CHECK( worker->backlog.front().id() == activity_id( "ACT_PULP" ) );
+            CHECK( worker->backlog.back().str_values == backlog.str_values );
+        } else {
+            REQUIRE( worker->peek_destination_activity().id() == ACT_MOVE_LOOT );
+            REQUIRE( worker->backlog.size() == 1 );
+            CHECK( worker->backlog.front().auto_resume );
+            CHECK( worker->backlog.front().str_values == backlog.str_values );
+        }
         CHECK( worker->mission == job_mission );
         CHECK( worker->get_attitude() == ( fleeing ? NPCATT_FLEE_TEMP : job_attitude ) );
     }
@@ -12145,10 +12166,22 @@ TEST_CASE( "NPC pulp interrupts a real sorting route and resumes its pending job
         REQUIRE( worker->backlog.size() == 1 );
         CHECK( worker->backlog.front().auto_resume );
     }
+    std::optional<int64_t> delivered_uid;
     const auto delivered_count = [&]() {
         int count = 0;
         for( const item &it : here.i_at( target ) ) {
             if( it.get_var( "pulp_continuation_067" ) == "one" ) {
+                // The native sorter copies into the destination and removes
+                // the source. item_uid copy construction creates a new UID;
+                // track that actual delivered root, then require it stable.
+                const int64_t current_uid = it.uid().get_value();
+                CHECK( current_uid > 0 );
+                CHECK( current_uid != source_uid );
+                if( !delivered_uid ) {
+                    delivered_uid = current_uid;
+                }
+                CHECK( current_uid == *delivered_uid );
+                CHECK( it.typeId() == itype_id( "test_apple" ) );
                 ++count;
             }
         }

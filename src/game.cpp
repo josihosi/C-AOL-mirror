@@ -6421,6 +6421,12 @@ look_around_result game::look_around(
     bool select_zone, bool peeking, bool is_moving_zone, const tripoint_bub_ms &end_point,
     bool change_lv )
 {
+    // Automatic peeking can enter from the travel branch without a World
+    // input session. Own this blocking native modal for its whole lifetime.
+    std::optional<semantic_surface_manager_session> semantic_session;
+    if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
+        semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
     map &here = get_map();
 
     bVMonsterLookFire = false;

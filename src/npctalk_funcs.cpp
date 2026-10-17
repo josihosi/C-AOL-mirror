@@ -233,6 +233,9 @@ void talk_function::start_trade( npc &p )
 
 void talk_function::sort_loot( npc &p )
 {
+    // This is a new job, not a pulp interruption of the old parked job.
+    // Its actor must discover and own a fresh sorting route.
+    p.clear_destination();
     p.assign_activity( zone_sort_activity_actor() );
 }
 

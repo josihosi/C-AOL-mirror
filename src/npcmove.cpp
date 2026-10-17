@@ -1013,19 +1013,28 @@ const std::vector<bionic_id> weapon_cbms = {
 
 const int avoidance_vehicles_radius = 5;
 
-// The exact current paid home order owns action selection and navigation.
-// Its smoke/light target describes knowledge, not the payment/contact height;
-// an incidental camp guard point cannot supersede this physical return.
-bool has_paid_home_return_order( const npc &who )
+// A reserved physical departure owns navigation independently of its social
+// relationship. Fight remains hostile; payment alone grants paid protection.
+bool has_hostile_home_return_order( const npc &who )
 {
     const auto &world = overmap_buffer.global_state.bandit_live_world;
     const bandit_live_world::site_record *site = nullptr;
-    return !who.is_dead() && bandit_live_world::hostile_operation_player_relationship_for(
-               world, who.getID(), &site ) ==
-           bandit_live_world::hostile_operation_player_relationship::paid_departure &&
-           site != nullptr && bandit_live_world::active_operation_duty_site_for(
-               world, who.getID() ) == site && who.is_travelling() &&
-           who.has_omt_destination() && who.goal == site->anchor &&
+    const auto relationship = bandit_live_world::hostile_operation_player_relationship_for(
+                                  world, who.getID(), &site );
+    if( who.is_dead() || site == nullptr ||
+        ( relationship != bandit_live_world::hostile_operation_player_relationship::paid_departure &&
+          relationship != bandit_live_world::hostile_operation_player_relationship::combat_released ) ||
+        site->active_hostile_operation.phase !=
+        bandit_live_world::hostile_operation_phase::returning_home ||
+        site->active_hostile_operation.reservation.owner !=
+        bandit_live_world::simulation_owner::abstract ||
+        !bandit_live_world::current_external_simulation_cursor( *site ) ||
+        bandit_live_world::active_operation_duty_site_for( world, who.getID() ) != site ) {
+        return false;
+    }
+    const auto *member = site->find_member( who.getID() );
+    return member != nullptr && member->state == bandit_live_world::member_state::outbound &&
+           who.is_travelling() && who.has_omt_destination() && who.goal == site->anchor &&
            !who.omt_path.empty() && who.omt_path.front() == site->anchor;
 }
 
@@ -3167,10 +3176,10 @@ void npc::move()
     const bandit_live_world::site_record *withdrawal_site =
         bandit_live_world::active_hostile_withdrawal_site_for(
             overmap_buffer.global_state.bandit_live_world, getID() );
-    // An authenticated paid home return owns its actual travel order ahead of
+    // An authenticated hostile home return owns its actual travel order ahead of
     // incidental camp pickup and guarding, independently of the signal target's
     // altitude. The shared predicate validates the current reserved survivor.
-    const bool paid_home_return = has_paid_home_return_order( *this );
+    const bool hostile_home_return = has_hostile_home_return_order( *this );
     if( assault_site != nullptr ) {
         const auto &reservation = assault_site->active_hostile_operation.reservation;
         reconcile_active_assault_routine( assault_site->site_id + ":" +
@@ -3548,10 +3557,10 @@ void npc::move()
     } else if( target != nullptr && ai_cache.danger > 0 &&
                !has_flag( json_flag_CANNOT_ATTACK ) ) {
         action = method_of_attack();
-    } else if( paid_home_return && attitude != NPCATT_FLEE && attitude != NPCATT_FLEE_TEMP &&
+    } else if( hostile_home_return && attitude != NPCATT_FLEE && attitude != NPCATT_FLEE_TEMP &&
                !has_effect( effect_npc_run_away ) && !has_effect( effect_npc_flee_player ) ) {
         // Fire, explosives, visible combat and flight above retain priority. Urgent
-        // needs remain effective; routine pickup/sleep cannot consume the paid exit.
+        // needs remain effective; routine pickup/sleep cannot consume the owned exit.
         action = address_needs( NPC_DANGER_VERY_LOW + 1.0f );
         if( action == npc_undecided ) {
             action = has_flag( json_flag_CANNOT_MOVE ) ? npc_pause : npc_goto_destination;
@@ -5340,14 +5349,16 @@ npc_action npc::address_needs( float danger )
         return npc_noop;
     }
 
-    if( can_do_pulp() ) {
-        if( !activity ) {
-            assign_activity( pulp_activity_actor( *pulp_location ) );
+    if( !activity || activity.id() == ACT_PULP ) {
+        if( can_do_pulp() ) {
+            if( !activity ) {
+                assign_activity( pulp_activity_actor( *pulp_location ) );
+            }
+            return self_activity();
+        } else if( find_corpse_to_pulp() ) {
+            move_to_next();
+            return npc_noop;
         }
-        return self_activity();
-    } else if( find_corpse_to_pulp() ) {
-        move_to_next();
-        return npc_noop;
     }
 
     if( one_in( 3 ) && adjust_worn() ) {
@@ -8323,7 +8334,7 @@ void npc::go_to_omt_destination( const std::function<bool(
                                      const std::vector<tripoint_bub_ms> & )> &path_validator )
 {
     if( ai_cache.guard_pos && pos_abs() == *ai_cache.guard_pos &&
-        !has_paid_home_return_order( *this ) ) {
+        !has_hostile_home_return_order( *this ) ) {
         path.clear();
         ai_cache.guard_pos = std::nullopt;
         move_pause();
