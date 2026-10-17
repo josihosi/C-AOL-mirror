@@ -1,5 +1,7 @@
 # Select a scenario and launch
 
+## Select an existing ready route
+
 Translate the proof question into typed requirements, then query with:
 
 ```sh
@@ -107,6 +109,35 @@ source bytes. A useful read-only check is:
 ```sh
 python3 tools/openclaw_harness/scenario_registry_cli.py --json lint-declarations "$SCENARIO_SOURCE"
 ```
+
+### Fresh HUD or saved input owner
+
+Choose from the actual starting state, not the fact that a fixture originally came from a save.
+An ordinary clean fixture still uses fresh native startup. Reuse a compatible working declaration
+and change only the task's host/save/outcome fields; do not copy a saved-owner override from an
+unrelated continuation.
+
+| Starting state | Bootstrap settings and usable result |
+| --- | --- |
+| Ordinary fixture/new game admission | The `native_semantic_bootstrap` checkpoint uses `require_initial_hud_world_ready_frame: true`, followed by `cockpit_live_session`. Omit `allow_saved_native_input_owner`. Existing recoverable-selection handoff lets Luna resolve authentic startup menus before the initial World; a menu is not World proof. |
+| Full saved-world continuation | Declare the actual `saved_world_snapshot` and destination profile using the saved-start/reentry route above. Use `allow_saved_native_input_owner: true` only when that route needs to retain the loaded native input owner, including an activity or prompt. It requires the installed immutable snapshot and following live cockpit, and must not also require fresh-HUD proof. |
+
+`blocked_saved_native_input_owner_contract` means the declaration requested that saved-owner
+route without its required snapshot/step shape, or combined it with strict fresh-HUD proof.
+Correct the declaration to match the intended start; do not fabricate a snapshot, weaken the
+guard or rebuild the game to fix that mismatch. Settle any already-launched process through its
+existing owner before a new selection. Never replay its consumed token.
+
+Use the returned session for `play_cli.py --session SESSION look` and `controls`. Confirm the
+effective profile/world and current same-run native owner. A pending startup menu can be handled
+through its advertised actions; a missing descriptor requires diagnosing startup's actual refusal,
+not assuming the game crashed. Historical action IDs and a live PID cannot supply input authority.
+
+For compressed-save setup/audits, the harness uses the repository's executable `zzip` helper.
+If it reports that helper missing, build the `zzip` target in the existing checkout/cache with
+the selected product's recorded Make settings. This is a helper prerequisite, not a reason to
+rebuild or relabel the ready production game. Resolve host paths and platform requirements on
+the machine running the test; a Mac path or declaration is not automatically Windows-ready.
 
 For continuation, use the returned current checkpoint and exact retained save rather than
 rolling back to a familiar starting label. For a fresh story, apply the initial-save rule above.

@@ -17,8 +17,7 @@ that contradicts this vision; a mismatch calls for diagnosis, not an unauthorize
 
 ## Own a scenario through its outcome
 
-Use the registry to select a compatible scenario/build/save and the cockpit/player CLI for native
-input. Run CLI commands from the game checkout. The coordinator supplies the whole outcome,
+The coordinator supplies the whole outcome,
 current bindings and real constraints; the player chooses practical strategy and recovery.
 Protocols are reusable recipes, not scripts whose first unexpected result ends the test.
 
@@ -39,6 +38,29 @@ experiment efficiently, then let the tested NPC/game mechanism operate normally.
 condition earns no proof of the bypassed natural stage, but subsequent native behavior can fully
 prove the downstream question. Use [setup and interactions](references/setup-and-interactions.md)
 for mutation effects and [scenario composition](GAME-MANUAL.md#compose-a-useful-scenario) for examples.
+
+## Starting a game
+
+Work from the game checkout on the machine that will run it. Reuse a ready source-bound product
+and compatible save; a new test does not itself require a build. Give the direct Luna player the
+test outcome, selected save/build, relevant recipe and exact registry-returned launch command.
+
+- Query the registry, then use its selected `next_action`. A query does not launch a game.
+  The token is single-use; `registry-detached-launch` creates its own new session directory.
+- Choose the right bootstrap. An ordinary fixture starts through the fresh HUD/World route.
+  A saved continuation uses its real snapshot and retained state; being based on a save does not
+  by itself justify `allow_saved_native_input_owner`. See the
+  [fresh versus saved launch settings](references/selection-and-launch.md#fresh-hud-or-saved-input-owner).
+- Use a profile name under `.userdata`, not an absolute path. From the returned session, use
+  `play_cli.py --session SESSION look` and `controls` to obtain current native input authority.
+  Resolve advertised startup menus if needed; require the intended same-run World before play.
+  A live process or successful launcher is not an attached game.
+- On Windows/WSL, use the existing native host owner and its checkout, paths and build settings.
+  Keep the owning launch/session alive through the game and closeout; do not finish a one-shot
+  wrapper while its game still depends on it. Reuse the existing route rather than adding owners.
+
+For a changed declaration, lint it before selection. The [launch reference](references/selection-and-launch.md)
+contains the commands, snapshot/reentry shape, helper prerequisites and conditional build checks.
 
 ## Live playtesting belongs to Luna
 
