@@ -5332,6 +5332,25 @@ bool begin_abstract_pair_homeward_resume( site_record &site,
     return true;
 }
 
+// A retained physical sortie advances only to its next canonical route point.
+// Clock-based arrival must not substitute a logical destination for its actors.
+std::optional<tripoint_abs_omt> retained_abstract_arrival_destination(
+    const active_outing_state &outing )
+{
+    if( outing.kind != outing_kind::structural_sortie ||
+        outing.owner != simulation_owner::abstract ||
+        outing.phase != scout_phase::observing || structural_outing_uses_watch_route( outing ) ||
+        !outing.local_handoff.is_abstract_resume() ||
+        !simulation_owner_state_is_consistent( outing ) ) {
+        return std::nullopt;
+    }
+    const int next = outing.local_handoff.waypoint_index + 1;
+    if( next < 0 || next > structural_outing_destination_waypoint( outing ) ) {
+        return std::nullopt;
+    }
+    return outing.shared_route[static_cast<std::size_t>( next )];
+}
+
 namespace
 {
 std::optional<site_record> local_pair_abstract_resume_progress_candidate( const site_record &site,
@@ -5385,7 +5404,8 @@ std::optional<site_record> local_pair_abstract_resume_progress_candidate( const 
         outing.schema_version < 7 || outing.owner != simulation_owner::abstract ||
         !simulation_cursor_matches( outing, expected_cursor ) ||
         !crossing_receipt_allows_runtime_progress( outing ) ||
-        !scout_phase_requires_homeward_only( outing.phase ) ||
+        ( !scout_phase_requires_homeward_only( outing.phase ) &&
+          !retained_abstract_arrival_destination( outing ) ) ||
         !outing.local_handoff.is_abstract_resume() ||
         outing.member_ids.size() != 2 || outing.local_handoff.members.size() != 2 ||
         member_reads.size() != 2 || current_minutes < outing.last_advanced_minutes ||
@@ -5476,11 +5496,21 @@ std::optional<site_record> local_pair_abstract_resume_progress_candidate( const 
     active_outing_state &next = candidate.active_outing;
     local_handoff_snapshot &resume = next.local_handoff;
     const tripoint_abs_omt prior_route_position = resume.route_position;
-    resume.route_position = *progressed_omt;
-    resume.approach_from = prior_route_position;
-    if( next.phase != scout_phase::burned_withdrawal ) {
+    const auto forward_destination = retained_abstract_arrival_destination( outing );
+    if( forward_destination ) {
+        if( *progressed_omt != *forward_destination ) {
+            return refuse( "resume_forward_route_point", &next );
+        }
+        ++resume.waypoint_index;
+        next.waypoint_index = resume.waypoint_index;
+        resume.egress_omt = resume.waypoint_index + 1 < static_cast<int>( next.shared_route.size() ) ?
+                            next.shared_route[static_cast<std::size_t>( resume.waypoint_index + 1 )] :
+                            *progressed_omt;
+    } else if( next.phase != scout_phase::burned_withdrawal ) {
         resume.egress_omt = next.shared_route.back();
     }
+    resume.route_position = *progressed_omt;
+    resume.approach_from = prior_route_position;
     resume.committed_minutes = current_minutes;
     resume.cohesion_best_staging_distances.clear();
     for( local_handoff_member_snapshot &snapshot : resume.members ) {
@@ -5501,7 +5531,10 @@ std::optional<site_record> local_pair_abstract_resume_progress_candidate( const 
         }
         snapshot.prior_position = snapshot.exit_position;
         snapshot.entry_position = ( *read )->current_position;
-        snapshot.staging_position = partner == reads.end() ? ( *read )->current_position :
+        snapshot.staging_position = forward_destination ?
+                                    project_to<coords::ms>( *progressed_omt ) +
+                                    ( snapshot.staging_position - project_to<coords::ms>( prior_route_position ) ) :
+                                    partner == reads.end() ? ( *read )->current_position :
                                     ( *partner )->current_position;
         snapshot.exit_position = ( *read )->current_position;
         snapshot.hp_percent = ( *read )->hp_percent;
@@ -17302,12 +17335,56 @@ struct structural_resource_arrival_receipt {
     int remaining_units = 0;
 };
 
-std::optional<structural_resource_arrival_receipt> apply_structural_resource_arrival(
-    world_state &candidate_state, const std::size_t site_index, const int now_minutes )
+namespace
 {
-    if( site_index >= candidate_state.sites.size() || now_minutes < 0 ) {
+bool retained_structural_arrival_is_physical( const active_outing_state &outing )
+{
+    if( !outing.local_handoff.is_abstract_resume() ) {
+        return true; // Ordinary abstract simulation retains its established semantics.
+    }
+    const int destination = structural_outing_destination_waypoint( outing );
+    return destination >= 0 && simulation_owner_state_is_consistent( outing ) &&
+           outing.local_handoff.waypoint_index == destination &&
+           outing.local_handoff.route_position == outing.target_omt &&
+           std::all_of( outing.local_handoff.members.begin(), outing.local_handoff.members.end(),
+    [&outing]( const auto &member ) {
+        return member.dead || project_to<coords::omt>( member.exit_position ) == outing.target_omt;
+    } );
+}
+
+bool begin_structural_arrival_return( site_record &site, const sortie_cargo &cargo,
+                                     const int now_minutes )
+{
+    if( !retained_structural_arrival_is_physical( site.active_outing ) ) {
+        return false;
+    }
+    site_record candidate = site;
+    auto &outing = candidate.active_outing;
+    outing.cargo = cargo;
+    outing.waypoint_index = structural_outing_destination_waypoint( outing );
+    outing.phase = scout_phase::returning_home;
+    outing.last_progress_minutes = now_minutes;
+    if( outing.local_handoff.is_abstract_resume() ) {
+        // Transfer purpose and cargo together, retaining actual poses, route,
+        // casualty identities and the physical movement receipt.
+        outing.local_handoff.phase = outing.phase;
+        outing.local_handoff.cargo = outing.cargo;
+    }
+    if( !simulation_owner_state_is_consistent( outing ) || !candidate.roster().valid ) {
+        return false;
+    }
+    site = std::move( candidate );
+    return true;
+}
+} // namespace
+
+std::optional<structural_resource_arrival_receipt> apply_structural_resource_arrival(
+    world_state &state, const std::size_t site_index, const int now_minutes )
+{
+    if( site_index >= state.sites.size() || now_minutes < 0 ) {
         return std::nullopt;
     }
+    world_state candidate_state = state;
     site_record &site = candidate_state.sites[site_index];
     active_outing_state &outing = site.active_outing;
     camp_map_lead *lead = site.intelligence_map.find_lead( outing.target_id );
@@ -17315,6 +17392,7 @@ std::optional<structural_resource_arrival_receipt> apply_structural_resource_arr
                                          site.active_outing_survivor_count() );
     if( outing.kind != outing_kind::structural_sortie ||
         outing.phase != scout_phase::observing ||
+        !retained_structural_arrival_is_physical( outing ) ||
         lead == nullptr || lead->kind != camp_lead_kind::structural_bounty ||
         lead->omt != outing.target_omt || survivor_count <= 0 ||
         outing.cargo.supply_units != 0 || outing.cargo.trade_value != 0 ||
@@ -17357,11 +17435,12 @@ std::optional<structural_resource_arrival_receipt> apply_structural_resource_arr
         return std::nullopt;
     }
 
-    active_outing_state &claimed_outing = claimed_site.active_outing;
-    claimed_outing.cargo.supply_units = 2 * claim.claimed_units;
-    claimed_outing.waypoint_index = structural_outing_destination_waypoint( claimed_outing );
-    claimed_outing.phase = scout_phase::returning_home;
-    claimed_outing.last_progress_minutes = now_minutes;
+    sortie_cargo cargo = claimed_site.active_outing.cargo;
+    cargo.supply_units = 2 * claim.claimed_units;
+    if( !begin_structural_arrival_return( claimed_site, cargo, now_minutes ) ) {
+        return std::nullopt;
+    }
+    const active_outing_state &claimed_outing = claimed_site.active_outing;
     camp_map_lead *updated_lead = claimed_site.intelligence_map.find_lead(
                                       claimed_outing.target_id );
     if( updated_lead == nullptr ) {
@@ -17370,6 +17449,7 @@ std::optional<structural_resource_arrival_receipt> apply_structural_resource_arr
     if( claim.claimed_units > 0 && claim.remaining_units == 0 ) {
         updated_lead->last_outcome = "harvested_structural_bounty";
     }
+    state = std::move( candidate_state );
     return structural_resource_arrival_receipt { claim.claimed_units,
             claim.remaining_units };
 }
@@ -18544,6 +18624,14 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
         }
 
         active_outing_state &pre_advance_outing = candidate.active_outing;
+        if( pre_advance_outing.phase == scout_phase::observing &&
+            !structural_outing_uses_watch_route( pre_advance_outing ) &&
+            !retained_structural_arrival_is_physical( pre_advance_outing ) ) {
+            // The existing native paired motor owns the next physical step.
+            // Do not consume its interval or claim resources from elapsed time.
+            trace_structural_outing( candidate, "physical_arrival", "reached=0" );
+            continue;
+        }
         if( pre_advance_outing.owner == simulation_owner::abstract &&
             pre_advance_outing.actor_route_waypoint >= 0 ) {
             // The production travel owner supplies reached waypoints from the
@@ -19134,6 +19222,9 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
                 if( !receipt ) {
                     continue;
                 }
+                if( projection_commit && !projection_commit( site, transaction.sites.front() ) ) {
+                    continue;
+                }
                 if( receipt->claimed_units > 0 ) {
                     const auto updated_resource = transaction.finite_resources.find(
                                                       transaction.sites.front().active_outing.target_omt );
@@ -19153,9 +19244,9 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
                 continue;
             }
             advance_camp_map_lead_revision( candidate, *lead );
-            outing.waypoint_index = structural_outing_destination_waypoint( outing );
-            outing.phase = scout_phase::returning_home;
-            outing.last_progress_minutes = now_minutes;
+            if( !begin_structural_arrival_return( candidate, outing.cargo, now_minutes ) ) {
+                continue;
+            }
             if( projection_commit && !projection_commit( site, candidate ) ) {
                 continue;
             }

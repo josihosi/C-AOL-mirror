@@ -18419,7 +18419,9 @@ void overmap_npc_move()
         if( !site.retired_empty_site && outing.member_ids.size() == 2 &&
             outing.owner == bandit_live_world::simulation_owner::abstract &&
             outing.local_handoff.is_abstract_resume() &&
-            bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ) {
+            ( bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ||
+              ( outing.phase == bandit_live_world::scout_phase::observing &&
+                outing.selected_watch_kind == bandit_live_world::structural_watch_kind::none ) ) ) {
             released_retained_resume_members.insert( outing.member_ids.begin(),
                     outing.member_ids.end() );
         }
@@ -18539,7 +18541,8 @@ void overmap_npc_move()
         if( site.retired_empty_site || outing.member_ids.size() != 2 ||
             outing.owner != bandit_live_world::simulation_owner::abstract ||
             !outing.local_handoff.is_abstract_resume() ||
-            !bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) ||
+            ( !bandit_live_world::scout_phase_requires_homeward_only( outing.phase ) &&
+              !bandit_live_world::retained_abstract_arrival_destination( outing ) ) ||
             released_retained_resume_members.count( outing.member_ids[0] ) == 0 ||
             released_retained_resume_members.count( outing.member_ids[1] ) == 0 ) {
             continue;
@@ -18609,9 +18612,12 @@ void overmap_npc_move()
         if( !complete_party || members.empty() ) {
             continue;
         }
-        const auto homeward_destination = live_bandit_homeward_destination( site );
+        const auto forward_destination =
+            bandit_live_world::retained_abstract_arrival_destination( outing );
+        const auto homeward_destination = forward_destination ? forward_destination :
+                                          live_bandit_homeward_destination( site );
         if( !homeward_destination ) {
-            refuse( "homeward leg has no authenticated destination" );
+            refuse( "retained leg has no authenticated destination" );
             continue;
         }
         std::vector<std::vector<tripoint_abs_omt>> routes;

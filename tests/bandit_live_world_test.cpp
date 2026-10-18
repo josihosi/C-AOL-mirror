@@ -70343,3 +70343,362 @@ TEST_CASE( "fresh shakedown cannot inherit an earlier operation's Fight outcome"
     CHECK( scene.site().shakedown_defender_losses == 3 );
     CHECK( scene.site().active_hostile_operation.reservation.generation == 4 );
 }
+
+namespace
+{
+bandit_live_world::world_state retained_survivor_11371()
+{
+    const char *path = std::getenv( "CAOL_R067_RETAINED_FIXTURE" );
+    std::ifstream input( path == nullptr ? "tests/data/r067_retained_survivor_11371.json" : path );
+    REQUIRE( input.good() );
+    JsonObject fixture = json_loader::from_string(
+                             std::string( std::istreambuf_iterator<char>( input ), {} ) ).get_object();
+    bandit_live_world::world_state world;
+    fixture.get_object( "provenance" ).allow_omitted_members();
+    world.deserialize( fixture.get_object( "world" ) );
+    return world;
+}
+
+bandit_live_world::site_record &retained_survivor_site( bandit_live_world::world_state &world )
+{
+    const auto found = std::find_if( world.sites.begin(), world.sites.end(), []( const auto &site ) {
+        return site.site_id == "overmap_special:cannibal_camp@135,137,0";
+    } );
+    REQUIRE( found != world.sites.end() );
+    return *found;
+}
+
+void cross_retained_survivor_11375( bandit_live_world::site_record &site,
+                                    const bool casualty = true )
+{
+    using namespace bandit_live_world;
+    REQUIRE( site.active_outing.schema_version == 9 );
+    REQUIRE( site.active_outing.phase == scout_phase::observing );
+    REQUIRE( site.active_outing.casualty_ids == ( casualty ?
+             std::vector<character_id>{ character_id( 5 ) } : std::vector<character_id>{} ) );
+    const auto cursor = current_external_simulation_cursor( site );
+    REQUIRE( cursor );
+    std::vector<local_dematerialization_member_read> reads;
+    for( const auto &member : site.active_outing.local_handoff.members ) {
+        local_dematerialization_member_read read;
+        read.npc_id = member.npc_id;
+        read.readable = true;
+        read.dead = member.dead;
+        read.hp_percent = member.hp_percent;
+        read.current_position = tripoint_abs_ms( member.npc_id == character_id( 5 ) ? 3240 : 3241,
+                                                3382, 0 );
+        reads.push_back( read );
+    }
+    const auto plan = plan_local_pair_dematerialization( site, *cursor, 11375, reads,
+                      site.active_outing.cargo );
+    REQUIRE( plan.valid );
+    REQUIRE( commit_local_pair_dematerialization( site, plan,
+    []( const auto & ) { return true; }, []( const auto & ) {} ) ==
+    local_handoff_commit_result::applied );
+    REQUIRE( current_external_simulation_cursor( site ) );
+    REQUIRE( site.active_outing.local_handoff.route_position == tripoint_abs_omt( 135, 140, 0 ) );
+}
+}
+
+TEST_CASE( "retained physical survivor cannot harvest a logical destination before arrival",
+           "[bandit_live_world][retained_arrival_067]" )
+{
+    using namespace bandit_live_world;
+    auto world = retained_survivor_11371();
+    auto &site = retained_survivor_site( world );
+    cross_retained_survivor_11375( site );
+    const auto snapshot_before = site.active_outing.local_handoff;
+    const auto resources_before = world.finite_resources;
+    const auto advanced = advance_structural_bounty_outings( world, 11400, {} );
+    REQUIRE( advanced.active_outings_considered >= 1 );
+    CHECK( advanced.arrivals_processed == 0 );
+    CHECK( site.active_outing.phase == scout_phase::observing );
+    CHECK( site.active_outing.cargo.supply_units == 0 );
+    CHECK( site.active_outing.local_handoff.route_position == tripoint_abs_omt( 135, 140, 0 ) );
+    CHECK( site.active_outing.local_handoff.members[1].exit_position ==
+           snapshot_before.members[1].exit_position );
+    REQUIRE( current_external_simulation_cursor( site ).has_value() );
+    // Serialization must preserve the same owner, not sanitize a rejected cursor.
+    auto loaded = round_trip_world( world );
+    CHECK( serialize_world( loaded ) == serialize_world( world ) );
+    CHECK( retained_survivor_site( loaded ).active_outing.local_handoff.phase ==
+           retained_survivor_site( loaded ).active_outing.phase );
+    ( void )resources_before;
+}
+
+TEST_CASE( "authenticated retained survivor arrival owns cargo and return together",
+           "[bandit_live_world][retained_arrival_067]" )
+{
+    using namespace bandit_live_world;
+    const bool casualty = GENERATE( true, false );
+    const bool terrain_opportunity = GENERATE( false, true );
+    CAPTURE( casualty, terrain_opportunity );
+    auto world = retained_survivor_11371();
+    auto &site = retained_survivor_site( world );
+    if( !casualty ) {
+        // Declared two-living-member countercontrol, not historical revival.
+        ++site.living_total;
+        auto *restored = site.find_member( character_id( 5 ) );
+        restored->state = member_state::outbound;
+        for( auto &spawn : site.spawn_tiles ) {
+            if( spawn.tile == restored->home_spawn_tile ) {
+                ++spawn.assigned_living_total;
+            }
+        }
+        site.active_outing.casualty_ids.clear();
+        site.active_outing.resolved_member_ids.clear();
+        site.active_outing.local_handoff.casualty_ids.clear();
+        auto &member = site.active_outing.local_handoff.members.front();
+        member.dead = false;
+        member.hp_percent = 100;
+        member.exit_position = member.entry_position;
+    }
+    if( terrain_opportunity ) {
+        // Produce a genuine terrain lead and bind the declared scout variant;
+        // changing only a lead kind would leave an invalid scavenge job.
+        REQUIRE( upsert_terrain_opportunity_lead( site, site.active_outing.target_omt,
+                 classify_structural_bounty_terrain( "road" ),
+                 site.active_outing.started_minutes - 1 ) );
+        const auto id = make_terrain_opportunity_lead_id( site.site_id,
+                        site.active_outing.target_omt, "road" );
+        const auto *lead = site.intelligence_map.find_lead( id );
+        REQUIRE( lead );
+        site.active_outing.job_type = "scout";
+        site.active_outing.target_id = id;
+        site.active_outing.target_lead_id = id;
+        site.active_outing.target_lead_revision = lead->revision;
+    }
+    REQUIRE( site.roster().valid );
+    REQUIRE( serialize_world( round_trip_world( world ) ) == serialize_world( world ) );
+    cross_retained_survivor_11375( site, casualty );
+    const auto cursor = current_external_simulation_cursor( site );
+    REQUIRE( cursor );
+    std::vector<local_abstract_resume_progress_read> reads;
+    for( const auto &member : site.active_outing.local_handoff.members ) {
+        reads.push_back( { member.npc_id, true, member.dead, member.hp_percent,
+                           member.dead ? member.exit_position : tripoint_abs_ms(
+                               member.npc_id == character_id( 5 ) ? 3240 : 3241, 3406, 0 ) } );
+    }
+    int commits = 0;
+    REQUIRE( record_local_pair_abstract_resume_progress( site, *cursor, 11400, reads,
+    [&]() { ++commits; } ) );
+    CHECK( commits == 1 );
+    CHECK( site.active_outing.local_handoff.route_position == tripoint_abs_omt( 135, 141, 0 ) );
+    CHECK( site.active_outing.phase == scout_phase::observing );
+    CHECK( site.active_outing.cargo.supply_units == 0 );
+    const auto result = advance_structural_bounty_outings( world, 11401, {} );
+    CHECK( result.arrivals_processed == 1 );
+    CHECK( site.active_outing.phase == scout_phase::returning_home );
+    CHECK( site.active_outing.local_handoff.phase == site.active_outing.phase );
+    const int expected_cargo = terrain_opportunity ? 0 : 2; // Retained lead has one finite unit.
+    CHECK( site.active_outing.cargo.supply_units == expected_cargo );
+    CHECK( site.active_outing.local_handoff.cargo.supply_units == expected_cargo );
+    CHECK( current_external_simulation_cursor( site ).has_value() );
+    CHECK( site.active_outing.casualty_ids == ( casualty ?
+           std::vector<character_id>{ character_id( 5 ) } : std::vector<character_id>{} ) );
+    CHECK( site.find_member( character_id( 5 ) )->state ==
+           ( casualty ? member_state::dead : member_state::outbound ) );
+    CHECK( site.applied_return_generation == 1 ); // Historical gen1, not a new return.
+    CHECK( site.applied_report_generation == 1 ); // Historical gen1, no new report.
+    const auto once = serialize_world( world );
+    advance_structural_bounty_outings( world, 11401, {} );
+    CHECK( serialize_world( world ) == once );
+    auto loaded = round_trip_world( world );
+    CHECK( serialize_world( loaded ) == once );
+    CHECK( current_external_simulation_cursor( retained_survivor_site( loaded ) ).has_value() );
+}
+
+TEST_CASE( "retained arrival rejects stale foreign and unobserved movement atomically",
+           "[bandit_live_world][retained_arrival_067]" )
+{
+    using namespace bandit_live_world;
+    auto world = retained_survivor_11371();
+    auto &site = retained_survivor_site( world );
+    cross_retained_survivor_11375( site );
+    auto cursor = *current_external_simulation_cursor( site );
+    std::vector<local_abstract_resume_progress_read> reads;
+    for( const auto &member : site.active_outing.local_handoff.members ) {
+        reads.push_back( { member.npc_id, true, member.dead, member.hp_percent,
+                           member.dead ? member.exit_position : tripoint_abs_ms( 3241, 3406, 0 ) } );
+    }
+    SECTION( "stale generation" ) { ++cursor.generation; }
+    SECTION( "foreign survivor" ) { reads[1].npc_id = character_id( 999 ); }
+    SECTION( "missing death evidence" ) { reads[0].dead = false; reads[0].hp_percent = 100; }
+    SECTION( "logical target beyond the next route point" ) {
+        reads[1].current_position = tripoint_abs_ms( 3241, 3430, 0 );
+    }
+    SECTION( "missing survivor read" ) { reads.pop_back(); }
+    SECTION( "observation cannot consume a stationary interval" ) {
+        reads[1].current_position = site.active_outing.local_handoff.members[1].exit_position;
+        const auto before = serialize_world( world );
+        CHECK_FALSE( record_local_pair_abstract_resume_progress( site, cursor, 11400, reads ) );
+        CHECK( serialize_world( world ) == before );
+        return;
+    }
+    const auto before = serialize_world( world );
+    int commits = 0;
+    CHECK_FALSE( record_local_pair_abstract_resume_progress( site, cursor, 11400, reads,
+    [&]() { ++commits; } ) );
+    CHECK( commits == 0 );
+    CHECK( serialize_world( world ) == before );
+}
+
+TEST_CASE( "retained arrival projection refusal cannot publish finite stock",
+           "[bandit_live_world][retained_arrival_067]" )
+{
+    using namespace bandit_live_world;
+    auto world = retained_survivor_11371();
+    auto &site = retained_survivor_site( world );
+    cross_retained_survivor_11375( site );
+    std::vector<local_abstract_resume_progress_read> reads;
+    for( const auto &member : site.active_outing.local_handoff.members ) {
+        reads.push_back( { member.npc_id, true, member.dead, member.hp_percent,
+                           member.dead ? member.exit_position : tripoint_abs_ms( 3241, 3406, 0 ) } );
+    }
+    REQUIRE( record_local_pair_abstract_resume_progress( site,
+             *current_external_simulation_cursor( site ), 11400, reads, []() {} ) );
+    const auto before = serialize_world( world );
+    int refused = 0;
+    const auto result = advance_structural_bounty_outings( world, 11401, {}, {}, {},
+    [&]( const site_record &, const site_record &candidate ) {
+        if( candidate.active_outing.phase == scout_phase::returning_home ) {
+            ++refused;
+            return false;
+        }
+        return true;
+    } );
+    CHECK( refused == 1 );
+    CHECK( result.arrivals_processed == 0 );
+    CHECK( serialize_world( world ) == before );
+    const auto accepted = advance_structural_bounty_outings( world, 11401, {} );
+    CHECK( accepted.arrivals_processed == 1 );
+    CHECK( site.active_outing.cargo.supply_units == 2 );
+    CHECK( current_external_simulation_cursor( site ).has_value() );
+}
+
+TEST_CASE( "retained survivor uses the native motor before cargo and after return transition",
+           "[bandit_live_world][retained_arrival_067][retained_arrival_motor_067]" )
+{
+    using namespace bandit_live_world;
+    const bool incapacitated = GENERATE( false, true );
+    CAPTURE( incapacitated );
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const auto old_world = overmap_buffer.global_state.bandit_live_world;
+    const auto old_turn = calendar::turn;
+    const auto old_start = calendar::start_of_cataclysm;
+    const auto old_player = get_avatar().pos_abs_omt();
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
+    on_out_of_scope restore( [&]() {
+        g->remove_npc( character_id( 6 ) );
+        overmap_buffer.remove_npc( character_id( 6 ) );
+        overmap_buffer.global_state.bandit_live_world = old_world;
+        for( const auto &[position, prior] : terrain ) {
+            overmap_buffer.ter_set( position, prior );
+        }
+        calendar::start_of_cataclysm = old_start;
+        calendar::turn = old_turn;
+        g->place_player_overmap( old_player );
+    } );
+    clear_avatar();
+    clear_npcs();
+    clear_creatures();
+    calendar::start_of_cataclysm = time_point::from_turn( 4752000 );
+    calendar::turn = calendar::start_of_cataclysm + 11375_minutes;
+    g->place_player_overmap( tripoint_abs_omt( 140, 145, 0 ) );
+    // Controlled traversable native corridor, not a claim about the original
+    // save's complete terrain or original survivor physiology/equipment.
+    for( int x = 134; x <= 136; ++x ) {
+        for( int y = 136; y <= 142; ++y ) {
+            const tripoint_abs_omt point( x, y, 0 );
+            terrain.emplace_back( point, overmap_buffer.ter( point ) );
+            overmap_buffer.ter_set( point, oter_str_id( "field" ) );
+        }
+    }
+    auto &world = overmap_buffer.global_state.bandit_live_world;
+    world = retained_survivor_11371();
+    auto &site = retained_survivor_site( world );
+    cross_retained_survivor_11375( site );
+    auto body = make_shared_fast<npc>();
+    body->normalize();
+    body->load_npc_template( npc_template_id( "test_talker" ) );
+    clear_character( *body, true );
+    body->setID( character_id( 6 ), true );
+    body->set_fac( faction_id( "cannibal_camp" ) );
+    body->spawn_at_precise( tripoint_abs_ms( 3241, 3382, 0 ) );
+    body->set_moves( -39 );
+    overmap_buffer.insert_npc( body );
+    REQUIRE_FALSE( body->is_active() );
+    REQUIRE_FALSE( body->is_dead() );
+    REQUIRE( body->hp_percentage() == 100 );
+    // The proxy is born before the retained calendar. Consume that historical
+    // body interval before applying a current finite incapacity.
+    body->catch_up_body();
+    REQUIRE( body->get_last_updated() == calendar::turn );
+    if( incapacitated ) {
+        body->add_effect( efftype_id( "narcosis" ), 1_hours );
+        REQUIRE( body->has_effect( efftype_id( "narcosis" ) ) );
+        calendar::turn += 5_minutes;
+        process_overmap_npc_move_for_test();
+        REQUIRE( body->has_effect( efftype_id( "narcosis" ) ) );
+        CHECK( body->pos_abs() == tripoint_abs_ms( 3241, 3382, 0 ) );
+        CHECK( retained_survivor_site( world ).active_outing.cargo.supply_units == 0 );
+        REQUIRE( current_external_simulation_cursor( site ) );
+        body->remove_effect( efftype_id( "narcosis" ) ); // Changed condition, same owner.
+    }
+    calendar::turn += 5_minutes;
+    process_overmap_npc_move_for_test();
+    REQUIRE( body->pos_abs_omt() == tripoint_abs_omt( 135, 141, 0 ) );
+    REQUIRE( retained_survivor_site( world ).active_outing.local_handoff.route_position == body->pos_abs_omt() );
+    REQUIRE( retained_survivor_site( world ).active_outing.cargo.supply_units == 0 );
+    REQUIRE( g->save() );
+    const auto moved = body->pos_abs();
+    process_overmap_npc_move_for_test();
+    CHECK( body->pos_abs() == moved ); // A second callback cannot spend the same interval.
+    calendar::turn = calendar::start_of_cataclysm + 11400_minutes;
+    advance_structural_bounty_outings( world, 11400, {} );
+    REQUIRE( retained_survivor_site( world ).active_outing.cargo.supply_units == 2 );
+    REQUIRE( current_external_simulation_cursor( site ) );
+    REQUIRE( g->save() );
+    const auto world_name = world_generator->active_world->world_name;
+    const auto arrived_position = body->pos_abs();
+    r067_handover_reload( world_name );
+    body = overmap_buffer.find_npc( character_id( 6 ) );
+    REQUIRE( body );
+    REQUIRE( body->pos_abs() == arrived_position );
+    REQUIRE( retained_survivor_site( world ).active_outing.cargo.supply_units == 2 );
+    REQUIRE( current_external_simulation_cursor( retained_survivor_site( world ) ) );
+    calendar::turn = calendar::start_of_cataclysm + 11400_minutes;
+    int steps = 0;
+    while( body->pos_abs_omt() != tripoint_abs_omt( 135, 137, 0 ) && steps < 24 ) {
+        calendar::turn += 5_minutes;
+        process_overmap_npc_move_for_test();
+        ++steps;
+        REQUIRE_FALSE( body->is_dead() );
+    }
+    CHECK( body->pos_abs_omt() == tripoint_abs_omt( 135, 137, 0 ) );
+    CHECK( steps > 0 );
+    CHECK( steps < 24 );
+    CHECK( retained_survivor_site( world ).find_member( character_id( 5 ) )->state == member_state::dead );
+    REQUIRE( retained_survivor_site( world ).active_outing.member_return_receipts.size() == 1 );
+    CHECK( retained_survivor_site( world ).active_outing.member_return_receipts.front().member_id ==
+           character_id( 6 ) );
+    for( int cadence = 0; cadence < 24 &&
+         retained_survivor_site( world ).active_outing.is_active(); ++cadence ) {
+        calendar::turn += 5_minutes;
+        process_overmap_npc_move_for_test();
+    }
+    CHECK_FALSE( retained_survivor_site( world ).active_outing.is_active() );
+    CHECK( retained_survivor_site( world ).applied_return_generation == 2 );
+    CHECK( retained_survivor_site( world ).applied_cargo_generation == 2 );
+    const auto returned_supply = retained_survivor_site( world ).supply_units;
+    const auto cargo_key = retained_survivor_site( world ).last_cargo_application_key;
+    REQUIRE( g->save() );
+    r067_handover_reload( world_name );
+    calendar::turn += 5_minutes;
+    process_overmap_npc_move_for_test();
+    CHECK( retained_survivor_site( world ).applied_return_generation == 2 );
+    CHECK( retained_survivor_site( world ).applied_cargo_generation == 2 );
+    CHECK( retained_survivor_site( world ).supply_units <= returned_supply );
+    CHECK( retained_survivor_site( world ).last_cargo_application_key == cargo_key );
+}

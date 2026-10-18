@@ -2199,6 +2199,9 @@ local_handoff_commit_result commit_local_pair_dematerialization( site_record &si
 bool begin_abstract_pair_homeward_resume( site_record &site,
         const simulation_advance_cursor &expected_cursor, int current_minutes,
         const std::vector<local_abstract_resume_progress_read> &member_reads );
+// The next canonical arrival point still owned by a retained physical sortie.
+std::optional<tripoint_abs_omt> retained_abstract_arrival_destination(
+    const active_outing_state &outing );
 // Validate the complete next snapshot before invoking the preflighted native
 // motor. Its callback must commit all surviving actors without refusal.
 bool record_local_pair_abstract_resume_progress( site_record &site,
