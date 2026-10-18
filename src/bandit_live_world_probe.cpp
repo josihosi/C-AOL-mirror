@@ -78,6 +78,13 @@ bool read_stream_file_stamp( const std::string &path, stream_file_stamp &stamp )
     return !error;
 }
 
+struct signal_refusal_state {
+    std::string site;
+    std::string subject;
+    std::string signature;
+    bool site_only = false;
+};
+
 struct live_transition_stream {
     std::string path;
     std::string run_id;
@@ -90,6 +97,8 @@ struct live_transition_stream {
     std::string last_line;
     std::unordered_map<std::string, bandit_live_world_probe::change_only_transition_state>
     homeward_observations;
+    // Fixed-size digests retain only the last refusal per recently changed subject.
+    std::vector<signal_refusal_state> signal_refusals;
 };
 
 live_transition_stream transition_stream;
@@ -544,6 +553,167 @@ void write_scout_homeward_observation( JsonOut &json,
     json.end_object();
 }
 
+// Share the recorded payload with refusal comparison. Signal sample/freshness
+// clocks remain causal inputs; only this diagnostic's emission clock is omitted.
+void write_staffed_camp_signal_read( JsonOut &json,
+                                    const bandit_live_world_probe::transition_event &event,
+                                    const bool include_game_clock )
+{
+    json.start_object();
+    const auto identity = []( const char *name ) {
+        const char *value = std::getenv( name );
+        return value == nullptr ? "" : std::string( value );
+    };
+    json.member( "identity" );
+    json.start_object();
+    json.member( "run_id", transition_stream.run_id );
+    json.member( "scenario", identity( "OPENCLAW_HARNESS_SCENARIO" ) );
+    json.member( "source_sha256", identity( "OPENCLAW_HARNESS_RUNTIME_SOURCE_SHA256" ) );
+    json.member( "executable_sha256", identity( "OPENCLAW_HARNESS_EXECUTABLE_SHA256" ) );
+    json.member( "binding_id", identity( "OPENCLAW_HARNESS_BINDING_ID" ) );
+    json.end_object();
+    json.member( "observer" );
+    json.start_object();
+    json.member( "id", event.observer_id );
+    json.member( "home", event.observer_home );
+    json.member( "at_home", event.observer_at_home );
+    json.member( "eligible", event.observer_eligible );
+    json.member( "capability" );
+    json.start_object();
+    json.member( "kind", event.observer_capability );
+    json.end_object();
+    json.end_object();
+    json.member( "camp" );
+    json.start_object();
+    json.member( "id", event.site_id );
+    json.member( "omt", event.camp_omt );
+    json.end_object();
+    json.member( "channel" );
+    json.start_object();
+    json.member( "kind", event.signal_channel );
+    json.end_object();
+    json.member( "source" );
+    json.start_object();
+    json.member( "omt", event.source_omt );
+    json.member( "intensity", event.source_intensity );
+    json.end_object();
+    json.member( "range" );
+    json.start_object();
+    json.member( "actual", event.range_actual );
+    json.member( "cap", event.range_cap );
+    json.end_object();
+    json.member( "line_of_sight" );
+    json.start_object();
+    json.member( "result", event.line_of_sight );
+    json.end_object();
+    json.member( "elevation" );
+    json.start_object();
+    json.member( "delta", event.elevation_delta );
+    json.end_object();
+    json.member( "weather" );
+    json.start_object();
+    json.member( "summary", event.weather );
+    json.end_object();
+    json.member( "visibility" );
+    json.start_object();
+    json.member( "inputs" );
+    json.start_object();
+    json.member( "sight_points", event.visibility_input );
+    json.end_object();
+    json.member( "result", event.visibility_result );
+    json.end_object();
+    json.member( "observation_clocks" );
+    json.start_object();
+    if( include_game_clock ) {
+        json.member( "game_minutes", event.game_minutes );
+    }
+    json.member( "emitted_minutes", event.emitted_minutes );
+    json.member( "observed_minutes", event.observed_minutes );
+    json.member( "sample_id", event.source_sample_id );
+    json.member( "uncertainty_radius_omt", event.uncertainty_radius_omt );
+    json.end_object();
+    json.member( "lead" );
+    json.start_object();
+    json.member( "id", event.lead_id );
+    json.end_object();
+    json.member( "outcome" );
+    json.start_object();
+    json.member( "kind", event.lead_outcome );
+    json.end_object();
+    json.member( "work" );
+    json.start_object();
+    json.member( "reads", event.work_reads );
+    json.member( "callbacks", event.work_callbacks );
+    json.end_object();
+    json.member( "persistence" );
+    json.start_object();
+    json.member( "site_id", event.persistence_site_id );
+    json.member( "lead_id", event.persistence_lead_id );
+    json.member( "lead_count_before", event.persistence_lead_count_before );
+    json.member( "lead_count_after", event.persistence_lead_count_after );
+    json.member( "lead_hash_before", event.persistence_lead_hash_before );
+    json.member( "lead_hash_after", event.persistence_lead_hash_after );
+    json.end_object();
+    json.member( "drive_response" );
+    json.start_object();
+    json.member( "before", event.drive_state_before );
+    json.member( "after", event.drive_state_after );
+    json.end_object();
+    json.end_object();
+}
+
+bool nonmutating_signal_refusal( const bandit_live_world_probe::transition_event &event )
+{
+    return event.domain == "bandit_live_world" &&
+           event.transition == "staffed_camp_signal_read" && event.has_staffed_camp_signal_read &&
+           event.outcome == "bounded" && event.lead_outcome == "no_new_lead" &&
+           !event.scout_homeward && !event.has_staffed_camp_signal_aging &&
+           event.fixture_actor_id.empty() && event.certification_round_id.empty() &&
+           event.persistence_lead_count_before >= 0 &&
+           event.persistence_lead_count_before == event.persistence_lead_count_after &&
+           !event.persistence_lead_hash_before.empty() &&
+           event.persistence_lead_hash_before == event.persistence_lead_hash_after &&
+           !event.drive_state_before.empty() && event.drive_state_before == event.drive_state_after;
+}
+
+signal_refusal_state signal_refusal_context(
+    const bandit_live_world_probe::transition_event &event )
+{
+    std::ostringstream subject;
+    JsonOut key( subject );
+    key.start_array();
+    key.write( event.site_id );
+    key.write( event.signal_channel );
+    key.write( event.source_omt );
+    key.end_array();
+    std::ostringstream context;
+    JsonOut json( context );
+    json.start_array();
+    json.write( event.domain );
+    json.write( event.transition );
+    json.write( event.outcome );
+    json.write( event.site_id );
+    json.write( event.operation_id );
+    json.write( event.target_lead_id );
+    json.write( event.target_lead_revision );
+    json.write( event.generation );
+    json.write( event.handoff_epoch );
+    json.write( event.simulation_owner );
+    json.write( event.previous_phase );
+    json.write( event.new_phase );
+    json.write( event.reason );
+    json.write( event.actor_ids );
+    write_staffed_camp_signal_read( json, event, false );
+    json.end_array();
+    const auto digest = []( const std::string &text ) {
+        sha256 hash;
+        hash.update( text.data(), text.size() );
+        return hash.finish();
+    };
+    return { digest( event.site_id ), digest( subject.str() ), digest( context.str() ),
+             event.signal_channel.empty() && event.source_omt.empty() };
+}
+
 bool append_live_transition_event( const bandit_live_world_probe::transition_event &event )
 {
     if( !live_transition_stream_enabled() ||
@@ -644,105 +814,18 @@ bool append_live_transition_event( const bandit_live_world_probe::transition_eve
     }
     if( event.has_staffed_camp_signal_read ) {
         json.member( "staffed_camp_signal_read" );
-        json.start_object();
-        const auto identity = []( const char *name ) {
-            const char *value = std::getenv( name );
-            return value == nullptr ? "" : std::string( value );
-        };
-        json.member( "identity" );
-        json.start_object();
-        json.member( "run_id", transition_stream.run_id );
-        json.member( "scenario", identity( "OPENCLAW_HARNESS_SCENARIO" ) );
-        json.member( "source_sha256", identity( "OPENCLAW_HARNESS_RUNTIME_SOURCE_SHA256" ) );
-        json.member( "executable_sha256", identity( "OPENCLAW_HARNESS_EXECUTABLE_SHA256" ) );
-        json.member( "binding_id", identity( "OPENCLAW_HARNESS_BINDING_ID" ) );
-        json.end_object();
-        json.member( "observer" );
-        json.start_object();
-        json.member( "id", event.observer_id );
-        json.member( "home", event.observer_home );
-        json.member( "at_home", event.observer_at_home );
-        json.member( "eligible", event.observer_eligible );
-        json.member( "capability" );
-        json.start_object();
-        json.member( "kind", event.observer_capability );
-        json.end_object();
-        json.end_object();
-        json.member( "camp" );
-        json.start_object();
-        json.member( "id", event.site_id );
-        json.member( "omt", event.camp_omt );
-        json.end_object();
-        json.member( "channel" );
-        json.start_object();
-        json.member( "kind", event.signal_channel );
-        json.end_object();
-        json.member( "source" );
-        json.start_object();
-        json.member( "omt", event.source_omt );
-        json.member( "intensity", event.source_intensity );
-        json.end_object();
-        json.member( "range" );
-        json.start_object();
-        json.member( "actual", event.range_actual );
-        json.member( "cap", event.range_cap );
-        json.end_object();
-        json.member( "line_of_sight" );
-        json.start_object();
-        json.member( "result", event.line_of_sight );
-        json.end_object();
-        json.member( "elevation" );
-        json.start_object();
-        json.member( "delta", event.elevation_delta );
-        json.end_object();
-        json.member( "weather" );
-        json.start_object();
-        json.member( "summary", event.weather );
-        json.end_object();
-        json.member( "visibility" );
-        json.start_object();
-        json.member( "inputs" );
-        json.start_object();
-        json.member( "sight_points", event.visibility_input );
-        json.end_object();
-        json.member( "result", event.visibility_result );
-        json.end_object();
-        json.member( "observation_clocks" );
-        json.start_object();
-        json.member( "game_minutes", event.game_minutes );
-        json.member( "emitted_minutes", event.emitted_minutes );
-        json.member( "observed_minutes", event.observed_minutes );
-        json.member( "sample_id", event.source_sample_id );
-        json.member( "uncertainty_radius_omt", event.uncertainty_radius_omt );
-        json.end_object();
-        json.member( "lead" );
-        json.start_object();
-        json.member( "id", event.lead_id );
-        json.end_object();
-        json.member( "outcome" );
-        json.start_object();
-        json.member( "kind", event.lead_outcome );
-        json.end_object();
-        json.member( "work" );
-        json.start_object();
-        json.member( "reads", event.work_reads );
-        json.member( "callbacks", event.work_callbacks );
-        json.end_object();
-        json.member( "persistence" );
-        json.start_object();
-        json.member( "site_id", event.persistence_site_id );
-        json.member( "lead_id", event.persistence_lead_id );
-        json.member( "lead_count_before", event.persistence_lead_count_before );
-        json.member( "lead_count_after", event.persistence_lead_count_after );
-        json.member( "lead_hash_before", event.persistence_lead_hash_before );
-        json.member( "lead_hash_after", event.persistence_lead_hash_after );
-        json.end_object();
-        json.member( "drive_response" );
-        json.start_object();
-        json.member( "before", event.drive_state_before );
-        json.member( "after", event.drive_state_after );
-        json.end_object();
-        json.end_object();
+        write_staffed_camp_signal_read( json, event, true );
+        if( nonmutating_signal_refusal( event ) ) {
+            json.member( "diagnostic_capture" );
+            json.start_object();
+            json.member( "mode", "change_only_nonmutating_refusals" );
+            json.member( "emission_clock_repeats_may_be_omitted", true );
+            json.member( "continuous_coverage", false );
+            json.member( "subject_scope", "camp_channel_source" );
+            json.member( "remembered_subject_limit", bandit_live_world_probe::max_transition_events );
+            json.member( "eviction", "old_context_may_be_reemitted" );
+            json.end_object();
+        }
     }
     if( event.has_staffed_camp_signal_aging ) {
         json.member( "staffed_camp_signal_aging" );
@@ -1199,7 +1282,45 @@ void record_live_transition_event( transition_event event )
         event.game_minutes = event.at_minutes;
     }
     try {
-        append_live_transition_event( event );
+        const bool compact = nonmutating_signal_refusal( event );
+        signal_refusal_state context;
+        if( compact ) {
+            if( !live_transition_stream_enabled() ) {
+                return;
+            }
+            context = signal_refusal_context( event );
+            const auto &cache = transition_stream.signal_refusals;
+            const auto previous = std::find_if( cache.begin(), cache.end(), [&]( const auto &entry ) {
+                return entry.subject == context.subject;
+            } );
+            if( previous != cache.end() && previous->signature == context.signature ) {
+                return;
+            }
+        }
+        if( append_live_transition_event( event ) && event.has_staffed_camp_signal_read &&
+            live_transition_stream_enabled() ) {
+            // Reconcile the successful append before remembering it. Failed writes
+            // cannot consume a changed context; run/file replacement resets this cache.
+            if( !compact ) {
+                context = signal_refusal_context( event );
+            }
+            auto &cache = transition_stream.signal_refusals;
+            // Observer/owner changes belong to a source's context, not a new
+            // subject. Site-only refusals (no source or no observer) invalidate
+            // prior source contexts; a later source read invalidates that summary.
+            cache.erase( std::remove_if( cache.begin(), cache.end(), [&]( const auto &entry ) {
+                return entry.subject == context.subject ||
+                       ( entry.site == context.site && ( entry.site_only || context.site_only ) );
+            } ), cache.end() );
+            if( compact ) {
+                if( cache.size() == max_transition_events ) {
+                    cache.erase( cache.begin() );
+                }
+                cache.push_back( std::move( context ) );
+            }
+            // Successful/mutating reads are never compacted and invalidate their
+            // preceding refusal. Changed outcomes are never subject to an output cap.
+        }
     } catch( ... ) {
         transition_stream = {};
     }

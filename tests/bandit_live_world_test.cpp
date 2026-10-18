@@ -23,6 +23,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -70701,4 +70702,292 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
     CHECK( retained_survivor_site( world ).applied_cargo_generation == 2 );
     CHECK( retained_survivor_site( world ).supply_units <= returned_supply );
     CHECK( retained_survivor_site( world ).last_cargo_application_key == cargo_key );
+}
+
+TEST_CASE( "staffed signal refusal capture is change-only without hiding causal changes",
+           "[bandit][live_world][camp_signal][transition_event][stream][signal_capture_067]" )
+{
+    const auto path = std::filesystem::temp_directory_path() / "caol-signal-capture-067.jsonl";
+    const auto replaced = path.string() + ".replaced";
+    const char *old_path = std::getenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+    const char *old_run = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
+    const std::optional<std::string> saved_path = old_path ?
+            std::optional<std::string>( old_path ) : std::nullopt;
+    const std::optional<std::string> saved_run = old_run ?
+            std::optional<std::string>( old_run ) : std::nullopt;
+    const auto environment = []( const char *name, const std::optional<std::string> &value ) {
+        if( value ) {
+            set_test_env( name, value->c_str(), 1 );
+        } else {
+            unset_test_env( name );
+        }
+    };
+    on_out_of_scope cleanup( [&]() {
+        environment( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path );
+        environment( "OPENCLAW_HARNESS_RUN_ID", saved_run );
+        if( std::filesystem::exists( path ) ) {
+            std::filesystem::permissions( path, std::filesystem::perms::owner_all );
+            std::filesystem::remove( path );
+        }
+        std::filesystem::remove( replaced );
+    } );
+    std::filesystem::remove( path );
+    std::filesystem::remove( replaced );
+    environment( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", path.string() );
+    environment( "OPENCLAW_HARNESS_RUN_ID", "signal-capture-067" );
+    const auto records = [&]() {
+        std::vector<std::string> lines;
+        std::ifstream input( path );
+        for( std::string line; std::getline( input, line ); ) {
+            const JsonObject row = native_trace_value( line );
+            row.allow_omitted_members();
+            CHECK( row.get_int( "sequence" ) == static_cast<int>( lines.size() + 1 ) );
+            lines.push_back( line );
+        }
+        return lines;
+    };
+    bandit_live_world_probe::transition_event event;
+    event.domain = "bandit_live_world";
+    event.transition = "staffed_camp_signal_read";
+    event.outcome = "bounded";
+    event.reason = "out_of_range";
+    event.site_id = "overmap_special:bandit_camp@129,149,0";
+    event.simulation_owner = "abstract";
+    event.actor_ids = { 5 };
+    event.game_minutes = 100;
+    event.has_staffed_camp_signal_read = true;
+    event.observer_id = "5";
+    event.observer_home = "(129,149,0)";
+    event.observer_at_home = true;
+    event.observer_eligible = true;
+    event.observer_capability = "light";
+    event.camp_omt = "(129,149,0)";
+    event.signal_channel = "light";
+    event.source_omt = "(131,143,1)";
+    event.source_intensity = 1;
+    event.range_actual = 6;
+    event.range_cap = 4;
+    event.weather = "clear";
+    event.visibility_input = 3;
+    event.elevation_delta = 1;
+    event.lead_outcome = "no_new_lead";
+    event.persistence_site_id = event.site_id;
+    event.persistence_lead_count_before = event.persistence_lead_count_after = 13;
+    event.persistence_lead_hash_before = event.persistence_lead_hash_after = "824859266566579150";
+    event.drive_state_before = event.drive_state_after = "report_awaiting_assessment";
+    const auto emit = [&]( const bandit_live_world_probe::transition_event &read ) {
+        bandit_live_world_probe::record_live_transition_event( read );
+    };
+
+    SECTION( "actual camp-signal caller preserves gameplay and bounds clock-only repeats" ) {
+        environment( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", std::nullopt );
+        bandit_live_world::world_state quiet = make_structural_signal_test_world( false, 16967 );
+        auto &site = quiet.sites.front();
+        site.active_outing.clear();
+        for( auto &member : site.members ) {
+            member.state = bandit_live_world::member_state::at_home;
+            member.wounded_or_unready = false;
+        }
+        auto captured = quiet;
+        const tripoint_abs_omt source( site.anchor.x() + 7, site.anchor.y(), site.anchor.z() );
+        const auto read_signals = [source]( const bandit_live_world::site_record &,
+        const bandit_live_world::camp_signal_observer_request & ) {
+            auto read = make_structural_signal_read(
+                            bandit_live_world::sortie_observation_sense::smoke, source, 3, 75, 2 );
+            read.line_of_sight = true;
+            read.rejected = true;
+            read.rejection_reason = "out_of_range";
+            read.range_cap_omt = 3;
+            return std::vector<bandit_live_world::structural_signal_read> { read };
+        };
+        const auto summary = []( const bandit_live_world::camp_signal_observation_result &result ) {
+            return std::make_tuple( result.sites_considered, result.eligible_camps,
+                                   result.callbacks_invoked, result.leads_created,
+                                   result.leads_refreshed, result.unchanged_reads );
+        };
+        std::vector<bandit_live_world::camp_signal_observation_result> baseline;
+        for( int minute = 220; minute < 340; ++minute ) {
+            baseline.push_back( bandit_live_world::record_staffed_camp_signal_observations(
+                                    quiet, minute, read_signals ) );
+        }
+        environment( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", path.string() );
+        for( int minute = 220; minute < 340; ++minute ) {
+            const auto result = bandit_live_world::record_staffed_camp_signal_observations(
+                                    captured, minute, read_signals );
+            CHECK( summary( result ) == summary( baseline[minute - 220] ) );
+            CHECK( result.leads_created == 0 );
+            CHECK( result.leads_refreshed == 0 );
+        }
+        CHECK( serialize_world( captured ) == serialize_world( quiet ) );
+        const auto rows = records();
+        REQUIRE( rows.size() == 1 );
+        const JsonObject row = native_trace_value( rows.front() );
+        row.allow_omitted_members();
+        CHECK( row.get_int( "game_minutes" ) == 220 );
+        CHECK( row.get_string( "reason" ) == "out_of_range" );
+        const auto limits = row.get_object( "diagnostic_capture" );
+        limits.allow_omitted_members();
+        CHECK_FALSE( limits.get_bool( "continuous_coverage" ) );
+        CHECK( limits.get_bool( "emission_clock_repeats_may_be_omitted" ) );
+    }
+    SECTION( "causal changes and a return to an earlier context are all recorded" ) {
+        emit( event );
+        for( int repeat = 0; repeat < 120; ++repeat ) {
+            ++event.game_minutes;
+            ++event.turn;
+            emit( event );
+        }
+        REQUIRE( records().size() == 1 );
+        const auto first = event;
+        const std::vector<std::function<void( bandit_live_world_probe::transition_event & )>> changes = {
+            []( auto &e ) { ++e.range_actual; },
+            []( auto &e ) { ++e.range_cap; },
+            []( auto &e ) { e.line_of_sight = !e.line_of_sight; },
+            []( auto &e ) { e.weather = "rain"; },
+            []( auto &e ) { ++e.visibility_input; },
+            []( auto &e ) { e.visibility_result = !e.visibility_result; },
+            []( auto &e ) { ++e.source_intensity; },
+            []( auto &e ) { e.observer_eligible = false; },
+            []( auto &e ) { e.observer_at_home = false; },
+            []( auto &e ) { ++e.uncertainty_radius_omt; },
+            []( auto &e ) { e.source_sample_id = "new real sample"; },
+            []( auto &e ) { e.observed_minutes = 110; },
+            []( auto &e ) { e.emitted_minutes = 109; },
+            []( auto &e ) { e.reason = "blocked_line_of_sight"; },
+            []( auto &e ) { ++e.handoff_epoch; },
+            []( auto &e ) { e.drive_state_before = e.drive_state_after = "changed drive"; },
+            []( auto &e ) { e.persistence_lead_hash_before = e.persistence_lead_hash_after = "changed leads"; }
+        };
+        std::size_t count = 1;
+        for( const auto &change : changes ) {
+            change( event );
+            emit( event );
+            CHECK( records().size() == ++count );
+        }
+        emit( first );
+        CHECK( records().size() == ++count );
+        for( std::size_t change = 0; change < bandit_live_world_probe::max_transition_events + 10;
+             ++change ) {
+            event.reason = "changed cause " + std::to_string( change );
+            emit( event );
+            CHECK( records().size() == ++count );
+        }
+    }
+    SECTION( "mutations successes unknown persistence and ordinary commits always remain visible" ) {
+        emit( event );
+        std::size_t count = 1;
+        auto changed = event;
+        changed.persistence_lead_hash_after = "new durable payload";
+        changed.lead_outcome = "created";
+        changed.outcome = "created";
+        for( int i = 0; i < 2; ++i ) {
+            emit( changed );
+            CHECK( records().size() == ++count );
+        }
+        emit( event );
+        CHECK( records().size() == ++count );
+        changed = event;
+        changed.persistence_lead_hash_before.clear();
+        changed.persistence_lead_hash_after.clear();
+        for( int i = 0; i < 2; ++i ) {
+            emit( changed );
+            CHECK( records().size() == ++count );
+        }
+        changed.has_staffed_camp_signal_read = false;
+        changed.transition = "local_pair_handoff";
+        changed.outcome = "committed";
+        for( int i = 0; i < 2; ++i ) {
+            emit( changed );
+            CHECK( records().size() == ++count );
+        }
+    }
+    SECTION( "bounded recent-subject memory may reemit an evicted context but never hides changes" ) {
+        emit( event );
+        for( std::size_t subject = 1; subject <= bandit_live_world_probe::max_transition_events;
+             ++subject ) {
+            event.source_omt = "(" + std::to_string( 131 + subject ) + ",143,1)";
+            emit( event );
+        }
+        CHECK( records().size() == bandit_live_world_probe::max_transition_events + 1 );
+        emit( event );
+        CHECK( records().size() == bandit_live_world_probe::max_transition_events + 1 );
+        event.source_omt = "(131,143,1)";
+        emit( event );
+        const auto rows = records();
+        REQUIRE( rows.size() == bandit_live_world_probe::max_transition_events + 2 );
+        const JsonObject row = native_trace_value( rows.back() );
+        row.allow_omitted_members();
+        const auto limits = row.get_object( "diagnostic_capture" );
+        limits.allow_omitted_members();
+        CHECK( limits.get_int( "remembered_subject_limit" ) ==
+               static_cast<int>( bandit_live_world_probe::max_transition_events ) );
+        CHECK( limits.get_string( "subject_scope" ) == "camp_channel_source" );
+        CHECK_FALSE( limits.get_bool( "continuous_coverage" ) );
+    }
+    SECTION( "observer changes and site-only refusals invalidate earlier context" ) {
+        emit( event );
+        auto other = event;
+        other.observer_id = "6";
+        other.actor_ids = { 6 };
+        emit( other );
+        emit( event );
+        CHECK( records().size() == 3 );
+        auto absent = event;
+        absent.signal_channel.clear();
+        absent.source_omt.clear();
+        absent.reason = "no_signal_source";
+        emit( absent );
+        emit( absent );
+        CHECK( records().size() == 4 );
+        emit( event );
+        CHECK( records().size() == 5 );
+        emit( absent );
+        CHECK( records().size() == 6 );
+    }
+    SECTION( "independent sources may interleave without repeating unchanged context" ) {
+        emit( event );
+        auto other = event;
+        other.source_omt = "(132,143,1)";
+        emit( other );
+        for( int repeat = 0; repeat < 100; ++repeat ) {
+            ++event.game_minutes;
+            ++other.game_minutes;
+            emit( event );
+            emit( other );
+        }
+        CHECK( records().size() == 2 );
+    }
+    SECTION( "stream replacement truncation and run rebinding reset refusal memory" ) {
+        emit( event );
+        REQUIRE( records().size() == 1 );
+        std::filesystem::rename( path, replaced );
+        std::filesystem::copy_file( replaced, path );
+        emit( event );
+        CHECK( records().size() == 2 );
+        std::ofstream( path, std::ios::trunc ).close();
+        emit( event );
+        CHECK( records().size() == 1 );
+        std::filesystem::remove( path );
+        environment( "OPENCLAW_HARNESS_RUN_ID", "signal-capture-rebound-067" );
+        emit( event );
+        const auto rows = records();
+        REQUIRE( rows.size() == 1 );
+        const JsonObject row = native_trace_value( rows.front() );
+        row.allow_omitted_members();
+        CHECK( row.get_string( "run_id" ) == "signal-capture-rebound-067" );
+    }
+    SECTION( "failed append preserves the changed refusal for a later successful write" ) {
+        emit( event );
+        REQUIRE( records().size() == 1 );
+        std::filesystem::permissions( path, std::filesystem::perms::owner_read );
+        event.range_cap = 5;
+        emit( event );
+        CHECK( records().size() == 1 );
+        std::filesystem::permissions( path, std::filesystem::perms::owner_read |
+                                      std::filesystem::perms::owner_write );
+        emit( event );
+        REQUIRE( records().size() == 2 );
+        emit( event );
+        CHECK( records().size() == 2 );
+    }
 }
