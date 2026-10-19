@@ -18,6 +18,7 @@ import select
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -103,10 +104,17 @@ def _stable_generation(pid: int, *, timeout: float = 2.0) -> dict[str, Any]:
     return last
 
 
-def _read_owner(endpoint: Path, owner_path: Path | None = None) -> dict[str, Any]:
+def _read_owner(
+    endpoint: Path, owner_path: Path | None = None, *, expected_sha256: str | None = None,
+) -> dict[str, Any]:
     try:
         path = owner_path or (endpoint.parent / "owner.json")
-        value = json.loads(path.read_text(encoding="utf-8"))
+        owner_bytes = path.read_bytes()
+        if expected_sha256 is not None and hashlib.sha256(owner_bytes).hexdigest() != expected_sha256:
+            raise RuntimeError("terminal run-owner snapshot changed after input registration")
+        value = json.loads(owner_bytes.decode("utf-8"))
+    except RuntimeError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeError("terminal dispatcher owner record is unavailable") from error
     if not isinstance(value, dict) or value.get("schema") != OWNER_SCHEMA:
@@ -320,18 +328,80 @@ class CursesTerminalTransport:
         raise RuntimeError("terminal dispatcher did not create its run-bound endpoint")
 
 
+
+def _unix_peer_pid(client: socket.socket) -> int:
+    """Return the kernel-authenticated PID at the other end of a local socket."""
+    if sys.platform != "darwin":
+        raise RuntimeError("run-owner recovery requires a supported Unix peer-PID credential")
+    # Darwin sys/un.h: SOL_LOCAL=0 and LOCAL_PEERPID=0x002. Python 3.9 on
+    # the supported Mac host does not export these constants.
+    raw = client.getsockopt(0, 0x002, 4)
+    if not isinstance(raw, bytes) or len(raw) < 4:
+        raise RuntimeError("terminal peer PID credential is unavailable")
+    peer_pid = struct.unpack("=i", raw[:4])[0]
+    if peer_pid <= 0:
+        raise RuntimeError("terminal peer PID credential is invalid")
+    return peer_pid
+
+
+def _run_owner_recovery_binding(
+    endpoint: Path, owner_path: Path, run_id: str, pid: int, host: str,
+    process_generation: Mapping[str, Any] | None, owner_sha256: str | None,
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    """Validate an intact run owner before use when its private copy is gone."""
+    owner_path = Path(owner_path).resolve()
+    owner = _read_owner(endpoint, owner_path, expected_sha256=owner_sha256)
+    if Path(str(owner.get("run_owner_path", ""))).resolve() != owner_path:
+        raise RuntimeError("terminal run-owner path does not match its persisted binding")
+    if Path(str(owner.get("endpoint", ""))).resolve() != endpoint.resolve():
+        raise RuntimeError("terminal run-owner endpoint mismatch")
+    private_path = endpoint.parent / "owner.json"
+    if private_path.exists() and _read_owner(endpoint, private_path) != owner:
+        raise RuntimeError("terminal private and run owner records disagree")
+    actual_host = _host_identity()
+    if owner.get("host") != actual_host or host != actual_host:
+        raise RuntimeError("terminal run-owner host mismatch")
+    if str(owner.get("run_id", "")) != run_id or int(owner.get("game_pid", 0) or 0) != pid:
+        raise RuntimeError("terminal run-owner run or game PID mismatch")
+    expected_game = owner.get("game_process_generation")
+    expected_broker = owner.get("broker_process_generation")
+    if not isinstance(expected_game, Mapping) or not isinstance(expected_broker, Mapping):
+        raise RuntimeError("terminal run-owner process generation is incomplete")
+    if process_generation is not None and not _same_generation(process_generation, expected_game):
+        raise RuntimeError("terminal dispatcher rejected expected process generation")
+    status = dispatcher_status(endpoint, owner_path=owner_path)
+    if status.get("game_status") != "alive" or status.get("broker_status") != "alive":
+        raise RuntimeError("terminal run-owner process generation is stale or unavailable")
+    return owner, expected_broker
+
+
 def dispatch_input(
     endpoint: Path, *, run_id: str, pid: int, keys: list[str], delay_ms: int = 0,
     host: str | None = None, process_generation: Mapping[str, Any] | None = None,
-    request_id: str | None = None,
+    request_id: str | None = None, owner_path: Path | None = None,
+    owner_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Deliver one exact request after reconciling its persisted process owner."""
+    """Deliver one exact request after reconciling its persisted process owner.
+
+    ``owner_path`` recovers an intact run-bound owner when the private copy is
+    gone. Kernel peer PID plus process generations bind the connected responder;
+    the broker authenticates run, host, game PID and birth before delivery.
+    """
     if os.name == "nt":
+        if owner_path is not None or owner_sha256 is not None:
+            raise RuntimeError("run-owner recovery is not supported by this transport")
         from windows_curses_terminal_transport import dispatch_input as native_dispatch
         return native_dispatch(endpoint, run_id=run_id, pid=pid, keys=keys, delay_ms=delay_ms,
             host=host, process_generation=process_generation, request_id=request_id)
     endpoint = Path(endpoint)
-    owner = _read_owner(endpoint)
+    recovery_broker: Mapping[str, Any] | None = None
+    if owner_path is None:
+        owner = _read_owner(endpoint)
+    else:
+        owner, recovery_broker = _run_owner_recovery_binding(
+            endpoint, owner_path, run_id, pid, _host_identity() if host is None else str(host),
+            process_generation, owner_sha256,
+        )
     actual_host = _host_identity() if host is None else str(host)
     expected_game = owner.get("game_process_generation")
     if not isinstance(expected_game, Mapping):
@@ -355,6 +425,12 @@ def dispatch_input(
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(2.0 + len(keys) * request["delay_ms"] / 1000)
         client.connect(str(endpoint))
+        if recovery_broker is not None:
+            broker_pid = int(recovery_broker.get("pid", 0) or 0)
+            if _unix_peer_pid(client) != broker_pid:
+                raise RuntimeError("terminal socket peer does not match the run-bound broker PID")
+            if not _same_generation(recovery_broker, _process_generation(broker_pid)):
+                raise RuntimeError("terminal run-bound broker generation changed before input")
         client.sendall((json.dumps(request, sort_keys=True) + "\n").encode())
         response = b""
         while not response.endswith(b"\n"):
@@ -366,6 +442,12 @@ def dispatch_input(
     receipt = public_process_owner(receipt)
     if receipt.get("request_id") != request["request_id"] or not receipt.get("ok"):
         raise RuntimeError("terminal input dispatcher rejected request: " + json.dumps(receipt, sort_keys=True))
+    if recovery_broker is not None and (
+            receipt.get("host") != request["host"]
+            or receipt.get("run_id") != request["run_id"]
+            or int(receipt.get("pid", 0) or 0) != request["pid"]
+            or not _same_generation(receipt.get("process_generation", {}), expected_game)):
+        raise RuntimeError("terminal input receipt does not match the authenticated request")
     return receipt
 
 

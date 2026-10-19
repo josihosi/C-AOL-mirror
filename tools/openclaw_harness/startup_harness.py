@@ -4049,11 +4049,13 @@ TERMINAL_NATIVE_INPUTS: Dict[int, Dict[str, Any]] = {}
 def register_terminal_native_input(pid: int, endpoint: str, run_id: str, run_dir: Path) -> None:
     if pid <= 0 or not endpoint or not run_id:
         raise ValueError("terminal-native input registration requires pid, endpoint, and run id")
-    binding = json.loads((run_dir / "terminal.owner.json").read_text())
+    owner_bytes = (run_dir / "terminal.owner.json").read_bytes()
+    binding = json.loads(owner_bytes)
     if binding.get("run_id") != run_id or binding.get("game_pid") != pid or binding.get("host") != __import__("socket").gethostname() or binding.get("endpoint") != endpoint:
         raise ValueError("terminal-native input registration owner mismatch")
     TERMINAL_NATIVE_INPUTS[pid] = {"endpoint": endpoint, "run_id": run_id, "run_dir": str(run_dir),
-                                  "host": binding["host"], "process_generation": binding["game_process_generation"]}
+                                  "host": binding["host"], "process_generation": binding["game_process_generation"],
+                                  "owner_sha256": hashlib.sha256(owner_bytes).hexdigest()}
 
 
 def terminal_native_press_sequence(pid: int, keys: List[str], delay_ms: int = 0) -> Dict[str, Any]:
@@ -4061,9 +4063,13 @@ def terminal_native_press_sequence(pid: int, keys: List[str], delay_ms: int = 0)
     if owner is None:
         raise RuntimeError("terminal-native input owner is not registered")
     normalized = [normalize_peekaboo_key(key) for key in keys]
+    private_path = Path(owner["endpoint"]).parent / "owner.json"
+    recovery_owner_path = Path(owner["run_dir"]) / "terminal.owner.json" if not private_path.exists() else None
     receipt = dispatch_terminal_input(Path(owner["endpoint"]), run_id=owner["run_id"], pid=pid,
                                      keys=normalized, delay_ms=delay_ms, host=owner["host"],
-                                     process_generation=owner["process_generation"])
+                                     process_generation=owner["process_generation"],
+                                     owner_path=recovery_owner_path,
+                                     owner_sha256=owner.get("owner_sha256") if recovery_owner_path is not None else None)
     receipt["input_owner"] = "run_bound_pty"
     write_json(Path(owner["run_dir"]) / f"terminal.input.{receipt['request_id']}.receipt.json", receipt)
     return receipt
