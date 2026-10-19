@@ -3244,11 +3244,13 @@ void dialogue::add_gen_response( const talk_response &resp, bool insert_front,
                                    std::to_string( ++next_semantic_response_id );
     if( insert_front ) {
         responses.insert( responses.begin(), std::move( generated ) );
+        response_condition_exists.insert( response_condition_exists.begin(), condition_exists );
+        response_condition_eval.insert( response_condition_eval.begin(), condition_result );
     } else {
         responses.push_back( std::move( generated ) );
+        response_condition_exists.emplace_back( condition_exists );
+        response_condition_eval.emplace_back( condition_result );
     }
-    response_condition_exists.emplace_back( condition_exists );
-    response_condition_eval.emplace_back( condition_result );
 }
 
 void dialogue::add_topic( const std::string &topic_id )
@@ -3683,7 +3685,12 @@ talk_topic dialogue::opt( dialogue_window &d_win, const talk_topic &topic )
             // The response can be rendered disabled after its condition failed.
             // Re-evaluate immediately before the existing trial/effect path.
             if( response_condition_exists[index] && !debug_mode ) {
-                response_condition_eval[index] = responses[index].condition( *this );
+                // Built-in exits and explained failures can have a cached
+                // decision without a callable predicate.  Preserve that
+                // decision; only a real predicate can be re-evaluated.
+                if( responses[index].condition ) {
+                    response_condition_eval[index] = responses[index].condition( *this );
+                }
                 if( !response_condition_eval[index] ) {
                     return semantic_action_dispatch_result{ false, "disabled_stable_id", "" };
                 }
