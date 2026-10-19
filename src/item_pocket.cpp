@@ -1776,6 +1776,7 @@ bool item_pocket::remove_internal( const std::function<bool( item & )> &filter,
 {
     for( auto it = contents.begin(); it != contents.end(); ) {
         if( filter( *it ) ) {
+            it->invalidate_references();
             res.splice( res.end(), contents, it++ );
             if( --count == 0 ) {
                 return true;

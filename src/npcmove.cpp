@@ -1210,62 +1210,6 @@ bool good_for_llm_targeted_pickup( const item &it, npc &who,
     return can_carry_wear_or_wield && who.would_take_that( it, there );
 }
 
-std::string normalize_item_label( const std::string &text )
-{
-    std::string stripped = remove_color_tags( text );
-    size_t suffix_pos = stripped.find( " > " );
-    if( suffix_pos == std::string::npos ) {
-        suffix_pos = stripped.find( '>' );
-    }
-    if( suffix_pos != std::string::npos ) {
-        stripped = stripped.substr( 0, suffix_pos );
-    }
-    std::string out;
-    out.reserve( stripped.size() );
-    bool last_space = false;
-    for( unsigned char c : stripped ) {
-        bool allowed = std::isalnum( c ) != 0;
-        if( !allowed ) {
-            switch( c ) {
-                case ' ':
-                case '-':
-                case '_':
-                case '.':
-                case ',':
-                case '/':
-                case '(':
-                case ')':
-                case '[':
-                case ']':
-                case '{':
-                case '}':
-                    allowed = true;
-                    break;
-                default:
-                    break;
-            }
-        }
-        if( allowed ) {
-            out.push_back( static_cast<char>( c ) );
-            last_space = ( c == ' ' );
-        } else if( !last_space ) {
-            out.push_back( ' ' );
-            last_space = true;
-        }
-    }
-    size_t start = 0;
-    while( start < out.size() &&
-           std::isspace( static_cast<unsigned char>( out[start] ) ) ) {
-        ++start;
-    }
-    size_t end = out.size();
-    while( end > start &&
-           std::isspace( static_cast<unsigned char>( out[end - 1] ) ) ) {
-        --end;
-    }
-    return out.substr( start, end - start );
-}
-
 } // namespace
 
 static std::string npc_action_name( npc_action action );
@@ -3076,7 +3020,7 @@ bool npc::apply_llm_intent_item_targets()
 
         const auto consider = [&]( const tripoint_bub_ms & p, item_location loc,
         item & node ) {
-            if( normalize_item_label( node.tname( 1, false ) ) != target.name ) {
+            if( llm_intent::normalize_item_label( node.tname( 1, false ) ) != target.name ) {
                 return;
             }
             if( !::good_for_llm_targeted_pickup( node, *this, p ) ) {

@@ -3091,16 +3091,6 @@ void options_manager::add_options_llm()
 
     add_empty_line();
 
-    add( "LLM_INTENT_TEMPERATURE", "llm", to_translation( "Temperature" ),
-         to_translation( "Sampling temperature for local model responses." ),
-         0.1f, 2.0f, 0.6f, 0.05f
-       );
-
-    add( "LLM_INTENT_TOP_P", "llm", to_translation( "Top-p (advanced)" ),
-         to_translation( "Advanced nucleus sampling control for local model responses." ),
-         0.1f, 1.0f, 0.9f, 0.05f
-       );
-
     add( "LLM_INTENT_REPETITION_PENALTY", "llm", translation(), translation(),
          0.5f, 2.0f, 1.0f, 0.05f, COPT_ALWAYS_HIDE
        );
@@ -4251,7 +4241,8 @@ void options_manager::deserialize( const JsonArray &ja )
         // yay hardcoded list! remove after 0.J
         std::vector<std::string> removed_options = { "DISTANCE_INITIAL_VISIBILITY", "FOV_3D_Z_RANGE", "SAFEMODE",
                                                      "INITIAL_STAT_POINTS", "INITIAL_TRAIT_POINTS", "INITIAL_SKILL_POINTS", "MAX_TRAIT_POINTS",
-                                                     "SKILL_TRAINING_SPEED", "PROFICIENCY_TRAINING_SPEED", "CITY_SPACING", "CITY_SIZE"
+                                                     "SKILL_TRAINING_SPEED", "PROFICIENCY_TRAINING_SPEED", "CITY_SPACING", "CITY_SIZE",
+                                                     "LLM_INTENT_TEMPERATURE", "LLM_INTENT_TOP_P"
                                                    };
 
         const std::string name = migrateOptionName( joOptions.get_string( "name" ) );

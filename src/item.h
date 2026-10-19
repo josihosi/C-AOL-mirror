@@ -239,6 +239,8 @@ class item : public visitable
         /** Return a pointer-like type that's automatically invalidated if this
          * item is destroyed or assigned-to */
         safe_reference<item> get_safe_reference();
+        /** Invalidate old storage references to this tree, preserving UIDs and contents. */
+        void invalidate_references();
 
         /** Persistent unique identifier for this item instance.
          * Returns const ref to avoid triggering item_uid's copy-generates-new semantics. */

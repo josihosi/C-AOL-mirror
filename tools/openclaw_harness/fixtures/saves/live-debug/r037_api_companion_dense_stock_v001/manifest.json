@@ -1,0 +1,39 @@
+{
+  "name": "r037_api_companion_dense_stock_v001",
+  "source_profile": "live-debug",
+  "source_fixture": "r037_npc_llm_command_sandbox_v001",
+  "description": "Disposable API rerun derivative of the unchanged canonical R037 fixture. Adds reachable ordinary item stock only; it does not add commands, outcomes, NPC phases, or responses.",
+  "save_transforms": [
+    {
+      "kind": "map_items_near_player",
+      "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip",
+      "items": [
+        { "typeid": "bandages", "count": 2, "offset_ms": [3, 1, 0] },
+        { "typeid": "tshirt", "count": 1, "offset_ms": [3, -1, 0] },
+        { "typeid": "tshirt", "count": 1, "offset_ms": [3, -2, 0] },
+        { "typeid": "rock", "count": 5, "offset_ms": [4, 1, 0] },
+        { "typeid": "log", "count": 1, "offset_ms": [4, -1, 0] },
+        { "typeid": "38_special", "count": 1, "charges": 60, "owner": "hells_raiders", "offset_ms": [4, 2, 0] },
+        {
+          "typeid": "lighter",
+          "count": 1,
+          "offset_ms": [5, 0, 0],
+          "contents": {
+            "contents": [
+              {
+                "pocket_type": 1,
+                "contents": [
+                  { "typeid": "butane", "charges": 100, "bday": 0, "last_temp_check": 0, "template_traits": [] }
+                ],
+                "_sealed": false,
+                "no_rigid": []
+              }
+            ],
+            "additional_pockets": []
+          }
+        },
+        { "typeid": "apple", "count": 3, "offset_ms": [2, -2, 0] }
+      ]
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cata_catch.h"
+#include "active_item_cache.h"
 #include "character.h"
 #include "coordinates.h"
 #include "debug.h"
@@ -660,4 +661,191 @@ TEST_CASE( "item_location_in_container_deserialize_without_uid_falls_back_to_ind
     item_location loaded = deserialize_item_location( json_str );
     REQUIRE( loaded );
     CHECK( loaded->typeId() == itype_tshirt );
+}
+
+
+TEST_CASE( "item_location_detach_keeps_the_native_storage_identity",
+           "[item][item_location][item_uid][companion_repair]" )
+{
+    clear_map_without_vision();
+    clear_vehicles();
+    map &here = get_map();
+    const bool base_part = GENERATE( false, true );
+    vehicle *veh = here.add_vehicle( vehicle_prototype_car, tripoint_bub_ms( 60, 60, 0 ),
+                                     0_degrees, 0, veh_spawn_status::UNDAMAGED );
+    REQUIRE( veh != nullptr );
+    int part = 0;
+    item_location selected;
+    if( base_part ) {
+        const item &base = veh->part( part ).get_base();
+        selected = item_location( vehicle_cursor( *veh, part ), const_cast<item *>( &base ) );
+    } else {
+        part = -1;
+        for( const vpart_reference &vpr : veh->get_all_parts() ) {
+            if( vpr.has_feature( "CARGO" ) ) {
+                part = vpr.part_index();
+                break;
+            }
+        }
+        REQUIRE( part >= 0 );
+        vehicle_stack cargo = veh->get_items( veh->part( part ) );
+        while( !cargo.empty() ) {
+            cargo.erase( cargo.begin() );
+        }
+        item coat( itype_id( "jacket_leather" ), calendar::turn );
+        REQUIRE( coat.put_in( item( itype_id( "rock" ), calendar::turn ),
+                              pocket_type::CONTAINER ).success() );
+        const auto added = veh->add_item( here, veh->part( part ), coat );
+        REQUIRE( added.has_value() );
+        selected = item_location( vehicle_cursor( *veh, part ), & **added );
+    }
+    const int64_t uid = selected->uid().get_value();
+    const int64_t content_uid = base_part ? 0 : selected->only_item().uid().get_value();
+    const itype_id type = selected->typeId();
+    item extracted = selected.detach();
+    CHECK_FALSE( selected );
+    CHECK( extracted.typeId() == type );
+    CHECK( extracted.uid().get_value() == uid );
+    if( base_part ) {
+        CHECK( veh->part( part ).removed );
+    } else {
+        CHECK( extracted.only_item().uid().get_value() == content_uid );
+        CHECK( veh->get_items( veh->part( part ) ).empty() );
+    }
+}
+
+TEST_CASE( "generic_extraction_preserves_nested_identity_and_expires_storage_cache",
+           "[item][item_location][companion_repair][transfer_cache]" )
+{
+    clear_avatar();
+    clear_map_without_vision();
+    clear_vehicles();
+    map &here = get_map();
+    Character &who = get_player_character();
+    const tripoint_bub_ms pos( 60, 60, 0 );
+    const std::string storage = GENERATE( "map_single", "map_bulk", "vehicle_single",
+                                          "vehicle_bulk", "inventory_bulk", "pocket_single",
+                                          "worn_bulk", "weapon" );
+    CAPTURE( storage );
+    item gun( itype_id( "glock_19" ), calendar::turn );
+    gun.ammo_set( itype_id( "9mm" ), 3 );
+    REQUIRE( gun.magazine_current() != nullptr );
+    gun.magazine_current()->active = true;
+    REQUIRE( gun.magazine_current()->all_items_top( pocket_type::MAGAZINE ).size() == 1 );
+    gun.magazine_current()->all_items_top( pocket_type::MAGAZINE ).front()->active = true;
+    item pack( itype_backpack, calendar::turn );
+    REQUIRE( pack.put_in( gun, pocket_type::CONTAINER ).success() );
+    inventory inv;
+    item holder( itype_backpack, calendar::turn );
+    item *selected = nullptr;
+    std::function<item()> extract;
+    if( storage == "map_single" || storage == "map_bulk" ) {
+        selected = &here.add_item_or_charges( pos, pack );
+        extract = [&]() {
+            map_cursor cursor( pos );
+            if( storage == "map_single" ) {
+                item result = cursor.remove_item( *selected );
+                CHECK( here.i_at( pos ).empty() );
+                return result;
+            }
+            auto removed = cursor.remove_items_with( [&]( const item & it ) {
+                return &it == selected;
+            }, 1 );
+            REQUIRE( removed.size() == 1 );
+            CHECK( here.i_at( pos ).empty() );
+            return std::move( removed.front() );
+        };
+    } else if( storage == "vehicle_single" || storage == "vehicle_bulk" ) {
+        vehicle *veh = here.add_vehicle( vehicle_prototype_car, pos, 0_degrees, 0,
+                                         veh_spawn_status::UNDAMAGED );
+        REQUIRE( veh != nullptr );
+        int part = -1;
+        for( const vpart_reference &vpr : veh->get_all_parts() ) {
+            if( vpr.has_feature( "CARGO" ) ) {
+                part = vpr.part_index();
+                break;
+            }
+        }
+        REQUIRE( part >= 0 );
+        vehicle_stack cargo = veh->get_items( veh->part( part ) );
+        while( !cargo.empty() ) {
+            cargo.erase( cargo.begin() );
+        }
+        const auto added = veh->add_item( here, veh->part( part ), pack );
+        REQUIRE( added.has_value() );
+        selected = & **added;
+        extract = [ &, veh, part]() {
+            vehicle_cursor cursor( *veh, part );
+            if( storage == "vehicle_single" ) {
+                item result = cursor.remove_item( *selected );
+                CHECK( veh->get_items( veh->part( part ) ).empty() );
+                return result;
+            }
+            auto removed = cursor.remove_items_with( [&]( const item & it ) {
+                return &it == selected;
+            }, 1 );
+            REQUIRE( removed.size() == 1 );
+            CHECK( veh->get_items( veh->part( part ) ).empty() );
+            return std::move( removed.front() );
+        };
+    } else if( storage == "inventory_bulk" ) {
+        selected = &inv.add_item( pack );
+        extract = [&]() {
+            auto removed = inv.remove_items_with( [&]( const item & it ) {
+                return &it == selected;
+            }, 1 );
+            REQUIRE( removed.size() == 1 );
+            CHECK( inv.size() == 0 );
+            return std::move( removed.front() );
+        };
+    } else if( storage == "pocket_single" ) {
+        REQUIRE( holder.put_in( pack, pocket_type::CONTAINER ).success() );
+        selected = &holder.only_item();
+        extract = [&]() {
+            item result = holder.remove_item( *selected );
+            CHECK( holder.all_items_top().empty() );
+            return result;
+        };
+    } else if( storage == "worn_bulk" ) {
+        const auto worn = who.wear_item( pack, false );
+        REQUIRE( worn.has_value() );
+        selected = & **worn;
+        extract = [&]() {
+            auto removed = who.remove_items_with( [&]( const item & it ) {
+                return &it == selected;
+            }, 1 );
+            REQUIRE( removed.size() == 1 );
+            CHECK( who.amount_worn( itype_backpack ) == 0 );
+            return std::move( removed.front() );
+        };
+    } else {
+        REQUIRE( who.wield( pack ) );
+        selected = who.get_wielded_item().get_item();
+        extract = [&]() {
+            item result = who.remove_weapon();
+            CHECK_FALSE( who.get_wielded_item() );
+            return result;
+        };
+    }
+    REQUIRE( selected != nullptr );
+    const int64_t uid = selected->uid().get_value();
+    const int64_t gun_uid = selected->only_item().uid().get_value();
+    const int64_t mag_uid = selected->only_item().magazine_current()->uid().get_value();
+    const int64_t ammo_uid = selected->only_item().magazine_current()->all_items_top(
+                                 pocket_type::MAGAZINE ).front()->uid().get_value();
+    active_item_cache old_cache;
+    REQUIRE( old_cache.add( *selected, point_sm_ms( 0, 0 ) ) );
+    REQUIRE( old_cache.get().size() == 2 );
+    const auto old_root = selected->get_safe_reference();
+    item extracted = extract();
+    CHECK( extracted.uid().get_value() == uid );
+    CHECK( extracted.only_item().uid().get_value() == gun_uid );
+    CHECK( extracted.only_item().magazine_current()->uid().get_value() == mag_uid );
+    CHECK( extracted.only_item().magazine_current()->all_items_top(
+               pocket_type::MAGAZINE ).front()->uid().get_value() == ammo_uid );
+    CHECK_FALSE( old_root );
+    CHECK( old_cache.get().empty() );
+    active_item_cache new_cache;
+    REQUIRE( new_cache.add( extracted, point_sm_ms( 1, 0 ) ) );
+    CHECK( new_cache.get().size() == 2 );
 }

@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -20,33 +21,25 @@ REPETITION_PENALTY = 1.0
 
 
 def strip_think_tags(text: str) -> str:
-    """Reject reasoning and unwrap only empty, documented thinking delimiters.
-
-    Gemma 4 uses <|channel>thought...<channel|>; other supported runners
-    use <think>...</think>. NPC output must not contain internal reasoning,
-    even when followed by final text. Some models emit empty blocks with
-    thinking disabled, so those delimiters alone do not invalidate the answer.
-    """
-    markers = (("<think>", "</think>"), ("<|channel>", "<channel|>"))
+    """Discard supported thinking prefixes; only a completed final suffix is usable."""
     while True:
-        starts = [(text.find(begin), begin, end) for begin, end in markers
-                  if begin in text]
-        if not starts:
-            break
-        start, begin, end = min(starts)
-        finish = text.find(end, start + len(begin))
-        if finish < 0:
+        lowered = text.lower()
+        channel = lowered.find("<|channel>")
+        opening = re.search(r"<think(?=[\s>]|$)", lowered)
+        think = opening.start() if opening else -1
+        if channel >= 0 and (think < 0 or channel < think):
+            end = lowered.find("<channel|>", channel)
+            if end < 0:
+                return ""
+            text = text[end + len("<channel|>"):].strip()
+            continue
+        endings = list(re.finditer(r"<\s*/\s*think\s*>", text, re.IGNORECASE))
+        if endings:
+            text = text[endings[-1].end():].strip()
+            continue
+        if think >= 0 or "<channel|>" in lowered:
             return ""
-        content = text[start + len(begin):finish]
-        if begin == "<|channel>":
-            content = content.removeprefix("thought")
-        if content.strip():
-            return ""
-        text = text[:start] + text[finish + len(end):]
-    # An orphaned closing delimiter is also not an NPC speech field.
-    if any(end in text for _, end in markers):
-        return ""
-    return text
+        return text
 
 
 def sanitize_text(text: Any) -> str:
@@ -83,8 +76,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=256,
-        help="Default max tokens per request.",
+        default=None,
+        help=argparse.SUPPRESS,  # Retired option accepted only for old launchers.
     )
     parser.add_argument(
         "--max-prompt-len",
@@ -304,12 +297,68 @@ def write_response(payload: Dict[str, Any], *, log_fp=None) -> None:
     request_event(log_fp, "llm_response_emitted", payload)
 
 
+def openvino_output_settings() -> Dict[str, int]:
+    # Reset model generation_config.json ceilings to the SDK's SIZE_MAX sentinels.
+    # MAX_PROMPT_LEN remains a separate pipeline/input-capacity setting.
+    from openvino_genai import GenerationConfig
+    defaults = GenerationConfig()
+    return {"max_new_tokens": defaults.max_new_tokens, "max_length": defaults.max_length}
+
+
+def _response_field(value: Any, name: str, default: Any = None) -> Any:
+    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+
+def api_response_diagnostics(response: Any, extracted_chars: int, final_chars: int) -> Dict[str, Any]:
+    """Allowlisted completion metadata only: never SDK repr, message/refusal/tool bodies."""
+    choices = _response_field(response, "choices")
+    first = choices[0] if isinstance(choices, (list, tuple)) and choices else None
+    message = _response_field(first, "message")
+    missing = object()
+    content = _response_field(message, "content", missing)
+    usage = _response_field(response, "usage")
+    counts: Dict[str, Any] = {}
+    for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = _response_field(usage, name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            counts[name] = value
+    for name, fields in (
+        ("completion_tokens_details", ("reasoning_tokens", "audio_tokens", "accepted_prediction_tokens",
+                                       "rejected_prediction_tokens")),
+        ("prompt_tokens_details", ("cached_tokens", "audio_tokens")),
+    ):
+        detail = _response_field(usage, name)
+        values = {field: _response_field(detail, field) for field in fields}
+        values = {key: value for key, value in values.items()
+                  if isinstance(value, int) and not isinstance(value, bool)}
+        if values:
+            counts[name] = values
+    finish = _response_field(first, "finish_reason")
+    return {
+        "finish_reason": finish if isinstance(finish, str) else None,
+        "usage": counts or None,
+        "choice_count": len(choices) if isinstance(choices, (list, tuple)) else None,
+        "content_present": content is not missing,
+        "content_type": type(content).__name__ if content is not missing else None,
+        "content_chars": len(content) if isinstance(content, str) else None,
+        "content_parts": len(content) if isinstance(content, list) else None,
+        "extracted_text_chars": extracted_chars,
+        "final_text_chars": final_chars,
+        "refusal_present": bool(_response_field(message, "refusal")),
+        "tool_calls_present": bool(_response_field(message, "tool_calls")),
+        "function_call_present": bool(_response_field(message, "function_call")),
+    }
+
+
+def ollama_response_diagnostics(response: Dict[str, Any]) -> Dict[str, Any]:
+    return {name: response.get(name) for name in
+            ("done", "done_reason", "prompt_eval_count", "eval_count", "eval_duration")}
+
+
 def handle_request(
     pipe,
     tokenizer,
     request: Dict[str, Any],
-    default_max_tokens: int,
-    max_prompt_len: int,
     build_time_ms: float,
     total_load_time_ms: float,
     log_fp: Optional[TextIO],
@@ -322,10 +371,6 @@ def handle_request(
     if not isinstance(prompt, str) or not prompt.strip():
         return {"request_id": request_id, "ok": False, "error": "Missing prompt"}
 
-    max_tokens = request.get("max_tokens", default_max_tokens)
-    if not isinstance(max_tokens, int) or max_tokens <= 0:
-        max_tokens = default_max_tokens
-
     temperature = request.get("temperature")
     if not isinstance(temperature, (int, float)) or temperature <= 0:
         temperature = TEMPERATURE
@@ -337,16 +382,11 @@ def handle_request(
         repetition_penalty = REPETITION_PENALTY
 
     prompt_tokens, token_count_method = count_tokens(tokenizer, prompt)
-    max_length = prompt_tokens + max_tokens
-    if token_count_method == "whitespace" and max_prompt_len:
-        max_length = max(max_length, max_prompt_len)
-    if max_length <= prompt_tokens:
-        max_length = prompt_tokens + max(1, max_tokens)
     start_time = time.perf_counter()
     try:
         do_sample = temperature is not None or top_p is not None
         gen_kwargs = {
-            "max_length": max_length,
+            **openvino_output_settings(),
             "do_sample": do_sample,
         }
         if temperature is not None:
@@ -361,7 +401,7 @@ def handle_request(
             log_line(log_fp, f"generate params unsupported, retrying without sampling args: {exc}")
             result = pipe.generate(
                 prompt,
-                max_length=max_length,
+                **openvino_output_settings(),
                 do_sample=False,
             )
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -380,13 +420,16 @@ def handle_request(
             "prompt_tokens": prompt_tokens,
             "generated_tokens": generated_tokens,
             "total_tokens": total_tokens,
-            "max_length": max_length,
-            "max_new_tokens": max_tokens,
+            "output_limit": "none_by_application",
             "token_count_method": token_count_method,
+            "token_count_scope": "final_text_only",
             "npu": get_npu_metrics(),
             "use_api": False,
         }
-        return {"request_id": request_id, "ok": True, "text": text, "metrics": metrics}
+        payload = {"request_id": request_id, "ok": bool(text.strip()), "text": text, "metrics": metrics}
+        if not payload["ok"]:
+            payload["error"] = "OpenVINO returned no usable final text"
+        return payload
     except Exception as exc:
         log_line(log_fp, f"request exception: {exc}")
         log_line(log_fp, traceback.format_exc())
@@ -432,7 +475,6 @@ def run_openvino_self_test(args: argparse.Namespace, log_fp: Optional[TextIO]) -
         request = {
             "request_id": "self_test",
             "prompt": args.self_test_prompt,
-            "max_tokens": min(args.max_tokens, 16),
             "temperature": 0.2,
             "top_p": 0.9,
             "repetition_penalty": 1.0,
@@ -441,8 +483,6 @@ def run_openvino_self_test(args: argparse.Namespace, log_fp: Optional[TextIO]) -
             pipe,
             tokenizer,
             request,
-            args.max_tokens,
-            args.max_prompt_len,
             build_time_ms=0.0,
             total_load_time_ms=0.0,
             log_fp=log_fp,
@@ -460,7 +500,7 @@ def run_openvino_self_test(args: argparse.Namespace, log_fp: Optional[TextIO]) -
         return 1
 
 
-def ollama_generate(ollama_url: str, model: str, prompt: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
+def ollama_generate(ollama_url: str, model: str, prompt: str, temperature: float) -> Dict[str, Any]:
     payload = {
         "model": model,
         "prompt": prompt,
@@ -469,7 +509,7 @@ def ollama_generate(ollama_url: str, model: str, prompt: str, max_tokens: int, t
         "think": False,
         "options": {
             "temperature": float(temperature),
-            "num_predict": int(max_tokens),
+            "num_predict": -1,  # Ollama's supported generate-until-stop setting.
         },
     }
     url = ollama_url.rstrip("/") + "/api/generate"
@@ -497,10 +537,7 @@ def ollama_unload(ollama_url: str, model: str, log_fp: Optional[TextIO]) -> None
 
 
 def ollama_final_text(response: Dict[str, Any]) -> str:
-    # Thinking is disabled at the API boundary; leaked reasoning is a failure,
-    # not an alternate source of NPC speech or an accepted stripped answer.
-    if sanitize_text(response.get("thinking", "")).strip():
-        return ""
+    # The structured thinking field is never an alternate final-text source.
     return strip_think_tags(sanitize_text(response.get("response", "")))
 
 
@@ -510,8 +547,8 @@ def run_ollama_self_test(args: argparse.Namespace, log_fp: Optional[TextIO]) -> 
         print("Ollama model is required for Ollama self-test.", file=sys.stderr)
         return 1
     try:
-        response = ollama_generate(args.ollama_url, model, args.self_test_prompt, min(args.max_tokens, 16), 0.2)
-        log_line(log_fp, "ollama raw response: " + json.dumps(response, ensure_ascii=True))
+        response = ollama_generate(args.ollama_url, model, args.self_test_prompt, 0.2)
+        log_line(log_fp, "ollama response metadata: " + json.dumps(ollama_response_diagnostics(response)))
         text = ollama_final_text(response)
         if not text.strip():
             print("self-test failed: empty Ollama response", file=sys.stderr)
@@ -649,8 +686,6 @@ def main() -> int:
             pipe,
             tokenizer,
             request,
-            args.max_tokens,
-            args.max_prompt_len,
             build_time_ms,
             total_load_time_ms,
             log_fp,
@@ -679,6 +714,8 @@ def extract_message_content_text(content: Any) -> str:
             if isinstance(item, str):
                 parts.append(item)
             elif isinstance(item, dict):
+                if item.get("type") not in (None, "text", "output_text"):
+                    continue
                 text = item.get("text")
                 if isinstance(text, str) and text:
                     parts.append(text)
@@ -687,14 +724,20 @@ def extract_message_content_text(content: Any) -> str:
                     if isinstance(maybe_text, str) and maybe_text:
                         parts.append(maybe_text)
             else:
+                if getattr(item, "type", None) not in (None, "text", "output_text"):
+                    continue
                 maybe_text = getattr(item, "text", None)
                 if isinstance(maybe_text, str) and maybe_text:
                     parts.append(maybe_text)
         return "".join(parts)
     if isinstance(content, dict):
+        if content.get("type") not in (None, "text", "output_text"):
+            return ""
         text = content.get("text")
         if isinstance(text, str):
             return text
+    if getattr(content, "type", None) not in (None, "text", "output_text"):
+        return ""
     maybe_text = getattr(content, "text", None)
     if isinstance(maybe_text, str):
         return maybe_text
@@ -720,7 +763,7 @@ def extract_completion_text(response: Any) -> str:
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str) and output_text:
         return output_text
-    return str(response)
+    return ""
 
 
 def run_ollama_mode(args: argparse.Namespace, log_fp: Optional[TextIO]) -> int:
@@ -752,25 +795,22 @@ def run_ollama_mode(args: argparse.Namespace, log_fp: Optional[TextIO]) -> int:
             write_response({"request_id": request_id, "ok": False, "error": "Missing prompt"}, log_fp=log_fp)
             continue
 
-        max_tokens = request.get("max_tokens")
-        if not isinstance(max_tokens, int) or max_tokens <= 0:
-            max_tokens = 128
         temperature = request.get("temperature")
         if not isinstance(temperature, (int, float)) or temperature <= 0:
             temperature = TEMPERATURE
 
         start_time = time.perf_counter()
         try:
-            response = ollama_generate(args.ollama_url, model, prompt, max_tokens, temperature)
-            log_line(log_fp, "ollama raw response: " + json.dumps(response, ensure_ascii=True))
+            response = ollama_generate(args.ollama_url, model, prompt, temperature)
+            log_line(log_fp, "ollama response metadata: " + json.dumps(ollama_response_diagnostics(response)))
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
             text = ollama_final_text(response)
             payload = {"request_id": request_id, "ok": bool(text.strip()), "text": text}
             if not payload["ok"]:
-                payload["error"] = "Ollama returned no acceptable final text (empty, leaked reasoning, or incomplete reasoning)."
+                payload["error"] = "Ollama returned no acceptable final text (empty or incomplete reasoning)."
             payload["metrics"] = {
                 "gen_time_ms": elapsed_ms,
-                "max_new_tokens": max_tokens,
+                "output_limit": "none_by_application",
                 "use_api": False,
                 "backend": "ollama",
                 "prompt_eval_count": response.get("prompt_eval_count"),
@@ -783,6 +823,19 @@ def run_ollama_mode(args: argparse.Namespace, log_fp: Optional[TextIO]) -> int:
             log_line(log_fp, traceback.format_exc())
             write_response({"request_id": request_id, "ok": False, "error": str(exc)}, log_fp=log_fp)
     return 0
+
+
+
+def api_generation_settings(request: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """API sampling/output limits use provider defaults; old output caps are ignored."""
+    settings: Dict[str, Any] = {}
+    repetition = request.get("repetition_penalty", REPETITION_PENALTY)
+    # 1 is the neutral multiplicative penalty.  The API cannot implement any
+    # non-neutral value, and frequency_penalty is a different operation.
+    if isinstance(repetition, bool) or repetition != 1.0:
+        raise ValueError("API repetition_penalty is unsupported; only neutral 1.0 is accepted")
+    return settings, {"repetition_penalty": {"requested": repetition, "supported": False,
+                                             "applied": False, "neutral": True}}
 
 
 def run_api_mode(args: argparse.Namespace, log_fp: Optional[TextIO]) -> int:
@@ -835,16 +888,25 @@ def run_api_mode(args: argparse.Namespace, log_fp: Optional[TextIO]) -> int:
                 "messages": [{"role": "user", "content": prompt}],
                 "api_key": api_key,
             }
-            response = completion(
-                **completion_kwargs,
-            )
+            settings, unsupported = api_generation_settings(request)
+            completion_kwargs.update(settings)
+            response = completion(**completion_kwargs)
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            text = strip_think_tags(extract_completion_text(response))
-            text = sanitize_text(text)
-            payload = {"request_id": request_id, "ok": True, "text": text}
+            extracted = extract_completion_text(response)
+            text = sanitize_text(strip_think_tags(extracted))
+            payload = {"request_id": request_id, "ok": bool(text.strip()), "text": text}
+            if not payload["ok"]:
+                payload["error"] = "API returned no usable text content"
             payload["metrics"] = {
                 "gen_time_ms": elapsed_ms,
+                "output_limit": "none_by_application",
+                "completion": api_response_diagnostics(response, len(extracted), len(text)),
                 "use_api": True,
+                "generation_settings": settings,
+                "sampling": "provider_default",
+                "ignored_sampling_settings": {name: request[name] for name in ("temperature", "top_p")
+                                              if name in request},
+                "unsupported_settings": unsupported,
             }
             write_response(payload, log_fp=log_fp)
         except Exception as exc:

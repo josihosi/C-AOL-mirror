@@ -40,6 +40,7 @@
 #include "calendar.h"
 #include "cata_path.h"
 #include "cata_utility.h"
+#include "catacharset.h"
 #include "character.h"
 #include "character_id.h"
 #include "coordinates.h"
@@ -276,9 +277,6 @@ constexpr const char *look_around_prompt_filename = "look_around_prompt.txt";
 constexpr const char *look_inventory_prompt_filename = "look_inventory_prompt.txt";
 constexpr const char *llm_prompt_readme_filename = "README.txt";
 constexpr int llm_snapshot_map_radius = 20;
-// Primary replies are one short pipe-delimited line.  A large generation budget can leave
-// local models producing text until the request times out instead of returning that line.
-constexpr int primary_response_max_tokens = 256;
 
 struct llm_intent_request {
     std::string request_id;
@@ -286,9 +284,9 @@ struct llm_intent_request {
     std::string npc_name;
     std::string prompt;
     std::string snapshot;
-    int max_tokens = 0;
-    float temperature = 0.0f;
-    float top_p = 0.0f;
+    // Local backend defaults; the API runner uses provider-default sampling.
+    float temperature = 0.6f;
+    float top_p = 0.9f;
     float repetition_penalty = 0.0f;
 };
 
@@ -314,7 +312,6 @@ struct runner_config {
     std::string api_model;
     std::string ollama_url;
     std::string ollama_model;
-    int max_tokens = 0;
     int max_prompt_len = 0;
     bool force_npu = false;
     bool debug_logging = false;
@@ -331,7 +328,6 @@ struct runner_config {
                api_model == other.api_model &&
                ollama_url == other.ollama_url &&
                ollama_model == other.ollama_model &&
-               max_tokens == other.max_tokens &&
                max_prompt_len == other.max_prompt_len &&
                force_npu == other.force_npu &&
                debug_logging == other.debug_logging;
@@ -379,7 +375,7 @@ std::string trim_copy( std::string_view text )
     return std::string( text.substr( start, end - start ) );
 }
 
-std::string normalize_item_label( std::string_view text )
+std::string normalize_item_label_impl( std::string_view text )
 {
     std::string stripped = remove_color_tags( text );
     size_t suffix_pos = stripped.find( " > " );
@@ -392,8 +388,11 @@ std::string normalize_item_label( std::string_view text )
     std::string out;
     out.reserve( stripped.size() );
     bool last_space = false;
-    for( unsigned char c : stripped ) {
-        bool allowed = std::isalnum( c ) != 0;
+    // Classify complete codepoints: byte-wise locale classification can keep
+    // only part of a valid UTF-8 label (for example U+207A).
+    for( char32_t c : utf8_to_utf32( stripped ) ) {
+        bool allowed = c >= 0x80 || ( c >= 'a' && c <= 'z' ) ||
+                       ( c >= 'A' && c <= 'Z' ) || ( c >= '0' && c <= '9' );
         if( !allowed ) {
             switch( c ) {
                 case ' ':
@@ -415,7 +414,7 @@ std::string normalize_item_label( std::string_view text )
             }
         }
         if( allowed ) {
-            out.push_back( static_cast<char>( c ) );
+            out += utf32_to_utf8( c );
             last_space = ( c == ' ' );
         } else if( !last_space ) {
             out.push_back( ' ' );
@@ -1374,40 +1373,72 @@ std::string xml_escape( std::string_view text )
 
 std::string strip_think_output( const std::string &text )
 {
-    for( size_t i = text.size(); i-- > 0; ) {
-        if( text[i] != '<' ) {
+    std::string final_text = text;
+    while( true ) {
+        const std::string lowered = lower_copy( final_text );
+        const size_t channel = lowered.find( "<|channel>" );
+        size_t think = lowered.find( "<think" );
+        while( think != std::string::npos && think + 6 < lowered.size() &&
+               lowered[think + 6] != '>' &&
+               !isspace( static_cast<unsigned char>( lowered[think + 6] ) ) ) {
+            think = lowered.find( "<think", think + 6 );
+        }
+        if( channel != std::string::npos && ( think == std::string::npos || channel < think ) ) {
+            const size_t end = lowered.find( "<channel|>", channel );
+            if( end == std::string::npos ) {
+                return {};
+            }
+            final_text = trim_copy( final_text.substr( end + 10 ) );
             continue;
         }
-        size_t j = i + 1;
-        while( j < text.size() && isspace( static_cast<unsigned char>( text[j] ) ) ) {
+        bool stripped = false;
+        // Preserve the existing case/whitespace-tolerant closing think tag.
+        for( size_t i = final_text.size(); i-- > 0; ) {
+            if( final_text[i] != '<' ) {
+                continue;
+            }
+            size_t j = i + 1;
+            while( j < final_text.size() && isspace( static_cast<unsigned char>( final_text[j] ) ) ) {
+                ++j;
+            }
+            if( j >= final_text.size() || final_text[j] != '/' ) {
+                continue;
+            }
             ++j;
+            while( j < final_text.size() && isspace( static_cast<unsigned char>( final_text[j] ) ) ) {
+                ++j;
+            }
+            if( lowered.compare( j, 5, "think" ) != 0 ) {
+                continue;
+            }
+            j += 5;
+            while( j < final_text.size() && isspace( static_cast<unsigned char>( final_text[j] ) ) ) {
+                ++j;
+            }
+            if( j >= final_text.size() || final_text[j] != '>' ) {
+                continue;
+            }
+            final_text = trim_copy( final_text.substr( j + 1 ) );
+            stripped = true;
+            break;
         }
-        if( j >= text.size() || text[j] != '/' ) {
+        if( stripped ) {
             continue;
         }
-        ++j;
-        while( j < text.size() && isspace( static_cast<unsigned char>( text[j] ) ) ) {
-            ++j;
+        if( think != std::string::npos || lowered.find( "<channel|>" ) != std::string::npos ) {
+            return {};
         }
-        static constexpr std::string_view think_tag = "think";
-        size_t k = 0;
-        while( k < think_tag.size() && j + k < text.size() &&
-               tolower( static_cast<unsigned char>( text[j + k] ) ) == think_tag[k] ) {
-            ++k;
-        }
-        if( k != think_tag.size() ) {
-            continue;
-        }
-        j += k;
-        while( j < text.size() && isspace( static_cast<unsigned char>( text[j] ) ) ) {
-            ++j;
-        }
-        if( j >= text.size() || text[j] != '>' ) {
-            continue;
-        }
-        return trim_copy( text.substr( j + 1 ) );
+        return final_text;
     }
-    return text;
+}
+
+std::string response_log_payload( const llm_intent_response &response )
+{
+    const std::string final_text = strip_think_output( response.text );
+    if( final_text != response.text ) {
+        return final_text;
+    }
+    return response.raw.empty() ? response.text : response.raw;
 }
 
 std::string strip_xml_tags( const std::string &text )
@@ -1483,7 +1514,7 @@ std::vector<look_around_item_entry> collect_look_around_items( npc &listener, in
     std::unordered_map<std::string, look_around_item_entry> entries_by_name;
     for_each_visible_look_around_item( listener, radius,
     [&]( const tripoint_bub_ms &, const int dist, const item_location &, const item & it ) {
-        const std::string name = normalize_item_label( it.tname( 1, false ) );
+        const std::string name = llm_intent::normalize_item_label( it.tname( 1, false ) );
         if( name.empty() ) {
             return;
         }
@@ -1524,7 +1555,7 @@ std::vector<inventory_item_entry> collect_inventory_entries( npc &listener, size
         if( it == nullptr ) {
             return VisitResponse::NEXT;
         }
-        const std::string name = normalize_item_label( it->tname( 1, false ) );
+        const std::string name = llm_intent::normalize_item_label( it->tname( 1, false ) );
         if( name.empty() ) {
             return VisitResponse::NEXT;
         }
@@ -1784,12 +1815,34 @@ void apply_look_inventory_actions( npc &listener,
                                    const std::unordered_map<std::string, std::string> &id_to_name,
                                    const look_inventory_selection &selection )
 {
-    auto item_label = [&]( const std::string &item_name ) {
+    // Wearing moves the selected tree out of its old storage.  Resolve each
+    // subsequent section by identity, including wear+act of the same item.
+    std::unordered_map<std::string, int64_t> selected_uids;
+    for( const auto &entry : inventory ) {
+        selected_uids.emplace( entry.first, entry.second->uid().get_value() );
+    }
+    auto selected_item = [&]( const std::string & name ) -> item * {
+        const auto uid = selected_uids.find( name );
+        if( uid == selected_uids.end() || uid->second <= 0 ) {
+            return nullptr;
+        }
+        item *found = nullptr;
+        listener.visit_items( [&]( item * candidate, item * ) {
+            if( candidate->uid().get_value() == uid->second ) {
+                found = candidate;
+                return VisitResponse::ABORT;
+            }
+            return VisitResponse::NEXT;
+        } );
+        return found;
+    };
+
+    auto item_label = [&]( const std::string & item_name ) {
         const auto name_it = id_to_name.find( item_name );
         return name_it == id_to_name.end() ? item_name : name_it->second;
     };
 
-    auto begin_inventory_action = [&]( const std::string &item_name ) {
+    auto begin_inventory_action = [&]( const std::string & item_name ) {
         listener.begin_llm_action( npc::llm_action_kind::look_inventory,
                                    item_name,
                                    item_label( item_name ),
@@ -1800,17 +1853,17 @@ void apply_look_inventory_actions( npc &listener,
 
     for( const std::string &name : selection.wear ) {
         begin_inventory_action( name );
-        auto it = inventory.find( name );
-        if( it == inventory.end() ) {
+        item *selected = selected_item( name );
+        if( selected == nullptr ) {
             listener.finish_llm_action( npc::llm_action_phase::blocked, "inventory.item_missing" );
             continue;
         }
-        if( !listener.can_wear( *it->second ).success() ) {
+        if( !listener.can_wear( *selected ).success() ) {
             listener.finish_llm_action( npc::llm_action_phase::blocked, "inventory.cannot_wear" );
             continue;
         }
         listener.update_llm_action_phase( npc::llm_action_phase::executing );
-        if( listener.wear_item( *it->second, false ).has_value() ) {
+        if( listener.wear( item_location( listener, selected ), false ).has_value() ) {
             listener.finish_llm_action( npc::llm_action_phase::completed );
         } else {
             listener.finish_llm_action( npc::llm_action_phase::failed, "inventory.wear_failed" );
@@ -1819,17 +1872,32 @@ void apply_look_inventory_actions( npc &listener,
 
     for( const std::string &name : selection.wield ) {
         begin_inventory_action( name );
-        auto it = inventory.find( name );
-        if( it == inventory.end() ) {
+        item *selected = selected_item( name );
+        if( selected == nullptr ) {
             listener.finish_llm_action( npc::llm_action_phase::blocked, "inventory.item_missing" );
             continue;
         }
-        if( !listener.can_wield( *it->second ).success() ) {
+        if( !listener.can_wield( *selected ).success() ) {
             listener.finish_llm_action( npc::llm_action_phase::blocked, "inventory.cannot_wield" );
             continue;
         }
         listener.update_llm_action_phase( npc::llm_action_phase::executing );
-        if( listener.wield( *it->second ) ) {
+        const int64_t selected_uid = selected->uid().get_value();
+        const item_location previous_weapon = listener.get_wielded_item();
+        const bool was_wielded = previous_weapon && previous_weapon.get_item() == selected;
+        const bool combines = previous_weapon && selected->can_combine( *previous_weapon );
+        if( listener.wield( *selected ) ) {
+            // Native wield currently copies the selected tree.  Follow its
+            // explicit replacement result for later sections in this response;
+            // do not infer a successor after unwielding or stack merging.
+            const item_location weapon = listener.get_wielded_item();
+            if( weapon && !was_wielded && !combines ) {
+                for( auto &entry : selected_uids ) {
+                    if( entry.second == selected_uid ) {
+                        entry.second = weapon->uid().get_value();
+                    }
+                }
+            }
             listener.finish_llm_action( npc::llm_action_phase::completed );
         } else {
             listener.finish_llm_action( npc::llm_action_phase::failed, "inventory.wield_failed" );
@@ -1838,34 +1906,32 @@ void apply_look_inventory_actions( npc &listener,
 
     for( const std::string &name : selection.act ) {
         begin_inventory_action( name );
-        auto it = inventory.find( name );
-        if( it == inventory.end() ) {
+        item *selected = selected_item( name );
+        if( selected == nullptr ) {
             listener.finish_llm_action( npc::llm_action_phase::blocked, "inventory.item_missing" );
             continue;
         }
         listener.update_llm_action_phase( npc::llm_action_phase::executing );
-        listener.activate_item( *it->second );
-        listener.finish_llm_action( npc::llm_action_phase::completed, "",
-        {
+        listener.activate_item( *selected );
+        listener.finish_llm_action( npc::llm_action_phase::completed, "", {
             "activation_attempted=true"
         } );
     }
 
     for( const std::string &name : selection.drop ) {
         begin_inventory_action( name );
-        auto it = inventory.find( name );
-        if( it == inventory.end() ) {
+        item *selected = selected_item( name );
+        if( selected == nullptr ) {
             listener.finish_llm_action( npc::llm_action_phase::blocked, "inventory.item_missing" );
             continue;
         }
-        item_location loc( listener, it->second );
-        const int count = it->second->count_by_charges() ? std::max( 1, it->second->charges ) : 1;
+        item_location loc( listener, selected );
+        const int count = selected->count_by_charges() ? std::max( 1, selected->charges ) : 1;
         drop_locations items;
         items.emplace_back( loc, count );
         listener.update_llm_action_phase( npc::llm_action_phase::executing );
         listener.drop( items, listener.pos_bub(), false );
-        listener.finish_llm_action( npc::llm_action_phase::completed, "",
-        {
+        listener.finish_llm_action( npc::llm_action_phase::completed, "", {
             string_format( "drop_count=%d", count ),
             "drop_attempted=true"
         } );
@@ -2565,7 +2631,7 @@ Only use 'idle' when no action change is needed. Do not use 'idle' as a substitu
 'panic_on' to start running, get out of here.
 'panic_off' if convincing, to stop fleeing and get your act together.
 'look_around' to view your surroundings and pick-up, grab, search, explore for items around you.
-'look_inventory' to look inside your inventory and wear/wield/activate items.
+'look_inventory' to look inside your inventory and wear/wield/activate/drop items.
 'move=<dx>,<dy> <state>' to move to a relative destination offset on your snapshot map. Positive x is east/right, negative x is west/left, positive y is north/up, and negative y is south/down. The snapshot map includes dx column markers and dy row labels using that same signed-delta convention. Always include either 'wait_here' or 'hold_position' after the delta.
 'attack=<target>' to attack a target with the letter from your map. Any creature with a map letter is a valid explicit target handle, including the player, friendlies, neutrals, and hostiles.
 'idle' if none of the above.
@@ -2653,7 +2719,6 @@ std::string build_ambient_prompt( const std::string &npc_name,
     jsout.member( "request_id", request.request_id );
     jsout.member( "prompt", request.prompt );
     jsout.member( "snapshot", request.snapshot );
-    jsout.member( "max_tokens", request.max_tokens );
     jsout.member( "temperature", request.temperature );
     jsout.member( "top_p", request.top_p );
     jsout.member( "repetition_penalty", request.repetition_penalty );
@@ -2798,7 +2863,6 @@ bool should_attempt_parse( const std::string &line )
         cfg.python_path = configured_python;
     }
 
-    cfg.max_tokens = primary_response_max_tokens;
     cfg.max_prompt_len = get_option<int>( "LLM_INTENT_MAX_PROMPT_LEN" );
     if( cfg.max_prompt_len <= 0 ) {
         cfg.max_prompt_len = default_max_prompt_len;
@@ -2928,23 +2992,17 @@ class llm_intent_runner_process
                     args.push_back( "--api-key-env" );
                     args.push_back( config.api_key_env );
                 }
-                args.push_back( "--max-tokens" );
-                args.push_back( std::to_string( config.max_tokens ) );
             } else if( use_ollama_mode ) {
                 args.push_back( "--ollama-url" );
                 args.push_back( config.ollama_url.empty() ? "http://127.0.0.1:11434" : config.ollama_url );
                 args.push_back( "--ollama-model" );
                 args.push_back( config.ollama_model );
-                args.push_back( "--max-tokens" );
-                args.push_back( std::to_string( config.max_tokens ) );
             } else if( !config.model_dir.empty() ) {
                 std::filesystem::path cache_dir = model_dir / ".ov_cache";
                 args.push_back( "--model-dir" );
                 args.push_back( model_dir.string() );
                 args.push_back( "--device" );
                 args.push_back( config.device.empty() ? "AUTO" : config.device );
-                args.push_back( "--max-tokens" );
-                args.push_back( std::to_string( config.max_tokens ) );
                 args.push_back( "--max-prompt-len" );
                 args.push_back( std::to_string( config.max_prompt_len ) );
                 args.push_back( "--cache-dir" );
@@ -3256,23 +3314,17 @@ class posix_runner_process
                     args.push_back( "--api-key-env" );
                     args.push_back( config.api_key_env );
                 }
-                args.push_back( "--max-tokens" );
-                args.push_back( std::to_string( config.max_tokens ) );
             } else if( use_ollama_mode ) {
                 args.push_back( "--ollama-url" );
                 args.push_back( config.ollama_url.empty() ? "http://127.0.0.1:11434" : config.ollama_url );
                 args.push_back( "--ollama-model" );
                 args.push_back( config.ollama_model );
-                args.push_back( "--max-tokens" );
-                args.push_back( std::to_string( config.max_tokens ) );
             } else if( !config.model_dir.empty() ) {
                 std::filesystem::path cache_dir = model_dir / ".ov_cache";
                 args.push_back( "--model-dir" );
                 args.push_back( model_dir.string() );
                 args.push_back( "--device" );
                 args.push_back( config.device.empty() ? "AUTO" : config.device );
-                args.push_back( "--max-tokens" );
-                args.push_back( std::to_string( config.max_tokens ) );
                 args.push_back( "--max-prompt-len" );
                 args.push_back( std::to_string( config.max_prompt_len ) );
                 args.push_back( "--cache-dir" );
@@ -3602,9 +3654,6 @@ class llm_intent_manager
             req.npc_name = listener.get_name();
             req.snapshot = build_snapshot_json( listener, player_utterance, req.request_id );
             req.prompt = build_prompt( req.npc_name, player_utterance, req.snapshot );
-            req.max_tokens = primary_response_max_tokens;
-            req.temperature = get_option<float>( "LLM_INTENT_TEMPERATURE" );
-            req.top_p = get_option<float>( "LLM_INTENT_TOP_P" );
             req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
             if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
                 append_llm_intent_log( string_format( "prompt %s (%s)\n%s\n\n",
@@ -3632,16 +3681,12 @@ class llm_intent_manager
                 }
                 pending_ambient_npcs.insert( listener.getID() );
             }
-            static constexpr int ambient_max_tokens = 256;
             llm_intent_request req;
             req.request_id = next_request_id();
             req.npc_id = listener.getID();
             req.npc_name = listener.get_name();
             req.snapshot = build_snapshot_json( listener, player_utterance, req.request_id );
             req.prompt = build_ambient_prompt( req.npc_name, player_utterance, req.snapshot );
-            req.max_tokens = ambient_max_tokens;
-            req.temperature = get_option<float>( "LLM_INTENT_TEMPERATURE" );
-            req.top_p = get_option<float>( "LLM_INTENT_TOP_P" );
             req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
             if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
                 append_llm_intent_log( string_format( "ambient prompt %s (%s)\n%s\n\n",
@@ -3689,10 +3734,7 @@ class llm_intent_manager
                 req.npc_name = listener->get_name();
                 req.snapshot = build_snapshot_json( *listener, pending.player_utterance, req.request_id );
                 req.prompt = build_prompt( req.npc_name, pending.player_utterance, req.snapshot );
-                req.max_tokens = primary_response_max_tokens;
-                req.temperature = get_option<float>( "LLM_INTENT_TEMPERATURE" );
-                req.top_p = get_option<float>( "LLM_INTENT_TOP_P" );
-                req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
+                    req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
                 if( get_option<bool>( "DEBUG_LLM_INTENT_LOG" ) ) {
                     append_llm_intent_log( string_format( "prompt %s (%s)\n%s\n\n",
                                                           req.npc_name, req.request_id, req.prompt ) );
@@ -3748,9 +3790,6 @@ class llm_intent_manager
                 warm.npc_name = "prewarm";
                 warm.snapshot = "{}";
                 warm.prompt = build_prompt( "", "", warm.snapshot );
-                warm.max_tokens = 8;
-                warm.temperature = get_option<float>( "LLM_INTENT_TEMPERATURE" );
-                warm.top_p = get_option<float>( "LLM_INTENT_TOP_P" );
                 warm.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
                 {
                     std::lock_guard<std::mutex> lock( mutex );
@@ -3762,7 +3801,6 @@ class llm_intent_manager
 
         bool enqueue_look_around_request( npc &listener, const std::string &player_utterance,
                                           const std::string &primary_request_id ) {
-            static constexpr int look_max_tokens = 128;
             static constexpr size_t max_item_entries = 60;
             std::vector<look_around_item_entry> items = collect_look_around_items( listener, 5,
                     max_item_entries );
@@ -3778,9 +3816,6 @@ class llm_intent_manager
             req.npc_name = listener.get_name();
             req.snapshot = "{}";
             req.prompt = build_look_around_prompt( player_utterance, items );
-            req.max_tokens = look_max_tokens;
-            req.temperature = get_option<float>( "LLM_INTENT_TEMPERATURE" );
-            req.top_p = get_option<float>( "LLM_INTENT_TOP_P" );
             req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
 
             look_around_context context;
@@ -3833,7 +3868,7 @@ class llm_intent_manager
                 selected = parse_look_around_response( resp.text, allowed );
             }
             {
-                const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+                const std::string payload = response_log_payload( resp );
                 append_llm_intent_log( string_format( "look_around response %s (%s)\n%s\n\n",
                                                       context.npc_name, resp.request_id, payload ) );
                 if( !selected.empty() ) {
@@ -3879,7 +3914,6 @@ class llm_intent_manager
 
         void enqueue_look_inventory_request( npc &listener, const std::string &player_utterance,
                 const std::string &primary_request_id ) {
-            static constexpr int look_max_tokens = 256;
             static constexpr size_t max_inventory_entries = 80;
             std::vector<inventory_item_entry> inventory = collect_inventory_entries( listener,
                     max_inventory_entries );
@@ -3895,9 +3929,6 @@ class llm_intent_manager
             req.npc_name = listener.get_name();
             req.snapshot = "{}";
             req.prompt = build_look_inventory_prompt( player_utterance, inventory );
-            req.max_tokens = look_max_tokens;
-            req.temperature = get_option<float>( "LLM_INTENT_TEMPERATURE" );
-            req.top_p = get_option<float>( "LLM_INTENT_TOP_P" );
             req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
 
             look_inventory_context context;
@@ -3942,7 +3973,7 @@ class llm_intent_manager
                 selection = parse_look_inventory_response( resp.text, allowed );
             }
             {
-                const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+                const std::string payload = response_log_payload( resp );
                 append_llm_intent_log( string_format( "look_inventory response %s (%s)\n%s\n\n",
                                                       context.npc_name, resp.request_id, payload ) );
             }
@@ -4024,14 +4055,14 @@ class llm_intent_manager
                             broadcast_overheard_memory( *target, ambient_speech, {} );
                         }
                         if( debug_log ) {
-                            const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+                            const std::string payload = response_log_payload( resp );
                             append_llm_intent_log( string_format( "ambient response %s (%s)\n%s\n\nsay %s (%s)\n%s\n\n",
                                                                   resp.npc_name, resp.request_id, payload,
                                                                   resp.npc_name, resp.request_id,
                                                                   ambient_speech ) );
                         }
                     } else if( debug_log ) {
-                        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+                        const std::string payload = response_log_payload( resp );
                         append_llm_intent_log( string_format( "ambient failed %s (%s)\n%s\nraw:\n%s\n\n",
                                                               resp.npc_name, resp.request_id,
                                                               ambient_error, payload ) );
@@ -4213,13 +4244,13 @@ if( resp.ok && parse_error.empty() )
 if( resp.ok && parse_error.empty() )
 {
     if( debug_ui ) {
-        add_msg( "LLM intent response for %s: %s", resp.npc_name, resp.text );
+        add_msg( "LLM intent response for %s: %s", resp.npc_name, strip_think_output( resp.text ) );
         if( !action_error.empty() ) {
             add_msg( "LLM intent warning for %s: %s", resp.npc_name, action_error );
         }
     }
     if( debug_log ) {
-        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+        const std::string payload = response_log_payload( resp );
         std::string log_block = string_format( "response %s (%s)\n%s\n\n",
                                                resp.npc_name, resp.request_id, payload );
         if( !say_log_line.empty() ) {
@@ -4236,7 +4267,7 @@ if( resp.ok && parse_error.empty() )
         add_msg( "LLM intent failed for %s: %s", resp.npc_name, err );
     }
     if( debug_log ) {
-        const std::string &payload = resp.raw.empty() ? resp.text : resp.raw;
+        const std::string payload = response_log_payload( resp );
         std::string log_block = string_format( "failed %s (%s)\n%s\nraw:\n%s\n\n",
                                                resp.npc_name, resp.request_id, err, payload );
         if( !say_log_line.empty() ) {
@@ -4322,8 +4353,17 @@ void process_response_for_test( npc &listener, const std::string &request_id,
     process_responses();
 }
 
-bool has_request_state_for_test( const npc &listener, const std::string &request_id )
-{
+        void process_inventory_response_for_test( npc &listener, const std::string &response_text ) {
+            look_inventory_context context{ listener.getID(), listener.get_name(),
+                                            collect_inventory_entries( listener, 100 ) };
+            llm_intent_response response;
+            response.request_id = "inventory-test";
+            response.ok = true;
+            response.text = response_text;
+            process_look_inventory_response( response, context );
+        }
+
+        bool has_request_state_for_test( const npc &listener, const std::string &request_id ) {
     std::lock_guard<std::mutex> lock( mutex );
     return utterance_by_request.count( request_id ) > 0 ||
            snapshot_origin_by_request.count( request_id ) > 0 ||
@@ -4526,6 +4566,11 @@ llm_intent_manager &get_manager()
 
 namespace llm_intent
 {
+std::string normalize_item_label( std::string_view text )
+{
+    return normalize_item_label_impl( text );
+}
+
 void enqueue_request( npc &listener, const std::string &player_utterance )
 {
     get_manager().enqueue_request( listener, player_utterance );
@@ -4655,9 +4700,28 @@ std::string build_action_prompt_for_test( const std::string &npc_name,
     return build_prompt( npc_name, player_utterance, snapshot );
 }
 
-int primary_response_max_tokens_for_test()
+void process_inventory_response_for_test( npc &listener, const std::string &response_text )
 {
-    return primary_response_max_tokens;
+    get_manager().process_inventory_response_for_test( listener, response_text );
+}
+
+std::string build_inventory_prompt_for_test( npc &listener, const std::string &utterance )
+{
+    return build_look_inventory_prompt( utterance, collect_inventory_entries( listener, 100 ) );
+}
+
+std::string build_look_around_prompt_for_test( npc &listener, const std::string &utterance )
+{
+    return build_look_around_prompt( utterance, collect_look_around_items( listener, 6, 100 ) );
+}
+
+std::string request_json_for_test()
+{
+    llm_intent_request request;
+    request.request_id = "request-producer-control";
+    request.prompt = "unchanged prompt";
+    request.snapshot = "unchanged snapshot";
+    return request_to_json( request );
 }
 
 size_t look_around_selection_limit_for_test()

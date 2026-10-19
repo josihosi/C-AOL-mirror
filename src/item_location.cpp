@@ -139,6 +139,7 @@ class item_location::impl
         virtual bool check_parent_capacity_recursive() const = 0;
         virtual int obtain_cost( const Character &, int ) const = 0;
         virtual void remove_item() = 0;
+        virtual item detach() = 0;
         virtual void on_contents_changed() = 0;
         virtual void serialize( JsonOut &js ) const = 0;
         // Legacy: idx-based item lookup for old-save compat and vehicle base items (#85905)
@@ -225,6 +226,11 @@ class item_location::impl::nowhere : public item_location::impl
 
         void remove_item() override {
             debugmsg( "invalid use of nowhere item_location" );
+        }
+
+        item detach() override {
+            debugmsg( "invalid use of nowhere item_location" );
+            return item();
         }
 
         void on_contents_changed() override {
@@ -354,6 +360,11 @@ class item_location::impl::item_on_map : public item_location::impl
         void remove_item() override {
             on_contents_changed();
             cur.remove_item( *what );
+        }
+
+        item detach() override {
+            on_contents_changed();
+            return cur.remove_item( *target() );
         }
 
         void on_contents_changed() override {
@@ -536,6 +547,14 @@ class item_location::impl::item_on_person : public item_location::impl
             who->remove_item( *what );
         }
 
+        item detach() override {
+            if( !ensure_who_unpacked() ) {
+                return item();
+            }
+            on_contents_changed();
+            return who->remove_item( *target() );
+        }
+
         void on_contents_changed() override {
             target()->on_contents_changed();
         }
@@ -691,6 +710,20 @@ class item_location::impl::item_on_vehicle : public item_location::impl
             }
         }
 
+        item detach() override {
+            on_contents_changed();
+            vehicle_part &vp = cur.veh.part( cur.part );
+            if( &vp.base == target() ) {
+                // Removal callbacks need the live part.  remove_part marks it
+                // removed; physical deletion is deferred to vehicle cleanup.
+                cur.veh.remove_part( vp );
+                item result = std::move( cur.veh.part( cur.part ).base );
+                result.invalidate_references();
+                return result;
+            }
+            return cur.remove_item( *target() );
+        }
+
         void on_contents_changed() override {
             target()->on_contents_changed();
             cur.veh.invalidate_mass();
@@ -836,6 +869,12 @@ class item_location::impl::item_in_container : public item_location::impl
         void remove_item() override {
             container->remove_item( *target() );
             container->on_contents_changed();
+        }
+
+        item detach() override {
+            item result = container->remove_item( *target() );
+            container->on_contents_changed();
+            return result;
         }
 
         void on_contents_changed() override {
@@ -1319,6 +1358,17 @@ void item_location::remove_item()
     }
     ptr->remove_item();
     ptr = std::make_shared<impl::nowhere>( );
+}
+
+item item_location::detach()
+{
+    if( !ptr->valid() ) {
+        debugmsg( "item location does not point to valid item" );
+        return item();
+    }
+    item result = ptr->detach();
+    ptr = std::make_shared<impl::nowhere>();
+    return result;
 }
 
 void item_location::on_contents_changed()

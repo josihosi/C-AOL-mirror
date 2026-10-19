@@ -309,36 +309,40 @@ Character::wear( item_location item_wear, bool interactive )
         return std::nullopt;
     }
 
-    bool was_weapon;
-    item to_wear_copy( to_wear );
-    if( &to_wear == &weapon ) {
+    const bool was_weapon = &to_wear == &weapon;
+    item owned;
+    if( was_weapon ) {
+        owned = std::move( weapon );
         weapon = item();
-        was_weapon = true;
-    } else if( has_item( to_wear ) ) {
-        remove_item( to_wear );
-        was_weapon = false;
-    } else {
-        // item is on the map if this point is reached.
-        item_wear.remove_item();
-        was_weapon = false;
     }
-
-    worn.check_rigid_sidedness( to_wear_copy );
-    worn.one_per_layer_sidedness( to_wear_copy );
-
-    auto result = wear_item( to_wear_copy, interactive );
-    if( !result ) {
-        // set it to no longer be sided
-        to_wear_copy.set_side( side::BOTH );
+    item &candidate = was_weapon ? owned : to_wear;
+    const side original_side = candidate.get_side();
+    worn.check_rigid_sidedness( candidate );
+    worn.one_per_layer_sidedness( candidate );
+    const auto can_put_on = can_wear( candidate );
+    if( !can_put_on.success() ) {
+        // Keep an unsuccessful selection in its original storage.  A wielded
+        // candidate must be taken out first because it can itself restrict hands.
+        candidate.set_side( original_side );
         if( was_weapon ) {
-            weapon = to_wear_copy;
-        } else {
-            i_add( to_wear_copy );
+            weapon = std::move( owned );
+        }
+        if( interactive ) {
+            add_msg_if_player( m_info, "%s", can_put_on.c_str() );
         }
         return std::nullopt;
     }
+    if( !was_weapon ) {
+        owned = item_wear.detach();
+    } else {
+        owned.invalidate_references();
+    }
+    invalidate_inventory_validity_cache();
+    invalidate_leak_level_cache();
+    auto result = worn.wear_item( *this, std::move( owned ), interactive, true );
 
     if( was_weapon ) {
+        item_wear = get_wielded_item();
         cata::event e = cata::event::make<event_type::character_wields_item>( getID(), weapon.typeId() );
         get_event_bus().send_with_talker( this, &item_wear, e );
     }
@@ -346,24 +350,26 @@ Character::wear( item_location item_wear, bool interactive )
     return result;
 }
 
-std::optional<std::list<item>::iterator> outfit::wear_item( Character &guy, const item &to_wear,
+std::optional<std::list<item>::iterator> outfit::wear_item( Character &guy, item to_wear_owned,
         bool interactive, bool do_calc_encumbrance, bool do_sort_items, bool quiet )
 {
     const map &here = get_map();
 
     const bool was_deaf = guy.is_deaf();
     const bool supertinymouse = guy.get_size() == creature_size::tiny;
-    guy.last_item = to_wear.typeId();
+    guy.last_item = to_wear_owned.typeId();
 
     std::list<item>::iterator new_item_it = worn.end();
 
     if( do_sort_items ) {
-        std::list<item>::iterator position = position_to_wear_new_item( to_wear );
-        new_item_it = worn.insert( position, to_wear );
+        std::list<item>::iterator position = position_to_wear_new_item( to_wear_owned );
+        new_item_it = worn.insert( position, std::move( to_wear_owned ) );
     } else {
         // this is used for debug and putting on clothing in the wrong order
-        worn.push_back( to_wear );
+        new_item_it = worn.insert( worn.end(), std::move( to_wear_owned ) );
     }
+
+    const item &to_wear = *new_item_it;
 
     item_location loc = new_item_it != worn.end() ?
                         item_location( guy, &*new_item_it ) : item_location();
@@ -475,7 +481,8 @@ std::optional<std::list<item>::iterator> Character::wear_item( const item &to_we
         return std::nullopt;
     }
 
-    return worn.wear_item( *this, to_wear, interactive, do_calc_encumbrance, do_sort_items, quiet );
+    return worn.wear_item( *this, to_wear, interactive, do_calc_encumbrance, do_sort_items,
+                           quiet );
 }
 
 int Character::amount_worn( const itype_id &id ) const

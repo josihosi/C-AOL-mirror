@@ -110,6 +110,10 @@ source bytes. A useful read-only check is:
 python3 tools/openclaw_harness/scenario_registry_cli.py --json lint-declarations "$SCENARIO_SOURCE"
 ```
 
+Saved reentry clears `profile_option_overrides`. Preserve the intended model/settings through
+an explicit `config_profile` seeded from the verified configuration, and check the effective
+options before speech. A declaration's overrides alone do not prove the resumed configuration.
+
 ### Fresh HUD or saved input owner
 
 Choose from the actual starting state, not the fact that a fixture originally came from a save.

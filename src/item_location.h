@@ -97,6 +97,9 @@ class item_location
          *  @warning all further operations using this class are invalid */
         void remove_item();
 
+        /** Remove and transfer the selected tree without regenerating its UIDs. */
+        item detach();
+
         /** Handles updates to the item location, mostly for caching. */
         void on_contents_changed();
 

@@ -308,6 +308,20 @@ safe_reference<item> item::get_safe_reference()
     return anchor->reference_to( this );
 }
 
+void item::invalidate_references()
+{
+    if( anchor.has_value() ) {
+        *anchor = safe_reference_anchor();
+    }
+    // Match active_item_cache's ownership traversal, including magazines and
+    // magazine wells.  visit_items intentionally visits CONTAINER pockets only.
+    for( item_pocket *pocket : get_standard_pockets() ) {
+        for( item *child : pocket->all_items_top() ) {
+            child->invalidate_references();
+        }
+    }
+}
+
 item::item( const recipe *rec, int qty, item_components items, std::vector<item_comp> selections,
             bool should_add_faults )
     : item( itype_craft, calendar::turn )

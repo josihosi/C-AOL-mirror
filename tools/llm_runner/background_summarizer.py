@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from runner import openvino_output_settings, ollama_final_text, strip_think_tags
 import json
 import os
 import re
@@ -103,12 +104,6 @@ def default_summarizer_prompt_template(strict: bool = False) -> str:
     )
 
 
-def strip_think_tags(text: str) -> str:
-    if "</think>" in text:
-        return text.rsplit("</think>", 1)[-1]
-    return text
-
-
 def load_pipeline(model_dir: str, device: str, max_prompt_len: int):
     import openvino_genai as ov_genai
 
@@ -130,14 +125,14 @@ def load_pipeline(model_dir: str, device: str, max_prompt_len: int):
 
 
 def ollama_generate(ollama_url: str, model: str, prompt: str,
-                    max_tokens: int, temperature: float) -> Dict[str, Any]:
+                    temperature: float) -> Dict[str, Any]:
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "options": {
             "temperature": float(temperature),
-            "num_predict": int(max_tokens),
+            "num_predict": -1,  # Ollama generate-until-stop; no application output cap.
         },
     }
     url = ollama_url.rstrip("/") + "/api/generate"
@@ -283,50 +278,6 @@ def normalize_output(text: str) -> str:
 
 def words_from_output(text: str) -> List[str]:
     return re.findall(r"[A-Za-z0-9_-]+", text)
-
-
-def quoted_words(text: str) -> List[str]:
-    return re.findall(r"\"([A-Za-z0-9_-]+)\"", text)
-
-
-def stopword_set() -> set:
-    return {
-        "the", "and", "that", "with", "this", "they", "them", "their", "then", "from", "have", "has",
-        "had", "for", "are", "was", "were", "but", "not", "you", "your", "she", "his", "her", "him",
-        "about", "into", "just", "like", "first", "next", "words", "word", "output", "exactly",
-        "personality", "expressive", "mannerisms", "descriptors", "dialogue", "npc", "character",
-        "think", "okay", "lets", "tackle", "analyze", "understand", "user", "wants", "need", "should",
-        "theyre", "dont", "didnt", "its", "im", "ive", "we", "our", "ours", "me", "before", "started",
-        "crappy", "job", "flipping", "burgers", "sambal", "grille", "losing", "come", "mind", "let",
-        "start", "starts", "talking", "talk", "mention", "mentions", "phrase", "phrases", "use", "uses",
-        "focus", "based", "now", "next", "parents", "parent", "mom", "dad", "family",
-        "telling", "told", "love", "loved",
-    }
-
-
-def keyword_fallback(text: str, limit: int, exclude: Optional[set] = None) -> List[str]:
-    stopwords = stopword_set()
-    exclude = exclude or set()
-    candidates: List[str] = []
-    for word in words_from_output(text):
-        lowered = word.lower()
-        if lowered in stopwords:
-            continue
-        if len(lowered) < 3:
-            continue
-        if lowered in exclude:
-            continue
-        candidates.append(word)
-        if len(candidates) >= limit:
-            break
-    return candidates
-
-
-def words_from_phrase_list(text: str) -> List[str]:
-    words: List[str] = []
-    for match in re.findall(r"[Ww]ords like ([^\\.]+)", text):
-        words.extend(words_from_output(match))
-    return words
 
 
 def summarize_to_lines(text: str) -> Tuple[str, str]:
@@ -699,14 +650,12 @@ def generate_summary_text(prompt: str, label: str, args: argparse.Namespace,
         if args.debug_io:
             mode_name = "strict" if strict_prompt else "default"
             print(f"Prompt for {label} ({mode_name}):\n{active_prompt}\n")
-        prompt_tokens = max(1, len(active_prompt.split()))
-        max_length = min(args.max_prompt_len, prompt_tokens + args.max_tokens)
         for attempt in range(attempts):
             if backend == "openvino":
                 try:
                     result = pipe.generate(
                         active_prompt,
-                        max_length=max_length,
+                        **openvino_output_settings(),
                         do_sample=True,
                         temperature=args.temperature,
                         top_p=args.top_p,
@@ -715,7 +664,7 @@ def generate_summary_text(prompt: str, label: str, args: argparse.Namespace,
                 except TypeError:
                     result = pipe.generate(
                         active_prompt,
-                        max_length=max_length,
+                        **openvino_output_settings(),
                         do_sample=False,
                     )
                 raw_text = "" if result is None else str(result)
@@ -724,60 +673,17 @@ def generate_summary_text(prompt: str, label: str, args: argparse.Namespace,
                     args.ollama_url,
                     args.ollama_model,
                     active_prompt,
-                    args.max_tokens,
                     args.temperature,
                 )
-                raw_text = str(response.get("response", ""))
+                raw_text = ollama_final_text(response)
+            final_text = strip_think_tags(raw_text)
             if args.debug_io:
-                print(f"Raw output for {label}:\n{raw_text}\n")
-            summary = ""
-            if "</think>" in raw_text:
-                summary = normalize_output(raw_text)
-            elif "WORDS:" in raw_text:
-                summary = normalize_output(raw_text.rsplit("WORDS:", 1)[-1])
-            elif "<think>" in raw_text and "</think>" not in raw_text:
-                stopwords = stopword_set()
-                quoted = quoted_words(raw_text)
-                phrase_words = words_from_phrase_list(raw_text)
-                selected: List[str] = []
-                for word in quoted + phrase_words:
-                    lowered = word.lower()
-                    if lowered in stopwords or len(lowered) < 3:
-                        continue
-                    if word not in selected:
-                        selected.append(word)
-                raw_lower = raw_text.lower()
-                expressions: List[str] = []
-                expressive_candidates = [
-                    "raw", "emotional", "reflective", "regretful", "vulnerable", "blunt",
-                    "casual", "weary", "nostalgic", "guilt-ridden", "introspective", "urgent",
-                    "trauma", "guarded", "broken",
-                ]
-                used = {word.lower() for word in selected}
-                for cand in expressive_candidates:
-                    if cand in raw_lower and cand not in used:
-                        expressions.append(cand)
-                        used.add(cand)
-                        if len(expressions) >= 5:
-                            break
-                if len(selected) < 5:
-                    selected.extend(keyword_fallback(raw_text, 5 - len(selected), used))
-                    used.update(word.lower() for word in selected)
-                if len(expressions) < 5:
-                    expressions.extend(keyword_fallback(raw_text, 5 - len(expressions), used))
-                if len(selected) >= 5 and len(expressions) >= 5:
-                    summary = " ".join(selected[:5] + expressions[:5])
-                else:
-                    if args.debug_invalid:
-                        print(f"Invalid summary output for {label}: {raw_text!r}")
-                    if attempt + 1 < attempts:
-                        continue
-            else:
-                summary = raw_text.strip()
+                print(f"Final output for {label}:\n{final_text}\n")
+            summary = normalize_output(final_text.rsplit("WORDS:", 1)[-1]) if "WORDS:" in final_text else normalize_output(final_text)
             if is_valid_words(summary):
                 return summarize_to_lines(summary)
             if args.debug_invalid:
-                print(f"Invalid summary output for {label}: {raw_text!r}")
+                print(f"Invalid final summary output for {label}: {final_text!r}")
             if attempt + 1 < attempts:
                 continue
     return "", ""
@@ -1038,8 +944,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=20000,
-        help="Maximum tokens to generate.",
+        default=None,
+        help=argparse.SUPPRESS,  # Retired output-cap flag accepted but ignored.
     )
     parser.add_argument(
         "--temperature",

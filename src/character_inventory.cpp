@@ -1102,7 +1102,8 @@ std::list<item *> Character::get_dependent_worn_items( const item &it )
 
 item Character::remove_weapon()
 {
-    item tmp = weapon;
+    item tmp = std::move( weapon );
+    tmp.invalidate_references();
     weapon = item();
     get_event_bus().send<event_type::character_wields_item>( getID(), weapon.typeId() );
     cached_info.erase( "weapon_value" );

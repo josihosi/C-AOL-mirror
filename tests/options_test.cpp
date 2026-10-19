@@ -137,3 +137,27 @@ TEST_CASE( "options_manager_reinitializes_options_and_groups", "[option]" )
     CHECK( loaded.has_option( "ITEM_HEALTH" ) );
     CHECK( loaded.get_option( "AUTO_PICKUP_WEIGHT_LIMIT" ).getPage() == "general" );
 }
+
+TEST_CASE( "old_llm_sampling_options_do_not_return_when_loading_saved_configuration",
+           "[option][llm_intent][api_sampling_defaults]" )
+{
+    options_manager opts = get_options();
+    opts.init();
+    CHECK_FALSE( opts.has_option( "LLM_INTENT_TEMPERATURE" ) );
+    CHECK_FALSE( opts.has_option( "LLM_INTENT_TOP_P" ) );
+    opts.deserialize( json_loader::from_string( R"([
+        {"name":"LLM_INTENT_TEMPERATURE","value":"0.60"},
+        {"name":"LLM_INTENT_TOP_P","value":"0.90"},
+        {"name":"LLM_INTENT_API_MODEL","value":"gpt-6-luna"},
+        {"name":"LLM_INTENT_MAX_PROMPT_LEN","value":"4096"}
+    ])" ).get_array() );
+    CHECK_FALSE( opts.has_option( "LLM_INTENT_TEMPERATURE" ) );
+    CHECK_FALSE( opts.has_option( "LLM_INTENT_TOP_P" ) );
+    CHECK( opts.get_option( "LLM_INTENT_API_MODEL" ).getValue() == "gpt-6-luna" );
+    CHECK( opts.get_option( "LLM_INTENT_MAX_PROMPT_LEN" ).value_as<int>() == 4096 );
+    std::ostringstream saved;
+    JsonOut writer( saved );
+    opts.serialize( writer );
+    CHECK( saved.str().find( "LLM_INTENT_TEMPERATURE" ) == std::string::npos );
+    CHECK( saved.str().find( "LLM_INTENT_TOP_P" ) == std::string::npos );
+}

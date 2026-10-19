@@ -28,7 +28,6 @@ from runner import strip_think_tags
 PROMPT_DIRNAME = "llm_prompts"
 NPC_ACTION_PROMPT_FILENAME = "npc_action_prompt.txt"
 DEFAULT_TIMEOUT_SECONDS = 60.0
-DEFAULT_MAX_TOKENS = 256
 DEFAULT_MAX_PROMPT_LEN = 4096
 ALLOWED_ACTIONS = [
     "wait_here",
@@ -704,7 +703,7 @@ def strip_speaker_prefix(text: str) -> str:
 
 
 def validate_response_like_game(payload: str) -> Dict[str, object]:
-    # The production runner rejects reasoning before the native action parser.
+    # The production runner separates completed reasoning from final text before parsing.
     # Do this before lenient recovery too: Gemma's channel marker contains '|'.
     payload = strip_think_tags(payload)
     ok, error, parsed_actions = validate_csv_payload(payload)
@@ -892,7 +891,6 @@ def run_self_test() -> int:
 def build_runner_command(args: argparse.Namespace) -> List[str]:
     cmd = [args.python_path or sys.executable, args.runner_path]
     cmd.extend(["--backend", args.backend])
-    cmd.extend(["--max-tokens", str(args.max_tokens)])
     cmd.extend(["--max-prompt-len", str(args.max_prompt_len)])
     if args.log_file:
         cmd.extend(["--log-file", args.log_file])
@@ -919,7 +917,6 @@ def run_runner_request(args: argparse.Namespace, prompt: str, snapshot: str, req
         "request_id": request_id,
         "prompt": prompt,
         "snapshot": snapshot,
-        "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_p": args.top_p,
         "repetition_penalty": args.repetition_penalty,
@@ -980,7 +977,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-provider", default="")
     parser.add_argument("--api-model", default="")
     parser.add_argument("--api-key-env", default="")
-    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument("--max-tokens", type=int, help=argparse.SUPPRESS)  # Retired; ignored.
     parser.add_argument("--max-prompt-len", type=int, default=DEFAULT_MAX_PROMPT_LEN)
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.9)

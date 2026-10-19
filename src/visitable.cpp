@@ -595,7 +595,7 @@ item visitable::remove_item( item &it )
         return &e == &it;
     }, 1 );
     if( !obj.empty() ) {
-        return obj.front();
+        return std::move( obj.front() );
 
     } else {
         debugmsg( "Tried removing item '%s' (typeId=%s, charges=%d) "
@@ -647,6 +647,7 @@ std::list<item> inventory::remove_items_with( const
         for( auto istack_iter = istack.begin(); istack_iter != istack.end() && count > 0; ) {
             if( filter( *istack_iter ) ) {
                 count--;
+                istack_iter->invalidate_references();
                 res.splice( res.end(), istack, istack_iter++ );
                 // The non-first items of a stack may have different invlets, the code
                 // in inventory only ever checks the invlet of the first item. This
@@ -682,6 +683,7 @@ std::list<item> outfit::remove_items_with( Character &guy,
     for( auto iter = worn.begin(); iter != worn.end(); ) {
         if( filter( *iter ) ) {
             iter->on_takeoff( guy );
+            iter->invalidate_references();
             res.splice( res.end(), worn, iter++ );
             if( --count == 0 ) {
                 return res;
@@ -719,7 +721,7 @@ std::list<item> Character::remove_items_with( const
 
     // then try any worn items
     std::list<item> worn_res = worn.remove_items_with( *this, filter, count );
-    res.insert( res.end(), worn_res.begin(), worn_res.end() );
+    res.splice( res.end(), worn_res );
 
     if( count > 0 ) {
         // finally try the currently wielded item (if any)
@@ -765,7 +767,8 @@ std::list<item> map_cursor::remove_items_with( const
             }
 
             // finally remove the item
-            res.push_back( *iter );
+            iter->invalidate_references();
+            res.push_back( std::move( *iter ) );
             iter = stack.erase( iter );
 
             if( --count == 0 ) {
@@ -820,16 +823,17 @@ std::list<item> vehicle_cursor::remove_items_with( const
                 map &here = get_map();
                 here.set_lightmap_cache_dirty( veh.bub_part_pos( here, veh.part( part ) ).z() );
             }
-            res.push_back( *iter );
+            iter->invalidate_references();
+            res.push_back( std::move( *iter ) );
             iter = items.erase( iter );
 
             if( --count == 0 ) {
-                return res;
+                break;
             }
         } else {
             iter->remove_internal( filter, count, res );
             if( count == 0 ) {
-                return res;
+                break;
             }
             ++iter;
         }

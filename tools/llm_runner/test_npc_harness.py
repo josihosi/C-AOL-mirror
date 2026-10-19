@@ -30,8 +30,6 @@ class NpcHarnessParsingTest(unittest.TestCase):
             "<|channel>thought\nReasoning only<channel|>",
             '<think>"Holding here"|hold_position',
             "<think>Reasoning only</think>",
-            "<|channel>thought\nLeaked reasoning<channel|>Holding.|hold_position",
-            "<think>Leaked reasoning</think>Holding.|hold_position",
         ):
             with self.subTest(raw=raw):
                 result = validate_response_like_game(raw)
@@ -39,8 +37,10 @@ class NpcHarnessParsingTest(unittest.TestCase):
                 self.assertEqual(result["parsed_speech"], "")
                 self.assertEqual(result["parsed_actions"], [])
 
-    def test_empty_thinking_delimiters_preserve_final_action_line(self) -> None:
-        for trace in ("<|channel>thought\n<channel|>", "<think></think>"):
+    def test_closed_thinking_delimiters_preserve_only_final_action_line(self) -> None:
+        for trace in ("<|channel>thought\n<channel|>", "<think></think>",
+                      "<think>PRIVATE|panic_on|attack=a</think>",
+                      "<|channel>thought\nPRIVATE|panic_on<channel|>"):
             with self.subTest(trace=trace):
                 result = validate_response_like_game(trace + "Holding here.|hold_position")
                 self.assertTrue(result["ok"])

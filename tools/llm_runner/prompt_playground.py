@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from runner import strip_think_tags
 import json
 import os
 import queue
@@ -267,9 +268,7 @@ def build_prompt(snapshot: str, system_prompt: str) -> str:
 def extract_csv_line(text: str) -> str:
     if not text:
         return ""
-    trimmed = text.strip()
-    if "</think>" in trimmed:
-        trimmed = trimmed.split("</think>")[-1].strip()
+    trimmed = strip_think_tags(text).strip()
     lines = [line.strip() for line in trimmed.splitlines() if line.strip()]
     for line in reversed(lines):
         if "|" in line:
@@ -282,7 +281,6 @@ def run_runner(
     runner_path: str,
     model_dir: str,
     device: str,
-    max_tokens: int,
     max_prompt_len: int,
     force_npu: bool,
     cache_dir: str,
@@ -304,7 +302,6 @@ def run_runner(
         cmd.extend(["--api-model", api_model])
         if api_key_env:
             cmd.extend(["--api-key-env", api_key_env])
-        cmd.extend(["--max-tokens", str(max_tokens)])
     else:
         cmd.extend(
             [
@@ -312,8 +309,6 @@ def run_runner(
                 model_dir,
                 "--device",
                 device,
-                "--max-tokens",
-                str(max_tokens),
                 "--max-prompt-len",
                 str(max_prompt_len),
             ]
@@ -338,7 +333,6 @@ def run_runner(
         "request_id": request_id,
         "prompt": prompt,
         "snapshot": snapshot,
-        "max_tokens": max_tokens,
         "temperature": TEMPERATURE,
         "top_p": TOP_P,
         "repetition_penalty": REPETITION_PENALTY,
@@ -429,7 +423,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runner-path", default="", help="Override runner.py path.")
     parser.add_argument("--model-dir", default="", help="Override model directory.")
     parser.add_argument("--device", default="", help="Override device (e.g. NPU).")
-    parser.add_argument("--max-tokens", type=int, default=20000, help="Max tokens.")
+    parser.add_argument("--max-tokens", type=int, help=argparse.SUPPRESS)  # Retired; ignored.
     parser.add_argument(
         "--max-prompt-len",
         type=int,
@@ -523,7 +517,6 @@ def main() -> int:
                 runner_path=runner_path,
                 model_dir=model_dir,
                 device=device,
-                max_tokens=args.max_tokens,
                 max_prompt_len=max_prompt_len,
                 force_npu=force_npu,
                 cache_dir=args.cache_dir,

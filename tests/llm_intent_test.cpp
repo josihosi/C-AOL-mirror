@@ -6,8 +6,20 @@
 #include <sstream>
 #include <string>
 
+#include "active_item_cache.h"
+#include "activity_actor_definitions.h"
 #include "avatar.h"
 #include "cata_catch.h"
+#include "catacharset.h"
+#include "item.h"
+#include "item_location.h"
+#include "item_pocket.h"
+#include "item_uid.h"
+#include "json.h"
+#include "json_loader.h"
+#include "flexbuffer_json.h"
+#include "map_selector.h"
+#include "visitable.h"
 #include "character_id.h"
 #include "cata_path.h"
 #include "path_info.h"
@@ -24,6 +36,7 @@
 #include "npc.h"
 #include "options_helpers.h"
 #include "player_helpers.h"
+#include "player_activity.h"
 #include "point.h"
 #include "type_id.h"
 
@@ -125,9 +138,21 @@ TEST_CASE( "llm_intent_prompt_uses_delta_move_contract", "[llm_intent]" )
     CHECK( prompt.find( "move: S S S S S hold_position" ) == std::string::npos );
 }
 
-TEST_CASE( "llm_intent_primary_response_generation_is_bounded", "[llm_intent]" )
+TEST_CASE( "llm_intent_request_has_no_output_generation_limit", "[llm_intent][response_output]" )
 {
-    CHECK( llm_intent::primary_response_max_tokens_for_test() == 256 );
+    const std::string payload = llm_intent::request_json_for_test();
+    const JsonValue loaded = json_loader::from_string( payload );
+    const JsonObject request = loaded.get_object();
+    CHECK( request.get_string( "request_id" ) == "request-producer-control" );
+    // Consume the unchanged local sampling fields with the strict native reader.
+    ( void )request.get_float( "temperature" );
+    ( void )request.get_float( "top_p" );
+    ( void )request.get_float( "repetition_penalty" );
+    CHECK( request.get_string( "prompt" ) == "unchanged prompt" );
+    CHECK( request.get_string( "snapshot" ) == "unchanged snapshot" );
+    CHECK_FALSE( request.has_member( "max_tokens" ) );
+    CHECK_FALSE( request.has_member( "max_new_tokens" ) );
+    CHECK_FALSE( request.has_member( "max_length" ) );
 }
 
 TEST_CASE( "llm_intent_can_parse_delta_move_fields", "[llm_intent]" )
@@ -288,6 +313,54 @@ TEST_CASE( "llm_intent_leading_separator_reaches_visible_speech_and_action_route
     CHECK( memory.back().npc_response ==
            "Inspecting inventory... I'm carrying a sharpened rebar." );
     CHECK( memory.back().actions == std::vector<std::string> { "equip_melee" } );
+}
+
+TEST_CASE( "llm_intent_final_suffix_reaches_native_speech_and_actions",
+           "[llm_intent][response_output]" )
+{
+    const std::vector<std::pair<std::string, bool>> samples = {
+        { "Ready.|wait_here", true },
+        { "<think>PRIVATE_THOUGHT|attack=a|panic_on</think>Ready.|wait_here", true },
+        { "<|channel>thought\nPRIVATE_THOUGHT|panic_on<channel|>Ready.|wait_here", true },
+        { "<think>PRIVATE_THOUGHT|attack=a", false },
+        { "<|channel>thought\nPRIVATE_THOUGHT|panic_on", false },
+        { "<think>PRIVATE_THOUGHT|attack=a</think>", false }
+    };
+    for( size_t i = 0; i < samples.size(); ++i ) {
+        DYNAMIC_SECTION( "response case " << i ) {
+            override_option enabled( "LLM_INTENT_ENABLE", "true" );
+            override_option debug_ui( "DEBUG_LLM_INTENT_UI", "true" );
+            setup_snapshot_test_scene();
+            npc &listener = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Listener NPC" );
+            listener.set_fac( faction_your_followers );
+            Messages::clear_messages();
+            llm_intent::process_response_for_test( listener, "final-suffix", "Wait here.",
+                                                 samples[i].first );
+            if( samples[i].second ) {
+                CHECK( listener.get_llm_intent_actions_for_test() ==
+                       std::vector<llm_intent_action> { llm_intent_action::wait_here } );
+                REQUIRE_FALSE( listener.get_llm_intent_memory().empty() );
+                CHECK( listener.get_llm_intent_memory().back().npc_response == "Ready." );
+            } else {
+                CHECK_FALSE( listener.has_llm_intent_actions() );
+            }
+            for( const auto &message : Messages::recent_messages( 0 ) ) {
+                CHECK( message.second.find( "PRIVATE_THOUGHT" ) == std::string::npos );
+            }
+        }
+    }
+}
+
+TEST_CASE( "llm_intent_secondary_reader_never_selects_reasoning_items",
+           "[llm_intent][response_output]" )
+{
+    const std::vector<std::string> allowed = { "safe item", "reasoning item" };
+    CHECK( llm_intent::parse_look_around_response_for_test(
+               "<think>item_2</think>item_1", allowed ) == std::vector<std::string> { "safe item" } );
+    CHECK( llm_intent::parse_look_around_response_for_test(
+               "<|channel>thought\nitem_2<channel|>item_1", allowed ) ==
+           std::vector<std::string> { "safe item" } );
+    CHECK( llm_intent::parse_look_around_response_for_test( "<think>item_2", allowed ).empty() );
 }
 
 TEST_CASE( "llm_intent_machine_event_log_preserves_utf8_json_punctuation", "[llm_intent]" )
@@ -645,4 +718,427 @@ TEST_CASE( "llm_response_error_diagnostics_are_categorized_and_sanitized", "[llm
     CHECK( llm_intent::should_retry_response_for_test( "Runner stdout closed (still_running)." ) );
     CHECK_FALSE( llm_intent::should_retry_response_for_test( "Runner response timed out." ) );
     CHECK_FALSE( llm_intent::should_retry_response_for_test( "Runner process exited (signal=13)." ) );
+}
+
+
+TEST_CASE( "native_wear_transfers_the_selected_tree_and_preserves_copy_callers",
+           "[llm_intent][companion_repair][wear_transfer]" )
+{
+    setup_snapshot_test_scene();
+    map &here = get_map();
+    avatar &who = get_avatar();
+    who.setpos( here, tripoint_bub_ms( 48, 50, 0 ) );
+    item coat( itype_id( "jacket_leather" ), calendar::turn );
+    REQUIRE( coat.put_in( item( itype_id( "rock" ), calendar::turn ),
+                          pocket_type::CONTAINER ).success() );
+    const std::string storage = GENERATE( "ground", "wielded", "container", "copy", "unsorted_copy" );
+    CAPTURE( storage );
+    if( storage == "copy" || storage == "unsorted_copy" ) {
+        const int64_t coat_uid = coat.uid().get_value();
+        const int64_t rock_uid = coat.only_item().uid().get_value();
+        const auto result = who.wear_item( coat, false, true, storage == "copy" );
+        REQUIRE( result.has_value() );
+        CHECK( ( *result )->uid().get_value() != coat_uid );
+        CHECK( ( *result )->only_item().uid().get_value() != rock_uid );
+        CHECK( coat.uid().get_value() == coat_uid );
+        CHECK( coat.only_item().uid().get_value() == rock_uid );
+        return;
+    }
+    item_location selected;
+    item_location container;
+    if( storage == "ground" ) {
+        item &placed = here.add_item_or_charges( who.pos_bub(), coat );
+        selected = item_location( map_cursor( who.pos_bub() ), &placed );
+    } else if( storage == "wielded" ) {
+        REQUIRE( who.wield( coat ) );
+        selected = who.get_wielded_item();
+    } else {
+        REQUIRE( who.wear_item( item( itype_id( "backpack" ), calendar::turn ), false ) );
+        container = who.worn.top_items_loc( who ).front();
+        REQUIRE( container->put_in( coat, pocket_type::CONTAINER ).success() );
+        selected = item_location( container, &container->only_item() );
+    }
+    const int64_t coat_uid = selected->uid().get_value();
+    const int64_t rock_uid = selected->only_item().uid().get_value();
+    const auto result = who.wear( selected, false );
+    REQUIRE( result.has_value() );
+    CHECK( ( *result )->uid().get_value() == coat_uid );
+    CHECK( ( *result )->only_item().uid().get_value() == rock_uid );
+    CHECK( who.is_worn( **result ) );
+    CHECK( who.amount_worn( itype_id( "jacket_leather" ) ) == 1 );
+    std::ostringstream saved;
+    JsonOut out( saved );
+    ( **result ).serialize( out );
+    JsonValue loaded = json_loader::from_string( saved.str() );
+    item restored;
+    restored.deserialize( loaded );
+    CHECK( restored.uid().get_value() == coat_uid );
+    CHECK( restored.only_item().uid().get_value() == rock_uid );
+    CHECK_FALSE( who.get_wielded_item() );
+    CHECK( here.i_at( who.pos_bub() ).empty() );
+    if( container ) {
+        CHECK( container->all_items_top().empty() );
+    }
+    CHECK_FALSE( who.wear( item_location( who, & **result ), false ).has_value() );
+    CHECK( ( *result )->uid().get_value() == coat_uid );
+}
+
+TEST_CASE( "native_wear_refusal_keeps_owned_item_identity_and_contents",
+           "[llm_intent][companion_repair][wear_transfer]" )
+{
+    setup_snapshot_test_scene();
+    avatar &who = get_avatar();
+    item box( itype_id( "box_small" ), calendar::turn );
+    REQUIRE( box.put_in( item( itype_id( "rock" ), calendar::turn ),
+                         pocket_type::CONTAINER ).success() );
+    SECTION( "unconsumed rvalue" ) {
+        const int64_t box_uid = box.uid().get_value();
+        const int64_t rock_uid = box.only_item().uid().get_value();
+        CHECK_FALSE( who.wear_item( std::move( box ), false ) );
+        CHECK( box.uid().get_value() == box_uid );
+        CHECK( box.only_item().uid().get_value() == rock_uid );
+    }
+    SECTION( "ground or container rollback conserves the entire tree" ) {
+        REQUIRE( who.wear_item( item( itype_id( "backpack" ), calendar::turn ), false ) );
+        item_location backpack = who.worn.top_items_loc( who ).front();
+        const int64_t backpack_uid = backpack->uid().get_value();
+        const bool ground = GENERATE( false, true );
+        item_location selected;
+        if( ground ) {
+            item &placed = get_map().add_item_or_charges( who.pos_bub(), box );
+            selected = item_location( map_cursor( who.pos_bub() ), &placed );
+        } else {
+            REQUIRE( backpack->put_in( box, pocket_type::CONTAINER ).success() );
+            selected = item_location( backpack, &backpack->only_item() );
+        }
+        const int64_t box_uid = selected->uid().get_value();
+        const int64_t rock_uid = selected->only_item().uid().get_value();
+        CHECK_FALSE( who.wear( selected, false ) );
+        int boxes = 0;
+        who.visit_items( [&]( item * it, item * ) {
+            if( it->uid().get_value() == box_uid ) {
+                ++boxes;
+                CHECK( it->only_item().uid().get_value() == rock_uid );
+            }
+            return VisitResponse::NEXT;
+        } );
+        CHECK( boxes == ( ground ? 0 : 1 ) );
+        if( ground ) {
+            REQUIRE( get_map().i_at( who.pos_bub() ).size() == 1 );
+            const item &retained = *get_map().i_at( who.pos_bub() ).begin();
+            CHECK( retained.uid().get_value() == box_uid );
+            CHECK( retained.only_item().uid().get_value() == rock_uid );
+        } else {
+            CHECK( get_map().i_at( who.pos_bub() ).empty() );
+            CHECK( backpack->only_item().uid().get_value() == box_uid );
+        }
+        CHECK( backpack->uid().get_value() == backpack_uid );
+    }
+    SECTION( "wielded rollback" ) {
+        REQUIRE( who.wield( box ) );
+        const int64_t box_uid = who.get_wielded_item()->uid().get_value();
+        const int64_t rock_uid = who.get_wielded_item()->only_item().uid().get_value();
+        CHECK_FALSE( who.wear( who.get_wielded_item(), false ) );
+        REQUIRE( who.get_wielded_item() );
+        CHECK( who.get_wielded_item()->uid().get_value() == box_uid );
+        CHECK( who.get_wielded_item()->only_item().uid().get_value() == rock_uid );
+    }
+}
+
+TEST_CASE( "llm_inventory_wear_consumes_original_once_and_resolves_later_sections",
+           "[llm_intent][companion_repair]" )
+{
+    setup_snapshot_test_scene();
+    npc &listener = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Listener NPC" );
+    listener.set_fac( faction_your_followers );
+    item coat( itype_id( "jacket_leather" ), calendar::turn );
+    REQUIRE( coat.put_in( item( itype_id( "rock" ), calendar::turn ),
+                          pocket_type::CONTAINER ).success() );
+    REQUIRE( listener.wield( coat ) );
+    const int64_t coat_uid = listener.get_wielded_item()->uid().get_value();
+    const int64_t rock_uid = listener.get_wielded_item()->only_item().uid().get_value();
+    const std::string prompt = llm_intent::build_inventory_prompt_for_test( listener,
+        "Wear the jacket" );
+    REQUIRE( prompt.find( "id=\"item_1\"" ) != std::string::npos );
+    llm_intent::process_inventory_response_for_test( listener, "wear: item_1" );
+    CHECK_FALSE( listener.get_wielded_item() );
+    CHECK( listener.amount_worn( itype_id( "jacket_leather" ) ) == 1 );
+    int coats = 0;
+    listener.visit_items( [&]( item * it, item * ) {
+        if( it->typeId() == itype_id( "jacket_leather" ) ) {
+            ++coats;
+            CHECK( it->uid().get_value() == coat_uid );
+            CHECK( it->only_item().uid().get_value() == rock_uid );
+        }
+        return VisitResponse::NEXT;
+    } );
+    CHECK( coats == 1 );
+    SECTION( "repeat refusal" ) {
+        llm_intent::process_inventory_response_for_test( listener, "wear: item_1" );
+        CHECK( listener.amount_worn( itype_id( "jacket_leather" ) ) == 1 );
+    }
+    SECTION( "same-response transfer then drop uses new owner" ) {
+        // A second garment changes storage before a later section resolves it.
+        item shirt( itype_id( "tshirt" ), calendar::turn );
+        shirt.set_var( "item_label", "transfer shirt" );
+        REQUIRE( listener.wield( shirt ) );
+        const int64_t shirt_uid = listener.get_wielded_item()->uid().get_value();
+        const std::string offered = llm_intent::build_inventory_prompt_for_test( listener,
+            "wear then drop" );
+        const size_t label_pos = offered.find( "transfer shirt" );
+        REQUIRE( label_pos != std::string::npos );
+        const std::string id_prefix = "<Item id=\"";
+        const size_t item_pos = offered.rfind( id_prefix, label_pos );
+        REQUIRE( item_pos != std::string::npos );
+        const size_t id_start = item_pos + id_prefix.size();
+        const std::string selected = offered.substr( id_start, offered.find( '\"', id_start ) - id_start );
+        override_option opt_ui( "DEBUG_LLM_INTENT_UI", "true" );
+        Messages::clear_messages();
+        llm_intent::process_inventory_response_for_test( listener,
+                "wear: " + selected + " | drop: " + selected );
+        // npc::drop processes its activity immediately.  Check the actual
+        // physical result rather than assuming an avatar-style pending activity.
+        CHECK( listener.amount_worn( itype_id( "tshirt" ) ) == 0 );
+        int shirts_dropped = 0;
+        for( const item &it : get_map().i_at( listener.pos_bub() ) ) {
+            shirts_dropped += it.typeId() == itype_id( "tshirt" ) &&
+                              it.get_var( "item_label" ) == "transfer shirt";
+        }
+        CHECK( shirts_dropped == 1 );
+        int completed = 0;
+        for( const auto &message : Messages::recent_messages( 0 ) ) {
+            CHECK( message.second.find( "inventory.item_missing" ) == std::string::npos );
+            completed += message.second.find( "LLM look_inventory completed" ) != std::string::npos;
+        }
+        CHECK( completed == 2 );
+        CHECK( shirt_uid > 0 );
+    }
+}
+
+TEST_CASE( "llm_item_labels_stay_utf8_through_inventory_world_and_action_messages",
+           "[llm_intent][companion_repair][utf8_label]" )
+{
+    override_option opt_ui( "DEBUG_LLM_INTENT_UI", "true" );
+    setup_snapshot_test_scene();
+    npc &listener = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Listener NPC" );
+    listener.set_fac( faction_your_followers );
+    item can( itype_id( "can_drink" ), calendar::turn );
+    REQUIRE_FALSE( can.get_container_pockets().empty() );
+    can.get_container_pockets().front()->settings.whitelist_item( itype_id( "water" ) );
+    const std::string label = "café 界 can";
+    can.set_var( "item_label", label );
+    REQUIRE( can.tname().find( "⁺" ) != std::string::npos );
+    REQUIRE( listener.wield( can ) );
+    const std::string inventory = llm_intent::build_inventory_prompt_for_test( listener, "Inspect" );
+    CHECK( inventory.find( label + "⁺" ) != std::string::npos );
+    CHECK( utf32_to_utf8( utf8_to_utf32( inventory ) ) == inventory );
+    item &placed = get_map().add_item_or_charges( listener.pos_bub(), can );
+    const std::string world = llm_intent::build_look_around_prompt_for_test( listener, "Look" );
+    CHECK( world.find( label + "⁺" ) != std::string::npos );
+    CHECK( utf32_to_utf8( utf8_to_utf32( world ) ) == world );
+    Messages::clear_messages();
+    llm_intent::process_inventory_response_for_test( listener, "wear: item_1" );
+    const auto messages = Messages::recent_messages( 0 );
+    bool saw_label = false;
+    for( const auto &message : messages ) {
+        CHECK( utf32_to_utf8( utf8_to_utf32( message.second ) ) == message.second );
+        saw_label |= message.second.find( label + "⁺" ) != std::string::npos;
+    }
+    CHECK( saw_label );
+    std::ostringstream saved;
+    JsonOut out( saved );
+    placed.serialize( out );
+    CHECK( utf32_to_utf8( utf8_to_utf32( saved.str() ) ) == saved.str() );
+    item restored;
+    JsonValue loaded = json_loader::from_string( saved.str() );
+    restored.deserialize( loaded );
+    CHECK( restored.tname() == placed.tname() );
+    CHECK( restored.uid().get_value() == placed.uid().get_value() );
+}
+
+
+TEST_CASE( "look_around_item_labels_match_through_native_pickup",
+           "[llm_intent][companion_repair][utf8_pickup]" )
+{
+    override_option opt_ui( "DEBUG_LLM_INTENT_UI", "true" );
+    override_option opt_llm( "LLM_INTENT_ENABLE", "true" );
+    setup_snapshot_test_scene();
+    npc &listener = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Listener NPC" );
+    listener.set_fac( faction_your_followers );
+    const int variant = GENERATE( 0, 1, 2 );
+    CAPTURE( variant );
+    item box( itype_id( "box_small" ), calendar::turn );
+    const std::string label = variant == 2 ? "café 界 box" : "supply box";
+    box.set_var( "item_label", label );
+    if( variant != 0 ) {
+        box.get_container_pockets().front()->settings.whitelist_item( itype_id( "protein_bar_evac" ) );
+    }
+    REQUIRE( box.put_in( item( itype_id( "protein_bar_evac" ), calendar::turn ),
+                         pocket_type::CONTAINER ).success() );
+    item &placed = get_map().add_item_or_charges( listener.pos_bub(), box );
+    const std::string expected = label + ( variant == 0 ? "" : "⁺" );
+    // Isolate label matching from distance, visibility and intake eligibility.
+    REQUIRE( get_map().sees_some_items( listener.pos_bub(), listener ) );
+    REQUIRE( listener.sees( get_map(), listener.pos_bub() ) );
+    REQUIRE( listener.can_wield( placed ).success() );
+    REQUIRE( listener.would_take_that( placed, listener.pos_bub() ) );
+    const std::string prompt = llm_intent::build_look_around_prompt_for_test( listener,
+                               "Pick up one supply box" );
+    const size_t label_pos = prompt.find( "name=\"" + expected + "\"" );
+    REQUIRE( label_pos != std::string::npos );
+    std::vector<std::string> offered;
+    std::string id;
+    size_t name_pos = 0;
+    while( ( name_pos = prompt.find( " name=\"", name_pos ) ) != std::string::npos ) {
+        name_pos += 7;
+        const size_t end = prompt.find( '\"', name_pos );
+        offered.push_back( prompt.substr( name_pos, end - name_pos ) );
+        // The prompt inspection helper collects labels before the real
+        // enqueue caller assigns sequential item IDs.
+        if( offered.back() == expected ) {
+            id = "item_" + std::to_string( offered.size() );
+        }
+        name_pos = end;
+    }
+    REQUIRE_FALSE( id.empty() );
+    const std::vector<std::string> selected = llm_intent::parse_look_around_response_for_test(
+            id + ":1", offered );
+    REQUIRE( selected == std::vector<std::string>{ expected } );
+    listener.set_llm_intent_item_targets( { { selected.front(), 1 } }, "utf8-pickup" );
+    Messages::clear_messages();
+    run_npc_turns( listener, 1 );
+    CHECK( get_map().i_at( listener.pos_bub() ).empty() );
+    int boxes = 0;
+    int rations = 0;
+    listener.visit_items( [&]( item * node, item * ) {
+        if( node->typeId() == itype_id( "box_small" ) ) {
+            ++boxes;
+            CHECK( node->get_var( "item_label" ) == label );
+            CHECK( node->only_item().typeId() == itype_id( "protein_bar_evac" ) );
+        }
+        rations += node->typeId() == itype_id( "protein_bar_evac" );
+        return VisitResponse::NEXT;
+    } );
+    CHECK( boxes == 1 );
+    CHECK( rations == 1 );
+    for( const auto &message : Messages::recent_messages( 0 ) ) {
+        CHECK( utf32_to_utf8( utf8_to_utf32( message.second ) ) == message.second );
+        CHECK( message.second.find( "pickup.item_missing" ) == std::string::npos );
+    }
+}
+
+TEST_CASE( "native_wear_does_not_leave_nested_items_in_the_old_map_cache",
+           "[llm_intent][companion_repair][wear_transfer]" )
+{
+    setup_snapshot_test_scene();
+    map &here = get_map();
+    avatar &who = get_avatar();
+    who.setpos( here, tripoint_bub_ms( 48, 50, 0 ) );
+    item coat( itype_id( "jacket_leather" ), calendar::turn );
+    REQUIRE( coat.put_in( item( itype_id( "apple" ), calendar::turn ),
+                          pocket_type::CONTAINER ).success() );
+    item &placed = here.add_item_or_charges( who.pos_bub(), coat );
+    const int64_t apple_uid = placed.only_item().uid().get_value();
+    // Use the same cache and exact placed tree as the native submap cache.
+    active_item_cache old_cache;
+    REQUIRE( old_cache.add( placed, point_sm_ms( 0, 0 ) ) );
+    bool was_cached = false;
+    for( const item_reference &ref : old_cache.get() ) {
+        was_cached |= ref.item_ref && ref.item_ref->uid().get_value() == apple_uid;
+    }
+    REQUIRE( was_cached );
+    const auto result = who.wear( item_location( map_cursor( who.pos_bub() ), &placed ), false );
+    REQUIRE( result.has_value() );
+    CHECK( ( *result )->only_item().uid().get_value() == apple_uid );
+    for( const item_reference &ref : old_cache.get() ) {
+        CHECK_FALSE( ( ref.item_ref && ref.item_ref->uid().get_value() == apple_uid ) );
+    }
+}
+
+TEST_CASE( "native_wear_activity_retains_copy_then_remove_and_refusal_contracts",
+           "[llm_intent][companion_repair][wear_transfer]" )
+{
+    setup_snapshot_test_scene();
+    avatar &who = get_avatar();
+    const bool wearable = GENERATE( false, true );
+    const itype_id type( wearable ? "jacket_leather" : "box_small" );
+    item original( type, calendar::turn );
+    REQUIRE( original.put_in( item( itype_id( "rock" ), calendar::turn ),
+                              pocket_type::CONTAINER ).success() );
+    item &placed = get_map().add_item_or_charges( who.pos_bub(), original );
+    item_location selected( map_cursor( who.pos_bub() ), &placed );
+    const int64_t uid = placed.uid().get_value();
+    const int64_t child_uid = placed.only_item().uid().get_value();
+    wear_activity_actor actor( { selected }, { 0 } );
+    who.set_moves( 10000 );
+    actor.do_turn( who.activity, who );
+    if( wearable ) {
+        CHECK_FALSE( selected );
+        CHECK( get_map().i_at( who.pos_bub() ).empty() );
+        REQUIRE( who.amount_worn( type ) == 1 );
+        const item &worn = **who.worn.top_items_loc( who ).begin();
+        CHECK( worn.uid().get_value() != uid );
+        CHECK( worn.only_item().uid().get_value() != child_uid );
+        CHECK( worn.only_item().typeId() == itype_id( "rock" ) );
+    } else {
+        REQUIRE( selected );
+        CHECK( selected->uid().get_value() == uid );
+        CHECK( selected->only_item().uid().get_value() == child_uid );
+        CHECK( who.amount_worn( type ) == 0 );
+        CHECK( get_map().i_at( who.pos_bub() ).size() == 1 );
+    }
+}
+
+TEST_CASE( "llm_inventory_wield_then_drop_tracks_the_native_result",
+           "[llm_intent][companion_repair][wield_chain]" )
+{
+    setup_snapshot_test_scene();
+    npc &listener = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Listener NPC" );
+    listener.set_fac( faction_your_followers );
+    const bool copied_descendant = GENERATE( false, true );
+    item pack( itype_id( "backpack" ), calendar::turn );
+    pack.set_var( "item_label", "chain pack" );
+    REQUIRE( pack.put_in( item( itype_id( "rock" ), calendar::turn ),
+                          pocket_type::CONTAINER ).success() );
+    REQUIRE( listener.wear_item( pack, false ) );
+    const std::string offered = llm_intent::build_inventory_prompt_for_test( listener,
+        "Wield then drop the rock" );
+    const size_t rock = offered.find( "name=\"rock\"" );
+    REQUIRE( rock != std::string::npos );
+    const size_t id_start = offered.rfind( "id=\"", rock ) + 4;
+    const std::string selected = offered.substr( id_start, offered.find( '\"', id_start ) - id_start );
+    const size_t pack_name = offered.find( "chain pack" );
+    REQUIRE( pack_name != std::string::npos );
+    const size_t pack_id_start = offered.rfind( "id=\"", pack_name ) + 4;
+    const std::string pack_id = offered.substr( pack_id_start,
+                                offered.find( '\"', pack_id_start ) - pack_id_start );
+    override_option opt_ui( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    llm_intent::process_inventory_response_for_test( listener,
+            "wield: " + ( copied_descendant ? pack_id : selected ) + " | drop: " + selected );
+    if( copied_descendant ) {
+        // Native wield copies descendant UIDs too.  This remains an explicit
+        // chain limitation: refuse the stale child selection safely, never
+        // reinterpret it as the container or claim the drop completed.
+        REQUIRE( listener.get_wielded_item() );
+        CHECK( listener.get_wielded_item()->typeId() == itype_id( "backpack" ) );
+        CHECK( listener.get_wielded_item()->only_item().typeId() == itype_id( "rock" ) );
+        CHECK( get_map().i_at( listener.pos_bub() ).empty() );
+        bool missing = false;
+        for( const auto &message : Messages::recent_messages( 0 ) ) {
+            missing |= message.second.find( "inventory.item_missing" ) != std::string::npos;
+        }
+        CHECK( missing );
+        return;
+    }
+    CHECK_FALSE( listener.get_wielded_item() );
+    CHECK( listener.worn.top_items_loc( listener ).front()->all_items_top().empty() );
+    int rocks = 0;
+    for( const item &it : get_map().i_at( listener.pos_bub() ) ) {
+        rocks += it.typeId() == itype_id( "rock" );
+    }
+    CHECK( rocks == 1 );
+    for( const auto &message : Messages::recent_messages( 0 ) ) {
+        CHECK( message.second.find( "inventory.item_missing" ) == std::string::npos );
+    }
 }
