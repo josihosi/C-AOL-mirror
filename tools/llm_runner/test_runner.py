@@ -2,6 +2,10 @@
 import argparse
 import io
 import hashlib
+import http.server
+import os
+import subprocess
+import threading
 import json
 from pathlib import Path
 import sys
@@ -13,6 +17,61 @@ import runner
 
 
 class RunnerFinalResponseTest(unittest.TestCase):
+    def test_stdio_reaches_existing_sanitizer_and_recovers_next_request(self):
+        captured = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                data = self.rfile.read(int(self.headers["Content-Length"]))
+                captured.append(json.loads(data))
+                body = json.dumps({"response": "Ready.|idle", "thinking": ""}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        # Cross the text decoder's buffer boundary with valid multibyte text.
+        valid_prompt = "inventory " + "é界🙂" * 1200 + " replacement: \ufffd"
+        valid = json.dumps({"request_id": "valid", "prompt": valid_prompt,
+                            "max_tokens": 9}, ensure_ascii=False).encode() + b"\n"
+        malformed = b'{"request_id":"bytes","prompt":"bag\xe2 \xba","max_tokens":7}\n'
+        invalid_json = b'{"request_id":"json",broken}\n'
+        after = b'{"request_id":"after","prompt":"after"}\n'
+        expected = runner.read_request(malformed.decode("utf-8", "surrogateescape"))
+        with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever,
+                                      kwargs={"poll_interval": 0.01})
+            thread.start()
+            try:
+                result = subprocess.run(
+                    [sys.executable, runner.__file__, "--backend", "ollama",
+                     "--ollama-url", f"http://127.0.0.1:{server.server_port}",
+                     "--ollama-model", "transport-fixture"],
+                    input=valid + malformed + invalid_json + after,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=dict(os.environ, PYTHONIOENCODING="utf-8"), timeout=15)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual([r["request_id"] for r in replies],
+                         ["valid", "bytes", "unknown", "after"])
+        self.assertEqual([r["ok"] for r in replies], [True, True, False, True])
+        self.assertEqual(len(captured), 3)
+        self.assertEqual(hashlib.sha256(captured[0]["prompt"].encode()).hexdigest(),
+                         hashlib.sha256(valid_prompt.encode()).hexdigest())
+        self.assertEqual(captured[1]["prompt"], expected["prompt"])
+        self.assertEqual(captured[1]["prompt"], "bag\ufffd \ufffd")
+        self.assertEqual(captured[2]["prompt"], "after")
+        self.assertEqual([r["options"]["num_predict"] for r in captured], [9, 7, 128])
+        self.assertTrue(all(r["think"] is False for r in captured))
+        self.assertTrue(all(r["model"] == "transport-fixture" for r in captured))
+
     def test_debug_events_bind_only_matching_run_ids_and_stay_opt_in(self):
         with patch.dict(runner.os.environ, {"OPENCLAW_HARNESS_RUN_ID": "run-a",
                                           "OPENCLAW_HARNESS_SEMANTIC_RUN_ID": "run-a"}):

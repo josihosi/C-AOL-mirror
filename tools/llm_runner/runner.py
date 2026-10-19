@@ -577,6 +577,9 @@ def run_api_self_test(args: argparse.Namespace, log_fp: Optional[TextIO]) -> int
 
 
 def main() -> int:
+    # Preserve malformed pipe bytes for the existing request sanitizer.
+    # The harness may impose strict UTF-8 stdio before this runner starts.
+    sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
     args = parse_args()
     log_fp = setup_logger(args.log_file)
     if args.dry_run:
