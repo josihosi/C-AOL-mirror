@@ -53,6 +53,7 @@
 #include "game.h"
 #include "item.h"
 #include "item_location.h"
+#include "item_pocket.h"
 #include "itype.h"
 #include "json.h"
 #include "map.h"
@@ -1332,7 +1333,17 @@ struct look_around_selection {
 struct inventory_item_entry {
     std::string id;
     std::string name;
-    item *ptr = nullptr;
+    item_location location;
+    std::string tree;
+    int quantity = 1;
+};
+
+struct gift_recipient_entry {
+    std::string id;
+    std::string name;
+    character_id character;
+    bool avatar = false;
+    int distance = 0;
 };
 
 struct look_inventory_selection {
@@ -1340,6 +1351,9 @@ struct look_inventory_selection {
     std::vector<std::string> wield;
     std::vector<std::string> act;
     std::vector<std::string> drop;
+    std::string give_item;
+    std::string give_recipient;
+    bool give = false;
 };
 
 std::string xml_escape( std::string_view text )
@@ -1452,7 +1466,7 @@ std::string strip_xml_tags( const std::string &text )
             in_tag = true;
             continue;
         }
-        if( c == '>' ) {
+        if( c == '>' && in_tag ) {
             in_tag = false;
             continue;
         }
@@ -1549,7 +1563,6 @@ std::vector<inventory_item_entry> collect_inventory_entries( npc &listener, size
 {
     std::vector<inventory_item_entry> entries;
     entries.reserve( max_entries );
-    std::unordered_set<std::string> seen;
     int counter = 0;
     listener.visit_items( [&]( item * it, item * ) {
         if( it == nullptr ) {
@@ -1559,13 +1572,12 @@ std::vector<inventory_item_entry> collect_inventory_entries( npc &listener, size
         if( name.empty() ) {
             return VisitResponse::NEXT;
         }
-        if( !seen.insert( name ).second ) {
-            return VisitResponse::NEXT;
-        }
         inventory_item_entry entry;
         entry.id = string_format( "item_%d", ++counter );
         entry.name = name;
-        entry.ptr = it;
+        entry.location = item_location( listener, it );
+        entry.tree = llm_intent::gift_tree_identity( *it );
+        entry.quantity = it->count_by_charges() ? it->charges : 1;
         entries.push_back( std::move( entry ) );
         if( entries.size() >= max_entries ) {
             return VisitResponse::ABORT;
@@ -1573,6 +1585,26 @@ std::vector<inventory_item_entry> collect_inventory_entries( npc &listener, size
         return VisitResponse::NEXT;
     } );
     return entries;
+}
+
+std::vector<gift_recipient_entry> collect_gift_recipients( npc &donor )
+{
+    Character &player = get_player_character();
+    std::vector<gift_recipient_entry> recipients{ { "player", player.get_name(), player.getID(),
+                    true, rl_dist( donor.pos_abs(), player.pos_abs() )
+        } };
+    for( npc *candidate : g->get_npcs_if( [&]( const npc & guy ) {
+    return &guy != &donor && !guy.is_dead_state() && !guy.is_hallucination() &&
+               guy.is_player_ally() && donor.is_ally( guy ) &&
+               guy.attitude_to( donor ) != Creature::Attitude::HOSTILE &&
+               donor.attitude_to( guy ) != Creature::Attitude::HOSTILE &&
+               donor.posz() == guy.posz() && donor.sees( get_map(), guy );
+    } ) ) {
+        recipients.push_back( { string_format( "npc_%d", candidate->getID().get_value() ),
+                                candidate->get_name(), candidate->getID(), false,
+                                rl_dist( donor.pos_abs(), candidate->pos_abs() ) } );
+    }
+    return recipients;
 }
 
 constexpr size_t look_around_selection_limit = 4;
@@ -1598,12 +1630,15 @@ To activate items, write:
 act: item1, item2
 To drop items, write:
 drop: item1, item2
-You may include any combination, separated by |.Section labels are case-insensitive.Use item ids from the list only.If you need both wear and act, repeat the same id in both sections.
+To give one listed item or stack, write: give: item_1 -> player. Use listed item and recipient IDs only. Give must be the only action. Return none if no listed match.
+You may include any combination of wear, wield, act and drop, separated by |.Section labels are case-insensitive.Use item ids from the list only.If you need both wear and act, repeat the same id in both sections.
 /no_think
 Answer directly. No reasoning.</System>
 <UserUtterance>{{player_utterance}}</UserUtterance>
 <Inventory>
 {{inventory_xml}}</Inventory>
+<Recipients>
+{{recipients_xml}}</Recipients>
 <Examples>
   <Example>wear: item_1 | wield: item_2</Example>
   <Example>wield: item_2 | act: item_3</Example>
@@ -1634,21 +1669,28 @@ std::string build_look_around_prompt( const std::string &player_utterance,
 }
 
 std::string build_look_inventory_prompt( const std::string &player_utterance,
-        const std::vector<inventory_item_entry> &inventory )
+        const std::vector<inventory_item_entry> &inventory,
+        const std::vector<gift_recipient_entry> &recipients )
 {
     std::ostringstream inventory_xml;
     for( const inventory_item_entry &entry : inventory ) {
         inventory_xml << "  <Item id=\"" << xml_escape( entry.id ) << "\" name=\""
-                      << xml_escape( entry.name ) << "\"/>\n";
+                      << xml_escape( entry.name ) << "\" qty=\"" << entry.quantity << "\"/>\n";
+    }
+    std::ostringstream recipient_xml;
+    for( const gift_recipient_entry &recipient : recipients ) {
+        recipient_xml << "  <Recipient id=\"" << xml_escape( recipient.id ) << "\" name=\""
+                      << xml_escape( recipient.name ) << "\" distance=\"" << recipient.distance << "\"/>\n";
     }
     const std::string templ = llm_prompt_templates::load( look_inventory_prompt_filename,
                               default_look_inventory_prompt_template(),
-    { "{{player_utterance}}", "{{inventory_xml}}" },
+    { "{{player_utterance}}", "{{inventory_xml}}", "{{recipients_xml}}" },
     { look_inventory_prompt_filename, llm_prompt_readme_filename } );
     return llm_prompt_templates::render( templ,
     {
         { "{{player_utterance}}", xml_escape( player_utterance ) },
-        { "{{inventory_xml}}", inventory_xml.str() }
+        { "{{inventory_xml}}", inventory_xml.str() },
+        { "{{recipients_xml}}", recipient_xml.str() }
     } );
 }
 
@@ -1746,6 +1788,23 @@ look_inventory_selection parse_look_inventory_response( const std::string &text,
     if( cleaned.empty() ) {
         return selection;
     }
+    const std::string lower = lower_copy( cleaned );
+    if( lower.find( "give" ) != std::string::npos ) {
+        selection.give = true;
+        const size_t arrow = lower.find( "->" );
+        if( lower.rfind( "give:", 0 ) != 0 || arrow == std::string::npos ||
+            lower.find( '|' ) != std::string::npos || lower.find( ',', arrow ) != std::string::npos ) {
+            return selection;
+        }
+        const std::string id = trim_copy( lower.substr( 5, arrow - 5 ) );
+        const auto found = allowed.find( id );
+        if( id.rfind( "item_", 0 ) == 0 && found != allowed.end() &&
+            found->second == id ) {
+            selection.give_item = found->second;
+            selection.give_recipient = trim_copy( lower.substr( arrow + 2 ) );
+        }
+        return selection;
+    }
     std::vector<std::string> segments;
     size_t start = 0;
     while( start < cleaned.size() ) {
@@ -1811,7 +1870,7 @@ look_inventory_selection parse_look_inventory_response( const std::string &text,
 
 void apply_look_inventory_actions( npc &listener,
                                    const std::string &request_id,
-                                   const std::unordered_map<std::string, item *> &inventory,
+                                   const std::unordered_map<std::string, item_location> &inventory,
                                    const std::unordered_map<std::string, std::string> &id_to_name,
                                    const look_inventory_selection &selection )
 {
@@ -1819,7 +1878,9 @@ void apply_look_inventory_actions( npc &listener,
     // subsequent section by identity, including wear+act of the same item.
     std::unordered_map<std::string, int64_t> selected_uids;
     for( const auto &entry : inventory ) {
-        selected_uids.emplace( entry.first, entry.second->uid().get_value() );
+        if( entry.second && listener.has_item( *entry.second ) ) {
+            selected_uids.emplace( entry.first, entry.second->uid().get_value() );
+        }
     }
     auto selected_item = [&]( const std::string & name ) -> item * {
         const auto uid = selected_uids.find( name );
@@ -2631,7 +2692,7 @@ Only use 'idle' when no action change is needed. Do not use 'idle' as a substitu
 'panic_on' to start running, get out of here.
 'panic_off' if convincing, to stop fleeing and get your act together.
 'look_around' to view your surroundings and pick-up, grab, search, explore for items around you.
-'look_inventory' to look inside your inventory and wear/wield/activate/drop items.
+'look_inventory': Inspect your inventory to wear, wield, activate, drop on the ground, or give an item.
 'move=<dx>,<dy> <state>' to move to a relative destination offset on your snapshot map. Positive x is east/right, negative x is west/left, positive y is north/up, and negative y is south/down. The snapshot map includes dx column markers and dy row labels using that same signed-delta convention. Always include either 'wait_here' or 'hold_position' after the delta.
 'attack=<target>' to attack a target with the letter from your map. Any creature with a map letter is a valid explicit target handle, including the player, friendlies, neutrals, and hostiles.
 'idle' if none of the above.
@@ -3597,6 +3658,8 @@ class llm_intent_manager
             character_id npc_id;
             std::string npc_name;
             std::vector<inventory_item_entry> items;
+            std::vector<gift_recipient_entry> recipients;
+            uint64_t order_revision = 0;
         };
 
     public:
@@ -3629,6 +3692,7 @@ class llm_intent_manager
                         continue;
                     }
                     pending_primary_npcs.insert( listener->getID() );
+                    listener->cancel_llm_give( "intent.superseded" );
                     listener->set_llm_intent_response_pending( true );
                     pending_primary_requests.push_back( { listener->getID(), player_utterance } );
                 }
@@ -3647,6 +3711,7 @@ class llm_intent_manager
                 }
                 pending_primary_npcs.insert( listener.getID() );
             }
+            listener.cancel_llm_give( "intent.superseded" );
             listener.set_llm_intent_response_pending( true );
             llm_intent_request req;
             req.request_id = next_request_id();
@@ -3928,13 +3993,16 @@ class llm_intent_manager
             req.npc_id = listener.getID();
             req.npc_name = listener.get_name();
             req.snapshot = "{}";
-            req.prompt = build_look_inventory_prompt( player_utterance, inventory );
+            const auto recipients = collect_gift_recipients( listener );
+            req.prompt = build_look_inventory_prompt( player_utterance, inventory, recipients );
             req.repetition_penalty = get_option<float>( "LLM_INTENT_REPETITION_PENALTY" );
 
             look_inventory_context context;
             context.npc_id = req.npc_id;
             context.npc_name = req.npc_name;
             context.items = inventory;
+            context.recipients = recipients;
+            context.order_revision = listener.llm_intent_order_revision();
 
             append_llm_intent_log( string_format( "look_inventory request %s (%s)\n%s\n\n",
                                                   req.npc_name,
@@ -3956,16 +4024,16 @@ class llm_intent_manager
                                               const look_inventory_context &context ) {
             std::unordered_map<std::string, std::string> allowed;
             allowed.reserve( context.items.size() * 2 );
-            std::unordered_map<std::string, item *> inventory;
+            std::unordered_map<std::string, item_location> inventory;
             inventory.reserve( context.items.size() );
             std::unordered_map<std::string, std::string> id_to_name;
             id_to_name.reserve( context.items.size() );
             for( const inventory_item_entry &entry : context.items ) {
                 const std::string id_key = lower_copy( entry.id );
                 const std::string name_key = lower_copy( entry.name );
-                allowed.emplace( id_key, entry.id );
+                allowed.insert_or_assign( id_key, entry.id );
                 allowed.emplace( name_key, entry.id );
-                inventory.emplace( entry.id, entry.ptr );
+                inventory.emplace( entry.id, entry.location );
                 id_to_name.emplace( entry.id, entry.name );
             }
             look_inventory_selection selection;
@@ -3979,7 +4047,28 @@ class llm_intent_manager
             }
             if( npc *target = g->find_npc( context.npc_id ) ) {
                 if( target->is_player_ally() ) {
-                    apply_look_inventory_actions( *target, resp.request_id, inventory, id_to_name, selection );
+                    if( selection.give ) {
+                        if( target->llm_intent_order_revision() != context.order_revision ) {
+                            return; // a newer order owns this NPC; never restore a stale gift
+                        }
+                        const auto selected = std::find_if( context.items.begin(), context.items.end(),
+                        [&]( const inventory_item_entry & entry ) {
+                            return entry.id == selection.give_item;
+                        } );
+                        const auto recipient = std::find_if( context.recipients.begin(), context.recipients.end(),
+                        [&]( const gift_recipient_entry & entry ) {
+                            return entry.id == selection.give_recipient;
+                        } );
+                        if( selected == context.items.end() || recipient == context.recipients.end() ) {
+                            target->begin_llm_action( npc::llm_action_kind::give, "", "", std::nullopt, resp.request_id );
+                            target->finish_llm_action( npc::llm_action_phase::blocked, "give.invalid_selection" );
+                            return;
+                        }
+                        target->set_llm_give( selected->location, recipient->character, recipient->avatar,
+                                              selected->tree, resp.request_id );
+                    } else {
+                        apply_look_inventory_actions( *target, resp.request_id, inventory, id_to_name, selection );
+                    }
                 }
             }
         }
@@ -4355,12 +4444,32 @@ void process_response_for_test( npc &listener, const std::string &request_id,
 
         void process_inventory_response_for_test( npc &listener, const std::string &response_text ) {
             look_inventory_context context{ listener.getID(), listener.get_name(),
-                                            collect_inventory_entries( listener, 100 ) };
+                                            collect_inventory_entries( listener, 100 ), collect_gift_recipients( listener ),
+                                            listener.llm_intent_order_revision() };
             llm_intent_response response;
             response.request_id = "inventory-test";
             response.ok = true;
             response.text = response_text;
             process_look_inventory_response( response, context );
+        }
+
+        void prepare_inventory_request_for_test( npc &listener, const std::string &request_id ) {
+            look_inventory_context context{ listener.getID(), listener.get_name(),
+                                            collect_inventory_entries( listener, 100 ), collect_gift_recipients( listener ),
+                                            listener.llm_intent_order_revision() };
+            look_inventory_requests.emplace( request_id, std::move( context ) );
+        }
+
+        void process_prepared_inventory_response_for_test( npc &listener, const std::string &request_id,
+                const std::string &text ) {
+            llm_intent_response response;
+            response.request_id = request_id;
+            response.npc_id = listener.getID();
+            response.npc_name = listener.get_name();
+            response.ok = true;
+            response.text = text;
+            response_queue.push( std::move( response ) );
+            process_responses();
         }
 
         bool has_request_state_for_test( const npc &listener, const std::string &request_id ) {
@@ -4566,6 +4675,22 @@ llm_intent_manager &get_manager()
 
 namespace llm_intent
 {
+std::string gift_tree_identity( const item &root )
+{
+    std::string tree = string_format( "[%lld:%s:%d:%s",
+                                      static_cast<long long>( root.uid().get_value() ),
+                                      root.typeId().str(), root.charges, root.get_owner().str() );
+    for( const item_pocket *pocket : root.get_pockets( []( const item_pocket & ) { return true; } ) ) {
+        tree += string_format( "{%d:%d", static_cast<int>( pocket->get_pocket_data()->type ),
+                               pocket->sealed() ? 1 : 0 );
+        for( const item *child : pocket->all_items_top() ) {
+            tree += gift_tree_identity( *child );
+        }
+        tree += "}";
+    }
+    return tree + "]";
+}
+
 std::string normalize_item_label( std::string_view text )
 {
     return normalize_item_label_impl( text );
@@ -4705,9 +4830,21 @@ void process_inventory_response_for_test( npc &listener, const std::string &resp
     get_manager().process_inventory_response_for_test( listener, response_text );
 }
 
+void prepare_inventory_request_for_test( npc &listener, const std::string &request_id )
+{
+    get_manager().prepare_inventory_request_for_test( listener, request_id );
+}
+
+void process_prepared_inventory_response_for_test( npc &listener, const std::string &request_id,
+        const std::string &text )
+{
+    get_manager().process_prepared_inventory_response_for_test( listener, request_id, text );
+}
+
 std::string build_inventory_prompt_for_test( npc &listener, const std::string &utterance )
 {
-    return build_look_inventory_prompt( utterance, collect_inventory_entries( listener, 100 ) );
+    return build_look_inventory_prompt( utterance, collect_inventory_entries( listener, 100 ),
+                                        collect_gift_recipients( listener ) );
 }
 
 std::string build_look_around_prompt_for_test( npc &listener, const std::string &utterance )

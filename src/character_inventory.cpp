@@ -975,6 +975,91 @@ void Character::set_wielded_item( const item &to_wield )
     weapon = to_wield;
 }
 
+ret_val<item *> Character::receive_gift( Character &donor, item &gift )
+{
+    if( this == &donor || !donor.has_item( gift ) || gift.is_null() ) {
+        return ret_val<item *>::make_failure( nullptr, "give.item_missing" );
+    }
+    if( is_dead_state() || donor.is_dead_state() || posz() != donor.posz() ||
+        rl_dist( pos_bub(), donor.pos_bub() ) != 1 ||
+        !get_map().passable( pos_bub() ) || !get_map().passable( donor.pos_bub() ) ||
+        !get_map().clear_path( pos_bub(), donor.pos_bub(), 1, 1, 100 ) ) {
+        return ret_val<item *>::make_failure( nullptr, "give.no_path" );
+    }
+    if( ( donor.is_worn( gift ) && !donor.can_takeoff( gift ).success() ) ||
+        ( donor.is_wielding( gift ) && !donor.can_unwield( gift ).success() ) ) {
+        return ret_val<item *>::make_failure( nullptr, "give.cannot_remove" );
+    }
+    if( !can_pickWeight( gift, true ) ) {
+        return ret_val<item *>::make_failure( nullptr, "give.too_heavy" );
+    }
+    if( !get_faction() ) {
+        return ret_val<item *>::make_failure( nullptr, "give.recipient_changed" );
+    }
+    auto accept_tree = [this]( item &root ) {
+        // Native default traversal omits nonstandard pockets, including MOD.
+        // A whole-tree gift changes ownership and invalidates prior references
+        // for every descendant, while retaining their native identities.
+        const auto descendants = root.all_items_ptr();
+        root.invalidate_references();
+        root.set_owner( *this );
+        for( item *child : descendants ) {
+            child->invalidate_references();
+            child->set_owner( *this );
+        }
+    };
+    auto pocket = best_pocket( gift );
+    item *received = nullptr;
+    bool wielded = false;
+    if( pocket.second ) {
+        const auto result = pocket.second->transfer_item_from( donor, gift );
+        if( !result.success() ) {
+            return result;
+        }
+        received = result.value();
+        accept_tree( *received );
+        pocket.first.on_contents_changed();
+    } else {
+        if( has_weapon() || !can_wield( gift ).success() ) {
+            return ret_val<item *>::make_failure( nullptr, "give.no_space" );
+        }
+        // All potentially refusing checks precede extraction. The commit is a
+        // move into already-empty hands, with no copying or replacement path.
+        std::list<item> owned = donor.remove_items_with( [&]( const item & candidate ) {
+            return &candidate == &gift;
+        }, 1 );
+        if( owned.empty() ) {
+            return ret_val<item *>::make_failure( nullptr, "give.item_missing" );
+        }
+        weapon = std::move( owned.front() );
+        received = &weapon;
+        accept_tree( *received );
+        last_item = received->typeId();
+        recoil = MAX_RECOIL;
+        received->on_wield( *this );
+        inv->update_invlet( *received );
+        inv->update_cache_with_item( *received );
+        wielded = true;
+        item_location loc( *this, received );
+        get_event_bus().send_with_talker( this, &loc,
+                                          cata::event::make<event_type::character_wields_item>( getID(), weapon.typeId() ) );
+    }
+    invalidate_inventory_validity_cache();
+    invalidate_weight_carried_cache();
+    invalidate_leak_level_cache();
+    donor.invalidate_inventory_validity_cache();
+    donor.invalidate_leak_level_cache();
+    cached_info.erase( "reloadables" );
+    cached_info.erase( "weapon_value" );
+    if( !wielded ) {
+        // A handoff does not tilt or empty the selected container. on_pickup()
+        // can spill open pockets, so notify the new carrier without that action.
+        flag_encumbrance();
+        on_item_acquire( *received );
+    }
+    return ret_val<item *>::make_success( received );
+}
+
 bool Character::has_alarm_clock() const
 {
     map &here = get_map();

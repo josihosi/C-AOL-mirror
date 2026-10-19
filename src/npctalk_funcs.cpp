@@ -425,6 +425,7 @@ void talk_function::goto_location( npc &p )
 
 void talk_function::assign_guard( npc &p )
 {
+    p.cancel_llm_give( "intent.superseded" );
     if( !p.is_player_ally() ) {
         p.set_mission( NPC_MISSION_GUARD );
         p.set_omt_destination();
@@ -515,6 +516,7 @@ void talk_function::return_to_camp_duties( npc &p )
 
 void talk_function::stop_guard( npc &p )
 {
+    p.cancel_llm_give( "intent.superseded" );
     if( !p.is_player_ally() ) {
         p.set_attitude( NPCATT_NULL );
         p.set_mission( NPC_MISSION_NULL );
@@ -916,6 +918,7 @@ void talk_function::drop_items_in_place( npc &p )
 
 void talk_function::follow( npc &p )
 {
+    p.cancel_llm_give( "intent.superseded" );
     g->add_npc_follower( p.getID() );
     p.set_attitude( NPCATT_FOLLOW );
     p.set_fac( faction_your_followers );
@@ -928,6 +931,7 @@ void talk_function::follow( npc &p )
 
 void talk_function::follow_only( npc &p )
 {
+    p.cancel_llm_give( "intent.superseded" );
     p.set_attitude( NPCATT_FOLLOW );
 }
 

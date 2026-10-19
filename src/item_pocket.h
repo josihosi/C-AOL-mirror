@@ -346,6 +346,9 @@ class item_pocket
                                      bool restack_charges = true, bool ignore_contents = false );
         ret_val<item *> insert_item( item &&it, bool into_bottom = false,
                                      bool restack_charges = true, bool ignore_contents = false );
+        // Checked whole-tree ownership transfer. Refusal leaves the source intact;
+        // after extraction, list splice commits without copying, allocation or merging.
+        ret_val<item *> transfer_item_from( Character &donor, item &it );
         /**
           * adds an item to the pocket with no checks
           * may create a new pocket

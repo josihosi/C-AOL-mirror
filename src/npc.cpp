@@ -350,6 +350,8 @@ std::string llm_action_kind_name( npc::llm_action_kind kind )
             return "look_inventory";
         case npc::llm_action_kind::attack_target:
             return "attack_target";
+        case npc::llm_action_kind::give:
+            return "give";
     }
     return "unknown";
 }
@@ -523,6 +525,33 @@ bool npc::has_active_llm_action_status() const
 
 std::string npc::llm_action_bark_for_reason( const std::string &reason_code )
 {
+    if( reason_code == "give.no_space" ) {
+        return _( "You'll need to make room first." );
+    }
+    if( reason_code == "give.too_heavy" ) {
+        return _( "That's too much weight to carry." );
+    }
+    if( reason_code == "give.refused" ) {
+        return _( "They won't accept that." );
+    }
+    if( reason_code == "give.item_missing" || reason_code == "give.item_changed" ) {
+        return _( "I don't have that same item anymore." );
+    }
+    if( reason_code == "give.recipient_changed" ) {
+        return _( "I can't hand it to them now." );
+    }
+    if( reason_code == "give.no_path" ) {
+        return _( "I can't get close enough to hand it over." );
+    }
+    if( reason_code == "give.danger" ) {
+        return _( "Can't hand it over while we're in danger." );
+    }
+    if( reason_code == "give.cannot_remove" ) {
+        return _( "I can't take that off." );
+    }
+    if( reason_code == "give.invalid_selection" ) {
+        return _( "I need one listed item and recipient for that handoff." );
+    }
     if( reason_code == "pickup.no_inventory_space" ) {
         return _( "No room for that." );
     }
@@ -3724,6 +3753,7 @@ void npc::set_llm_intent_actions( const std::vector<llm_intent_action> &actions,
                                   const std::string &request_id,
                                   const std::string &target_hint ) const
 {
+    cancel_llm_give( "intent.superseded" );
     if( has_active_llm_action_status() ) {
         finish_llm_action( llm_action_phase::cancelled, "intent.superseded" );
     }
@@ -3759,6 +3789,7 @@ void npc::set_llm_intent_actions( const std::vector<llm_intent_action> &actions,
 
 void npc::clear_llm_intent_actions()
 {
+    cancel_llm_give( "intent.cleared" );
     if( has_active_llm_action_status() ) {
         finish_llm_action( llm_action_phase::cancelled, "intent.cleared" );
     }
@@ -3785,6 +3816,34 @@ void npc::clear_llm_intent_actions()
     state.look_around_request_id.clear();
     state.look_around_targets.clear();
     state.look_around_active_target = npc::llm_item_target{};
+}
+
+uint64_t npc::llm_intent_order_revision() const
+{
+    return llm_intent_state_for( *this ).order_revision;
+}
+
+void npc::cancel_llm_give( const std::string &reason ) const
+{
+    llm_intent_state &state = llm_intent_state_for( *this );
+    // A secondary selection may still be in flight before an approach exists.
+    // Every owning order/cancellation boundary invalidates that selection too.
+    ++state.order_revision;
+    if( state.giving ) {
+        state.giving.reset();
+        finish_llm_action( llm_action_phase::cancelled, reason );
+    }
+}
+
+void npc::set_llm_give( item_location selected, character_id recipient, bool avatar,
+                        const std::string &tree, const std::string &request_id )
+{
+    clear_llm_intent_actions();
+    begin_llm_action( llm_action_kind::give, "", selected ? selected->tname() : "",
+                      std::nullopt, request_id );
+    llm_intent_state_for( *this ).giving = llm_intent_state::gift{
+        std::move( selected ), recipient, avatar, tree
+    };
 }
 
 void npc::set_llm_intent_move_target( const std::optional<tripoint_abs_ms> &target,
@@ -4820,6 +4879,7 @@ void npc::add_new_mission( class mission *miss )
 
 void npc::on_unload()
 {
+    cancel_llm_give( "give.interrupted_unload" );
     // Active effects have already run each turn. Finish only the throttled body
     // interval so a later native catch-up cannot replay those active turns.
     if( !is_dead() && last_updated < calendar::turn ) {
@@ -5042,6 +5102,9 @@ void npc::process_turn()
     // Effects may select sleep. Preserve actual physiological collapse as well
     // as explicit incapacity; never remove effects while iterating them.
     reconcile_active_operation_sleep();
+    if( in_sleep_state() || duty_incapacitated() ) {
+        cancel_llm_give( "give.interrupted_incapacity" );
+    }
 
     if( get_option<bool>( "LLM_INTENT_ENABLE" ) ) {
         llm_intent_state &state = llm_intent_state_for( *this );

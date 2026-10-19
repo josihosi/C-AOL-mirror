@@ -2881,6 +2881,8 @@ class Character : public Creature, public visitable
         item_location get_wielded_item();
         // This invalidates the item_location returned by get_wielded_item
         void set_wielded_item( const item &to_wield );
+        // Pockets first, then empty hands; never drops, merges or replaces a weapon.
+        ret_val<item *> receive_gift( Character &donor, item &gift );
 
         int scent = 0;
         pimpl<bionic_collection> my_bionics;

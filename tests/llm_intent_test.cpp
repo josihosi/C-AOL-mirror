@@ -5,6 +5,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "active_item_cache.h"
 #include "activity_actor_definitions.h"
@@ -34,6 +35,7 @@
 #include "messages.h"
 #include "monster.h"
 #include "npc.h"
+#include "npctalk.h"
 #include "options_helpers.h"
 #include "player_helpers.h"
 #include "player_activity.h"
@@ -1140,5 +1142,653 @@ TEST_CASE( "llm_inventory_wield_then_drop_tracks_the_native_result",
     CHECK( rocks == 1 );
     for( const auto &message : Messages::recent_messages( 0 ) ) {
         CHECK( message.second.find( "inventory.item_missing" ) == std::string::npos );
+    }
+}
+
+namespace
+{
+template<typename Person>
+bool equip_gift_fixture( Person &who, item candidate )
+{
+    return who.wield( candidate );
+}
+
+template<typename Person>
+std::string gift_character_save( const Person &who )
+{
+    std::ostringstream saved;
+    JsonOut out( saved );
+    who.serialize( out );
+    return saved.str();
+}
+
+bool gift_status_contains( const std::string &expected )
+{
+    for( const auto &message : Messages::recent_messages( 0 ) ) {
+        if( message.second.find( expected ) != std::string::npos ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+item *gift_with_uid( Character &who, int64_t uid )
+{
+    item *found = nullptr;
+    who.visit_items( [&]( item * candidate, item * ) {
+        if( candidate->uid().get_value() == uid ) {
+            found = candidate;
+            return VisitResponse::ABORT;
+        }
+        return VisitResponse::NEXT;
+    } );
+    return found;
+}
+
+void give_turn( npc &donor )
+{
+    calendar::turn += 1_turns;
+    donor.set_moves( 100 );
+    donor.move();
+}
+
+void select_gift( npc &donor, const std::string &selection = "give: item_1 -> player" )
+{
+    llm_intent::prepare_inventory_request_for_test( donor, "give-caller-test" );
+    llm_intent::process_prepared_inventory_response_for_test( donor, "give-caller-test", selection );
+}
+}
+
+TEST_CASE( "companion_give_native_pockets_preserve_a_full_stack_without_merging",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    REQUIRE( receiver.wear_item( item( itype_id( "backpack" ), calendar::turn ) ) );
+    REQUIRE( equip_gift_fixture( receiver, item( itype_id( "rock" ), calendar::turn ) ) );
+    const int64_t weapon_uid = receiver.get_wielded_item()->uid().get_value();
+    item existing( itype_id( "9mm" ), calendar::turn, 7 );
+    REQUIRE( receiver.try_add( existing, nullptr, nullptr, false ) );
+    item ammo( itype_id( "9mm" ), calendar::turn, 61 );
+    REQUIRE( donor.wield( ammo ) );
+    const int64_t selected_uid = donor.get_wielded_item()->uid().get_value();
+    item_location old_location = donor.get_wielded_item();
+    select_gift( donor );
+    give_turn( donor );
+    CHECK( gift_status_contains( "LLM give completed" ) );
+    CHECK_FALSE( old_location );
+    CHECK_FALSE( donor.get_wielded_item() );
+    CHECK( receiver.get_wielded_item()->uid().get_value() == weapon_uid );
+    REQUIRE( gift_with_uid( receiver, selected_uid ) );
+    CHECK( gift_with_uid( receiver, selected_uid )->charges == 61 );
+    int stacks = 0;
+    int quantity = 0;
+    receiver.visit_items( [&]( item * candidate, item * ) {
+        if( candidate->typeId() == itype_id( "9mm" ) ) {
+            ++stacks;
+            quantity += candidate->charges;
+        }
+        return VisitResponse::NEXT;
+    } );
+    CHECK( stacks == 2 );
+    CHECK( quantity == 68 );
+    CHECK( get_map().i_at( donor.pos_bub() ).empty() );
+    CHECK( get_map().i_at( receiver.pos_bub() ).empty() );
+}
+
+TEST_CASE( "companion_give_caller_moves_the_exact_container_and_contents_once",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    item box( itype_id( "backpack" ), calendar::turn );
+    REQUIRE( box.put_in( item( itype_id( "9mm" ), calendar::turn, 37 ),
+                         pocket_type::CONTAINER ).success() );
+    REQUIRE( donor.wield( box ) );
+    const int64_t root_uid = donor.get_wielded_item()->uid().get_value();
+    const int64_t child_uid = donor.get_wielded_item()->only_item().uid().get_value();
+    SECTION( "empty hands fallback" ) {}
+    SECTION( "compatible pocket with occupied hands" ) {
+        REQUIRE( receiver.wear_item( item( itype_id( "backpack" ), calendar::turn ) ) );
+        REQUIRE( equip_gift_fixture( receiver, item( itype_id( "rock" ), calendar::turn ) ) );
+    }
+    select_gift( donor );
+    give_turn( donor );
+    CHECK( gift_status_contains( "LLM give completed" ) );
+    REQUIRE( gift_with_uid( receiver, root_uid ) );
+    CHECK( gift_with_uid( receiver, root_uid )->only_item().uid().get_value() == child_uid );
+    CHECK( gift_with_uid( receiver, root_uid )->only_item().charges == 37 );
+    CHECK_FALSE( gift_with_uid( donor, root_uid ) );
+    CHECK_FALSE( donor.get_wielded_item() );
+    llm_intent::process_prepared_inventory_response_for_test( donor, "give-caller-test",
+            "give: item_1 -> player" ); // the actual response context has been consumed
+    std::ostringstream saved;
+    JsonOut out( saved );
+    receiver.serialize( out );
+    auto restored = json_loader::from_string( saved.str() );
+    receiver.setID( character_id(), true ); // emulate the fresh-ID native loader
+    receiver.deserialize( restored.get_object() );
+    give_turn( donor );
+    REQUIRE( gift_with_uid( receiver, root_uid ) );
+    CHECK( gift_with_uid( receiver, root_uid )->only_item().uid().get_value() == child_uid );
+    CHECK( gift_with_uid( receiver, root_uid )->only_item().charges == 37 );
+    CHECK_FALSE( gift_with_uid( donor, root_uid ) );
+    CHECK( get_map().i_at( donor.pos_bub() ).empty() );
+    CHECK( get_map().i_at( receiver.pos_bub() ).empty() );
+}
+
+TEST_CASE( "companion_give_refusal_preserves_both_owners_and_full_quantity",
+           "[llm_intent][companion_give]" )
+{
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    item selected( itype_id( "rock" ), calendar::turn );
+    std::string reason = "give.no_space";
+    REQUIRE( equip_gift_fixture( receiver, item( itype_id( "rock" ), calendar::turn ) ) );
+    SECTION( "occupied hands with no pockets" ) {
+    }
+    SECTION( "refusal retains a container and nested charge stack" ) {
+        selected = item( itype_id( "backpack" ), calendar::turn );
+        REQUIRE( selected.put_in( item( itype_id( "9mm" ), calendar::turn, 37 ),
+                                  pocket_type::CONTAINER ).success() );
+    }
+    SECTION( "partial stack capacity cannot silently take a subset" ) {
+        REQUIRE( receiver.wear_item( item( itype_id( "jeans" ), calendar::turn ) ) );
+        selected = item( itype_id( "9mm" ), calendar::turn, 3000 );
+        REQUIRE( receiver.can_stash( item( itype_id( "9mm" ), calendar::turn, 1 ) ) );
+        REQUIRE_FALSE( receiver.can_stash( selected ) );
+        REQUIRE( receiver.can_pickWeight( selected, true ) );
+    }
+    SECTION( "native can_wield is not a carrying-weight check" ) {
+        receiver.remove_weapon();
+        selected = item( itype_id( "anvil_heavy" ), calendar::turn );
+        REQUIRE( receiver.can_wield( selected ).success() );
+        REQUIRE_FALSE( receiver.can_pickWeight( selected, true ) );
+        reason = "give.too_heavy";
+    }
+    REQUIRE( donor.wield( selected ) );
+    const int64_t uid = donor.get_wielded_item()->uid().get_value();
+    const int charges = donor.get_wielded_item()->charges;
+    const std::string donor_before = llm_intent::gift_tree_identity( *donor.get_wielded_item() );
+    const int64_t weapon_uid = receiver.get_wielded_item() ?
+                               receiver.get_wielded_item()->uid().get_value() : 0;
+    const std::string donor_save = gift_character_save( donor );
+    const std::string receiver_save = gift_character_save( receiver );
+    auto result = receiver.receive_gift( donor, *donor.get_wielded_item() );
+    CHECK_FALSE( result.success() );
+    CHECK( ( gift_character_save( donor ) == donor_save ) );
+    CHECK( ( gift_character_save( receiver ) == receiver_save ) );
+    CHECK( result.str() == reason );
+    REQUIRE( donor.get_wielded_item() );
+    CHECK( donor.get_wielded_item()->uid().get_value() == uid );
+    CHECK( donor.get_wielded_item()->charges == charges );
+    CHECK( llm_intent::gift_tree_identity( *donor.get_wielded_item() ) == donor_before );
+    CHECK_FALSE( gift_with_uid( receiver, uid ) );
+    CHECK( ( receiver.get_wielded_item() ? receiver.get_wielded_item()->uid().get_value() : 0 ) ==
+           weapon_uid );
+    CHECK( get_map().i_at( donor.pos_bub() ).empty() );
+    CHECK( get_map().i_at( receiver.pos_bub() ).empty() );
+}
+
+TEST_CASE( "companion_give_uses_listed_recipient_identity_despite_duplicate_names",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Twin" );
+    npc &receiver = spawn_test_npc_at( point_bub_ms( 51, 50 ), "Twin" );
+    npc &other = spawn_test_npc_at( point_bub_ms( 50, 51 ), "Twin" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    receiver.set_fac( faction_your_followers );
+    other.set_fac( faction_your_followers );
+    REQUIRE( equip_gift_fixture( donor, item( itype_id( "rock" ), calendar::turn ) ) );
+    const int64_t uid = donor.get_wielded_item()->uid().get_value();
+    const std::string handle = "npc_" + std::to_string( receiver.getID().get_value() );
+    CHECK( llm_intent::build_inventory_prompt_for_test( donor, "Give to Twin" ).find(
+               "id=\"" + handle + "\"" ) != std::string::npos );
+    SECTION( "exact eligible ally" ) {
+        select_gift( donor, "give: item_1 -> " + handle );
+        give_turn( donor );
+        CHECK( gift_with_uid( receiver, uid ) );
+        CHECK_FALSE( gift_with_uid( other, uid ) );
+        CHECK_FALSE( gift_with_uid( donor, uid ) );
+    }
+    SECTION( "same name does not substitute a changed recipient" ) {
+        llm_intent::prepare_inventory_request_for_test( donor, "changed-recipient" );
+        receiver.set_fac( faction_id( "no_faction" ) );
+        receiver.set_attitude( NPCATT_NULL );
+        llm_intent::process_prepared_inventory_response_for_test( donor, "changed-recipient",
+                "give: item_1 -> " + handle );
+        give_turn( donor );
+        CHECK( gift_status_contains( "LLM give blocked: give.recipient_changed" ) );
+        CHECK( gift_with_uid( donor, uid ) );
+        CHECK_FALSE( gift_with_uid( receiver, uid ) );
+        CHECK_FALSE( gift_with_uid( other, uid ) );
+    }
+    SECTION( "native recipient refusal differs from capacity" ) {
+        donor.remove_weapon();
+        item poisoned( itype_id( "apple" ), calendar::turn );
+        poisoned.poison = 10;
+        REQUIRE( donor.wield( poisoned ) );
+        receiver.op_of_u.trust = 0;
+        REQUIRE_FALSE( receiver.will_accept_from_player( *donor.get_wielded_item() ) );
+        const int64_t poison_uid = donor.get_wielded_item()->uid().get_value();
+        select_gift( donor, "give: item_1 -> " + handle );
+        give_turn( donor );
+        CHECK( gift_status_contains( "LLM give blocked: give.refused" ) );
+        CHECK( gift_with_uid( donor, poison_uid ) );
+        CHECK_FALSE( gift_with_uid( receiver, poison_uid ) );
+    }
+}
+
+TEST_CASE( "companion_give_stale_and_malformed_selection_never_substitutes_inventory",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    REQUIRE( equip_gift_fixture( donor, item( itype_id( "9mm" ), calendar::turn, 61 ) ) );
+    const int64_t uid = donor.get_wielded_item()->uid().get_value();
+    llm_intent::prepare_inventory_request_for_test( donor, "stale-give" );
+    std::string response = "give: item_1 -> player";
+    SECTION( "changed charges" ) {
+        donor.get_wielded_item()->charges = 60;
+    }
+    SECTION( "ownership changed to ground, identical replacement stays put" ) {
+        item owned = donor.get_wielded_item().detach();
+        get_map().add_item_or_charges( donor.pos_bub(), std::move( owned ) );
+        REQUIRE( equip_gift_fixture( donor, item( itype_id( "9mm" ), calendar::turn, 61 ) ) );
+    }
+    SECTION( "superseding order while model response is pending" ) {
+        donor.set_llm_intent_actions( { llm_intent_action::wait_here }, "new-order", "" );
+    }
+    SECTION( "mixed gift and drop refuses every section" ) {
+        response = "give: item_1 -> player | drop: item_1";
+    }
+    SECTION( "unlisted recipient" ) {
+        response = "give: item_1 -> npc_999999";
+    }
+    SECTION( "duplicate names require a listed item token" ) {
+        response = "give: 9mm -> player";
+    }
+    llm_intent::process_prepared_inventory_response_for_test( donor, "stale-give", response );
+    const int64_t current_uid = donor.get_wielded_item()->uid().get_value();
+    give_turn( donor );
+    CHECK( gift_with_uid( donor, current_uid ) );
+    CHECK_FALSE( gift_with_uid( get_avatar(), uid ) );
+}
+
+TEST_CASE( "companion_give_new_primary_admission_invalidates_pending_secondary_even_when_primary_fails",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    override_option debug_log( "DEBUG_LLM_INTENT_LOG", "false" );
+    // Exercise the actual asynchronous request caller and error response without
+    // launching a runner or contacting a provider. This native configuration
+    // failure happens before runner.ensure_running.
+    override_option backend( "LLM_INTENT_BACKEND", "openvino" );
+    override_option api( "LLM_INTENT_USE_API", "false" );
+    override_option force_npu( "LLM_INTENT_FORCE_NPU", "true" );
+    override_option device( "LLM_INTENT_DEVICE", "CPU" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    REQUIRE( equip_gift_fixture( donor, item( itype_id( "9mm" ), calendar::turn, 61 ) ) );
+    const int64_t uid = donor.get_wielded_item()->uid().get_value();
+    llm_intent::prepare_inventory_request_for_test( donor, "older-give-secondary" );
+    const uint64_t selected_revision = donor.llm_intent_order_revision();
+    const bool serial = GENERATE( false, true );
+    const bool secondary_after_failure = GENERATE( false, true );
+    CAPTURE( serial, secondary_after_failure );
+    const auto request = [&]() {
+        if( serial ) {
+            llm_intent::enqueue_requests( { &donor }, "Wait here instead." );
+        } else {
+            llm_intent::enqueue_request( donor, "Wait here instead." );
+        }
+    };
+    request();
+    CHECK( donor.llm_intent_order_revision() == selected_revision + 1 );
+    REQUIRE( llm_intent::has_request_state_for_test( donor, "not-a-request" ) );
+    // A rejected duplicate while the accepted request is pending is not another
+    // order admission and must not advance the revision.
+    const uint64_t accepted_revision = donor.llm_intent_order_revision();
+    request();
+    CHECK( donor.llm_intent_order_revision() == accepted_revision );
+    const auto deliver_old_secondary = [&]() {
+        llm_intent::process_prepared_inventory_response_for_test(
+            donor, "older-give-secondary", "give: item_1 -> player" );
+    };
+    if( !secondary_after_failure ) {
+        deliver_old_secondary();
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds( 2 );
+    while( llm_intent::has_request_state_for_test( donor, "not-a-request" ) &&
+           std::chrono::steady_clock::now() < deadline ) {
+        llm_intent::process_responses();
+        std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+    }
+    REQUIRE_FALSE( llm_intent::has_request_state_for_test( donor, "not-a-request" ) );
+    CHECK( gift_status_contains( "LLM_INTENT_FORCE_NPU requires device NPU." ) );
+    if( secondary_after_failure ) {
+        deliver_old_secondary();
+    }
+    CHECK_FALSE( donor.has_active_llm_action_status() );
+    CHECK( donor.llm_intent_order_revision() == accepted_revision );
+    give_turn( donor );
+    REQUIRE( gift_with_uid( donor, uid ) );
+    CHECK( gift_with_uid( donor, uid )->charges == 61 );
+    CHECK_FALSE( gift_with_uid( get_avatar(), uid ) );
+}
+
+TEST_CASE( "companion_give_native_player_commands_cancel_selection_and_active_approach",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 56, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    auto worn = donor.wear_item( item( itype_id( "backpack" ), calendar::turn ) );
+    REQUIRE( worn );
+    const int64_t uid = ( **worn ).uid().get_value();
+    const bool active_approach = GENERATE( false, true );
+    const std::string command = GENERATE( "guard", "stop_guard", "follow", "follow_only" );
+    CAPTURE( active_approach, command );
+    if( active_approach ) {
+        select_gift( donor );
+        give_turn( donor );
+        REQUIRE( donor.has_active_llm_action_status() );
+        REQUIRE( gift_status_contains( "LLM give waiting: give.approaching" ) );
+    } else {
+        llm_intent::prepare_inventory_request_for_test( donor, "native-command-stale-give" );
+    }
+    const uint64_t before_command = donor.llm_intent_order_revision();
+    if( command == "guard" ) {
+        talk_function::assign_guard( donor );
+    } else if( command == "stop_guard" ) {
+        talk_function::stop_guard( donor );
+    } else if( command == "follow" ) {
+        talk_function::follow( donor );
+    } else {
+        talk_function::follow_only( donor );
+    }
+    CHECK( donor.llm_intent_order_revision() == before_command + 1 );
+    if( active_approach ) {
+        CHECK( gift_status_contains( "LLM give cancelled: intent.superseded" ) );
+    } else {
+        llm_intent::process_prepared_inventory_response_for_test(
+            donor, "native-command-stale-give", "give: item_1 -> player" );
+    }
+    CHECK_FALSE( donor.has_active_llm_action_status() );
+    // Even an immediately available recipient cannot complete the old gift.
+    receiver.setpos( get_map(), donor.pos_bub() + tripoint_rel_ms::east );
+    give_turn( donor );
+    CHECK( gift_with_uid( donor, uid ) );
+    CHECK_FALSE( gift_with_uid( receiver, uid ) );
+}
+
+TEST_CASE( "companion_give_native_approach_yields_to_interruption_and_reload",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 56, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    // Keep the selected cargo worn so ordinary danger combat has no reason to
+    // discard a poor wielded weapon after the handoff has been interrupted.
+    auto worn = donor.wear_item( item( itype_id( "backpack" ), calendar::turn ) );
+    REQUIRE( worn );
+    const int64_t uid = ( **worn ).uid().get_value();
+    select_gift( donor );
+    const tripoint_bub_ms initial = donor.pos_bub();
+    give_turn( donor );
+    CHECK( gift_status_contains( "LLM give waiting: give.approaching" ) );
+    REQUIRE( donor.pos_bub() != initial );
+    REQUIRE( gift_with_uid( donor, uid ) );
+    SECTION( "ordinary reachable handoff" ) {
+        for( int turn = 0; turn < 12 && gift_with_uid( donor, uid ); ++turn ) {
+            give_turn( donor );
+        }
+        CHECK( gift_with_uid( receiver, uid ) );
+        CHECK( rl_dist( donor.pos_bub(), receiver.pos_bub() ) == 1 );
+    }
+    SECTION( "superseding command cancels approach" ) {
+        donor.set_llm_intent_actions( { llm_intent_action::wait_here }, "stop-give", "" );
+        run_npc_turns( donor, 8 );
+        CHECK( gift_with_uid( donor, uid ) );
+        CHECK_FALSE( gift_with_uid( receiver, uid ) );
+    }
+    SECTION( "reload cancels an incomplete approach" ) {
+        std::ostringstream saved;
+        JsonOut out( saved );
+        donor.serialize( out );
+        auto restored = json_loader::from_string( saved.str() );
+        donor.setID( character_id(), true ); // loader assigns the saved identity before cancellation
+        donor.deserialize( restored.get_object() );
+        receiver.setpos( get_map(), donor.pos_bub() + tripoint( 1, 0, 0 ) );
+        give_turn( donor );
+        CHECK( gift_with_uid( donor, uid ) );
+        CHECK_FALSE( gift_with_uid( receiver, uid ) );
+    }
+    SECTION( "native unload cancels the approach without transferring cargo" ) {
+        donor.on_unload();
+        CHECK( gift_status_contains( "LLM give cancelled: give.interrupted_unload" ) );
+        CHECK_FALSE( donor.has_active_llm_action_status() );
+        CHECK( gift_with_uid( donor, uid ) );
+        receiver.setpos( get_map(), donor.pos_bub() + tripoint( 1, 0, 0 ) );
+        give_turn( donor );
+        CHECK_FALSE( gift_with_uid( receiver, uid ) );
+    }
+    SECTION( "real hostile contact interrupts without a remote transfer" ) {
+        // A weak zombie can be below this NPC's native danger threshold. Use a
+        // real adjacent hulk and require the native assessment to recognize it.
+        monster &threat = spawn_test_monster( "mon_zombie_hulk", donor.pos_bub() + tripoint( 0, 1, 0 ) );
+        REQUIRE( donor.attitude_to( threat ) == Creature::Attitude::HOSTILE );
+        REQUIRE( donor.sees( get_map(), threat ) );
+        give_turn( donor );
+        CAPTURE( donor.get_ai_danger(), donor.danger_assessment(), donor.current_target() != nullptr,
+                 donor.has_active_llm_action_status() );
+        std::string observed_messages;
+        for( const auto &message : Messages::recent_messages( 0 ) ) {
+            observed_messages += message.second + "\n";
+        }
+        CAPTURE( observed_messages );
+        REQUIRE( ( donor.get_ai_danger() > 0 || donor.danger_assessment() > 0 || donor.current_target() != nullptr ) );
+        CHECK( gift_status_contains( "LLM give blocked: give.danger" ) );
+        CHECK( gift_with_uid( donor, uid ) );
+        CHECK_FALSE( gift_with_uid( receiver, uid ) );
+    }
+}
+
+TEST_CASE( "companion_give_duplicate_item_names_select_one_exact_listed_tree",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    item box( itype_id( "backpack" ), calendar::turn );
+    // Force separate identical stacks, as an ordinary restored inventory can contain.
+    auto pocket = box.get_container_pockets().front();
+    REQUIRE( pocket->insert_item( item( itype_id( "9mm" ), calendar::turn, 5 ), false,
+                                  false ).success() );
+    REQUIRE( pocket->insert_item( item( itype_id( "9mm" ), calendar::turn, 5 ), false,
+                                  false ).success() );
+    REQUIRE( donor.wield( box ) );
+    const auto children = donor.get_wielded_item()->all_items_top();
+    REQUIRE( children.size() == 2 );
+    const int64_t first_uid = children.front()->uid().get_value();
+    const int64_t second_uid = children.back()->uid().get_value();
+    REQUIRE( first_uid != second_uid );
+    const std::string prompt = llm_intent::build_inventory_prompt_for_test( donor,
+        "Give the second stack" );
+    CHECK( prompt.find( "id=\"item_3\"" ) != std::string::npos );
+    select_gift( donor, "give: item_3 -> player" );
+    give_turn( donor );
+    CHECK( gift_with_uid( donor, first_uid ) );
+    CHECK_FALSE( gift_with_uid( donor, second_uid ) );
+    REQUIRE( gift_with_uid( get_avatar(), second_uid ) );
+    CHECK( gift_with_uid( get_avatar(), second_uid )->charges == 5 );
+}
+
+TEST_CASE( "companion_give_does_not_cross_glass_or_an_unreachable_handoff_ring",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    map &here = get_map();
+    avatar &receiver = get_avatar();
+    receiver.setpos( here, tripoint_bub_ms( 54, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    REQUIRE( equip_gift_fixture( donor, item( itype_id( "rock" ), calendar::turn ) ) );
+    const int64_t uid = donor.get_wielded_item()->uid().get_value();
+    for( const tripoint_bub_ms &p : here.points_in_radius( receiver.pos_bub(), 1 ) ) {
+        if( p != receiver.pos_bub() ) {
+            here.ter_set( p, ter_str_id( "t_wall_glass" ) );
+        }
+    }
+    REQUIRE( donor.sees( here, receiver ) );
+    select_gift( donor );
+    give_turn( donor );
+    CHECK( gift_with_uid( donor, uid ) );
+    CHECK_FALSE( gift_with_uid( receiver, uid ) );
+    CHECK( gift_status_contains( "LLM give blocked: give.no_path" ) );
+    CHECK( donor.pos_bub() == tripoint_bub_ms( 50, 50, 0 ) );
+    CHECK( npc::llm_action_bark_for_reason( "give.refused" ) !=
+           npc::llm_action_bark_for_reason( "give.no_space" ) );
+    CHECK_FALSE( npc::llm_action_bark_for_reason( "give.no_path" ).empty() );
+}
+
+TEST_CASE( "companion_give_open_container_never_spills_its_contents",
+           "[llm_intent][companion_give]" )
+{
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    item bucket( itype_id( "bucket" ), calendar::turn );
+    REQUIRE( bucket.put_in( item( itype_id( "water_clean" ), calendar::turn, 5 ),
+                            pocket_type::CONTAINER ).success() );
+    REQUIRE( donor.wield( bucket ) );
+    REQUIRE( donor.get_wielded_item()->will_spill() );
+    const int64_t uid = donor.get_wielded_item()->uid().get_value();
+    const int64_t child_uid = donor.get_wielded_item()->only_item().uid().get_value();
+    auto result = receiver.receive_gift( donor, *donor.get_wielded_item() );
+    REQUIRE( result.success() );
+    REQUIRE( gift_with_uid( receiver, uid ) );
+    CHECK( gift_with_uid( receiver, uid )->only_item().uid().get_value() == child_uid );
+    CHECK( gift_with_uid( receiver, uid )->only_item().charges == 5 );
+    CHECK( get_map().i_at( donor.pos_bub() ).empty() );
+    CHECK( get_map().i_at( receiver.pos_bub() ).empty() );
+}
+
+TEST_CASE( "companion_give_binds_loaded_magazine_and_mod_as_one_native_tree",
+           "[llm_intent][companion_give]" )
+{
+    override_option enabled( "LLM_INTENT_ENABLE", "true" );
+    override_option debug_status( "DEBUG_LLM_INTENT_UI", "true" );
+    Messages::clear_messages();
+    setup_snapshot_test_scene();
+    avatar &receiver = get_avatar();
+    receiver.setpos( get_map(), tripoint_bub_ms( 51, 50, 0 ) );
+    npc &donor = spawn_test_npc_at( point_bub_ms( 50, 50 ), "Donor" );
+    donor.set_fac( faction_your_followers );
+    donor.set_attitude( NPCATT_FOLLOW );
+    item gun( itype_id( "glock_19" ), calendar::turn );
+    gun.ammo_set( itype_id( "9mm" ), 7 );
+    REQUIRE( gun.put_in( item( itype_id( "red_dot_sight" ), calendar::turn ),
+                         pocket_type::MOD ).success() );
+    REQUIRE( donor.wield( gun ) );
+    item_location original = donor.get_wielded_item();
+    const int64_t root_uid = original->uid().get_value();
+    REQUIRE( original->magazine_current() );
+    const int64_t magazine_uid = original->magazine_current()->uid().get_value();
+    auto mods = original->all_items_top( pocket_type::MOD );
+    REQUIRE( mods.size() == 1 );
+    item *mod = mods.front();
+    const int64_t mod_uid = mod->uid().get_value();
+    mod->set_owner( faction_id( "no_faction" ) );
+    auto old_mod_reference = mod->get_safe_reference();
+    llm_intent::prepare_inventory_request_for_test( donor, "give-mod-tree" );
+    SECTION( "intact full tree and ownership transfer" ) {
+        llm_intent::process_prepared_inventory_response_for_test( donor, "give-mod-tree", "give: item_1 -> player" );
+        give_turn( donor );
+        REQUIRE( receiver.get_wielded_item() );
+        CHECK( receiver.get_wielded_item()->uid().get_value() == root_uid );
+        CHECK( receiver.get_wielded_item()->magazine_current()->uid().get_value() == magazine_uid );
+        CHECK( receiver.get_wielded_item()->ammo_remaining() == 7 );
+        auto received_mods = receiver.get_wielded_item()->all_items_top( pocket_type::MOD );
+        REQUIRE( received_mods.size() == 1 );
+        CHECK( received_mods.front()->uid().get_value() == mod_uid );
+        CHECK( received_mods.front()->get_owner() == receiver.get_faction()->id );
+        CHECK_FALSE( old_mod_reference );
+        CHECK_FALSE( original );
+    }
+    SECTION( "changed attached mod refuses without substituting its identical name" ) {
+        original->remove_item( *mod );
+        REQUIRE( original->put_in( item( itype_id( "red_dot_sight" ), calendar::turn ),
+                                   pocket_type::MOD ).success() );
+        const int64_t replacement_uid = original->all_items_top( pocket_type::MOD ).front()->uid().get_value();
+        REQUIRE( replacement_uid != mod_uid );
+        llm_intent::process_prepared_inventory_response_for_test( donor, "give-mod-tree", "give: item_1 -> player" );
+        give_turn( donor );
+        CHECK( gift_status_contains( "LLM give blocked: give.item_changed" ) );
+        REQUIRE( donor.get_wielded_item() );
+        CHECK( donor.get_wielded_item()->uid().get_value() == root_uid );
+        CHECK( donor.get_wielded_item()->magazine_current()->uid().get_value() == magazine_uid );
+        CHECK( donor.get_wielded_item()->ammo_remaining() == 7 );
+        CHECK( donor.get_wielded_item()->all_items_top( pocket_type::MOD ).front()->uid().get_value() == replacement_uid );
+        CHECK_FALSE( receiver.get_wielded_item() );
     }
 }

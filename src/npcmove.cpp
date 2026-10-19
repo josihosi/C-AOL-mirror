@@ -2980,6 +2980,96 @@ void npc::apply_llm_intent_target()
     }
 }
 
+bool npc::apply_llm_give( bool safe )
+{
+    llm_intent_state &state = llm_intent_state_for( *this );
+    if( !state.giving ) {
+        return false;
+    }
+    auto stop = [&]( const std::string & reason ) {
+        state.giving.reset();
+        path.clear();
+        finish_llm_action( llm_action_phase::blocked, reason );
+    };
+    if( !safe || attitude == NPCATT_FLEE || attitude == NPCATT_FLEE_TEMP ||
+        has_effect( effect_npc_run_away ) || state.panic_forced_turns_remaining > 0 ) {
+        stop( "give.danger" );
+        return false; // ordinary danger response retains priority
+    }
+    llm_intent_state::gift &gift = *state.giving;
+    Character *recipient = gift.avatar ? &get_player_character() : g->find_npc( gift.recipient );
+    map &here = get_map();
+    if( !is_player_ally() || is_dead_state() || recipient == nullptr ||
+        recipient == this || recipient->getID() != gift.recipient ||
+        recipient->is_dead_state() || recipient->is_hallucination() || recipient->in_sleep_state() ||
+        ( recipient->is_npc() && !static_cast<npc *>( recipient )->is_player_ally() ) ||
+        !is_ally( *recipient ) || attitude_to( *recipient ) == Attitude::HOSTILE ||
+        recipient->attitude_to( *this ) == Attitude::HOSTILE || posz() != recipient->posz() ||
+        !here.inbounds( recipient->pos_bub() ) || !here.passable( recipient->pos_bub() ) ||
+        !sees( here, *recipient ) ) {
+        stop( "give.recipient_changed" );
+        mod_moves( -100 );
+        return true;
+    }
+    item *selected = gift.selected.get_item();
+    if( selected == nullptr || !has_item( *selected ) ) {
+        stop( "give.item_missing" );
+        mod_moves( -100 );
+        return true;
+    }
+    if( llm_intent::gift_tree_identity( *selected ) != gift.tree ) {
+        stop( "give.item_changed" );
+        mod_moves( -100 );
+        return true;
+    }
+    if( rl_dist( pos_bub(), recipient->pos_bub() ) == 1 &&
+        here.passable( pos_bub() ) &&
+        here.clear_path( pos_bub(), recipient->pos_bub(), 1, 1, 100 ) ) {
+        // Check recipient consent separately from native capacity and ownership.
+        if( const npc *receiver = dynamic_cast<const npc *>( recipient );
+            receiver && ( !receiver->is_player_ally() ||
+                          !receiver->will_accept_from_player( *selected ) ) ) {
+            stop( "give.refused" );
+            mod_moves( -100 );
+            return true;
+        }
+        update_llm_action_phase( llm_action_phase::executing );
+        // Consume before ownership callbacks can reenter native NPC processing.
+        state.giving.reset();
+        const auto result = recipient->receive_gift( *this, *selected );
+        path.clear();
+        if( result.success() ) {
+            finish_llm_action( llm_action_phase::completed );
+        } else {
+            finish_llm_action( llm_action_phase::blocked, result.str() );
+        }
+        mod_moves( -100 );
+        return true;
+    }
+    std::vector<tripoint_bub_ms> approach;
+    for( const tripoint_bub_ms &p : here.points_in_radius( recipient->pos_bub(), 1 ) ) {
+        if( p.z() != posz() || p == recipient->pos_bub() || !here.passable( p ) ||
+            get_creature_tracker().creature_at( p ) ||
+            !here.clear_path( p, recipient->pos_bub(), 1, 1, 100 ) ) {
+            continue;
+        }
+        auto candidate = here.route( pos_bub(), pathfinding_target::point( p ),
+                                     get_pathfinding_settings( true ), get_path_avoid() );
+        if( !candidate.empty() && ( approach.empty() || candidate.size() < approach.size() ) ) {
+            approach = std::move( candidate );
+        }
+    }
+    if( approach.empty() || has_flag( json_flag_CANNOT_MOVE ) ) {
+        stop( "give.no_path" );
+        mod_moves( -100 );
+        return true;
+    }
+    update_llm_action_phase( llm_action_phase::waiting, "give.approaching" );
+    path = std::move( approach );
+    move_to_next();
+    return true;
+}
+
 bool npc::apply_llm_intent_item_targets()
 {
     llm_intent_state &state = llm_intent_state_for( *this );
@@ -3188,6 +3278,7 @@ void npc::move()
     }
     // NPCs under operation or casting spells should just stay still
     if( activity.id() == ACT_OPERATION || activity.id() == ACT_SPELLCASTING ) {
+        cancel_llm_give( "give.interrupted_activity" );
         execute_action( npc_player_activity );
         return;
     }
@@ -3238,6 +3329,13 @@ void npc::move()
                                !sees_dangerous_field( pos_bub() ) &&
                                !has_effect( effect_npc_fire_bad ) &&
                                !has_effect( effect_npc_flee_player );
+    if( state.giving ) {
+        if( !get_option<bool>( "LLM_INTENT_ENABLE" ) ) {
+            cancel_llm_give( "give.disabled" );
+        } else if( apply_llm_give( llm_item_safe ) ) {
+            return;
+        }
+    }
     if( get_option<bool>( "LLM_INTENT_ENABLE" ) && !fetching_item &&
         !state.look_around_targets.empty() ) {
         llm_intent::log_event( string_format(

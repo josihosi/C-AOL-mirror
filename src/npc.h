@@ -1102,6 +1102,7 @@ class npc : public Character
             look_around_pickup,
             look_inventory,
             attack_target,
+            give,
         };
         enum class llm_action_phase : int {
             none = 0,
@@ -1154,6 +1155,10 @@ class npc : public Character
         void set_llm_intent_move_target( const std::optional<tripoint_abs_ms> &target,
                                          llm_intent_action arrival_state );
         void clear_llm_intent_actions();
+        uint64_t llm_intent_order_revision() const;
+        void set_llm_give( item_location selected, character_id recipient, bool avatar,
+                           const std::string &tree, const std::string &request_id );
+        void cancel_llm_give( const std::string &reason ) const;
         void set_llm_intent_response_pending( bool pending ) const;
         void set_llm_intent_item_request_pending( bool pending ) const;
         void set_llm_intent_item_targets( const std::vector<llm_item_target> &targets,
@@ -1686,6 +1691,14 @@ class npc : public Character
 
         npc_short_term_cache ai_cache;
         struct llm_intent_state {
+            struct gift {
+                item_location selected;
+                character_id recipient;
+                bool avatar = false;
+                std::string tree;
+            };
+            std::optional<gift> giving;
+            uint64_t order_revision = 0;
             std::deque<llm_intent_action> queue;
             llm_intent_action active = llm_intent_action::none;
             time_point active_turn = calendar::before_time_starts;
@@ -1723,6 +1736,7 @@ class npc : public Character
         static llm_intent_state &llm_intent_state_for( const npc &guy );
         void apply_llm_intent_target();
         bool apply_llm_intent_item_targets();
+        bool apply_llm_give( bool safe );
 
         std::map<npc_need, npc_need_goal_cache> goal_cache;
     public:

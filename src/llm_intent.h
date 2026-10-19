@@ -9,6 +9,7 @@
 #include "point.h"
 
 class npc;
+class item;
 
 namespace llm_intent
 {
@@ -25,6 +26,11 @@ void process_response_for_test( npc &listener, const std::string &request_id,
                                 const std::string &player_utterance,
                                 const std::string &response_text );
 void process_inventory_response_for_test( npc &listener, const std::string &response_text );
+// Exact tree identity and quantities, excluding transient rot/temperature state.
+std::string gift_tree_identity( const item &root );
+void prepare_inventory_request_for_test( npc &listener, const std::string &request_id );
+void process_prepared_inventory_response_for_test( npc &listener, const std::string &request_id,
+        const std::string &response_text );
 std::string build_inventory_prompt_for_test( npc &listener, const std::string &utterance );
 std::string build_look_around_prompt_for_test( npc &listener, const std::string &utterance );
 bool has_request_state_for_test( const npc &listener, const std::string &request_id );

@@ -2293,6 +2293,31 @@ ret_val<item *> item_pocket::insert_item_impl( Item &&it,
     return ret_val<item *>::make_success( inserted );
 }
 
+ret_val<item *> item_pocket::transfer_item_from( Character &donor, item &it )
+{
+    const auto accepts = can_contain( it );
+    if( !accepts.success() ) {
+        return ret_val<item *>::make_failure( nullptr, "give.no_space" );
+    }
+    const units::volume volume = it.volume();
+    const units::mass weight = it.weight();
+    std::list<item> owned = donor.remove_items_with( [&]( const item & candidate ) {
+        return &candidate == &it;
+    }, 1 );
+    if( owned.empty() ) {
+        return ret_val<item *>::make_failure( nullptr, "give.item_missing" );
+    }
+    item *received = &owned.front();
+    contents.splice( contents.begin(), owned );
+    if( bulk_fill_volume ) {
+        *bulk_fill_volume += volume;
+        *bulk_fill_weight += weight;
+    }
+    // on_contents_changed() would merge charge stacks and erase their identities.
+    unseal();
+    return ret_val<item *>::make_success( received );
+}
+
 ret_val<item *> item_pocket::insert_item( const item &it, const bool into_bottom,
         bool restack_charges, bool ignore_contents )
 {

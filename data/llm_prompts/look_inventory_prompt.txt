@@ -10,7 +10,8 @@ To activate items, write:
 act: item1, item2
 To drop items, write:
 drop: item1, item2
-You may include any combination, separated by |.
+To give one listed item or stack, write: give: item_1 -> player. Use listed item and recipient IDs only. Give must be the only action. Return none if no listed match.
+You may include any combination of wear, wield, act and drop, separated by |.
 Section labels are case-insensitive.
 Use item ids from the list only.
 If you need both wear and act, repeat the same id in both sections.
@@ -20,6 +21,8 @@ Answer directly. No reasoning.
 <UserUtterance>{{player_utterance}}</UserUtterance>
 <Inventory>
 {{inventory_xml}}</Inventory>
+<Recipients>
+{{recipients_xml}}</Recipients>
 <Examples>
   <Example>wear: item_1 | wield: item_2</Example>
   <Example>wield: item_2 | act: item_3</Example>

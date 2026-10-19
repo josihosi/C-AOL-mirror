@@ -2134,7 +2134,10 @@ void npc::deserialize( const JsonObject &data )
 
 void npc::load( const JsonObject &data )
 {
+    // Handoffs are interruptible commands, not durable transfer intents. Loading
+    // cancels any in-memory approach; an already committed gift is ordinary cargo.
     Character::load( data );
+    cancel_llm_give( "give.interrupted_reload" );
 
     // TEMPORARY Remove if branch after 0.G (keep else branch)
     if( !data.has_member( "location" ) ) {
