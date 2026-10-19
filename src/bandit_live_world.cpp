@@ -6102,25 +6102,35 @@ bool structural_outing_uses_frontier_route( const active_outing_state &outing )
     return false;
 }
 
+bool structural_frontier_arrival_order_is_current(
+    const site_record &site, const simulation_advance_cursor &expected_cursor,
+    const int current_minutes )
+{
+    const active_outing_state &outing = site.active_outing;
+    const camp_map_lead *lead = site.intelligence_map.find_lead( outing.target_lead_id );
+    const bool local = outing.owner == simulation_owner::local;
+    return structural_outing_uses_frontier_route( outing ) && !site.retired_empty_site &&
+           !outing.local_projection_reconciliation_rejected && lead != nullptr &&
+           frontier_sector_from_lead( *lead ) && lead->revision == outing.target_lead_revision &&
+           lead->omt == outing.target_omt && frontier_memory_is_valid( site.intelligence_map ) &&
+           structural_route_is_canonical_for_outing( outing, site.anchor, *lead ) &&
+           simulation_cursor_matches( outing, expected_cursor ) &&
+           outing.phase == scout_phase::observing && current_minutes >= 0 &&
+           current_minutes >= outing.last_advanced_minutes &&
+           outing.member_ids.size() == 2 && outing.member_ids[0] != outing.member_ids[1] &&
+           outing.casualty_ids.empty() && outing.resolved_member_ids.empty() &&
+           ( !local || ( outing.local_handoff.is_active() &&
+                         outing.local_handoff.cohesion_assembled && !outing.local_handoff.cohesion_abort_return ) );
+}
+
 local_handoff_commit_result complete_structural_frontier_arrival(
     site_record &site, const simulation_advance_cursor &expected_cursor,
     const int current_minutes, const std::vector<local_route_arrival_member_read> &member_reads )
 {
     const active_outing_state &outing = site.active_outing;
-    const camp_map_lead *lead = site.intelligence_map.find_lead( outing.target_lead_id );
     const bool local = outing.owner == simulation_owner::local;
-    if( !structural_outing_uses_frontier_route( outing ) || site.retired_empty_site ||
-        outing.local_projection_reconciliation_rejected || lead == nullptr ||
-        !frontier_sector_from_lead( *lead ) || lead->revision != outing.target_lead_revision ||
-        lead->omt != outing.target_omt || !frontier_memory_is_valid( site.intelligence_map ) ||
-        !structural_route_is_canonical_for_outing( outing, site.anchor, *lead ) ||
-        !simulation_cursor_matches( outing, expected_cursor ) ||
-        outing.phase != scout_phase::observing || current_minutes < 0 ||
-        current_minutes < outing.last_advanced_minutes ||
-        outing.member_ids.size() != 2 || member_reads.size() != 2 ||
-        !outing.casualty_ids.empty() || !outing.resolved_member_ids.empty() ||
-        ( local && ( !outing.local_handoff.is_active() ||
-                     !outing.local_handoff.cohesion_assembled || outing.local_handoff.cohesion_abort_return ) ) ) {
+    if( !structural_frontier_arrival_order_is_current( site, expected_cursor, current_minutes ) ||
+        member_reads.size() != 2 ) {
         return local_handoff_commit_result::rejected;
     }
     std::set<character_id> ids;
@@ -24360,8 +24370,15 @@ const site_record *active_hostile_withdrawal_site_for( const world_state &state,
     for( const site_record &site : state.sites ) {
         const hostile_operation_state &operation = site.active_hostile_operation;
         const active_outing_state &reservation = operation.reservation;
+        const bool fight = hostile_shakedown_fight_identity_matches( site );
         if( site.retired_empty_site || !operation.is_active() ||
-            operation.operation_kind != hostile_operation_kind::raid ||
+            ( operation.operation_kind != hostile_operation_kind::raid && !fight ) ||
+            ( fight && ( ( operation.phase == hostile_operation_phase::committed_contact ?
+                           reservation.owner != simulation_owner::local :
+                           reservation.owner != simulation_owner::abstract ) ||
+                         !simulation_owner_state_is_consistent( reservation ) ||
+                         std::find( reservation.member_ids.begin(), reservation.member_ids.end(), npc_id ) ==
+                         reservation.member_ids.end() ) ) ||
             ( operation.phase != hostile_operation_phase::committed_contact &&
               operation.phase != hostile_operation_phase::returning_home ) ||
             reservation.member_is_resolved( npc_id ) ||

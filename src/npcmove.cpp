@@ -3176,6 +3176,13 @@ void npc::move()
     const bandit_live_world::site_record *withdrawal_site =
         bandit_live_world::active_hostile_withdrawal_site_for(
             overmap_buffer.global_state.bandit_live_world, getID() );
+    const bool fight_withdrawal = withdrawal_site != nullptr &&
+                                  withdrawal_site->active_hostile_operation.operation_kind ==
+                                  bandit_live_world::hostile_operation_kind::shakedown;
+    const bool fight_withdrawal_order = fight_withdrawal &&
+                                       ( ( goto_to_this_pos && !path.empty() ) ||
+                                         ( has_omt_destination() && goal == withdrawal_site->anchor &&
+                                           !omt_path.empty() && omt_path.front() == withdrawal_site->anchor ) );
     // An authenticated hostile home return owns its actual travel order ahead of
     // incidental camp pickup and guarding, independently of the signal target's
     // altitude. The shared predicate validates the current reserved survivor.
@@ -3525,13 +3532,13 @@ void npc::move()
     if( !ai_cache.dangerous_explosives.empty() &&
         !has_flag( json_flag_CANNOT_MOVE ) ) {
         action = npc_escape_explosion;
-    } else if( withdrawal_site != nullptr && goto_to_this_pos &&
+    } else if( withdrawal_site != nullptr && !fight_withdrawal && goto_to_this_pos &&
                !has_flag( json_flag_CANNOT_MOVE ) ) {
         // The owned raid withdrawal has a real local path to a lower-floor exit.
         // Preserve native explosion/fire escapes above, then take that path even
         // while the ordinary flee attitude would otherwise circle locally.
         action = npc_goto_to_this_pos;
-    } else if( withdrawal_site != nullptr && has_omt_destination() &&
+    } else if( withdrawal_site != nullptr && !fight_withdrawal && has_omt_destination() &&
                !has_flag( json_flag_CANNOT_MOVE ) ) {
         action = npc_goto_destination;
     } else if( is_enemy() && vehicle_danger( avoidance_vehicles_radius ) >= 0 &&
@@ -3540,8 +3547,12 @@ void npc::move()
         // from player
         ai_cache.target = g->shared_from( player_character );
         action = method_of_fleeing();
-    } else if( ( target == &player_character && attitude == NPCATT_FLEE_TEMP ) ||
-               has_effect( effect_npc_run_away ) ) {
+    } else if( ( ( target == &player_character && attitude == NPCATT_FLEE_TEMP ) ||
+                 has_effect( effect_npc_run_away ) ) &&
+               ( !fight_withdrawal_order || ( target != nullptr && ai_cache.danger > 0 ) ||
+                 ( hp_percentage() > 30 && target != nullptr &&
+                   rl_dist( pos_bub(), target->pos_bub() ) <= 1 &&
+                   !has_flag( json_flag_CANNOT_ATTACK ) ) ) ) {
         if( hp_percentage() > 30 && target &&
             rl_dist( pos_bub(), target->pos_bub() ) <= 1 &&
             !has_flag( json_flag_CANNOT_ATTACK ) ) {
@@ -3557,6 +3568,15 @@ void npc::move()
     } else if( target != nullptr && ai_cache.danger > 0 &&
                !has_flag( json_flag_CANNOT_ATTACK ) ) {
         action = method_of_attack();
+    } else if( fight_withdrawal_order ) {
+        // Immediate field/explosion/vehicle survival, actual combat and asthma
+        // above retain native priority. An owned Fight escape then replaces
+        // directionless flight and routine needs, without changing hostility.
+        action = address_needs( NPC_DANGER_VERY_LOW + 1.0f );
+        if( action == npc_undecided ) {
+            action = has_flag( json_flag_CANNOT_MOVE ) ? npc_pause :
+                     goto_to_this_pos ? npc_goto_to_this_pos : npc_goto_destination;
+        }
     } else if( hostile_home_return && attitude != NPCATT_FLEE && attitude != NPCATT_FLEE_TEMP &&
                !has_effect( effect_npc_run_away ) && !has_effect( effect_npc_flee_player ) ) {
         // Fire, explosives, visible combat and flight above retain priority. Urgent
