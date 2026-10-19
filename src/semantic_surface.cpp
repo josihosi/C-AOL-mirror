@@ -864,7 +864,8 @@ void semantic_surface_manager::republish_top()
         // A terminal native action has no successor, however: its owning
         // scope is simply popped as the UI exits.  Do not strand that accepted
         // request merely because there is no frame to attach to.
-        if( pending_accepted_receipt_ && !pending_receipt_child_source_surface_id_ ) {
+        if( pending_accepted_receipt_ && !pending_receipt_child_source_surface_id_ &&
+            withheld_parent_surface_ids_.empty() ) {
             completed_requests_[pending_accepted_receipt_->request_id] = *pending_accepted_receipt_;
             if( receipt_observer_ ) {
                 receipt_observer_( *pending_accepted_receipt_ );
