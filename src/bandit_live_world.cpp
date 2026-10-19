@@ -19600,16 +19600,17 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                 // permission for this exact report-bound response. Existing
                 // conflicting or consumed opportunities are never overwritten.
                 const camp_map_lead *lead = candidate.intelligence_map.find_lead( report.target_lead_id );
-                const bool normal_physical_report = report.assessment.threshold_class ==
-                                                    scout_assessment_threshold_class::normal &&
-                                                    !report.carrier_ids.empty() &&
-                                                    report.source_activity_id.rfind( candidate.site_id + "#", 0 ) == 0 &&
-                                                    report.application_key == bandit_pursuit_handoff::make_operation_component_key(
-                                                        report.source_activity_id, report.source_generation, "report" ) &&
-                                                    candidate.applied_report_generation == report.source_generation &&
-                                                    lead != nullptr && lead->target_id == report.target_id && lead->omt == report.target_omt &&
-                                                    lead->revision >= report.target_lead_revision && lead->status != camp_lead_status::invalidated &&
-                                                    std::all_of( report.carrier_ids.begin(), report.carrier_ids.end(),
+                const bool authenticated_physical_report =
+                    ( report.assessment.threshold_class == scout_assessment_threshold_class::normal ||
+                      report.assessment.threshold_class == scout_assessment_threshold_class::burned ) &&
+                    !report.carrier_ids.empty() &&
+                    report.source_activity_id.rfind( candidate.site_id + "#", 0 ) == 0 &&
+                    report.application_key == bandit_pursuit_handoff::make_operation_component_key(
+                        report.source_activity_id, report.source_generation, "report" ) &&
+                    candidate.applied_report_generation == report.source_generation &&
+                    lead != nullptr && lead->target_id == report.target_id && lead->omt == report.target_omt &&
+                    lead->revision >= report.target_lead_revision && lead->status != camp_lead_status::invalidated &&
+                    std::all_of( report.carrier_ids.begin(), report.carrier_ids.end(),
                 [&candidate, &report]( const character_id id ) {
                     const member_record *member = candidate.find_member( id );
                     return member != nullptr && member->state == member_state::at_home &&
@@ -19620,7 +19621,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                 world_state claim_candidate;
                 claim_candidate.hostile_target_opportunities = state.hostile_target_opportunities;
                 if( ( report.assessment.threshold_class == scout_assessment_threshold_class::site_signal ||
-                      normal_physical_report ) &&
+                      authenticated_physical_report ) &&
                     claim_candidate.find_hostile_target_opportunity( reservation.target_id,
                             reservation.target_omt ) == nullptr ) {
                     claim_candidate.hostile_target_opportunities.push_back( {
