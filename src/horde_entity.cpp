@@ -19,6 +19,16 @@ bool is_predator_evolution_type( const mtype_id &type )
     return type == mon_zombie_hunter || type == mon_zombie_predator;
 }
 
+bool has_live_sound( const monster &payload )
+{
+    return payload.provocative_sound && payload.wandf > 0;
+}
+
+bool sound_owns_destination( const monster &payload, const tripoint_abs_ms &destination )
+{
+    return has_live_sound( payload ) && payload.wander_pos == destination;
+}
+
 } // namespace
 
 horde_entity::horde_entity( const monster &original )
@@ -145,18 +155,33 @@ void horde_entity::synchronize_payload( const tripoint_abs_ms &position )
     if( !monster_data ) {
         return;
     }
+    if( monster_data->type->id.str() == "mon_writhing_stalker" &&
+        monster_data->pos_abs() != position && has_live_sound( *monster_data ) &&
+        !sound_owns_destination( *monster_data, destination ) ) {
+        // A committed route step spends the same pending native budget as
+        // monster::move. Same-position handoff/repeated sync spends nothing.
+        --monster_data->wandf;
+    }
     monster_data->set_pos_abs_only( position );
     monster_data->set_moves( moves );
+    synchronize_navigation( *monster_data );
+}
+
+void horde_entity::synchronize_navigation( monster &payload ) const
+{
     if( tracking_intensity > 0 ) {
-        const bool heard_here = monster_data->provocative_sound && monster_data->wandf > 0 &&
-                                monster_data->wander_pos == destination;
-        monster_data->wander_to( destination, tracking_intensity );
-        if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
-            const auto &state = monster_data->writhing_stalker_state();
-            if( state.has_pursuit_memory && state.owns_waypoint( destination ) && !heard_here ) {
-                // This carrier came from the pursuit route, not a sound.
-                // A later real hear_sound call owns its own provocative flag.
-                monster_data->provocative_sound = false;
+        const bool stalker = payload.type->id.str() == "mon_writhing_stalker";
+        const bool heard_here = sound_owns_destination( payload, destination );
+        if( stalker && has_live_sound( payload ) && !heard_here ) {
+            // The current route may have priority, but a genuine pending
+            // sound keeps its separate native source/budget through handoff.
+            payload.set_dest( destination );
+        } else {
+            payload.wander_to( destination, tracking_intensity );
+            if( stalker ) {
+                // Route transport cannot turn an expired provocative flag
+                // into new sound evidence, including before first acquisition.
+                payload.provocative_sound = heard_here;
             }
         }
     }
@@ -193,8 +218,8 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
     life.last_advanced_turn = now_turn;
     if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
         writhing_stalker::persistent_state &state = monster_data->writhing_stalker_state();
-        const bool carried_route = !monster_data->provocative_sound &&
-                                   state.owns_waypoint( destination );
+        const bool carried_route = state.owns_waypoint( destination ) &&
+                                   !sound_owns_destination( *monster_data, destination );
         state.advance_to( now_turn, active_elapsed );
         if( active_elapsed == 0 ) {
             // The shared activation owner must also gate transport/evolution
@@ -203,7 +228,7 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         }
         monster_data->set_pos_abs_only( position );
         const bool saw_target = writhing_stalker::observe_current_target( *monster_data ) != nullptr;
-        if( !monster_data->provocative_sound && destination == light_source &&
+        if( !has_live_sound( *monster_data ) && destination == light_source &&
             !light_sample_id.empty() && to_turn<int>( light_observed ) <= now_turn &&
             to_turn<int>( light_expires ) > now_turn ) {
             state.observe_light_interest( light_source, light_sample_id,
@@ -211,10 +236,17 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
                                           to_turns<int>( light_expires - light_observed ) );
         }
         state.arrive_at( position );
-        const bool sound_owns_navigation = tracking_intensity > 0 && monster_data->provocative_sound &&
-                                           monster_data->wandf > 0 && monster_data->wander_pos == destination &&
-                                           !saw_target && state.phase != writhing_stalker::lifecycle_phase::retreating &&
+        const bool sound_owns_navigation = has_live_sound( *monster_data ) &&
+                                           ( carried_route || sound_owns_destination( *monster_data, destination ) ) &&
+                                           monster_data->wander_pos != position && !saw_target &&
+                                           state.phase != writhing_stalker::lifecycle_phase::retreating &&
                                            state.phase != writhing_stalker::lifecycle_phase::cooldown;
+        if( sound_owns_navigation && !sound_owns_destination( *monster_data, destination ) ) {
+            // Select a newly pending sound once. An already selected sound
+            // keeps its native remaining budget instead of renewing it.
+            destination = monster_data->wander_pos;
+            tracking_intensity = monster_data->wandf;
+        }
         // Abstract transport executes its own native one-tile steps. A local
         // intermediate light step must not replace the observed source goal.
         if( state.sighting_active_turn < 0 && state.search_started_active < 0 &&
@@ -234,6 +266,7 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
             // Accepted sound outranks speculative light/memory navigation.
             // Due visits wait; active searches keep their finite elapsed budget.
             // Actual sight and native retreat retain their higher authority.
+            monster_data->unset_dest();
             return true;
         }
         if( state.phase == writhing_stalker::lifecycle_phase::retreating ||
@@ -253,6 +286,7 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         if( tracking_intensity == 0 && carried_route ) {
             monster_data->unset_dest();
             monster_data->wander_to( position, 0 );
+            monster_data->provocative_sound = false;
         }
     } else {
         zombie_rider_overmap_ai::rider_pursuit_state &state =

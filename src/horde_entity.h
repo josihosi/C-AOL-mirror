@@ -36,6 +36,9 @@ struct horde_entity {
     // enters the abstract lifecycle.  The horde key remains its position.
     void ensure_predator_payload( const tripoint_abs_ms &position );
     void synchronize_payload( const tripoint_abs_ms &position );
+    // Placement clears explicit goals. Restore this owner's navigation
+    // without replacing an independently heard native sound.
+    void synchronize_navigation( monster &payload ) const;
     // Advance natural evolution through monster::try_upgrade once for this
     // abstract owner.  The payload is retained once it owns evolution timing.
     bool advance_evolution( const tripoint_abs_ms &position );

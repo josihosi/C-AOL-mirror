@@ -1792,10 +1792,9 @@ void overmap::move_hordes()
                     predator_lifecycle_state &state = placed_monster->predator_state();
                     state.last_advanced_turn = to_turn<int>( calendar::turn );
                 }
-                // TODO: this should be bundled into a constructor.
-                if( acting->tracking_intensity > 0 ) {
-                    placed_monster->wander_to( acting->destination, acting->tracking_intensity );
-                }
+                // spawn clears explicit goals; the same owning handoff must
+                // restore route priority without replacing a pending sound.
+                acting->synchronize_navigation( *placed_monster );
                 mon = hordes.erase( mon );
                 continue;
             }

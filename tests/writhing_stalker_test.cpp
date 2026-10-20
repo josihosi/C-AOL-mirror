@@ -4067,3 +4067,390 @@ TEST_CASE( "stalker_visible_stationary_shadow_continues_steps_then_holds_standof
     CHECK_FALSE( stalker.has_dest() );
     clear_map_without_vision();
 }
+
+TEST_CASE( "stalker_expired_sound_flag_cannot_own_delayed_transferred_pursuit",
+           "[writhing_stalker][predator][pursuit][scheduler][signal][fallback]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    original.anger = 100;
+    original.hear_sound( center + point::south * 3, 24, 3, true );
+    REQUIRE( original.provocative_sound );
+    REQUIRE( original.wandf > 0 );
+    const int heard_budget = original.wandf;
+    for( int turn = 0; turn <= heard_budget && original.wandf > 0; ++turn ) {
+        original.set_moves( 100 );
+        original.move();
+        set_time( calendar::turn + 1_turns );
+    }
+    REQUIRE( original.wandf == 0 );
+    REQUIRE( original.provocative_sound );
+    original = round_trip_writhing_stalker( original );
+    REQUIRE( original.wandf == 0 );
+    REQUIRE( original.provocative_sound );
+    auto &memory = original.writhing_stalker_state();
+    const int seen = to_turn<int>( calendar::turn );
+    memory.advance_to( seen );
+    const bool learned = GENERATE( true, false );
+    // Accepted observation fixtures feed the actual local planner; neither
+    // this remembered sight nor the light packet claims native acquisition.
+    if( learned ) {
+        REQUIRE( memory.observe_target( 77, 1, original.pos_abs() + point::east * 24, seen ) );
+    } else {
+        REQUIRE( memory.observe_light_interest( original.pos_abs() + point::east * 24,
+                 "expired-flag-native-light", seen, 120 ) );
+    }
+    set_time( calendar::turn + 61_turns );
+    original.plan();
+    REQUIRE( memory.phase == ( learned ? writhing_stalker::lifecycle_phase::searching :
+                              writhing_stalker::lifecycle_phase::shadowing ) );
+    REQUIRE( original.has_dest() );
+    REQUIRE( memory.owns_waypoint( original.get_dest() ) );
+    const auto old_route = original.get_dest();
+    const auto source = original.pos_abs();
+    const auto actor = original.predator_state().actor_id;
+    const auto epoch = original.predator_state().handoff_epoch;
+    // A later genuinely accepted sound remains independent even when it is
+    // at exactly the carried route coordinate.
+    const int sound = GENERATE( 0, 1, 2 );
+    tripoint_abs_ms heard;
+    if( sound ) {
+        heard = sound == 2 ? old_route : source + point::south * 6;
+        original.hear_sound( here.get_bub( heard ), 2000, 6, true );
+        REQUIRE( original.wander_pos == heard );
+        REQUIRE( original.wandf > 0 );
+    }
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = -30; x <= 30; ++x ) {
+        for( int y = -30; y <= 30; ++y ) {
+            overmap_buffer.set_passable( source + point( x, y ), true );
+        }
+    }
+    g->despawn_monster( original );
+    auto *owner = overmap_buffer.entity_at( source );
+    REQUIRE( owner != nullptr );
+    REQUIRE( owner->tracking_intensity == 1000 );
+    REQUIRE( owner->monster_data->provocative_sound );
+    REQUIRE( owner->monster_data->predator_state().handoff_epoch == epoch + 1 );
+    const bool early_reentry = GENERATE( false, true );
+    if( early_reentry ) {
+        // The real load caller synchronizes a disposable handoff payload.
+        // Exercise its provenance before a later unload and expiry too.
+        overmap_buffer.spawn_monster( project_to<coords::sm>( source ) );
+        monster *local = nullptr;
+        for( monster &candidate : g->all_monsters() ) {
+            if( candidate.is_caol_predator() && candidate.predator_state().actor_id == actor ) {
+                REQUIRE( local == nullptr );
+                local = &candidate;
+            }
+        }
+        REQUIRE( local != nullptr );
+        REQUIRE( local->predator_state().handoff_epoch == epoch + 2 );
+        g->despawn_monster( *local );
+        owner = overmap_buffer.entity_at( source );
+        REQUIRE( owner != nullptr );
+        REQUIRE( owner->monster_data->predator_state().handoff_epoch == epoch + 3 );
+    }
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( source );
+    }
+    // Native placement is blocked only at the old location. An expired route
+    // must not move elsewhere or turn itself into a fresh sound carrier.
+    spawn_test_monster( mon_zombie.str(), here.get_bub( source ) );
+    set_time( calendar::turn + 31_minutes );
+    overmap_buffer.move_hordes();
+    monster *payload = nullptr;
+    tripoint_abs_ms position;
+    int owners = 0;
+    horde_entity *abstract = nullptr;
+    for( const auto &entry : om.horde_entities() ) {
+        if( entry.second->monster_data && entry.second->monster_data->is_caol_predator() &&
+            entry.second->monster_data->predator_state().actor_id == actor ) {
+            abstract = entry.second;
+            payload = abstract->monster_data.get();
+            position = entry.first;
+            ++owners;
+        }
+    }
+    for( monster &candidate : g->all_monsters() ) {
+        if( candidate.is_caol_predator() && candidate.predator_state().actor_id == actor ) {
+            payload = &candidate;
+            position = candidate.pos_abs();
+            ++owners;
+        }
+    }
+    REQUIRE( payload != nullptr );
+    REQUIRE( owners == 1 );
+    CHECK( payload->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( payload->writhing_stalker_state().has_committed_waypoint );
+    CHECK( payload->writhing_stalker_state().evidence_turn == ( learned ? seen : -1 ) );
+    if( sound ) {
+        CHECK( payload->provocative_sound );
+        CHECK( payload->wandf > 0 );
+        CHECK( payload->wander_pos == heard );
+        CHECK( rl_dist( position, heard ) < rl_dist( source, heard ) );
+    } else {
+        CHECK( position == source );
+        REQUIRE( abstract != nullptr );
+        CHECK( abstract->tracking_intensity == 0 );
+        CHECK( abstract->is_active() == learned );
+        CHECK( payload->wandf == 0 );
+        CHECK_FALSE( payload->has_dest() );
+        CHECK_FALSE( payload->provocative_sound );
+        const auto active = payload->writhing_stalker_state().active_turns;
+        overmap_buffer.move_hordes();
+        CHECK( payload->writhing_stalker_state().active_turns == active );
+        CHECK( abstract->tracking_intensity == 0 );
+    }
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_sound_stays_pending_beneath_current_sight_or_retreat_handoff",
+           "[writhing_stalker][predator][pursuit][signal][fallback]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1_days );
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    original.anger = 100;
+    original.aggro_character = true;
+    const bool retreat = GENERATE( false, true );
+    if( retreat ) {
+        original.writhing_stalker_state().attempts_spent = 2;
+    }
+    original.plan();
+    REQUIRE( original.writhing_stalker_state().phase == ( retreat ?
+             writhing_stalker::lifecycle_phase::retreating : writhing_stalker::lifecycle_phase::shadowing ) );
+    REQUIRE( original.has_dest() );
+    const auto goal = original.get_dest();
+    tripoint_abs_ms position = original.pos_abs();
+    const bool same_coordinate = GENERATE( false, true );
+    const auto sound = same_coordinate ? goal : position + point::south * 6;
+    original.hear_sound( here.get_bub( sound ), 2000, 6, true );
+    REQUIRE( original.wander_pos == sound );
+    REQUIRE( original.wandf > 0 );
+    const auto actor = original.predator_state().actor_id;
+    const auto epoch = original.predator_state().handoff_epoch;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( position ).xy() );
+    om.hordes.clear();
+    for( int x = -12; x <= 12; ++x ) {
+        for( int y = -12; y <= 12; ++y ) {
+            overmap_buffer.set_passable( position + point( x, y ), true );
+        }
+    }
+    g->despawn_monster( original );
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    monster *local = nullptr;
+    for( monster &candidate : g->all_monsters() ) {
+        if( candidate.is_caol_predator() && candidate.predator_state().actor_id == actor ) {
+            REQUIRE( local == nullptr );
+            local = &candidate;
+        }
+    }
+    REQUIRE( local != nullptr );
+    REQUIRE( local->predator_state().handoff_epoch == epoch + 2 );
+    CHECK( local->provocative_sound );
+    CHECK( local->wandf > 0 );
+    CHECK( local->wander_pos == sound );
+    position = local->pos_abs();
+    horde_entity owner( *local );
+    REQUIRE( owner.advance_predator_intent( position, to_turn<int>( calendar::turn ) ) );
+    // Native fleeing does not acquire a fresh hostile watch observation.
+    CHECK( owner.monster_data->writhing_stalker_state().evidence_turn ==
+           to_turn<int>( calendar::turn ) - ( retreat ? 1 : 0 ) );
+    if( retreat ) {
+        CHECK( owner.destination == goal );
+    } else {
+        CHECK( owner.monster_data->writhing_stalker_state().owns_waypoint( owner.destination ) );
+    }
+    owner.synchronize_payload( position );
+    CHECK( owner.monster_data->provocative_sound );
+    CHECK( owner.monster_data->wandf > 0 );
+    CHECK( owner.monster_data->wander_pos == sound );
+    if( !same_coordinate ) {
+        CHECK( owner.destination != sound );
+        CHECK( owner.monster_data->get_dest() == owner.destination );
+    }
+    // Remove actual sight and let the existing recovery deadline settle.
+    // The still-live sound can then own movement above remembered searching.
+    you.setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    refresh_writhing_stalker_arena( here );
+    set_time( calendar::turn + 31_minutes );
+    REQUIRE( owner.advance_predator_intent( position, to_turn<int>( calendar::turn ) ) );
+    CHECK( owner.destination == sound );
+    CHECK( owner.tracking_intensity > 0 );
+    CHECK( owner.monster_data->wander_pos == sound );
+    CHECK_FALSE( owner.monster_data->has_dest() );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_selected_sound_budget_is_not_renewed_before_native_transport",
+           "[writhing_stalker][predator][pursuit][scheduler][signal]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    original.anger = 100;
+    original.hear_sound( center + point::south * 6, 30, 6, true );
+    REQUIRE( original.provocative_sound );
+    REQUIRE( original.wandf > 3 );
+    const auto sound = original.wander_pos;
+    const int budget = original.wandf;
+    const auto source = original.pos_abs();
+    original.set_moves( -300 );
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    g->despawn_monster( original );
+    for( int step = 1; step <= 2; ++step ) {
+        set_time( calendar::turn + 1_turns );
+        overmap_buffer.move_hordes();
+        auto *owner = overmap_buffer.entity_at( source );
+        REQUIRE( owner != nullptr );
+        CHECK( owner->destination == sound );
+        CHECK( owner->tracking_intensity == budget - step );
+        CHECK( owner->moves <= 0 );
+        // No transport has synchronized the payload yet. Repeated intent
+        // service must not refill the entity from this older native budget.
+        CHECK( owner->monster_data->wandf == budget );
+    }
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_native_unlearned_goal_precedes_pending_sound_during_handoff",
+           "[writhing_stalker][predator][pursuit][scheduler][signal][fallback]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    original.anger = 100;
+    const auto goal = here.get_abs( center + point::east * 6 );
+    const auto sound = here.get_abs( center + point::south * 6 );
+    original.set_dest( goal );
+    original.hear_sound( here.get_bub( sound ), 2000, 6, true );
+    REQUIRE( original.wander_pos == sound );
+    original.set_moves( 100 );
+    original.move();
+    const auto source = original.pos_abs();
+    REQUIRE( rl_dist( source, goal ) < rl_dist( here.get_abs( center ), goal ) );
+    REQUIRE( original.has_dest() );
+    REQUIRE_FALSE( original.writhing_stalker_state().has_pursuit_memory );
+    const auto actor = original.predator_state().actor_id;
+    original.set_moves( 100 );
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = -12; x <= 12; ++x ) {
+        for( int y = -12; y <= 12; ++y ) {
+            overmap_buffer.set_passable( source + point( x, y ), true );
+        }
+    }
+    g->despawn_monster( original );
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    monster *local = nullptr;
+    for( monster &candidate : g->all_monsters() ) {
+        if( candidate.is_caol_predator() && candidate.predator_state().actor_id == actor ) {
+            REQUIRE( local == nullptr );
+            local = &candidate;
+        }
+    }
+    REQUIRE( local != nullptr );
+    CHECK( rl_dist( local->pos_abs(), goal ) < rl_dist( source, goal ) );
+    CHECK( local->has_dest() );
+    CHECK( local->get_dest() == goal );
+    CHECK( local->provocative_sound );
+    CHECK( local->wander_pos == sound );
+    CHECK_FALSE( local->writhing_stalker_state().has_pursuit_memory );
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_pending_sound_spends_native_budget_on_committed_route_steps",
+           "[writhing_stalker][predator][pursuit][scheduler][signal][fallback]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    monster &heard_locally = spawn_test_monster( mon_writhing_stalker.str(), center );
+    heard_locally.anger = 100;
+    heard_locally.hear_sound( center + point::south * 6, 30, 6, true );
+    REQUIRE( heard_locally.provocative_sound );
+    const int budget = heard_locally.wandf;
+    REQUIRE( budget > 2 );
+    monster original( heard_locally );
+    g->remove_zombie( heard_locally );
+    // Translate the accepted callback into an unloaded route fixture. This
+    // proves transport lifetime, not physical hearing or remote perception.
+    const auto source = here.get_abs( tripoint_bub_ms( -budget - 48, 65, 0 ) );
+    const auto sound = source + point::south * 6;
+    const auto goal = source + point::east * ( budget + 12 );
+    original.set_pos_abs_only( source );
+    original.wander_to( sound, budget );
+    original.set_dest( goal );
+    original.set_moves( 100 );
+    const auto actor = original.predator_state().actor_id;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = 0; x <= budget + 12; ++x ) {
+        const auto cell = source + point::east * x;
+        overmap_buffer.get( project_to<coords::om>( cell ).xy() );
+        overmap_buffer.set_passable( cell, true );
+    }
+    REQUIRE( om.hordes.spawn_entity( source, original ) );
+    for( int step = 1; step <= budget; ++step ) {
+        set_time( calendar::turn + 1_turns );
+        overmap_buffer.move_hordes();
+        const auto position = source + point::east * step;
+        REQUIRE_FALSE( here.inbounds( position ) );
+        auto *owner = overmap_buffer.entity_at( position );
+        REQUIRE( owner != nullptr );
+        REQUIRE( owner->monster_data->predator_state().actor_id == actor );
+        CHECK( owner->destination == goal );
+        if( step < budget ) {
+            CHECK( owner->monster_data->provocative_sound );
+            CHECK( owner->monster_data->wander_pos == sound );
+            CHECK( owner->monster_data->wandf == budget - step );
+        } else {
+            // The remaining route carrier is explicitly not new sound.
+            CHECK_FALSE( owner->monster_data->provocative_sound );
+            CHECK( owner->monster_data->wander_pos == goal );
+        }
+        const int remaining = owner->monster_data->wandf;
+        overmap_buffer.move_hordes();
+        CHECK( owner->monster_data->wandf == remaining );
+    }
+    om.hordes.clear();
+    clear_map_without_vision();
+}

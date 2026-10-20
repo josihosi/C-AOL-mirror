@@ -2563,6 +2563,10 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             placed = g->place_critter_around( handoff->type_id->id, local, 1 );
         }
         if( placed ) {
+            if( handoff->monster_data ) {
+                // Reapply after spawn has cleared its explicit destination.
+                handoff->synchronize_navigation( *placed );
+            }
             if( placed->is_caol_predator() ) {
                 predator_lifecycle_state &state = placed->predator_state();
                 state.last_advanced_turn = to_turn<int>( calendar::turn );
