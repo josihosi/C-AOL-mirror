@@ -1349,6 +1349,47 @@ TEST_CASE( "predator local abstract local transfer retains its authoritative pay
     }
 }
 
+TEST_CASE( "stalker pursuit abstract active-interval seam does not refresh frozen evidence",
+           "[monster][hordes][predator][stalker_pursuit]" )
+{
+    clear_overmaps();
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    calendar::turn = calendar::turn_zero + 100_turns;
+    const auto position = get_map().get_abs( tripoint_bub_ms( 30, 66, 0 ) );
+    monster source( mtype_id( "mon_writhing_stalker" ) );
+    source.set_pos_abs_only( position );
+    source.predator_state().handoff_epoch = 4;
+    auto &original = source.writhing_stalker_state();
+    original.advance_to( 90 );
+    original.observe_target( 42, 1, position + point::east * 20, 90 );
+    original.advance_to( 100 );
+    original.begin_search();
+    horde_entity owner( source );
+    REQUIRE( owner.monster_data );
+    auto &state = owner.monster_data->writhing_stalker_state();
+    const auto actor = owner.monster_data->predator_state().actor_id;
+    const int active = state.active_turns;
+    const int search_start = state.search_started_active;
+    const auto destination = owner.destination;
+    calendar::turn = calendar::turn_zero + 10000_turns;
+    REQUIRE( owner.advance_predator_intent( position, 10000, 0 ) );
+    CHECK( state.active_turns == active );
+    CHECK( state.search_started_active == search_start );
+    CHECK( state.evidence_turn == 90 );
+    CHECK( state.familiar[0].last_seen_world == 90 );
+    CHECK( owner.destination == destination );
+    CHECK( owner.monster_data->predator_state().actor_id == actor );
+    CHECK( owner.monster_data->predator_state().handoff_epoch == 4 );
+    calendar::turn += 1_turns;
+    REQUIRE( owner.advance_predator_intent( position, 10001, 1 ) );
+    CHECK( state.active_turns == active + 1 );
+    CHECK( state.evidence_turn == 90 );
+    CHECK( state.searched_positions == 0 );
+    REQUIRE( owner.advance_predator_intent( position, 10001, 100 ) );
+    CHECK( state.active_turns == active + 1 );
+}
+
 TEST_CASE( "predator repeated production handoffs survive a save reload",
            "[monster][hordes][predator][persistence]" )
 {
@@ -1365,6 +1406,7 @@ TEST_CASE( "predator repeated production handoffs survive a save reload",
         const tripoint_bub_ms local_position( 30, 66, 0 );
         const tripoint_bub_ms ordinary_local_position( 31, 66, 0 );
         const tripoint_abs_ms position = here.get_abs( local_position );
+        const tripoint_abs_ms ordinary_position = here.get_abs( ordinary_local_position );
         const tripoint_abs_ms destination = position + point_rel_ms( 5, 0 );
         const tripoint_abs_ms observed = position + point_rel_ms( 2, 3 );
         const tripoint_abs_sm submap = project_to<coords::sm>( position );
@@ -1380,15 +1422,28 @@ TEST_CASE( "predator repeated production handoffs survive a save reload",
         life.handoff_epoch = 30;
         life.last_advanced_turn = to_turn<int>( calendar::turn ) - 1;
         const std::string actor_id = life.actor_id;
+        std::string pursuit_before;
 
         if( type == mtype_id( "mon_writhing_stalker" ) ) {
             writhing_stalker::persistent_state &state = live->writhing_stalker_state();
+            const int now = to_turn<int>( calendar::turn );
+            // Physical sensing is covered separately. Seed two acquisition
+            // inputs here to test production ownership/save callers.
+            state.advance_to( now - 20 );
+            state.observe_target( 42, 1, observed + point::south, now - 20 );
+            state.advance_to( now - 10 );
+            state.observe_target( 42, 1, observed, now - 10 );
+            state.advance_to( now );
+            state.finish_search();
             state.phase = writhing_stalker::lifecycle_phase::cooldown;
             state.last_observed_position = observed;
             state.has_last_observed_position = true;
             state.committed_waypoint = destination;
             state.has_committed_waypoint = true;
             state.cooldown_until_turn = to_turn<int>( calendar::turn ) + 20;
+            std::ostringstream memory;
+            { JsonOut json( memory ); state.serialize( json ); }
+            pursuit_before = memory.str();
         } else {
             zombie_rider_overmap_ai::rider_pursuit_state &state =
                 live->zombie_rider_pursuit_state();
@@ -1454,6 +1509,9 @@ TEST_CASE( "predator repeated production handoffs survive a save reload",
             CHECK( state.last_observed_position == observed );
             CHECK( state.has_committed_waypoint );
             CHECK( state.committed_waypoint == destination );
+            std::ostringstream memory;
+            { JsonOut json( memory ); state.serialize( json ); }
+            CHECK( memory.str() == pursuit_before );
         } else {
             const zombie_rider_overmap_ai::rider_pursuit_state &state =
                 restored->zombie_rider_pursuit_state();
@@ -1523,11 +1581,15 @@ TEST_CASE( "predator repeated production handoffs survive a save reload",
         // An ordinary local zombie retains its normal serialized monster
         // snapshot through this route, without acquiring predator identity or
         // lifecycle accounting.
-        monster *ordinary = g->place_critter_at( mon_test_zombie, ordinary_local_position );
+        // Loading centers the bubble on the saved avatar. The original local
+        // coordinate can now name unrelated, uncleared terrain; keep this
+        // control bound to the same prepared physical square across reload.
+        monster *ordinary = g->place_critter_at( mon_test_zombie,
+                            get_map().get_bub( ordinary_position ) );
         REQUIRE( ordinary != nullptr );
         ordinary->set_hp( 71 );
         ordinary->set_moves( 29 );
-        const tripoint_abs_ms ordinary_position = ordinary->pos_abs();
+        REQUIRE( ordinary->pos_abs() == ordinary_position );
         const tripoint_abs_sm ordinary_submap = project_to<coords::sm>( ordinary_position );
         g->despawn_monster( *ordinary );
         horde_entity *ordinary_abstract = overmap_buffer.entity_at( ordinary_position );

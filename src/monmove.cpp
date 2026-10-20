@@ -47,11 +47,13 @@
 #include "mtype.h"
 #include "npc.h"
 #include "options.h"
+#include "overmapbuffer.h"
 #include "pathfinding.h"
 #include "pimpl.h"
 #include "point.h"
 #include "rng.h"
 #include "scent_map.h"
+#include "scout_observation.h"
 #include "sounds.h"
 #include "string_formatter.h"
 #include "tileray.h"
@@ -788,9 +790,13 @@ static const std::vector<writhing_stalker_pressure_position> &writhing_stalker_o
             other.is_hallucination() || other.attitude_to( target ) != Creature::Attitude::HOSTILE ) {
             continue;
         }
-        const bool visible = stalker.sees( here, other ) && other.sees( here, target );
-        const bool same_target = const_cast<monster &>( other ).attack_target() == &target &&
-                                 other.get_dest() == target.pos_abs();
+        const bool visible = writhing_stalker::can_observe_actor( stalker, other ) &&
+                             other.sees( here, target );
+        const bool recent_attack = writhing_stalker::has_recent_observed_attack( &stalker, &other,
+                                   &target, now, 3 );
+        const bool same_target = recent_attack ||
+                                 ( const_cast<monster &>( other ).attack_target() == &target &&
+                                   other.get_dest() == target.pos_abs() );
         const int distance = rl_dist( other.pos_bub(), target.pos_bub() );
         const auto previous = std::find_if( memory.samples.begin(), memory.samples.end(),
         [&other, &target]( const writhing_stalker_pressure_sample & sample ) {
@@ -802,8 +808,6 @@ static const std::vector<writhing_stalker_pressure_position> &writhing_stalker_o
                                               distance > 1 && distance <= 8 &&
                                               here.clear_path( other.pos_bub(), target.pos_bub(),
                                                       std::max( 1, distance ), 1, 100 );
-        const bool recent_attack = writhing_stalker::has_recent_observed_attack( &stalker, &other,
-                                   &target, now, 3 );
         const bool qualified = writhing_stalker::is_meaningful_pressure(
                                    writhing_stalker::pressure_observation{ true, visible, same_target,
                                            recent_attack, distinct_recent_position } );
@@ -847,23 +851,28 @@ std::size_t writhing_stalker::transient_pressure_sample_count()
     return total;
 }
 
-static int writhing_stalker_allied_support_nearby( map &here, const Creature &target )
+static int writhing_stalker_allied_support_nearby( const monster &stalker, map &here,
+        const Creature &target )
 {
     const Character *target_character = target.as_character();
     if( target_character == nullptr ) {
         return 0;
     }
 
-    const Character &player_character = get_player_character();
     int support = 0;
-    for( const npc &guy : g->all_npcs() ) {
-        if( &guy == target_character || guy.is_dead() ) {
-            continue;
+    const auto consider = [&]( const Character & guy ) {
+        if( &guy == target_character || guy.is_dead_state() ) {
+            return;
         }
-        if( guy.is_friendly( player_character ) && rl_dist( guy.pos_bub(), target.pos_bub() ) <= 6 &&
-            guy.sees( here, target ) ) {
+        if( guy.attitude_to( target ) == Creature::Attitude::FRIENDLY &&
+            rl_dist( guy.pos_abs(), target.pos_abs() ) <= 6 && guy.sees( here, target ) &&
+            writhing_stalker::can_observe_actor( stalker, guy ) ) {
             ++support;
         }
+    };
+    consider( get_player_character() );
+    for( const npc &guy : g->all_npcs() ) {
+        consider( guy );
     }
     return support;
 }
@@ -962,13 +971,12 @@ void writhing_stalker::record_counterpressure_attempt( monster &stalker,
 }
 
 static writhing_stalker::live_context writhing_stalker_live_context( monster &stalker,
-        map &here, Creature &target )
+        map &here, Creature &target, const bool sees_target )
 {
     writhing_stalker::live_context ctx;
     const writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
     const int now_turn = to_turn<int>( calendar::turn );
     const tripoint_bub_ms stalker_pos = stalker.pos_bub();
-    const bool sees_target = stalker.sees( here, target );
     const bool has_recognized_observation = state.has_last_observed_position &&
                                             state.evidence_target == target.get_identity();
     // An unseen plan target is not a current observation. Keep live routing
@@ -1018,7 +1026,7 @@ static writhing_stalker::live_context writhing_stalker_live_context( monster &st
                           !ctx.edge_route_available;
     ctx.open_exposure = ctx.forced_no_cover;
     ctx.zombie_pressure = writhing_stalker::observed_zombie_pressure( stalker, here, target );
-    ctx.allied_support_nearby = writhing_stalker_allied_support_nearby( here, target );
+    ctx.allied_support_nearby = writhing_stalker_allied_support_nearby( stalker, here, target );
     ctx.quiet_side_cutoff_available = ctx.zombie_pressure > 0 &&
                                       ( ctx.cover_route_available || ctx.edge_route_available );
     ctx.near_cover_or_clutter = writhing_stalker_has_cover_or_clutter( here, target_pos );
@@ -1106,6 +1114,11 @@ static tripoint_abs_ms writhing_stalker_retreat_destination( const monster &stal
 {
     const tripoint_bub_ms stalker_pos = stalker.pos_bub();
     const tripoint_bub_ms target_pos = target.pos_bub();
+    // Watching can recognize prey beyond the short retreat radius. A cautious
+    // observer already outside that radius must not approach just to reach it.
+    if( rl_dist( stalker_pos, target_pos ) >= desired_distance ) {
+        return stalker.pos_abs();
+    }
     const int away_x = sgn( stalker_pos.x() - target_pos.x() );
     const int away_y = sgn( stalker_pos.y() - target_pos.y() );
     const int minimum_distance = std::max( 4, desired_distance - 4 );
@@ -1192,22 +1205,191 @@ static const char *writhing_stalker_approach_name( writhing_stalker::approach_cl
 static void writhing_stalker_record_live_evidence( monster &stalker, const Creature &target )
 {
     writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
-    state.evidence_target = target.get_identity();
-    state.evidence_turn = to_turn<int>( calendar::turn );
-    state.last_observed_position = target.pos_abs();
-    state.has_last_observed_position = true;
+    const Character *character = target.as_character();
+    const bool changed = !state.has_pursuit_memory || state.last_observed_position != target.pos_abs() ||
+                         state.evidence_target != target.get_identity();
+    const auto previous_heading = state.heading;
+    if( state.observe_target( target.get_identity(), character ? character->getID().get_value() : -1,
+                             target.pos_abs(), to_turn<int>( calendar::turn ) ) &&
+        ( changed || previous_heading != state.heading ) ) {
+        hostile_ecology_debug_log() << "writhing_stalker observation: actor="
+                                    << stalker.predator_state().actor_id
+                                    << " epoch=" << stalker.predator_state().handoff_epoch
+                                    << " observer=" << stalker.pos_abs().to_string_writable()
+                                    << " character=" << state.observed_character_id
+                                    << " seen=" << state.last_observed_position.to_string_writable()
+                                    << " world=" << state.evidence_turn << " active=" << state.active_turns
+                                    << " heading=" << state.heading.to_string_writable()
+                                    << " interval=" << state.heading_interval << '\n';
+    }
+}
+
+static bool writhing_stalker_watches( const monster &stalker, const Creature &target,
+                                    scout_observation::site_reader &reader )
+{
+    return stalker.friendly == 0 && stalker.can_see() && !stalker.is_dead() &&
+           reader.read_actor( stalker, target, { 72, 72.0f /
+                             std::max( 1, std::max( stalker.type->vision_day,
+                                       stalker.type->vision_night ) ) } ).visible;
+}
+
+bool writhing_stalker::can_observe_actor( const monster &stalker, const Creature &actor )
+{
+    scout_observation::site_reader reader;
+    return writhing_stalker_watches( stalker, actor, reader );
+}
+
+Creature *writhing_stalker::observe_current_target( monster &stalker )
+{
+    // Settle the owning interval before assigning an acquisition's active time.
+    // An abstract caller has already supplied its effective interval at this
+    // same world turn, so the once-only guard prevents a second advance here.
+    stalker.writhing_stalker_state().advance_to( to_turn<int>( calendar::turn ) );
+    scout_observation::site_reader reader;
+    Character *seen = nullptr;
+    const auto consider = [&]( Character & candidate ) {
+        if( rl_dist( stalker.pos_abs(), candidate.pos_abs() ) > 72 ||
+            stalker.attitude_to( candidate ) != Creature::Attitude::HOSTILE ||
+            !writhing_stalker_watches( stalker, candidate, reader ) ) {
+            return;
+        }
+        if( !seen || rl_dist( stalker.pos_abs(), candidate.pos_abs() ) <
+            rl_dist( stalker.pos_abs(), seen->pos_abs() ) ) {
+            seen = &candidate;
+        }
+    };
+    consider( get_player_character() );
+    for( npc &candidate : g->all_npcs() ) {
+        consider( candidate );
+    }
+    if( seen ) {
+        writhing_stalker_record_live_evidence( stalker, *seen );
+    }
+    return seen;
 }
 
 static bool writhing_stalker_waypoint_is_reachable( monster &stalker, map &here,
         const tripoint_abs_ms &waypoint )
 {
     const tripoint_bub_ms local = here.get_bub( waypoint );
-    return here.inbounds( local ) && stalker.can_move_to( local );
+    return here.inbounds( local ) && stalker.can_move_to( local ) &&
+           ( waypoint == stalker.pos_abs() ||
+             !here.route( stalker, pathfinding_target::point( local ) ).empty() );
+}
+
+std::optional<tripoint_abs_ms> writhing_stalker::pursuit_destination( monster &stalker,
+        const bool abstract_owner )
+{
+    auto &state = stalker.writhing_stalker_state();
+    map &here = get_map();
+    const auto before_phase = state.phase;
+    const int before_cursor = state.search_cursor;
+    const bool had_waypoint = state.has_committed_waypoint;
+    const auto before_waypoint = state.committed_waypoint;
+    const auto result = state.pursuit_waypoint( stalker.pos_abs(), [&]( const tripoint_abs_ms & desired,
+    const bool search ) -> std::optional<tripoint_abs_ms> {
+        tripoint_abs_ms aim = desired;
+        if( !search ) {
+            // A hypothesis is investigated from standoff, not occupied as if
+            // it were still the prey's known coordinate.
+            const auto delta = stalker.pos_abs() - desired;
+            const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
+            if( length > 0 ) {
+                aim += tripoint_rel_ms( delta.x() * 8 / length, delta.y() * 8 / length, 0 );
+            } else {
+                aim += point::north * 8;
+            }
+        }
+        if( abstract_owner ) {
+            // The existing horde transport has no vertical edge executor.
+            // Loaded routefinding below may use real stairs/ramps normally.
+            if( aim.z() != stalker.pos_abs().z() ) {
+                return std::nullopt;
+            }
+            const auto delta = aim - stalker.pos_abs();
+            const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
+            if( length > 72 ) {
+                aim = stalker.pos_abs() + tripoint_rel_ms( delta.x() * 72 / length,
+                        delta.y() * 72 / length, 0 );
+            }
+            const auto route = scout_observation::site_sightline( stalker.pos_abs(), aim );
+            if( route.empty() && aim != stalker.pos_abs() ) {
+                return std::nullopt;
+            }
+            for( const auto &cell : route ) {
+                if( !overmap_buffer.passable( cell ) ) {
+                    return std::nullopt;
+                }
+            }
+            return overmap_buffer.passable( aim ) ? std::optional<tripoint_abs_ms>( aim ) :
+                   std::nullopt;
+        }
+        if( !here.inbounds( aim ) ) {
+            // Only route through the currently loaded physical corridor. The
+            // ordinary owner transfer, not this planner, crosses its boundary.
+            aim = stalker.pos_abs();
+            for( const auto &cell : scout_observation::site_sightline( stalker.pos_abs(), desired ) ) {
+                if( !here.inbounds( cell ) ) {
+                    break;
+                }
+                aim = cell;
+            }
+        }
+        // Keep native short-path capabilities. A distant remembered OMT is a
+        // sequence of reachable steps, not permission to raise melee/path range.
+        const auto delta = aim - stalker.pos_abs();
+        const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
+        const int native_limit = stalker.get_pathfinding_settings().max_dist;
+        const int step = native_limit > 2 ? native_limit - 2 : 1;
+        if( native_limit > 0 && length > step ) {
+            aim = stalker.pos_abs() + tripoint_rel_ms( delta.x() * step / length,
+                    delta.y() * step / length, 0 );
+        }
+        static const std::array<point, 9> choices = {{ point::zero, point( -4, 0 ), point( 4, 0 ),
+                point( 0, -4 ), point( 0, 4 ), point( -4, -4 ), point( -4, 4 ), point( 4, -4 ), point( 4, 4 )
+            }};
+        for( const auto &offset : choices ) {
+            const auto candidate = aim + offset;
+            const auto local = here.get_bub( candidate );
+            if( !here.inbounds( local ) || !stalker.can_move_to( local ) ||
+                ( search && candidate != stalker.pos_abs() &&
+                  rl_dist( candidate, desired ) >= rl_dist( stalker.pos_abs(), desired ) ) ||
+                ( writhing_stalker_bright_exposure( here, local ) &&
+                  !writhing_stalker_bright_exposure( here, stalker.pos_bub() ) ) ) {
+                continue;
+            }
+            if( candidate == stalker.pos_abs() ||
+                !here.route( stalker, pathfinding_target::point( local ) ).empty() ) {
+                return candidate;
+            }
+        }
+        return std::nullopt;
+    } );
+    if( state.phase != before_phase || state.search_cursor != before_cursor ||
+        state.has_committed_waypoint != had_waypoint ||
+        ( result && *result != before_waypoint ) ) {
+        hostile_ecology_debug_log() << "writhing_stalker pursuit: actor="
+                                    << stalker.predator_state().actor_id
+                                    << " epoch=" << stalker.predator_state().handoff_epoch
+                                    << " phase=" << static_cast<int>( state.phase )
+                                    << " active=" << state.active_turns
+                                    << " observed_world=" << state.evidence_turn
+                                    << " search_started=" << state.search_started_active
+                                    << " cursor=" << state.search_cursor
+                                    << " reached=" << state.searched_positions
+                                    << " revisit=" << state.revisiting_slot
+                                    << " waypoint=" << ( result ? result->to_string_writable() : "none" ) << '\n';
+    }
+    return result;
 }
 
 static void writhing_stalker_enter_search( writhing_stalker::persistent_state &state,
         const int now_turn )
 {
+    if( state.has_pursuit_memory && state.sighting_active_turn >= 0 ) {
+        state.begin_search();
+        return;
+    }
     if( state.phase == writhing_stalker::lifecycle_phase::searching ) {
         return;
     }
@@ -1221,6 +1403,19 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
     writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
     const int now_turn = to_turn<int>( calendar::turn );
     state.advance_to( now_turn );
+    if( state.has_pursuit_memory && ( state.sighting_active_turn >= 0 ||
+                                    state.phase == writhing_stalker::lifecycle_phase::idle ||
+                                    state.revisiting_slot >= 0 ) &&
+        state.phase != writhing_stalker::lifecycle_phase::retreating &&
+        state.phase != writhing_stalker::lifecycle_phase::cooldown ) {
+        const auto waypoint = writhing_stalker::pursuit_destination( stalker, false );
+        if( waypoint ) {
+            stalker.set_dest( *waypoint );
+            return true;
+        }
+        stalker.unset_dest();
+        return state.phase != writhing_stalker::lifecycle_phase::idle;
+    }
     if( state.phase == writhing_stalker::lifecycle_phase::idle ) {
         return false;
     }
@@ -1291,6 +1486,14 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
     return true;
 }
 
+static bool writhing_stalker_owns_retreat( const monster &stalker )
+{
+    const auto &state = stalker.writhing_stalker_state();
+    return state.has_retreat_waypoint &&
+           ( state.phase == writhing_stalker::lifecycle_phase::retreating ||
+             state.phase == writhing_stalker::lifecycle_phase::cooldown );
+}
+
 static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &target )
 {
     if( stalker.type->id != mon_writhing_stalker ) {
@@ -1301,12 +1504,36 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
     const int now_turn = to_turn<int>( calendar::turn );
     state.advance_to( now_turn );
     // A stale target pointer from mon_plan is not proof of current sight.
-    if( stalker.sees( here, target ) ) {
+    scout_observation::site_reader reader;
+    const Character *character = target.as_character();
+    const bool visible = character ? writhing_stalker_watches( stalker, *character, reader ) :
+                         stalker.sees( here, target );
+    if( visible ) {
         writhing_stalker_record_live_evidence( stalker, target );
+    } else {
+        return apply_writhing_stalker_no_target_plan( stalker, here );
     }
     const auto perf_started = std::chrono::steady_clock::now();
-    const writhing_stalker::live_context ctx = writhing_stalker_live_context( stalker, here, target );
-    const writhing_stalker::live_response response = writhing_stalker::evaluate_live_response( ctx );
+    const writhing_stalker::live_context ctx = writhing_stalker_live_context( stalker, here, target,
+            visible );
+    writhing_stalker::live_response response = writhing_stalker::evaluate_live_response( ctx );
+    bool attacking_target = false;
+    for( const monster &other : g->all_monsters() ) {
+        if( &other != &stalker && other.type->in_species( species_ZOMBIE ) &&
+            writhing_stalker::has_recent_observed_attack( &stalker, &other, &target, now_turn, 2 ) &&
+            writhing_stalker::can_observe_actor( stalker, other ) ) {
+            attacking_target = true;
+            break;
+        }
+    }
+    const bool opening = ( !ctx.target_in_bright_exposure && !ctx.stalker_in_bright_exposure &&
+                           ctx.allied_support_nearby == 0 ) || attacking_target;
+    if( !opening && ( response.next == writhing_stalker::decision::strike ||
+                     response.writeback_intent == writhing_stalker::handoff_intent::committed_ambush ) ) {
+        response.next = writhing_stalker::decision::shadow;
+        response.writeback_intent = writhing_stalker::handoff_intent::shadowing;
+        response.reason = "live_watch_no_current_opening";
+    }
     const auto perf_done = std::chrono::steady_clock::now();
     const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>( perf_done -
                             perf_started ).count();
@@ -1367,6 +1594,14 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
             if( !state.has_committed_waypoint ||
                 !writhing_stalker_waypoint_is_reachable( stalker, here, shadow_dest ) ) {
                 shadow_dest = writhing_stalker_shadow_destination( stalker, here, target, found_shadow );
+                found_shadow = found_shadow && writhing_stalker_waypoint_is_reachable( stalker, here,
+                               shadow_dest );
+                if( !found_shadow ) {
+                    if( const auto step = writhing_stalker::pursuit_destination( stalker, false ) ) {
+                        shadow_dest = *step;
+                        found_shadow = true;
+                    }
+                }
                 if( found_shadow ) {
                     state.committed_waypoint = shadow_dest;
                     state.has_committed_waypoint = true;
@@ -2257,7 +2492,27 @@ void monster::plan()
                                     << " turns_since_target=" << turns_since_target << '\n';
     }
 
-    if( mon_plan.target == nullptr && type->id == mon_writhing_stalker ) {
+    if( type->id == mon_writhing_stalker &&
+        ( mon_plan.target == nullptr || mon_plan.target->as_character() ) ) {
+        if( mon_plan.fleeing && !writhing_stalker_owns_retreat( *this ) &&
+            mon_plan.target == nullptr ) {
+            const auto &state = writhing_stalker_state();
+            // Yield only the approach destination owned by this memory. An
+            // already chosen native escape/sound destination remains native.
+            if( state.has_committed_waypoint && has_dest() &&
+                get_dest() == state.committed_waypoint ) {
+                unset_dest();
+            }
+        }
+        if( Creature *watched = writhing_stalker::observe_current_target( *this ) ) {
+            if( ( !mon_plan.fleeing || writhing_stalker_owns_retreat( *this ) ) &&
+                apply_writhing_stalker_plan( *this, here, *watched ) ) {
+                return;
+            }
+        }
+    }
+    if( mon_plan.target == nullptr && type->id == mon_writhing_stalker &&
+        ( !mon_plan.fleeing || writhing_stalker_owns_retreat( *this ) ) ) {
         if( apply_writhing_stalker_no_target_plan( *this, here ) ) {
             return;
         }
@@ -2371,7 +2626,9 @@ void monster::plan()
 
     } else if( mon_plan.target != nullptr ) {
 
-        if( apply_targeted_live_plan_adapter( *this, here, *mon_plan.target ) ) {
+        if( ( type->id != mon_writhing_stalker || !mon_plan.fleeing ||
+              writhing_stalker_owns_retreat( *this ) ) &&
+            apply_targeted_live_plan_adapter( *this, here, *mon_plan.target ) ) {
             return;
         }
 

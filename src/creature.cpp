@@ -234,8 +234,9 @@ void writhing_stalker::observe_attack_resolution( const Creature *attacker,
     map &here = get_map();
     for( monster &observer : g->all_monsters() ) {
         if( observer.type->id != mon_writhing_stalker || observer.is_dead() ||
-            observer.is_hallucination() || !observer.sees( here, *attacker ) ||
-            !observer.sees( here, *target ) ) {
+            observer.is_hallucination() ||
+            !( ( observer.sees( here, *attacker ) && observer.sees( here, *target ) ) ||
+               ( can_observe_actor( observer, *attacker ) && can_observe_actor( observer, *target ) ) ) ) {
             continue;
         }
         record_observed_attack( &observer, attacker, target, turn, resolution );
@@ -572,10 +573,18 @@ bool Creature::sees_site_with_optics( const map &here, const Creature &critter,
     return sees_impl( here, critter, true, magnification, &footprint, observer_light );
 }
 
+bool Creature::sees_site_with_range( const map &here, const Creature &critter, const int range,
+                                   const std::vector<tripoint_abs_omt> &footprint ) const
+{
+    return range > 0 && range <= MAX_VIEW_DISTANCE * 2 && !footprint.empty() &&
+           sees_impl( here, critter, true, 2.0f, &footprint, 0.0f, true, range );
+}
+
 bool Creature::sees_impl( const map &here, const Creature &critter,
                           const bool without_clairvoyance, const float optics,
                           const std::vector<tripoint_abs_omt> *footprint,
-                          const float site_observer_light, const bool physical_scene ) const
+                          const float site_observer_light, const bool physical_scene,
+                          const int observation_range ) const
 {
     const Character *ch = critter.as_character();
 
@@ -687,12 +696,16 @@ bool Creature::sees_impl( const map &here, const Creature &critter,
                    sees( here, critter_pos, critter.is_avatar() );
         }
         const Character *observer = as_character();
-        if( observer == nullptr || observer->is_blind() || has_effect( effect_no_sight ) ) {
+        if( ( observer == nullptr && observation_range < 0 ) ||
+            ( observer && observer->is_blind() ) || has_effect( effect_no_sight ) ) {
             return false;
         }
         const float target_light = here.ambient_light_at( critter_pos );
         const float observer_light = footprint ? site_observer_light : here.ambient_light_at( pos );
         const auto optical_range = [&]( const float light ) {
+            if( observation_range >= 0 ) {
+                return observation_range;
+            }
             return static_cast<int>( std::floor( optics * observer->sight_range( light,
                                                  observer_light ) ) );
         };

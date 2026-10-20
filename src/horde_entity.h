@@ -42,7 +42,8 @@ struct horde_entity {
     // Species-owned abstract intent.  It consumes only actual horde light
     // evidence and writes the native stalker/rider state before the common
     // horde transport executes its one permitted step.
-    bool advance_predator_intent( const tripoint_abs_ms &position, int now_turn );
+    bool advance_predator_intent( const tripoint_abs_ms &position, int now_turn,
+                                 int active_elapsed = -1 );
 
     // Data here related to processing while acting as a horde entity.
     // a glaring omission is location, the parent horde container knows that.

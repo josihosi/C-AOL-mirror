@@ -1,5 +1,6 @@
 #include "game.h"
 #include "harness_creature_debug.h" // IWYU pragma: associated
+#include "json.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1109,6 +1110,8 @@ static std::string openclaw_harness_diagnostic_natural_evolution_monster()
 static std::string openclaw_harness_diagnostic_active_monsters()
 {
     const char *scenario = std::getenv( "OPENCLAW_HARNESS_SCENARIO" );
+    const bool pursuit_scenario = scenario != nullptr &&
+                                  std::string( scenario ) == "r_rel_stalker_pursuit.native_mcw";
     if( scenario != nullptr && std::string( scenario ) ==
         "zombie_rider.live_natural_evolution_mcw" ) {
         return openclaw_harness_diagnostic_natural_evolution_monster();
@@ -1126,10 +1129,13 @@ static std::string openclaw_harness_diagnostic_active_monsters()
             const std::string fixture_actor_id = critter.get_value( "caol_fixture_actor_id" ).str();
             const std::string debug_setup_run_id =
                 critter.get_value( "caol_debug_setup_stalker_run_id" ).str();
-            const bool tagged_debug_setup = scenario != nullptr &&
-                                            std::string( scenario ) ==
-                                            "r_zl_stalker_follow_city_debug_setup_mcw" &&
-                                            debug_setup_run_id == openclaw_harness_bound_semantic_run_id();
+            // The pursuit witness follows the saved tag through same-profile
+            // reloads too. This read-only diagnostic grants no input authority
+            // or player knowledge, and never enrolls an untagged hidden actor.
+            const bool tagged_debug_setup = !debug_setup_run_id.empty() &&
+                                            ( pursuit_scenario || ( scenario != nullptr &&
+                                                    std::string( scenario ) == "r_zl_stalker_follow_city_debug_setup_mcw" &&
+                                                    debug_setup_run_id == openclaw_harness_bound_semantic_run_id() ) );
             if( fixture_actor_id.empty() && !tagged_debug_setup ) {
                 continue;
             }
@@ -1151,8 +1157,16 @@ static std::string openclaw_harness_diagnostic_active_monsters()
                      << ",\"absolute_ms\":[" << absolute.x() << ',' << absolute.y() << ','
                      << absolute.z() << "]"
                      << ",\"provenance\":\"native_active_monster_state\""
-                     << ",\"knowledge_scope\":\"read_only_diagnostic_not_player_knowledge\""
-                     << ",\"writhing_stalker_state\":{\"direct_evidence_active\":"
+                     << ",\"knowledge_scope\":\"read_only_diagnostic_not_player_knowledge\"";
+            if( pursuit_scenario ) {
+                entities << ",\"predator_handoff_epoch\":" << critter.predator_state().handoff_epoch
+                         << ",\"writhing_stalker_state\":";
+                JsonOut json( entities );
+                state.serialize( json );
+                entities << '}';
+                continue;
+            }
+            entities << ",\"writhing_stalker_state\":{\"direct_evidence_active\":"
                      << ( state.has_direct_evidence( observed_turn ) ? "true" : "false" )
                      << ",\"light_interest_active\":"
                      << ( state.light_interest_active( observed_turn ) ? "true" : "false" )

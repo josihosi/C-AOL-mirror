@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,6 +29,16 @@ enum class lifecycle_phase : std::uint8_t {
     retreating,
     searching,
     cooldown
+};
+
+struct familiar_place {
+    bool valid = false;
+    tripoint_abs_omt position;
+    int last_seen_world = -1;
+    std::int64_t last_seen_active = -1;
+    std::int64_t revisit_at_active = -1;
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &json );
 };
 
 // The sole durable owner of a stalker's cross-turn/local-overmap commitment.
@@ -58,7 +71,35 @@ struct persistent_state {
     int remaining_route_progress = -1;
     int search_until_turn = -1;
 
-    void advance_to( int now_turn );
+    // Acquisition timestamps are world facts. These elapsed-work counters are
+    // separate so the shared activation owner can supply only active time.
+    std::int64_t active_turns = 0;
+    int observed_character_id = -1;
+    bool has_pursuit_memory = false;
+    std::int64_t sighting_active_turn = -1;
+    tripoint_rel_ms heading;
+    int heading_interval = 0;
+    std::int64_t search_started_active = -1;
+    int search_cursor = 0;
+    unsigned searched_positions = 0;
+    tripoint_abs_omt search_origin;
+    int revisiting_slot = -1;
+    std::array<familiar_place, 2> familiar;
+
+    // -1 uses ordinary continuously active native time. Explicit elapsed time
+    // is the integration seam for REL-AI-ACTIVATION; first admission never
+    // charges an untracked old-save backlog.
+    void advance_to( int now_turn, int active_elapsed = -1 );
+    bool observe_target( actor_identity target, int character_id,
+                         const tripoint_abs_ms &position, int world_turn );
+    void begin_search();
+    void finish_search();
+    // A resolver chooses an actual safe, reachable native position. A failed
+    // route may be skipped, but only reaching a position earns search progress.
+    using route_resolver = std::function<std::optional<tripoint_abs_ms>(
+                               const tripoint_abs_ms &, bool )>;
+    std::optional<tripoint_abs_ms> pursuit_waypoint( const tripoint_abs_ms &position,
+            const route_resolver &resolve );
     bool cooldown_active( int now_turn ) const;
     bool has_direct_evidence( int now_turn ) const;
     bool light_interest_active( int now_turn ) const;
@@ -69,6 +110,13 @@ struct persistent_state {
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &json );
 };
+
+// Shared local/abstract adapters: current physical perception only, and bounded
+// native-route resolution. Neither enumerating a candidate nor a hypothesis
+// writes evidence; only observe_current_target's successful read does.
+Creature *observe_current_target( monster &stalker );
+bool can_observe_actor( const monster &stalker, const Creature &actor );
+std::optional<tripoint_abs_ms> pursuit_destination( monster &stalker, bool abstract_owner );
 
 // Persisted on monster::value; this is an attempt count, not a plan/turn count.
 inline constexpr const char *burst_count_key = "caol_writhing_stalker_burst_count";

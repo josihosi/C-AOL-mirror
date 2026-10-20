@@ -2,9 +2,12 @@
 
 #include "creature.h"
 #include "json.h"
+#include "calendar.h"
+#include "rng.h"
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <unordered_set>
@@ -14,12 +17,40 @@
 namespace writhing_stalker
 {
 
-void persistent_state::advance_to( const int now_turn )
+void familiar_place::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "valid", valid );
+    json.member( "position", position );
+    json.member( "last_seen_world", last_seen_world );
+    json.member( "last_seen_active", last_seen_active );
+    json.member( "revisit_at_active", revisit_at_active );
+    json.end_object();
+}
+
+void familiar_place::deserialize( const JsonObject &json )
+{
+    json.read( "valid", valid );
+    json.read( "position", position );
+    json.read( "last_seen_world", last_seen_world );
+    json.read( "last_seen_active", last_seen_active );
+    json.read( "revisit_at_active", revisit_at_active );
+}
+
+void persistent_state::advance_to( const int now_turn, const int active_elapsed )
 {
     if( now_turn <= last_advanced_turn ) {
         return;
     }
+    const int elapsed = last_advanced_turn < 0 ? 0 :
+                        active_elapsed < 0 ? now_turn - last_advanced_turn : active_elapsed;
+    active_turns += std::max( 0, elapsed );
     last_advanced_turn = now_turn;
+    for( familiar_place &place : familiar ) {
+        if( place.valid && active_turns - place.last_seen_active >= to_turns<int>( 7_days ) ) {
+            place.valid = false;
+        }
+    }
     if( has_light_observed_position && light_expires_turn >= 0 && now_turn >= light_expires_turn ) {
         has_light_observed_position = false;
         light_observed_turn = -1;
@@ -32,9 +63,19 @@ void persistent_state::advance_to( const int now_turn )
             phase = lifecycle_phase::searching;
             phase_entered_turn = now_turn;
             search_until_turn = now_turn + 20;
+            if( has_pursuit_memory && sighting_active_turn >= 0 ) {
+                begin_search();
+            }
         }
     }
-    if( phase == lifecycle_phase::searching && search_until_turn >= 0 &&
+    // The existing short burst recovery is distinct from the longer pursuit
+    // search budget. A reacquisition must not turn spent combat into an
+    // indefinitely renewed retreat merely because search now has more steps.
+    if( has_pursuit_memory && search_until_turn >= 0 && now_turn >= search_until_turn ) {
+        attempts_spent = 0;
+        search_until_turn = -1;
+    }
+    if( search_started_active < 0 && phase == lifecycle_phase::searching && search_until_turn >= 0 &&
         now_turn >= search_until_turn ) {
         phase = lifecycle_phase::idle;
         phase_entered_turn = now_turn;
@@ -43,6 +84,170 @@ void persistent_state::advance_to( const int now_turn )
         attempts_spent = 0;
         remaining_route_progress = -1;
     }
+}
+
+bool persistent_state::observe_target( const actor_identity target, const int character_id,
+                                      const tripoint_abs_ms &position, const int world_turn )
+{
+    if( target == 0 || world_turn < 0 ||
+        ( has_pursuit_memory && world_turn <= evidence_turn ) ) {
+        return false;
+    }
+    const bool same = has_pursuit_memory && ( character_id >= 0 ?
+                      observed_character_id == character_id : evidence_target == target );
+    if( !same || position != last_observed_position ) {
+        has_committed_waypoint = false;
+    }
+    heading = same ? position - last_observed_position : tripoint_rel_ms::zero;
+    heading_interval = same && heading != tripoint_rel_ms::zero ? world_turn - evidence_turn : 0;
+    evidence_target = target;
+    observed_character_id = character_id;
+    evidence_turn = world_turn;
+    last_observed_position = position;
+    has_last_observed_position = true;
+    has_pursuit_memory = true;
+    if( phase == lifecycle_phase::idle || phase == lifecycle_phase::searching ) {
+        phase = lifecycle_phase::shadowing;
+    }
+    sighting_active_turn = active_turns;
+    search_started_active = -1;
+    revisiting_slot = -1;
+    search_cursor = 0;
+    searched_positions = 0;
+    const tripoint_abs_omt omt = project_to<coords::omt>( position );
+    auto slot = std::find_if( familiar.begin(), familiar.end(), [&]( const familiar_place & place ) {
+        return place.valid && place.position == omt;
+    } );
+    if( slot == familiar.end() ) {
+        slot = std::min_element( familiar.begin(), familiar.end(), []( const familiar_place & a,
+        const familiar_place & b ) {
+            return ( a.valid ? a.last_seen_world : -1 ) < ( b.valid ? b.last_seen_world : -1 );
+        } );
+    }
+    *slot = familiar_place{ true, omt, world_turn, active_turns, -1 };
+    return true;
+}
+
+void persistent_state::begin_search()
+{
+    if( search_started_active >= 0 ) {
+        return;
+    }
+    phase = lifecycle_phase::searching;
+    phase_entered_turn = last_advanced_turn;
+    search_started_active = active_turns;
+    search_origin = revisiting_slot >= 0 ? familiar[revisiting_slot].position :
+                    project_to<coords::omt>( last_observed_position );
+    search_cursor = 0;
+    searched_positions = 0;
+    has_committed_waypoint = false;
+    remaining_route_progress = -1;
+}
+
+void persistent_state::finish_search()
+{
+    phase = lifecycle_phase::idle;
+    phase_entered_turn = last_advanced_turn;
+    search_started_active = -1;
+    revisiting_slot = -1;
+    has_committed_waypoint = false;
+    has_retreat_waypoint = false;
+    heading = tripoint_rel_ms::zero;
+    heading_interval = 0;
+    sighting_active_turn = -1;
+    attempts_spent = 0;
+    remaining_route_progress = -1;
+    for( familiar_place &place : familiar ) {
+        if( place.valid && place.revisit_at_active < active_turns + to_turns<int>( 6_hours ) ) {
+            place.revisit_at_active = active_turns + rng( to_turns<int>( 6_hours ),
+                                      to_turns<int>( 12_hours ) );
+        }
+    }
+}
+
+std::optional<tripoint_abs_ms> persistent_state::pursuit_waypoint(
+    const tripoint_abs_ms &position, const route_resolver &resolve )
+{
+    if( !has_pursuit_memory || phase == lifecycle_phase::retreating ||
+        phase == lifecycle_phase::cooldown ) {
+        return std::nullopt;
+    }
+    if( phase != lifecycle_phase::idle && sighting_active_turn < 0 &&
+        search_started_active < 0 ) {
+        return std::nullopt;
+    }
+    if( phase == lifecycle_phase::idle ) {
+        for( size_t i = 0; i < familiar.size(); ++i ) {
+            if( familiar[i].valid && familiar[i].revisit_at_active >= 0 &&
+                active_turns >= familiar[i].revisit_at_active ) {
+                revisiting_slot = i;
+                familiar[i].revisit_at_active = -1;
+                begin_search();
+                break;
+            }
+        }
+        if( phase == lifecycle_phase::idle ) {
+            return std::nullopt;
+        }
+    }
+    if( search_started_active < 0 ) {
+        const std::int64_t age = active_turns - sighting_active_turn;
+        if( age <= to_turns<int>( 60_seconds ) ) {
+            tripoint_rel_ms offset = tripoint_rel_ms::zero;
+            if( heading_interval > 0 ) {
+                const double scale = static_cast<double>( std::max<std::int64_t>( 0, age ) ) / heading_interval;
+                const double bound = std::max( std::abs( heading.x() ), std::abs( heading.y() ) ) * scale;
+                const double limited = bound > 24 ? scale * 24 / bound : scale;
+                offset = tripoint_rel_ms( static_cast<int>( std::lround( heading.x() * limited ) ),
+                                         static_cast<int>( std::lround( heading.y() * limited ) ), 0 );
+            }
+            const auto waypoint = resolve( last_observed_position + offset, false );
+            if( waypoint && *waypoint != position ) {
+                committed_waypoint = *waypoint;
+                has_committed_waypoint = true;
+                return waypoint;
+            }
+        }
+        begin_search();
+        if( age > to_turns<int>( 60_seconds ) ) {
+            // A delayed/reloaded executor cannot renew the immediate search
+            // budget merely by first noticing that its projection expired.
+            search_started_active = sighting_active_turn + to_turns<int>( 60_seconds );
+        }
+    }
+    const int budget = revisiting_slot >= 0 ? to_turns<int>( 10_minutes ) :
+                       to_turns<int>( 30_minutes );
+    if( active_turns - search_started_active >= budget ) {
+        finish_search();
+        return std::nullopt;
+    }
+    static const std::array<point, 9> offsets = {{ point::zero, point::north, point::north_east,
+            point::east, point::south_east, point::south, point::south_west, point::west, point::north_west
+        }};
+    const int limit = revisiting_slot >= 0 ? 1 : offsets.size();
+    while( search_cursor < limit ) {
+        const tripoint_abs_omt omt = search_origin + offsets[search_cursor];
+        if( has_committed_waypoint && position == committed_waypoint ) {
+            has_committed_waypoint = false;
+            if( project_to<coords::omt>( position ) == omt ) {
+                searched_positions |= 1u << search_cursor;
+                ++search_cursor;
+                continue;
+            }
+        }
+        const tripoint_abs_ms center = project_to<coords::ms>( omt ) + point( 12, 12 );
+        const auto waypoint = resolve( center, true );
+        if( waypoint && ( *waypoint != position || project_to<coords::omt>( position ) == omt ) ) {
+            committed_waypoint = *waypoint;
+            has_committed_waypoint = true;
+            return waypoint;
+        }
+        // A refusal is not a searched position and cannot refresh place memory.
+        ++search_cursor;
+        has_committed_waypoint = false;
+    }
+    finish_search();
+    return std::nullopt;
 }
 
 bool persistent_state::has_direct_evidence( const int now_turn ) const
@@ -111,6 +316,18 @@ void persistent_state::serialize( JsonOut &json ) const
     json.member( "last_advanced_turn", last_advanced_turn );
     json.member( "remaining_route_progress", remaining_route_progress );
     json.member( "search_until_turn", search_until_turn );
+    json.member( "active_turns", active_turns );
+    json.member( "observed_character_id", observed_character_id );
+    json.member( "has_pursuit_memory", has_pursuit_memory );
+    json.member( "sighting_active_turn", sighting_active_turn );
+    json.member( "heading", heading );
+    json.member( "heading_interval", heading_interval );
+    json.member( "search_started_active", search_started_active );
+    json.member( "search_cursor", search_cursor );
+    json.member( "searched_positions", searched_positions );
+    json.member( "search_origin", search_origin );
+    json.member( "revisiting_slot", revisiting_slot );
+    json.member( "familiar", familiar );
     json.end_object();
 }
 
@@ -142,6 +359,24 @@ void persistent_state::deserialize( const JsonObject &json )
     json.read( "last_advanced_turn", last_advanced_turn );
     json.read( "remaining_route_progress", remaining_route_progress );
     json.read( "search_until_turn", search_until_turn );
+    json.read( "active_turns", active_turns );
+    json.read( "observed_character_id", observed_character_id );
+    json.read( "has_pursuit_memory", has_pursuit_memory );
+    json.read( "sighting_active_turn", sighting_active_turn );
+    json.read( "heading", heading );
+    json.read( "heading_interval", heading_interval );
+    json.read( "search_started_active", search_started_active );
+    json.read( "search_cursor", search_cursor );
+    json.read( "searched_positions", searched_positions );
+    json.read( "search_origin", search_origin );
+    json.read( "revisiting_slot", revisiting_slot );
+    json.read( "familiar", familiar );
+    if( !json.has_member( "active_turns" ) ) {
+        last_advanced_turn = -1;
+    }
+    active_turns = std::max<std::int64_t>( 0, active_turns );
+    search_cursor = std::clamp( search_cursor, 0, 9 );
+    revisiting_slot = std::clamp( revisiting_slot, -1, 1 );
 }
 
 namespace

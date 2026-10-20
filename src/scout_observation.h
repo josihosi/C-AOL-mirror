@@ -6,6 +6,7 @@
 #include <vector>
 #include "coordinates.h"
 class Character;
+class Creature;
 class npc;
 namespace bandit_live_world
 {
@@ -22,6 +23,10 @@ struct visibility_read {
     bool visible = false;
     std::string reason;
 };
+struct actor_capability {
+    int maximum_range = 0;
+    float native_range_scale = 1.0f;
+};
 // Decision-scoped geometry reuse; no visibility state survives movement or another turn.
 class site_reader
 {
@@ -35,6 +40,10 @@ class site_reader
                               const std::vector<tripoint_abs_omt> &footprint = {} );
         visibility_read read_character( const Character &observer, const Character &target,
                                         const std::vector<tripoint_abs_omt> &footprint = {} );
+        // Unlike site-directed scouts this requires the entire physical ray,
+        // including the observer. Unknown cells cannot reveal an occupant.
+        visibility_read read_actor( const Creature &observer, const Creature &target,
+                                    const actor_capability &capability );
         visibility_read read_signal( const Character &observer, const tripoint_abs_ms &origin,
                                      const tripoint_abs_ms &target,
                                      const std::vector<tripoint_abs_omt> &footprint );

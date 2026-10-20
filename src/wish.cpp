@@ -71,8 +71,8 @@ static const efftype_id effect_pet( "pet" );
 
 static const mongroup_id GROUP_ZOMBIE( "GROUP_ZOMBIE" );
 
-// This marker is deliberately restricted to the one harness scenario that
-// authorizes a debug-created stalker.  It is identity evidence for the
+// This marker is restricted to focused native stalker scenarios that
+// authorize a debug-created stalker. It is identity evidence for the
 // zero-credit setup receipt, not an AI input or a gameplay effect.
 static constexpr std::string_view caol_debug_setup_stalker_run_id =
     "caol_debug_setup_stalker_run_id";
@@ -83,7 +83,8 @@ static std::string caol_debug_setup_stalker_marker()
     const char *const run_id = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
     const char *const semantic_run_id = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID" );
     if( scenario == nullptr || run_id == nullptr || semantic_run_id == nullptr ||
-        std::string( scenario ) != "r_zl_stalker_follow_city_debug_setup_mcw" ||
+        ( std::string( scenario ) != "r_zl_stalker_follow_city_debug_setup_mcw" &&
+          std::string( scenario ) != "r_rel_stalker_pursuit.native_mcw" ) ||
         run_id[0] == '\0' || std::strcmp( run_id, semantic_run_id ) != 0 ) {
         return {};
     }

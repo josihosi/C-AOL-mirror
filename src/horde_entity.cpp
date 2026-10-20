@@ -142,7 +142,8 @@ bool horde_entity::advance_evolution( const tripoint_abs_ms &position )
     return true;
 }
 
-bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, const int now_turn )
+bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, const int now_turn,
+        const int active_elapsed )
 {
     ensure_predator_payload( position );
     if( !monster_data || !monster_data->is_caol_predator() ) {
@@ -155,13 +156,41 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
     life.last_advanced_turn = now_turn;
     if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
         writhing_stalker::persistent_state &state = monster_data->writhing_stalker_state();
-        state.advance_to( now_turn );
+        state.advance_to( now_turn, active_elapsed );
+        if( active_elapsed == 0 ) {
+            // The shared activation owner must also gate transport/evolution
+            // before this entrypoint; this seam does not implement that system.
+            return true;
+        }
+        monster_data->set_pos_abs_only( position );
+        writhing_stalker::observe_current_target( *monster_data );
+        if( state.has_pursuit_memory && ( state.sighting_active_turn >= 0 ||
+                                        state.phase == writhing_stalker::lifecycle_phase::idle ||
+                                        state.revisiting_slot >= 0 ) ) {
+            const auto waypoint = writhing_stalker::pursuit_destination( *monster_data, true );
+            if( waypoint ) {
+                state.committed_waypoint = *waypoint;
+                state.has_committed_waypoint = true;
+            } else if( state.phase == writhing_stalker::lifecycle_phase::idle ) {
+                tracking_intensity = 0;
+                monster_data->unset_dest();
+                monster_data->wander_to( position, 0 );
+            }
+        }
         if( !light_sample_id.empty() && light_expires > light_observed ) {
             state.observe_light_interest( light_source, light_sample_id,
                                           to_turn<int>( light_observed ),
                                           std::max( 1, to_turns<int>( light_expires - light_observed ) ) );
         }
-        if( state.has_committed_waypoint ) {
+        if( state.phase == writhing_stalker::lifecycle_phase::retreating ||
+            state.phase == writhing_stalker::lifecycle_phase::cooldown ) {
+            // The local caller handed off its actual retreat destination.
+            // A retained approach hypothesis cannot supersede that authority.
+            if( state.has_retreat_waypoint ) {
+                destination = state.retreat_waypoint;
+                tracking_intensity = std::max( tracking_intensity, 1 );
+            }
+        } else if( state.has_committed_waypoint ) {
             destination = state.committed_waypoint;
             tracking_intensity = std::max( tracking_intensity, 1 );
         }

@@ -1,18 +1,24 @@
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "avatar.h"
 #include "calendar.h"
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
 #include "character.h"
 #include "damage.h"
 #include "debug.h"
+#include "effect.h"
 #include "game.h"
+#include "horde_entity.h"
 #include "json.h"
 #include "json_loader.h"
+#include "level_cache.h"
 #include "map.h"
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
@@ -20,9 +26,14 @@
 #include "mongroup.h"
 #include "mtype.h"
 #include "npc.h"
+#include "options_helpers.h"
+#include "overmapbuffer.h"
 #include "player_helpers.h"
 #include "projectile.h"
+#include "scout_observation.h"
 #include "type_id.h"
+#include "weather.h"
+#include "weather_type.h"
 #include "writhing_stalker_ai.h"
 
 static const damage_type_id damage_cut( "cut" );
@@ -1432,7 +1443,17 @@ TEST_CASE( "writhing_stalker_no_target_plan_retains_committed_waypoint",
     auto &state = stalker.writhing_stalker_state();
     stalker.anger = 0;
     stalker.aggro_character = false;
-    REQUIRE_FALSE( stalker.sees( here, you ) );
+    const bool native_seen = stalker.sees( here, you );
+    CAPTURE( stalker.pos_abs(), you.pos_abs(), here.ter( center + point::east ).id().str(),
+             here.get_cache_ref( 0 ).seen_cache[stalker.pos_bub().x()][stalker.pos_bub().y()],
+             here.get_cache_ref( 0 ).vision_transparency_cache[center.x() + 1][center.y()],
+             stalker.sees_without_clairvoyance_physical( here, you ) );
+    CAPTURE( trigdist, here.supports_zlevels(), you.clairvoyance(),
+             get_avatar().get_active_moncams().size(),
+             here.get_cache_ref( 0 ).no_floor_gaps,
+             here.get_cache_ref( 1 ).floor_cache[center.x()][center.y()],
+             here.get_cache_ref( -1 ).floor_cache[center.x()][center.y()] );
+    REQUIRE_FALSE( native_seen );
     state.phase = writhing_stalker::lifecycle_phase::shadowing;
     state.committed_waypoint = stalker.pos_abs() + point::east * 3;
     state.has_committed_waypoint = true;
@@ -1564,13 +1585,14 @@ TEST_CASE( "writhing_stalker_pressure_history_is_visible_absolute_and_lifecycle_
     REQUIRE( pressure.sees( here, you ) );
 
     writhing_stalker::reset_transient_pressure_history();
-    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 0 );
+    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 1 );
     CHECK( writhing_stalker::transient_pressure_sample_count() == 1 );
     // A repeated same-turn facade read must not duplicate a position sample.
-    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 0 );
+    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 1 );
     CHECK( writhing_stalker::transient_pressure_sample_count() == 1 );
 
-    // An actor moving while the stalker cannot see it must not seed closure.
+    // Occluded motion supplies no sample. After reacquisition, current native
+    // target intent qualifies independently of any unobserved closing motion.
     writhing_stalker::reset_transient_pressure_history();
     here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
     refresh_writhing_stalker_arena( here );
@@ -1583,7 +1605,7 @@ TEST_CASE( "writhing_stalker_pressure_history_is_visible_absolute_and_lifecycle_
     set_time( calendar::turn_zero + 1_turns );
     refresh_writhing_stalker_arena( here );
     REQUIRE( stalker.sees( here, pressure ) );
-    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 0 );
+    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 1 );
     CHECK( writhing_stalker::transient_pressure_sample_count() == 1 );
 
     // Replacing a live actor must discard its old identity sample rather than
@@ -1596,7 +1618,7 @@ TEST_CASE( "writhing_stalker_pressure_history_is_visible_absolute_and_lifecycle_
         set_time( calendar::turn_zero + time_duration::from_turns( 2 + replacement ) );
         refresh_writhing_stalker_arena( here );
         REQUIRE( stalker.sees( here, new_pressure ) );
-        CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 0 );
+        CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 1 );
         CHECK( writhing_stalker::transient_pressure_sample_count() == 1 );
         g->remove_zombie( new_pressure );
     }
@@ -1630,7 +1652,7 @@ TEST_CASE( "writhing_stalker_pressure_history_survives_a_real_bubble_shift",
     REQUIRE( pressure.attack_target() == &target );
 
     writhing_stalker::reset_transient_pressure_history();
-    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, target ) == 0 );
+    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, target ) == 1 );
 
     // A real visible approach is still recognized as meaningful pressure.
     pressure.setpos( here, center + point::east * 2 );
@@ -1655,9 +1677,10 @@ TEST_CASE( "writhing_stalker_pressure_history_survives_a_real_bubble_shift",
     REQUIRE( stalker.sees( here, pressure ) );
     REQUIRE( pressure.sees( here, target ) );
     REQUIRE( pressure.attack_target() == &target );
-    // No actor closed distance after the rebase.  A bubble-relative sample
-    // would incorrectly report a fresh approach here.
-    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, target ) == 0 );
+    // No actor closed distance after the rebase. Current native target intent
+    // still qualifies once; absolute positions and sample uniqueness survive.
+    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, target ) == 1 );
+    CHECK( writhing_stalker::transient_pressure_sample_count() == 1 );
     clear_map_without_vision();
 }
 
@@ -1786,4 +1809,573 @@ TEST_CASE( "writhing_stalker_pattern_helper_traces_repeated_strikes_then_injured
         }
     }
     CHECK( jitter_count == 0 );
+}
+
+TEST_CASE( "stalker_pursuit_observed_heading_is_bounded_and_world_facts_survive_pause",
+           "[writhing_stalker][pursuit]" )
+{
+    using namespace writhing_stalker;
+    persistent_state state;
+    state.advance_to( 100 );
+    REQUIRE( state.observe_target( 77, 1, tripoint_abs_ms( 100, 100, 0 ), 100 ) );
+    CHECK( state.heading_interval == 0 );
+    state.advance_to( 110 );
+    REQUIRE( state.observe_target( 77, 1, tripoint_abs_ms( 100, 90, 0 ), 110 ) );
+    CHECK( state.heading == tripoint_rel_ms( 0, -10, 0 ) );
+    CHECK( state.heading_interval == 10 );
+    state.advance_to( 140 );
+    const auto identity_route = []( const tripoint_abs_ms & p, bool ) {
+        return std::optional<tripoint_abs_ms>( p );
+    };
+    CHECK( state.pursuit_waypoint( tripoint_abs_ms( 100, 120, 0 ), identity_route ) ==
+           tripoint_abs_ms( 100, 66, 0 ) );
+    CHECK( state.evidence_turn == 110 );
+    CHECK( state.last_observed_position == tripoint_abs_ms( 100, 90, 0 ) );
+
+    // A visible turn replaces the northbound heading. Reloading the observer
+    // or target does not confuse a stable Character ID with a new runtime ID.
+    state.advance_to( 150 );
+    REQUIRE( state.observe_target( 88, 1, tripoint_abs_ms( 110, 90, 0 ), 150 ) );
+    CHECK( state.heading == tripoint_rel_ms( 10, 0, 0 ) );
+    CHECK( state.heading_interval == 40 );
+    state.advance_to( 151 );
+    REQUIRE( state.observe_target( 88, 1, tripoint_abs_ms( 110, 90, 0 ), 151 ) );
+    CHECK( state.heading_interval == 0 );
+    CHECK_FALSE( state.observe_target( 88, 1, tripoint_abs_ms( 999, 999, 0 ), 151 ) );
+
+    std::ostringstream saved;
+    { JsonOut json( saved ); state.serialize( json ); }
+    persistent_state loaded;
+    loaded.deserialize( json_loader::from_string( saved.str() ) );
+    const int active = loaded.active_turns;
+    loaded.advance_to( 100000, 0 );
+    CHECK( loaded.active_turns == active );
+    CHECK( loaded.evidence_turn == 151 );
+    CHECK_FALSE( loaded.has_direct_evidence( 100000 ) );
+    loaded.advance_to( 100001, 1 );
+    CHECK( loaded.active_turns == active + 1 );
+    loaded.advance_to( 100001, 200 );
+    CHECK( loaded.active_turns == active + 1 );
+
+    persistent_state old_save;
+    old_save.deserialize( json_loader::from_string( "{\"last_advanced_turn\":10}" ) );
+    old_save.advance_to( 100000 );
+    CHECK( old_save.active_turns == 0 );
+    CHECK_FALSE( old_save.has_pursuit_memory );
+
+    // Cumulative active deadlines do not wrap at the old 32-bit turn bound.
+    loaded.active_turns = std::numeric_limits<int>::max();
+    loaded.advance_to( 100002, 10 );
+    CHECK( loaded.active_turns == static_cast<std::int64_t>( std::numeric_limits<int>::max() ) + 10 );
+    REQUIRE( loaded.observe_target( 88, 1, tripoint_abs_ms( 110, 90, 0 ), 100002 ) );
+    loaded.finish_search();
+    CHECK( loaded.familiar[0].revisit_at_active > loaded.active_turns );
+}
+
+TEST_CASE( "stalker_pursuit_search_revisits_are_finite_and_do_not_invent_sightings",
+           "[writhing_stalker][pursuit]" )
+{
+    using namespace writhing_stalker;
+    persistent_state state;
+    state.advance_to( 100 );
+    REQUIRE( state.observe_target( 77, 1, tripoint_abs_ms( 100, 100, 0 ), 100 ) );
+    state.advance_to( 161 );
+    const auto open_route = []( const tripoint_abs_ms & p, bool ) {
+        return std::optional<tripoint_abs_ms>( p );
+    };
+    tripoint_abs_ms position( 80, 100, 0 );
+    for( int step = 0; step < 9; ++step ) {
+        const auto waypoint = state.pursuit_waypoint( position, open_route );
+        REQUIRE( waypoint );
+        CHECK( rl_dist( project_to<coords::omt>( *waypoint ),
+                        project_to<coords::omt>( state.last_observed_position ) ) <= 1 );
+        position = *waypoint;
+        state.advance_to( 162 + step );
+    }
+    CHECK_FALSE( state.pursuit_waypoint( position, open_route ) );
+    CHECK( state.phase == lifecycle_phase::idle );
+    CHECK( state.searched_positions == 511 );
+    CHECK( state.evidence_turn == 100 );
+    CHECK( state.familiar[0].last_seen_world == 100 );
+    const int due = state.familiar[0].revisit_at_active;
+    CHECK( due >= state.active_turns + to_turns<int>( 6_hours ) );
+    CHECK( due <= state.active_turns + to_turns<int>( 12_hours ) );
+    CHECK_FALSE( state.pursuit_waypoint( position, open_route ) );
+    CHECK( state.familiar[0].revisit_at_active == due );
+
+    std::ostringstream serialized;
+    { JsonOut json( serialized ); state.serialize( json ); }
+    persistent_state reloaded;
+    reloaded.deserialize( json_loader::from_string( serialized.str() ) );
+    CHECK( reloaded.familiar[0].revisit_at_active == due );
+    reloaded.advance_to( 100000, due - reloaded.active_turns );
+    const auto revisit = reloaded.pursuit_waypoint( position + point::east, open_route );
+    REQUIRE( revisit );
+    CHECK( reloaded.revisiting_slot == 0 );
+    const int revisit_start = reloaded.active_turns;
+    reloaded.advance_to( 100600, to_turns<int>( 10_minutes ) );
+    CHECK_FALSE( reloaded.pursuit_waypoint( position + point::east, open_route ) );
+    CHECK( reloaded.phase == lifecycle_phase::idle );
+    CHECK( reloaded.familiar[0].revisit_at_active >= revisit_start +
+           to_turns<int>( 10_minutes + 6_hours ) );
+    CHECK( reloaded.familiar[0].last_seen_world == 100 );
+    CHECK_FALSE( reloaded.pursuit_waypoint( position, open_route ) );
+
+    // An independently blocked observer may end a search without claiming it
+    // searched the nine rejected positions or refreshing the learned place.
+    persistent_state blocked;
+    blocked.advance_to( 10 );
+    blocked.observe_target( 99, 2, tripoint_abs_ms( 10, 10, 0 ), 10 );
+    const auto no_route = []( const tripoint_abs_ms &, bool ) {
+        return std::optional<tripoint_abs_ms>();
+    };
+    CHECK_FALSE( blocked.pursuit_waypoint( position, no_route ) );
+    CHECK( blocked.searched_positions == 0 );
+    CHECK( blocked.familiar[0].last_seen_world == 10 );
+    CHECK( state.familiar[0].last_seen_world == 100 );
+}
+
+TEST_CASE( "stalker_pursuit_stalled_search_has_active_deadline_and_revisit_cannot_chain",
+           "[writhing_stalker][pursuit]" )
+{
+    using namespace writhing_stalker;
+    persistent_state state;
+    state.advance_to( 100 );
+    state.observe_target( 77, 1, tripoint_abs_ms( 100, 100, 0 ), 100 );
+    state.advance_to( 161 );
+    const tripoint_abs_ms waiting( 80, 100, 0 );
+    const auto route = []( const tripoint_abs_ms & p, bool ) {
+        return std::optional<tripoint_abs_ms>( p );
+    };
+    REQUIRE( state.pursuit_waypoint( waiting, route ) );
+    const int started = state.search_started_active;
+    state.advance_to( 100000, 0 );
+    REQUIRE( state.pursuit_waypoint( waiting, route ) );
+    CHECK( state.search_started_active == started );
+    CHECK( state.searched_positions == 0 );
+    state.advance_to( 100001, to_turns<int>( 30_minutes ) );
+    CHECK_FALSE( state.pursuit_waypoint( waiting, route ) );
+    CHECK( state.phase == lifecycle_phase::idle );
+    CHECK( state.evidence_turn == 100 );
+
+    state.familiar[1] = state.familiar[0];
+    state.familiar[1].position += point::east;
+    state.familiar[0].revisit_at_active = state.active_turns;
+    state.familiar[1].revisit_at_active = state.active_turns;
+    const auto blocked = []( const tripoint_abs_ms &, bool ) {
+        return std::optional<tripoint_abs_ms>();
+    };
+    CHECK_FALSE( state.pursuit_waypoint( waiting, blocked ) );
+    CHECK( state.phase == lifecycle_phase::idle );
+    for( const auto &place : state.familiar ) {
+        CHECK( place.revisit_at_active >= state.active_turns + to_turns<int>( 6_hours ) );
+        CHECK( place.last_seen_world == 100 );
+    }
+    CHECK_FALSE( state.pursuit_waypoint( waiting, route ) );
+
+    persistent_state delayed;
+    delayed.advance_to( 10 );
+    delayed.observe_target( 9, 1, tripoint_abs_ms( 100, 100, 0 ), 10 );
+    delayed.advance_to( 100000, to_turns<int>( 32_minutes ) );
+    CHECK_FALSE( delayed.pursuit_waypoint( waiting, route ) );
+    CHECK( delayed.phase == lifecycle_phase::idle );
+    CHECK( delayed.searched_positions == 0 );
+}
+
+TEST_CASE( "stalker_pursuit_familiar_places_use_two_slots_and_active_expiry",
+           "[writhing_stalker][pursuit]" )
+{
+    using namespace writhing_stalker;
+    persistent_state state;
+    state.advance_to( 1 );
+    state.observe_target( 1, 1, tripoint_abs_ms( 100, 100, 0 ), 1 );
+    state.advance_to( 2 );
+    state.observe_target( 1, 1, tripoint_abs_ms( 200, 100, 0 ), 2 );
+    state.advance_to( 3 );
+    state.observe_target( 1, 1, tripoint_abs_ms( 100, 100, 0 ), 3 );
+    state.advance_to( 4 );
+    state.observe_target( 1, 1, tripoint_abs_ms( 300, 100, 0 ), 4 );
+    CHECK( state.familiar[0].last_seen_world == 3 );
+    CHECK( state.familiar[1].last_seen_world == 4 );
+    state.advance_to( 10000000, 0 );
+    CHECK( state.familiar[0].valid );
+    CHECK( state.familiar[1].valid );
+    state.advance_to( 10000001, to_turns<int>( 7_days ) );
+    CHECK_FALSE( state.familiar[0].valid );
+    CHECK_FALSE( state.familiar[1].valid );
+    CHECK( state.evidence_turn == 4 );
+}
+
+TEST_CASE( "stalker_actor_weather_uses_the_physical_ray_without_indoor_range_penalty",
+           "[writhing_stalker][pursuit][monster][weather]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &you = get_player_character();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 12_hours );
+    const bool indoors = GENERATE( false, true );
+    for( int x = 0; x < 132; ++x ) {
+        for( int y = 0; y < 132; ++y ) {
+            here.ter_set( tripoint_bub_ms( x, y, 0 ), ter_id( indoors ? "t_floor" : "t_grass" ) );
+            here.ter_set( tripoint_bub_ms( x, y, 1 ), ter_id( indoors ? "t_flat_roof" : "t_open_air" ) );
+            here.furn_clear( tripoint_bub_ms( x, y, 0 ) );
+        }
+    }
+    const tripoint_bub_ms origin( 10, 65, 0 );
+    you.setpos( here, origin + point::east * ( indoors ? 20 : 71 ) );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), origin );
+    for( const char *weather_id : { "clear", "fog" } ) {
+        scoped_weather_override weather{ weather_type_id( weather_id ) };
+        here.invalidate_map_cache( 1 );
+        refresh_writhing_stalker_arena( here );
+        const int range = std::min( 72, static_cast<int>( std::floor(
+                                       stalker.sight_range( here.ambient_light_at( you.pos_bub() ) ) * 72.0f / 35 ) ) );
+        std::vector<tripoint_abs_omt> footprint;
+        for( const auto &cell : scout_observation::site_sightline( stalker.pos_abs(), you.pos_abs() ) ) {
+            footprint.push_back( project_to<coords::omt>( cell ) );
+        }
+        const bool physical = stalker.sees_site_with_range( here, you, range, footprint );
+        scout_observation::site_reader reader;
+        const auto read = reader.read_actor( stalker, you, { 72, 72.0f / 35 } );
+        CAPTURE( indoors, weather_id, range, read.reason, physical );
+        REQUIRE( here.is_outside( you.pos_bub() ) == !indoors );
+        REQUIRE( read.known );
+        CHECK( read.visible == physical );
+        CHECK( read.visible == ( indoors || std::string( weather_id ) == "clear" ) );
+    }
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_native_retreat_authority_survives_the_abstract_intent_caller",
+           "[writhing_stalker][predator][pursuit][monster]" )
+{
+    clear_overmaps();
+    clear_map_without_vision();
+    map &here = get_map();
+    Character &you = get_player_character();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 100_turns );
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 2 );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    auto &state = stalker.writhing_stalker_state();
+    state.advance_to( 90 );
+    REQUIRE( state.observe_target( you.get_identity(), you.getID().get_value(), you.pos_abs(), 90 ) );
+    state.committed_waypoint = you.pos_abs();
+    state.has_committed_waypoint = true;
+    state.attempts_spent = 2;
+    stalker.plan();
+    REQUIRE( state.phase == writhing_stalker::lifecycle_phase::retreating );
+    const bool cooling = GENERATE( false, true );
+    if( cooling ) {
+        stalker.plan();
+        REQUIRE( state.phase == writhing_stalker::lifecycle_phase::cooldown );
+    }
+    REQUIRE( state.has_retreat_waypoint );
+    const auto retreat = state.retreat_waypoint;
+    REQUIRE( stalker.get_dest() == retreat );
+    REQUIRE( retreat != state.committed_waypoint );
+    const auto position = stalker.pos_abs();
+    const auto actor = stalker.predator_state().actor_id;
+    const auto epoch = stalker.predator_state().handoff_epoch;
+    g->despawn_monster( stalker );
+    horde_entity *owner = overmap_buffer.entity_at( position );
+    REQUIRE( owner != nullptr );
+    REQUIRE( owner->monster_data != nullptr );
+    REQUIRE( owner->destination == retreat );
+    set_time( calendar::turn + 1_turns );
+    REQUIRE( owner->advance_predator_intent( position, to_turn<int>( calendar::turn ) ) );
+    CHECK( owner->destination == retreat );
+    CHECK( owner->monster_data->wander_pos == retreat );
+    CHECK( owner->monster_data->predator_state().actor_id == actor );
+    CHECK( owner->monster_data->predator_state().handoff_epoch == epoch + 1 );
+    const auto phase = owner->monster_data->writhing_stalker_state().phase;
+    CHECK( phase == ( cooling ? writhing_stalker::lifecycle_phase::cooldown :
+                     writhing_stalker::lifecycle_phase::retreating ) );
+    REQUIRE( owner->advance_predator_intent( position, to_turn<int>( calendar::turn ) ) );
+    CHECK( owner->destination == retreat );
+    clear_overmaps();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_pursuit_actual_planner_acquires_at_three_OMT_and_rejects_hidden_turn",
+           "[writhing_stalker][pursuit][monster]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &you = get_player_character();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 12_hours );
+    const tripoint_bub_ms origin( 10, 65, 0 );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    for( int x = 5; x < 100; ++x ) {
+        for( int y = 40; y < 80; ++y ) {
+            here.ter_set( tripoint_bub_ms( x, y, 0 ), ter_id( "t_grass" ) );
+            here.ter_set( tripoint_bub_ms( x, y, 1 ), ter_id( "t_open_air" ) );
+            here.furn_clear( tripoint_bub_ms( x, y, 0 ) );
+        }
+    }
+    you.setpos( here, tripoint_bub_ms( 82, 65, 0 ) );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), origin );
+    monster &second = spawn_test_monster( mon_writhing_stalker.str(), origin + point::north * 2 );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    second.anger = 100;
+    second.aggro_character = true;
+    REQUIRE_FALSE( stalker.sees( here, you ) );
+    REQUIRE( rl_dist( project_to<coords::omt>( stalker.pos_abs() ),
+                      project_to<coords::omt>( you.pos_abs() ) ) == 3 );
+    scout_observation::site_reader sight;
+    const auto direct = sight.read_actor( stalker, you, { 72, 72.0f / 35 } );
+    CAPTURE( direct.known, direct.visible, direct.reason, you.visibility(),
+             here.ambient_light_at( you.pos_bub() ), stalker.sight_range( 100.0f ),
+             static_cast<int>( stalker.attitude_to( you ) ),
+             static_cast<int>( stalker.attitude_to( second ) ) );
+    // Native avatar visibility is 99%, so exactly72 squares is beyond this
+    // target's recognition boundary. One square closer is still three OMT.
+    REQUIRE_FALSE( direct.visible );
+    you.setpos( here, tripoint_bub_ms( 81, 65, 0 ) );
+    refresh_writhing_stalker_arena( here );
+    REQUIRE( writhing_stalker::can_observe_actor( stalker, you ) );
+    stalker.plan();
+    second.plan();
+    auto &state = stalker.writhing_stalker_state();
+    REQUIRE( state.has_pursuit_memory );
+    REQUIRE( second.writhing_stalker_state().has_pursuit_memory );
+    const int second_first_sighting = second.writhing_stalker_state().evidence_turn;
+    CHECK( state.last_observed_position == you.pos_abs() );
+    CHECK( state.sighting_active_turn == state.active_turns );
+    REQUIRE( stalker.has_dest() );
+    CHECK( rl_dist( stalker.pos_abs(), stalker.get_dest() ) <= 10 );
+    if( state.phase == writhing_stalker::lifecycle_phase::retreating ||
+        state.phase == writhing_stalker::lifecycle_phase::cooldown ) {
+        CHECK( rl_dist( stalker.get_dest(), you.pos_abs() ) >=
+               rl_dist( stalker.pos_abs(), you.pos_abs() ) );
+    }
+
+    set_time( calendar::turn + 10_turns );
+    you.setpos( here, tripoint_bub_ms( 81, 55, 0 ) );
+    refresh_writhing_stalker_arena( here );
+    stalker.plan();
+    CHECK( state.heading == tripoint_rel_ms( 0, -10, 0 ) );
+    CHECK( state.sighting_active_turn == state.active_turns );
+    CHECK( second.writhing_stalker_state().evidence_turn == second_first_sighting );
+    set_time( calendar::turn + 10_turns );
+    you.setpos( here, tripoint_bub_ms( 71, 55, 0 ) );
+    refresh_writhing_stalker_arena( here );
+    stalker.plan();
+    CHECK( state.heading == tripoint_rel_ms( -10, 0, 0 ) );
+    CHECK( state.sighting_active_turn == state.active_turns );
+    const int last_seen = state.evidence_turn;
+    const auto last_position = state.last_observed_position;
+    for( int y = 0; y < 132; ++y ) {
+        here.ter_set( tripoint_bub_ms( 40, y, 0 ), ter_id( "t_wall" ) );
+    }
+    set_time( calendar::turn + 10_turns );
+    you.setpos( here, tripoint_bub_ms( 71, 45, 0 ) );
+    refresh_writhing_stalker_arena( here );
+    stalker.plan();
+    CHECK( state.evidence_turn == last_seen );
+    CHECK( state.last_observed_position == last_position );
+    CHECK( state.heading == tripoint_rel_ms( -10, 0, 0 ) );
+    const bool magically_tracked = stalker.has_dest() && stalker.get_dest() == you.pos_abs();
+    CHECK_FALSE( magically_tracked );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_pursuit_native_route_uses_short_steps_without_invented_search_progress",
+           "[writhing_stalker][pursuit][monster]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &you = get_player_character();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time_to_day();
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    for( int x = 25; x < 90; ++x ) {
+        for( int y = 50; y < 85; ++y ) {
+            here.ter_set( tripoint_bub_ms( x, y, 0 ), ter_id( "t_grass" ) );
+            here.ter_set( tripoint_bub_ms( x, y, 1 ), ter_id( "t_open_air" ) );
+            here.furn_clear( tripoint_bub_ms( x, y, 0 ) );
+        }
+    }
+    you.setpos( here, tripoint_bub_ms( 80, 66, 0 ) );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(),
+                       tripoint_bub_ms( 30, 66, 0 ) );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
+    auto &state = stalker.writhing_stalker_state();
+    const int observation = state.evidence_turn;
+    for( int y = 0; y < 132; ++y ) {
+        here.ter_set( tripoint_bub_ms( 65, y, 0 ), ter_id( "t_wall" ) );
+    }
+    set_time( calendar::turn + 1_turns );
+    refresh_writhing_stalker_arena( here );
+    REQUIRE_FALSE( writhing_stalker::can_observe_actor( stalker, you ) );
+    stalker.plan();
+    REQUIRE( stalker.has_dest() );
+    CHECK( rl_dist( stalker.pos_abs(), stalker.get_dest() ) <= 10 );
+    CHECK( stalker.get_dest().x() > stalker.pos_abs().x() );
+    const auto before = stalker.pos_abs();
+    stalker.set_moves( 100 );
+    stalker.move();
+    CHECK( stalker.pos_abs() != before );
+    CHECK( state.evidence_turn == observation );
+    CHECK( state.searched_positions == 0 );
+
+    // Search can travel through intermediate native points without claiming
+    // an unreached OMT, and its absolute active deadline is not renewed.
+    set_time( calendar::turn + 61_turns );
+    stalker.plan();
+    const int search_start = state.search_started_active;
+    REQUIRE( search_start >= 0 );
+    CHECK( state.searched_positions == 0 );
+    set_time( calendar::turn + 30_minutes );
+    stalker.plan();
+    CHECK( state.phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK( state.search_started_active == -1 );
+    CHECK( state.evidence_turn == observation );
+    CHECK_FALSE( state.has_committed_waypoint );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_pursuit_native_flight_preempts_visible_and_remembered_approach",
+           "[writhing_stalker][pursuit][monster]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &you = get_player_character();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time_to_day();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 5 );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    refresh_writhing_stalker_arena( here );
+    REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
+    auto &state = stalker.writhing_stalker_state();
+    state.begin_search();
+
+    SECTION( "current visible threat retains the native away destination" ) {
+        stalker.add_effect( efftype_id( "run" ), 5_minutes );
+        REQUIRE( stalker.is_fleeing( you ) );
+        stalker.plan();
+        REQUIRE( stalker.has_dest() );
+        CHECK( stalker.get_dest() == stalker.pos_abs() - you.pos_abs() + stalker.pos_abs() );
+        CHECK( state.searched_positions == 0 );
+        CHECK( state.attempts_spent == 0 );
+    }
+    SECTION( "hidden threat does not resume a remembered search during flight" ) {
+        here.ter_set( center + point::east * 2, ter_id( "t_wall" ) );
+        refresh_writhing_stalker_arena( here );
+        REQUIRE_FALSE( writhing_stalker::can_observe_actor( stalker, you ) );
+        set_time( calendar::turn + 1_turns );
+        stalker.plan();
+        REQUIRE( stalker.has_dest() );
+        REQUIRE( state.has_committed_waypoint );
+        const auto approach = state.committed_waypoint;
+        stalker.add_effect( efftype_id( "run" ), 5_minutes );
+        REQUIRE( stalker.is_fleeing( you ) );
+        const auto cursor = state.search_cursor;
+        set_time( calendar::turn + 1_turns );
+        stalker.plan();
+        CHECK_FALSE( stalker.has_dest() );
+        CHECK( state.committed_waypoint == approach );
+        CHECK( state.search_cursor == cursor );
+        CHECK( state.searched_positions == 0 );
+    }
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_pursuit_native_opening_requires_dark_solitude_or_witnessed_attack",
+           "[writhing_stalker][pursuit][monster][counterpressure]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    set_time_to_day();
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    std::vector<monster *> zombies;
+    for( const point &offset : { point::west, point::south, point::east, point::south_west } ) {
+        auto &zombie = spawn_test_monster( mon_zombie.str(), center + offset );
+        zombie.aggro_character = true;
+        zombie.set_dest( you.pos_abs() );
+        REQUIRE( zombie.attack_target() == &you );
+        zombies.push_back( &zombie );
+    }
+    refresh_writhing_stalker_arena( here );
+    REQUIRE( stalker.sees( here, you ) );
+    REQUIRE( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 4 );
+    stalker.plan();
+    auto &state = stalker.writhing_stalker_state();
+    REQUIRE( state.has_pursuit_memory );
+    // Four merely closing zombies are not an actual bright-light opening.
+    CHECK( state.phase != writhing_stalker::lifecycle_phase::attacking );
+    CHECK( state.attempts_spent == 0 );
+
+    SECTION( "a real visible attack resolution supplies the missing predicate" ) {
+        CHECK( you.deal_melee_attack( zombies.front(), -1000 ) < 0 );
+        REQUIRE( writhing_stalker::has_recent_observed_attack( &stalker, zombies.front(), &you,
+                 to_turn<int>( calendar::turn ), 0 ) );
+        set_time( calendar::turn + 1_turns );
+        stalker.plan();
+        CHECK( state.phase == writhing_stalker::lifecycle_phase::attacking );
+        CHECK( stalker.get_dest() == you.pos_abs() );
+        CHECK( state.attempts_spent == 0 ); // Planning does not spend an attack.
+    }
+    SECTION( "a target-directed attack hidden behind a wall is not witnessed" ) {
+        const int observation = state.evidence_turn;
+        here.ter_set( center + point::east * 2, ter_id( "t_wall" ) );
+        refresh_writhing_stalker_arena( here );
+        CHECK( you.deal_melee_attack( zombies.front(), -1000 ) < 0 );
+        CHECK_FALSE( writhing_stalker::has_recent_observed_attack( &stalker, zombies.front(), &you,
+                     to_turn<int>( calendar::turn ), 0 ) );
+        set_time( calendar::turn + 1_turns );
+        stalker.plan();
+        CHECK( state.evidence_turn == observation );
+        CHECK( state.phase != writhing_stalker::lifecycle_phase::attacking );
+    }
+    SECTION( "dark solitude supplies an opening without inventing an attack" ) {
+        set_time( calendar::turn - time_past_midnight( calendar::turn ) + 1_days );
+        for( const auto *zombie : zombies ) {
+            CHECK_FALSE( writhing_stalker::has_recent_observed_attack( &stalker, zombie, &you,
+                         to_turn<int>( calendar::turn ), 2 ) );
+        }
+        stalker.plan();
+        CHECK( state.phase == writhing_stalker::lifecycle_phase::attacking );
+    }
+    SECTION( "visible actual allies remove solitude even in darkness" ) {
+        for( const point &offset : { point( 2, 2 ), point( -2, 2 ), point( 0, 3 ) } ) {
+            npc &ally = spawn_npc( point_bub_ms( ( center + offset ).xy() ), "test_talker" );
+            ally.set_fac( faction_id( "your_followers" ) );
+            ally.set_attitude( NPCATT_FOLLOW );
+        }
+        set_time( calendar::turn - time_past_midnight( calendar::turn ) + 1_days );
+        refresh_writhing_stalker_arena( here );
+        stalker.plan();
+        CHECK( state.phase != writhing_stalker::lifecycle_phase::attacking );
+    }
+    clear_map_without_vision();
 }

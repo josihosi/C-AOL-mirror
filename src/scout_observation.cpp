@@ -475,6 +475,61 @@ visibility_read site_reader::read_character( const Character &observer, const Ch
     return read_visibility( observer, observer.pos_abs(), target.pos_abs(), &target, &impl->views,
                             &impl->vehicles, footprint );
 }
+visibility_read site_reader::read_actor( const Creature &observer, const Creature &target,
+                                       const actor_capability &capability )
+{
+    const auto origin = observer.pos_abs();
+    const auto endpoint = target.pos_abs();
+    if( observer.is_dead_state() || target.is_dead_state() || capability.maximum_range <= 0 ||
+        capability.maximum_range > MAX_VIEW_DISTANCE * 2 ||
+        !std::isfinite( capability.native_range_scale ) || capability.native_range_scale <= 0 ||
+        rl_dist( origin, endpoint ) > capability.maximum_range ||
+        std::abs( origin.z() - endpoint.z() ) > fov_3d_z_range ) {
+        return { true, false, "actor_capability_range_or_state" };
+    }
+    const auto ray = site_sightline( origin, endpoint );
+    std::vector<tripoint_abs_omt> footprint{ project_to<coords::omt>( origin ) };
+    for( const auto &point : ray ) {
+        const auto omt = project_to<coords::omt>( point );
+        if( std::find( footprint.begin(), footprint.end(), omt ) == footprint.end() ) {
+            footprint.push_back( omt );
+        }
+    }
+    const map *here = &get_map();
+    existing_view *view = nullptr;
+    if( !here->inbounds( origin ) || !here->inbounds( endpoint ) ) {
+        for( const auto &candidate : impl->views ) {
+            if( candidate->covers( origin, endpoint ) && candidate->scope_matches( &footprint ) ) {
+                view = candidate.get();
+                break;
+            }
+        }
+        if( !view ) {
+            auto owned = std::make_unique<existing_view>( impl->vehicles, origin, endpoint, true,
+                         false, false, &footprint );
+            owned->prepare_visibility();
+            view = owned.get();
+            impl->views.push_back( std::move( owned ) );
+        }
+        if( !view->has_ray( origin, endpoint ) ) {
+            return { false, false, "actor_geometry_unavailable" };
+        }
+        here = view;
+    }
+    const auto light = existing_ambient( endpoint, impl->views, impl->vehicles, &footprint );
+    if( !light ) {
+        return { false, false, "actor_lighting_unavailable" };
+    }
+    if( view ) {
+        set_view_ambient( *view, endpoint, *light );
+    }
+    // The physical ray's transparency cache already applies weather to its
+    // outdoor cells. A second range penalty also penalizes fully indoor rays.
+    const int range = std::min( capability.maximum_range, static_cast<int>( std::floor(
+                                   observer.sight_range( *light ) * capability.native_range_scale ) ) );
+    return { true, observer.sees_site_with_range( *here, target, range, footprint ),
+             "actor_light_weather_cover_visibility" };
+}
 visibility_read site_reader::read_signal( const Character &observer, const tripoint_abs_ms &origin,
         const tripoint_abs_ms &target,
         const std::vector<tripoint_abs_omt> &footprint )
