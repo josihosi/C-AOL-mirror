@@ -3227,6 +3227,12 @@ void monster::die( map *here, Creature *nkiller )
     }
     g->set_critter_died();
     dead = true;
+    if( !population_member.empty() ) {
+        if( migo_population::site_record *site =
+            overmap_buffer.global_state.migo_populations.find( population_member.site_id ) ) {
+            site->record_death( population_member );
+        }
+    }
     if( type->id == mon_zombie_rider && !lifecycle_state.actor_id.empty() ) {
         overmap_buffer.global_state.zombie_rider_bands.record_casualty( lifecycle_state.actor_id,
                 to_turns<int>( calendar::turn - calendar::turn_zero ) );

@@ -30,6 +30,7 @@
 #include "writhing_stalker_ai.h"
 #include "zombie_rider_overmap_ai.h"
 #include "predator_state.h"
+#include "migo_population_identity.h"
 
 class Character;
 class JsonObject;
@@ -225,6 +226,18 @@ class monster : public Creature
         void initialize_predator_ammo_once();
         predator_lifecycle_state &predator_state();
         const predator_lifecycle_state &predator_state() const;
+        // Only explicit site provenance makes a Mi-go a population member.
+        // Ordinary/mission/ambient Mi-go retain an empty token.
+        migo_population::identity &population_identity() { return population_member; }
+        const migo_population::identity &population_identity() const { return population_member; }
+        // Shared native transfer identity only. Species planning continues to
+        // use is_caol_predator(); membership does not turn Mi-go into predators.
+        bool has_handoff_identity() const {
+            return is_caol_predator() || !population_member.empty();
+        }
+        const std::string &handoff_actor_id() const {
+            return is_caol_predator() ? lifecycle_state.actor_id : population_member.member_id;
+        }
 
         bool avoid_trap( const tripoint_bub_ms &pos, const trap &tr ) const override;
 
@@ -672,6 +685,7 @@ class monster : public Creature
         writhing_stalker::persistent_state stalker_state;
         zombie_rider_overmap_ai::rider_pursuit_state rider_pursuit_state;
         predator_lifecycle_state lifecycle_state;
+        migo_population::identity population_member;
         // Set only around a successful non-forced physical move_to step.
         bool physical_move_to_step = false;
 

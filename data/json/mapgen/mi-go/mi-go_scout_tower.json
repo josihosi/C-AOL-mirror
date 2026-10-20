@@ -1,7 +1,7 @@
 [
   {
     "type": "mapgen",
-    "om_terrain": [ "barry_mi-go_scout_tower_1", "mi-go_scout_tower_1" ],
+    "om_terrain": "barry_mi-go_scout_tower_1",
     "object": {
       "fill_ter": "t_floor_resin",
       "rows": [
@@ -46,7 +46,48 @@
   },
   {
     "type": "mapgen",
-    "om_terrain": [ "barry_mi-go_scout_tower_2", "mi-go_scout_tower_2" ],
+    "om_terrain": "mi-go_scout_tower_1",
+    "object": {
+      "fill_ter": "t_floor_resin",
+      "rows": [
+        "........................",
+        "........................",
+        "........................",
+        "............||..........",
+        "..........||||||........",
+        "........|||TPTP|||......",
+        "......|||       V|||....",
+        "....|||V          T||...",
+        "...||<            T |...",
+        "...|||      B P     ||..",
+        "....||       &      T|..",
+        ".....|      P P     T|..",
+        ".....+              ||..",
+        "....|| TPTP     TPTP|...",
+        "..|||V              |...",
+        "||| +      TPTP  V ||...",
+        "||  ||| TPTP     |||....",
+        "|| 14 ||||||||TT||......",
+        ".|&  ||......||||.......",
+        ".|||||..................",
+        "........................",
+        "........................",
+        "........................",
+        "........................"
+      ],
+      "palettes": [ "mi-go_palette" ],
+      "furniture": { "B": "f_migo_brood_pod" },
+      "terrain": { ".": "t_region_groundcover" },
+      "place_nested": [ { "chunks": [ "mi-go_encampment1_room14" ], "x": 1, "y": 14 } ],
+      "place_monster": [
+        { "monster": "mon_mi_go", "x": 8, "y": 10 },
+        { "monster": "mon_mi_go", "x": 12, "y": 12 }
+      ]
+    }
+  },
+  {
+    "type": "mapgen",
+    "om_terrain": "barry_mi-go_scout_tower_2",
     "object": {
       "fill_ter": "t_floor_resin",
       "rows": [
@@ -90,7 +131,45 @@
   },
   {
     "type": "mapgen",
-    "om_terrain": [ "mi-go_scout_tower_3" ],
+    "om_terrain": "mi-go_scout_tower_2",
+    "object": {
+      "fill_ter": "t_floor_resin",
+      "rows": [
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvv||vvvvvvvvvv",
+        "vvvvvvvvvv||||||vvvvvvvv",
+        "vvvvvvvv|||   O|||vvvvvv",
+        "vvvvvv|||    OTO |||vvvv",
+        "vvvv|||i  O   O i O||vvv",
+        "vvv||>   OTO     OTO|vvv",
+        "vvv||<    O   O   O ||vv",
+        "vvvv||i    F OTO    i|vv",
+        "vvvvv|    O   O  O   |vv",
+        "vvvvv|   OTO    OTO ||vv",
+        "vvvv|| i  O   O  O  |vvv",
+        "vv|||        OTO  T |vvv",
+        "||| + F  &    O   V||vvv",
+        "||T |||    i    F|||vvvv",
+        "||   i||||||||ii||vvvvvv",
+        "v|PPP||vvvvvv||||vvvvvvv",
+        "v|||||vvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv"
+      ],
+      "palettes": [ "mi-go_palette" ],
+      "place_monster": [
+        { "monster": "mon_mi_go", "x": 8, "y": 10 },
+        { "monster": "mon_mi_go", "x": 12, "y": 12 }
+      ]
+    }
+  },
+  {
+    "type": "mapgen",
+    "om_terrain": "mi-go_scout_tower_3",
     "object": {
       "fill_ter": "t_floor_resin",
       "rows": [
@@ -125,13 +204,8 @@
         { "chunks": [ "mi-go_encampment1_room17" ], "x": 1, "y": 14 }
       ],
       "place_monster": [
-        {
-          "group": "GROUP_MI-GO_SCOUT_TOWER",
-          "x": 12,
-          "y": 12,
-          "pack_size": [ 1, 2 ],
-          "spawn_data": { "patrol": [ { "x": [ 8, 16 ], "y": [ 8, 16 ] } ] }
-        }
+        { "monster": "mon_mi_go_scout", "x": 8, "y": 10 },
+        { "monster": "mon_mi_go_scout", "x": 12, "y": 12 }
       ]
     }
   },
@@ -185,7 +259,7 @@
   },
   {
     "type": "mapgen",
-    "om_terrain": [ "barry_mi-go_scout_tower_4", "mi-go_scout_tower_4" ],
+    "om_terrain": "barry_mi-go_scout_tower_4",
     "object": {
       "fill_ter": "t_floor_resin",
       "rows": [
@@ -224,6 +298,44 @@
           "spawn_data": { "patrol": [ { "x": [ 8, 16 ], "y": [ 8, 16 ] } ] },
           "repeat": [ 1, 2 ]
         }
+      ]
+    }
+  },
+  {
+    "type": "mapgen",
+    "om_terrain": "mi-go_scout_tower_4",
+    "object": {
+      "fill_ter": "t_floor_resin",
+      "rows": [
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvv##vvvvvvvvvv",
+        "vvvvvvvvvv######vvvvvvvv",
+        "vvvvvvvv###_ii_###vvvvvv",
+        "vvvvvv###________###vvvv",
+        "vvvv###____________##vvv",
+        "vvv##>___T__________#vvv",
+        "vvv##&_______&______##vv",
+        "vvvv##_______________ivv",
+        "vvvvvi_______T________vv",
+        "vvvvv_________________vv",
+        "vvvvi____________T___vvv",
+        "vv###________&______ivvv",
+        "###_+____T_________##vvv",
+        "##T_###__________###vvvv",
+        "##P__i#i____i___##vvvvvv",
+        "v#iP_##vvvvvv####vvvvvvv",
+        "v#####vvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv",
+        "vvvvvvvvvvvvvvvvvvvvvvvv"
+      ],
+      "palettes": [ "mi-go_palette" ],
+      "place_monster": [
+        { "monster": "mon_mi_go", "x": 8, "y": 10 },
+        { "monster": "mon_mi_go", "x": 12, "y": 12 }
       ]
     }
   }

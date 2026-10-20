@@ -1,5 +1,6 @@
 #include "scout_observation.h"
 #include "map.h"
+#include "migo_population_native.h"
 
 #include <algorithm>
 #include <array>
@@ -2028,6 +2029,7 @@ bool map::furn_set( const tripoint_bub_ms &p, const furn_id &new_furniture, cons
         current_submap->player_adjusted_map = true;
     }
     current_submap->set_furn( l, new_target_furniture );
+    migo_population::source_changed( get_abs( p ), new_target_furniture.id().str() );
     current_submap->set_map_damage( point_sm_ms( l ), 0 );
     clear_original_terrain_at( p );
 
@@ -10047,6 +10049,7 @@ void map::spawn_monsters_submap_group( const tripoint_rel_sm &gp, mongroup &grou
 void map::spawn_monsters_submap( const tripoint_rel_sm &gp, bool ignore_sight, bool spawn_nonlocal )
 {
     const tripoint_abs_sm submap_pos( gp + abs_sub.xy() );
+    migo_population::discover( project_to<coords::omt>( submap_pos ) );
     // Load unloaded monsters
     overmap_buffer.spawn_monster( submap_pos, spawn_nonlocal );
     // Only spawn new monsters after existing monsters are loaded.
@@ -10069,6 +10072,11 @@ void map::spawn_monsters_submap( const tripoint_rel_sm &gp, bool ignore_sight, b
     // NOLINTNEXTLINE(modernize-loop-convert)
     for( size_t sp_i = 0; sp_i < current_submap->spawns.size(); ++sp_i ) {
         const spawn_point i = current_submap->spawns[sp_i]; // intentional copy
+        if( !i.population.empty() ) {
+            // This is still the source of a refused site handoff. It cannot
+            // fall through to ordinary spawning or be cleared as consumed.
+            continue;
+        }
         const tripoint_bub_ms center = gp_ms + rebase_rel( i.pos );
         const tripoint_range<tripoint_bub_ms> points = points_in_radius( center, 3 );
 
@@ -10115,7 +10123,10 @@ void map::spawn_monsters_submap( const tripoint_rel_sm &gp, bool ignore_sight, b
             g->place_critter_at_or_within( make_shared_fast<monster>( tmp ), this, center, points );
         }
     }
-    current_submap->spawns.clear();
+    auto &spawns = current_submap->spawns;
+    spawns.erase( std::remove_if( spawns.begin(), spawns.end(), []( const spawn_point &slot ) {
+        return slot.population.empty();
+    } ), spawns.end() );
 }
 
 void map::spawn_monsters( bool ignore_sight, bool spawn_nonlocal )

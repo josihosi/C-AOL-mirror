@@ -33,6 +33,7 @@
 #include "flood_fill.h"
 #include "game.h"
 #include "horde_entity.h"
+#include "migo_population_native.h"
 #include "line.h"
 #include "map.h"
 #include "map_extras.h"
@@ -73,13 +74,13 @@ static const mongroup_id GROUP_SUBWAY_CITY( "GROUP_SUBWAY_CITY" );
 static const mongroup_id GROUP_SWAMP( "GROUP_SWAMP" );
 static const mongroup_id GROUP_ZOMBIE_HORDE( "GROUP_ZOMBIE_HORDE" );
 
-static bool loaded_predator_owns( const std::string &actor_id )
+static bool loaded_actor_owns( const std::string &actor_id )
 {
     if( actor_id.empty() ) {
         return false;
     }
     for( const monster &existing : g->all_monsters() ) {
-        if( existing.is_caol_predator() && existing.predator_state().actor_id == actor_id ) {
+        if( existing.has_handoff_identity() && existing.handoff_actor_id() == actor_id ) {
             return true;
         }
     }
@@ -1553,6 +1554,26 @@ horde_entity &overmap::spawn_monster( const tripoint_abs_ms &p, mtype_id id )
     return ( *hordes.spawn_entity( p, id ) )->second;
 }
 
+horde_entity *overmap::retain_monster_payload( const tripoint_abs_ms &p, const monster &payload )
+{
+    const auto inserted = hordes.spawn_entity( p, payload );
+    return inserted ? &( *inserted )->second : nullptr;
+}
+
+bool overmap::release_monster_payload( const tripoint_abs_ms &p, const std::string &actor_id )
+{
+    point_abs_om ignored;
+    tripoint_om_ms local;
+    std::tie( ignored, local ) = project_remain<coords::om>( p );
+    auto it = hordes.find( local );
+    if( actor_id.empty() || it == hordes.end() || !it->second.monster_data ||
+        it->second.monster_data->handoff_actor_id() != actor_id ) {
+        return false;
+    }
+    hordes.erase( it );
+    return true;
+}
+
 // Seeks through the submap looking for open areas.
 // Cursor is passed in to track progress across multiple calls.
 // An alternative is just returning a shuffled vector of open spaces to consume.
@@ -1662,13 +1683,25 @@ void overmap::move_hordes()
             mon++;
             continue;
         }
+        if( mon->second.monster_data &&
+            migo_population::superseded( *mon->second.monster_data ) ) {
+            mon = hordes.erase( mon );
+            continue;
+        }
+        if( mon->second.monster_data &&
+            !migo_population::can_transfer( *mon->second.monster_data,
+                                           migo_population::representation::abstract ) ) {
+            mon->second.last_processed = calendar::turn;
+            ++mon;
+            continue;
+        }
         // A predator handoff prepares a private heavy snapshot.  In
         // particular, exact local placement may fail; no movement debit,
         // payload position, or intent update may then leak into its abstract
         // owner.  Ordinary hordes retain their established in-place path.
         const std::string &type_id = mon->second.get_type()->id.str();
         const bool predator_transfer = ( mon->second.monster_data &&
-                                         mon->second.monster_data->is_caol_predator() ) ||
+                                         mon->second.monster_data->has_handoff_identity() ) ||
                                        type_id == "mon_writhing_stalker" ||
                                        type_id == "mon_zombie_rider";
         // Keep an immutable owner snapshot before evolution, intent, or
@@ -1764,11 +1797,11 @@ void overmap::move_hordes()
                     // turn an abstract route into an arbitrary nearby local
                     // placement.  Retain it abstract if its exact step is
                     // occupied or invalid.
-                    if( acting->monster_data->is_caol_predator() &&
-                        loaded_predator_owns( acting->monster_data->predator_state().actor_id ) ) {
-                        DebugLog( D_WARNING, D_GAME ) << "Refused duplicate local predator ownership.";
+                    if( acting->monster_data->has_handoff_identity() &&
+                        loaded_actor_owns( acting->monster_data->handoff_actor_id() ) ) {
+                        DebugLog( D_WARNING, D_GAME ) << "Refused duplicate local actor ownership.";
                     } else {
-                        placed_monster = acting->monster_data->is_caol_predator() ?
+                        placed_monster = acting->monster_data->has_handoff_identity() ?
                                          g->place_critter_at( make_shared_fast<monster>( *acting->monster_data ),
                                                               local ) :
                                          g->place_critter_around( make_shared_fast<monster>( *acting->monster_data ),
@@ -1777,6 +1810,11 @@ void overmap::move_hordes()
                 } else {
                     placed_monster = g->place_critter_around( acting->type_id->id,
                                      get_map().get_bub( viable_candidates.front() ), 1 );
+                }
+                if( placed_monster && !migo_population::transfer( *placed_monster,
+                        migo_population::representation::abstract, migo_population::representation::local ) ) {
+                    g->remove_zombie( *placed_monster );
+                    placed_monster = nullptr;
                 }
                 if( placed_monster == nullptr ) {
                     // If the tile is occupied it can't enter, just don't move for now.

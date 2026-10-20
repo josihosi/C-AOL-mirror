@@ -536,6 +536,10 @@ class overmap
     public:
         // Spawn a monter at overmap scale.
         horde_entity &spawn_monster( const tripoint_abs_ms &p, mtype_id id );
+        // Retain one exact native payload. A collision/duplicate leaves the
+        // caller's source intact; unlike spawn_monster this reports refusal.
+        horde_entity *retain_monster_payload( const tripoint_abs_ms &p, const monster &payload );
+        bool release_monster_payload( const tripoint_abs_ms &p, const std::string &actor_id );
         // Spawn a vector of monsters at overmap scale on a specified submap.
         void spawn_monsters( const tripoint_om_sm &p, std::vector<monster> &monsters );
         // Spawn monsters from a mongroup on a specified submap.

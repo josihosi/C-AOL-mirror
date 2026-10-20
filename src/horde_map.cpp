@@ -169,7 +169,7 @@ std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde
     // actor looks like a successful local->abstract handoff to callers and
     // can make them release the real local owner.
     if( !can_accept_entity( p, candidate ) ) {
-        DebugLog( D_WARNING, D_GAME ) << "Refused duplicate predator ownership for " << mon.name();
+        DebugLog( D_WARNING, D_GAME ) << "Refused duplicate native actor ownership for " << mon.name();
         return result;
     }
     bool inserted;
@@ -188,18 +188,18 @@ std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde
 bool horde_map::can_accept_entity( const tripoint_abs_ms &p, const horde_entity &entity )
 {
     const monster *payload = entity.monster_data.get();
-    if( !payload || !payload->is_caol_predator() ) {
+    if( !payload || !payload->has_handoff_identity() ) {
         return true;
     }
-    const std::string &actor_id = payload->predator_state().actor_id;
+    const std::string &actor_id = payload->handoff_actor_id();
     if( actor_id.empty() ) {
         return true;
     }
     for( const std::pair<const tripoint_abs_ms, horde_entity> &existing : get_view(
              horde_map_flavors::active |
              horde_map_flavors::idle | horde_map_flavors::dormant | horde_map_flavors::immobile ) ) {
-        if( existing.second.monster_data && existing.second.monster_data->is_caol_predator() &&
-            existing.second.monster_data->predator_state().actor_id == actor_id ) {
+        if( existing.second.monster_data && existing.second.monster_data->has_handoff_identity() &&
+            existing.second.monster_data->handoff_actor_id() == actor_id ) {
             return false;
         }
     }
@@ -546,30 +546,19 @@ horde_map::iterator::pointer horde_map::iterator::operator->() const
 
 horde_map::iterator horde_map::find( const tripoint_om_ms &loc )
 {
-    tripoint_om_sm submap_loc = project_to<coords::sm>( loc );
-    tripoint_abs_ms monster_loc = project_combine( location, loc );
-    map_type::iterator submap_iter = active_monster_map.find( submap_loc );
-    if( submap_iter != active_monster_map.end() ) {
-        std::unordered_map<tripoint_abs_ms, horde_entity>::iterator mon_iter =
-            submap_iter->second.find( monster_loc );
-        if( mon_iter != submap_iter->second.end() ) {
-            return iterator( *this, active_monster_map, submap_iter, mon_iter );
+    const tripoint_om_sm submap_loc = project_to<coords::sm>( loc );
+    const tripoint_abs_ms monster_loc = project_combine( location, loc );
+    // Match entity_at and the ordinary all-flavor view. Population handoff
+    // rollback also needs to find Mi-go retained in the immobile bucket.
+    for( map_type *table : { &active_monster_map, &idle_monster_map,
+                           &dormant_monster_map, &immobile_monster_map } ) {
+        const auto submap_iter = table->find( submap_loc );
+        if( submap_iter == table->end() ) {
+            continue;
         }
-    }
-    submap_iter = idle_monster_map.find( submap_loc );
-    if( submap_iter != idle_monster_map.end() ) {
-        std::unordered_map<tripoint_abs_ms, horde_entity>::iterator mon_iter =
-            submap_iter->second.find( monster_loc );
+        const auto mon_iter = submap_iter->second.find( monster_loc );
         if( mon_iter != submap_iter->second.end() ) {
-            return iterator( *this, idle_monster_map, submap_iter, mon_iter );
-        }
-    }
-    submap_iter = dormant_monster_map.find( submap_loc );
-    if( submap_iter != dormant_monster_map.end() ) {
-        std::unordered_map<tripoint_abs_ms, horde_entity>::iterator mon_iter =
-            submap_iter->second.find( monster_loc );
-        if( mon_iter != submap_iter->second.end() ) {
-            return iterator( *this, dormant_monster_map, submap_iter, mon_iter );
+            return iterator( *this, *table, submap_iter, mon_iter );
         }
     }
     return end();

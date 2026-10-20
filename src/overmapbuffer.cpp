@@ -29,6 +29,7 @@
 #include "game.h"
 #include "horde_entity.h"
 #include "horde_map.h"
+#include "migo_population_native.h"
 #include "imgui/imgui.h"
 #include "json.h"
 #include "line.h"
@@ -66,13 +67,13 @@ static const oter_type_str_id oter_type_sub_ramp_below( "sub_ramp_below" );
 
 static const int default_search_range = OMAPX * 5;
 
-static bool loaded_predator_owns( const std::string &actor_id )
+static bool loaded_actor_owns( const std::string &actor_id )
 {
     if( actor_id.empty() ) {
         return false;
     }
     for( const monster &existing : g->all_monsters() ) {
-        if( existing.is_caol_predator() && existing.predator_state().actor_id == actor_id ) {
+        if( existing.has_handoff_identity() && existing.handoff_actor_id() == actor_id ) {
             return true;
         }
     }
@@ -321,6 +322,7 @@ void overmap_global_state::clear()
     unique_special_decks.clear();
     highway_intersections.clear();
     bandit_live_world.clear();
+    migo_populations.clear();
     zombie_rider_light_memory.clear();
     zombie_rider_light_memory_last_turn = calendar::turn_zero;
     zombie_rider_bands.clear();
@@ -2522,6 +2524,17 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
     } );
 
     for( queued_node &entry : to_spawn ) {
+        if( entry.node.mapped().monster_data ) {
+            const monster &payload = *entry.node.mapped().monster_data;
+            migo_population::reconcile_payload( payload, migo_population::representation::abstract );
+            if( migo_population::superseded( payload ) ) {
+                continue;
+            }
+            if( !migo_population::can_transfer( payload, migo_population::representation::abstract ) ) {
+                om.hordes.insert( std::move( entry.node ) );
+                continue;
+            }
+        }
         const tripoint_bub_ms local = here.get_bub( entry.pos );
         if( !spawn_nonlocal ) {
             cata_assert( here.inbounds( local ) );
@@ -2529,7 +2542,9 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
         monster *placed = nullptr;
         const std::string &type_id = entry.node.mapped().get_type()->id.str();
         const bool predator_transfer = type_id == "mon_writhing_stalker" ||
-                                       type_id == "mon_zombie_rider";
+                                       type_id == "mon_zombie_rider" ||
+                                       ( entry.node.mapped().monster_data &&
+                                         entry.node.mapped().monster_data->has_handoff_identity() );
         // Placement failure must reinsert the exact extracted owner.  Prepare
         // a predator's lazy payload/position only in this disposable handoff
         // copy; ordinary hordes retain their long-standing path below.
@@ -2548,11 +2563,11 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             // A predator handoff is deliberately exact.  The generic
             // place-around fallback may cross a sealed or too-narrow route;
             // failure instead leaves this same abstract node in place.
-            if( handoff->monster_data->is_caol_predator() &&
-                loaded_predator_owns( handoff->monster_data->predator_state().actor_id ) ) {
-                DebugLog( D_WARNING, D_GAME ) << "Refused duplicate local predator ownership.";
+            if( handoff->monster_data->has_handoff_identity() &&
+                loaded_actor_owns( handoff->monster_data->handoff_actor_id() ) ) {
+                DebugLog( D_WARNING, D_GAME ) << "Refused duplicate local actor ownership.";
             } else {
-                placed = handoff->monster_data->is_caol_predator() ?
+                placed = handoff->monster_data->has_handoff_identity() ?
                          g->place_critter_at( make_shared_fast<monster>( *handoff->monster_data ),
                                               local ) :
                          g->place_critter_around( make_shared_fast<monster>( *handoff->monster_data ),
@@ -2561,6 +2576,11 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             // TODO: make sure entity data such as destination is synched
         } else {
             placed = g->place_critter_around( handoff->type_id->id, local, 1 );
+        }
+        if( placed && !migo_population::transfer( *placed,
+                migo_population::representation::abstract, migo_population::representation::local ) ) {
+            g->remove_zombie( *placed );
+            placed = nullptr;
         }
         if( placed ) {
             if( handoff->monster_data ) {
@@ -2589,6 +2609,9 @@ void overmapbuffer::spawn_mongroup( const tripoint_abs_sm &p, const mongroup_id 
 
 bool overmapbuffer::despawn_monster( monster &critter )
 {
+    if( !migo_population::reconcile_payload( critter, migo_population::representation::local ) ) {
+        return false;
+    }
     tripoint_abs_om omp = project_to<coords::om>( critter.pos_abs() );
     overmap &om = get( omp.xy() );
     // Store the monster using coordinates local to the overmap
@@ -2604,6 +2627,14 @@ bool overmapbuffer::despawn_monster( monster &critter )
         snapshot.on_unload();
         const std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> inserted =
             om.hordes.spawn_entity( critter.pos_abs(), snapshot );
+        if( inserted && !migo_population::transfer( *( *inserted )->second.monster_data,
+                migo_population::representation::local, migo_population::representation::abstract ) ) {
+            point_abs_om ignored;
+            tripoint_om_ms local;
+            std::tie( ignored, local ) = project_remain<coords::om>( critter.pos_abs() );
+            om.hordes.erase( om.hordes.find( local ) );
+            return false;
+        }
         if( inserted && ( *inserted )->second.monster_data->is_caol_predator() ) {
             predator_lifecycle_state &state = ( *inserted )->second.monster_data->predator_state();
             ++state.handoff_epoch;

@@ -67,6 +67,7 @@
 #include "gamemode.h"
 #include "help.h"
 #include "horde_entity.h"
+#include "migo_population_native.h"
 #include "input.h"
 #include "input_context.h"
 #include "item_wakeup.h"
@@ -20423,6 +20424,7 @@ bool game::do_turn()
 
     // Move hordes every turn, move_hordes has its own rate limiting
     overmap_buffer.move_hordes();
+    migo_population::service_loaded();
     if( calendar::once_every( time_duration::from_minutes( 2.5 ) ) ) {
         if( u.has_trait( trait_HAS_NEMESIS ) ) {
             overmap_buffer.move_nemesis();

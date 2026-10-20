@@ -23,6 +23,7 @@
 #include "construction.h"
 #include "coordinates.h"
 #include "field.h"
+#include "migo_population_identity.h"
 #include "item.h"
 #include "map_scale_constants.h"
 #include "mapdata.h"
@@ -49,6 +50,7 @@ struct spawn_point {
     bool friendly;
     std::optional<std::string> name;
     spawn_data data;
+    migo_population::identity population;
     explicit spawn_point( const mtype_id &T = mtype_id::NULL_ID(), int C = 0,
                           point_sm_ms P = point_sm_ms::zero,
                           int FAC = -1, int MIS = -1, bool F = false,

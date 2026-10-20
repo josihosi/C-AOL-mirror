@@ -169,11 +169,12 @@ Owner-selected work in Phase2 order. Assignments and supported task routes admit
 - [ ] R-REL-MIGO-POPULATION — Real inhabitants, casualties and slow production reconcile once across lazy discovery and map loading.
   - DFS slices: `R-REL-MIGO-POPULATION-S001`
   - Assignment R-REL-MIGO-POPULATION-exploration-001: Deliver complete S001 population ownership through actual tower/encampment content, one seed transaction, stable site/member identities, provenance-aware legacy adoption, native local/abstract transfers, casualty/return reconciliation and slow destroyable brood-pod production. Prove no duplicate slots or refill across discovery/load/save/reload, no backlog or source resurrection, safe blocked placement, preserved over-capacity/ambient/story residents and actual pod destruction with population consequence. Expose the population interface needed by later Mi-go assault without implementing that sibling claim or the separate40-OMT activation system. Source owns coupled code/data/tests and existing cache; original direct Luna owns Mac native proof. Root owns Git/ledger/lifecycle; preserve unrelated Phase2/WEC bytes, accepted stalker behavior and existing protected configuration. Exit with reviewed implementation, connected automated/native proof and reconciled process/residue ownership, or a concrete unmet boundary with its authorized continuation. Allow72hours for coupled ownership/mapgen/serialization work, coherent build, regression and Mac pod/population scenarios with setup/recovery and uncertainty. Whole-claim budget96hours includes material review, ordinary corrections, proof readback and finite closure.
+  - Current result: Reviewed population code and the first game build are ready. Population14cases/1415assertions and affected regression scopes pass. Checkpoint9f8d4058 preserves the source/build handoff; no native population or pod proof is claimed. Original Luna will now test actual losses, slow births, pod destruction and reload. Signal dispatch and forty-OMT activation remain separate.
   - Subtasks:
-    - [open] population-seed :: Register real generated and proven legacy residents exactly once.
-    - [open] population-lifetime :: Reconcile native transfers, casualties, departures and returns without duplication.
-    - [open] brood-production :: Persist bounded production and stop it through actual brood-pod destruction.
-    - [open] population-proof :: Verify native pod consequences, reload and cleanup with honest evidence limits.
+    - [done] population-seed :: Register real generated and proven legacy residents exactly once.
+    - [done] population-lifetime :: Reconcile native transfers, casualties, departures and returns without duplication.
+    - [active] brood-production :: Persist bounded production and stop it through actual brood-pod destruction.
+    - [active] population-proof :: Verify native pod consequences, reload and cleanup with honest evidence limits.
 
 - [ ] R-REL-RAID-SWEEP — Assault search crosses source-tile borders, handles real hazards and resolves finite work without false search or refusal loops.
   - DFS slices: `R-REL-RAID-SWEEP-S001`

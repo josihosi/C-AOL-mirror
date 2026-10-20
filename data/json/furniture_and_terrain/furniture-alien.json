@@ -121,6 +121,14 @@
   },
   {
     "type": "furniture",
+    "id": "f_migo_brood_pod",
+    "copy-from": "f_alien_pod",
+    "name": "Mi-go brood pod",
+    "description": "A pulsing translucent pod.  Shapes slowly develop inside its warm, viscous fluid.  Destroying it will prevent this colony from producing more Mi-go.",
+    "extend": { "flags": [ "FLAMMABLE" ] }
+  },
+  {
+    "type": "furniture",
     "id": "f_alien_pod_organ",
     "name": "organ pod",
     "description": "A translucent pod suspended on a thin stalk.  Inside you can see the dimly outlined shape of human organs, floating in some kind of preservative goo.",

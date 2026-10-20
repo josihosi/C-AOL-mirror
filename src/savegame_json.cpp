@@ -2613,6 +2613,8 @@ void monster::load( const JsonObject &data )
         ensure_predator_state();
     }
 
+    population_member = {};
+    data.read( "migo_population", population_member );
     data.read( "unique_name", unique_name );
     data.read( "nickname", nickname );
     data.read( "goal", goal );
@@ -2799,6 +2801,9 @@ void monster::store( JsonOut &json ) const
         json.member( "band_reference", state.band_reference );
         json.member( "band_revision_cache", state.band_revision_cache );
         json.end_object();
+    }
+    if( !population_member.empty() ) {
+        json.member( "migo_population", population_member );
     }
     json.member( "unique_name", unique_name );
     json.member( "nickname", nickname );
@@ -5665,6 +5670,22 @@ void submap::store( JsonOut &jsout ) const
         jsout.write( elem.mission_id );
         jsout.write( elem.friendly );
         jsout.write( elem.name );
+        if( !elem.population.empty() ) {
+            jsout.start_object();
+            jsout.member( "identity", elem.population );
+            jsout.member( "ammo" );
+            jsout.start_array();
+            for( const auto &ammo : elem.data.ammo ) {
+                jsout.start_object();
+                jsout.member( "id", ammo.first );
+                jsout.member( "min", ammo.second.val );
+                jsout.member( "max", ammo.second.valmax );
+                jsout.end_object();
+            }
+            jsout.end_array();
+            jsout.member( "patrol", elem.data.patrol_points_rel_ms );
+            jsout.end_object();
+        }
         jsout.end_array();
     }
     jsout.end_array();
@@ -5974,10 +5995,19 @@ void submap::load( const JsonValue &jv, const std::string &member_name, int vers
             bool friendly = spawn_entry.next_bool();
             std::optional<std::string> name = std::nullopt;
             spawn_entry.read_next( name );
+            spawn_point tmp( type, count, p, faction_id, mission_id, friendly, name );
+            if( spawn_entry.has_more() ) {
+                JsonObject population = spawn_entry.next_object();
+                population.read( "identity", tmp.population );
+                for( JsonObject ammo : population.get_array( "ammo" ) ) {
+                    tmp.data.ammo.emplace( itype_id( ammo.get_string( "id" ) ),
+                                           jmapgen_int( ammo.get_int( "min" ), ammo.get_int( "max" ) ) );
+                }
+                population.read( "patrol", tmp.data.patrol_points_rel_ms );
+            }
             if( spawn_entry.has_more() ) {
                 spawn_entry.throw_error( "Too many values for spawn" );
             }
-            spawn_point tmp( type, count, p, faction_id, mission_id, friendly, name );
             spawns.push_back( tmp );
         }
     } else if( member_name == "vehicles" ) {

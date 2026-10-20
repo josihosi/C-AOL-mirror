@@ -36,6 +36,7 @@
 #include "mission.h"
 #include "mongroup.h"
 #include "monster.h"
+#include "migo_population_native.h"
 #include "mtype.h"
 #include "npc.h"
 #include "omdata.h"
@@ -2119,6 +2120,9 @@ void creature_tracker::deserialize( const JsonArray &ja )
         // TODO: would be nice if monster had a constructor using JsonIn or similar, so this could be one statement.
         shared_ptr_fast<monster> mptr = make_shared_fast<monster>();
         jv.read( *mptr );
+        if( !migo_population::reconcile_payload( *mptr, migo_population::representation::local ) ) {
+            continue;
+        }
         add( mptr );
     }
 }
@@ -2163,6 +2167,7 @@ void overmap_global_state::serialize( JsonOut &json ) const
     json.member( "major_river_count", major_river_count );
     json.member( "unique_special_decks", unique_special_decks );
     json.member( "bandit_live_world", bandit_live_world );
+    json.member( "migo_populations", migo_populations );
     json.member( "zombie_rider_light_memory" );
     json.start_array();
     for( const std::pair<const tripoint_abs_omt, zombie_rider_overmap_ai::rider_light_memory> &entry :
@@ -2220,6 +2225,8 @@ void overmap_global_state::deserialize( const JsonObject &json )
         bandit_live_world.clear();
     }
     zombie_rider_light_memory.clear();
+    migo_populations.clear();
+    json.read( "migo_populations", migo_populations );
     if( json.has_array( "zombie_rider_light_memory" ) ) {
         for( JsonObject memory_json : json.get_array( "zombie_rider_light_memory" ) ) {
             memory_json.allow_omitted_members();

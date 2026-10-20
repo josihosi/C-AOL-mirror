@@ -1,4 +1,5 @@
 #include "mapgen.h"
+#include "migo_population_native.h"
 #include "mapgen_post_process.h"
 
 #include <algorithm>
@@ -374,6 +375,20 @@ void map::generate( const tripoint_abs_omt &p, const time_point &when, bool save
                     }
                     if( omt->has_flag( oter_flags::pp_generate_ruined ) ) {
                         pp_generator_aftershock_ruin.obj().execute( *this, omt_point, nullptr );
+                    }
+                }
+            }
+        }
+    }
+
+    if( save_results ) {
+        for( int z = 0; z <= 3; ++z ) {
+            for( int x = 0; x < 2; ++x ) {
+                for( int y = 0; y < 2; ++y ) {
+                    const tripoint_rel_sm grid_position( x, y, z );
+                    if( !generated.at( get_nonant( grid_position ) ) ) {
+                        migo_population::tag_generated_slots( *this, *getsubmap( get_nonant( grid_position ) ),
+                                tripoint_abs_sm( p_sm_base.xy() + point( x, y ), z ) );
                     }
                 }
             }

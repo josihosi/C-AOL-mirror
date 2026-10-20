@@ -114,10 +114,13 @@ TEST_CASE( "predator horde payload is lazy and retains its opaque identity", "[h
     CHECK( heavy_rider->monster_data->predator_state().band_reference == "opaque-band-cache" );
     CHECK( heavy_rider->monster_data->predator_state().band_revision_cache == 12 );
 
-    stalker->light_source = stalker_pos + point_rel_ms( 12, 0 );
-    stalker->light_sample_id = "legitimate-light-sample";
-    stalker->light_observed = calendar::turn;
-    stalker->light_expires = calendar::turn + 10_turns;
+    // Use the real admission/carrier writer. Seeding only light metadata
+    // leaves destination unowned and is not a delivered native observation.
+    REQUIRE( test_horde.attract_entities_to_light( stalker_pos + point_rel_ms( 12, 0 ),
+             10, 4, "legitimate-light-sample", calendar::turn,
+    [&]( const tripoint_abs_ms &p ) { return p == stalker_pos; } ) == 1 );
+    stalker = test_horde.entity_at( local_stalker_pos );
+    REQUIRE( stalker != nullptr );
     CHECK( stalker->advance_predator_intent( stalker_pos, to_turn<int>( calendar::turn ) ) );
     CHECK( stalker->destination == stalker->light_source );
     CHECK( stalker->monster_data->writhing_stalker_state().has_light_observed_position );
