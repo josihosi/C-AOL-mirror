@@ -318,8 +318,12 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         }
         if( tracking_intensity == 0 && carried_route ) {
             monster_data->unset_dest();
-            monster_data->wander_to( position, 0 );
-            monster_data->provocative_sound = false;
+            // Retire the completed route, not an independent native sound
+            // waiting beneath its retreat/recovery authority.
+            if( !has_live_sound( *monster_data ) ) {
+                monster_data->wander_to( position, 0 );
+                monster_data->provocative_sound = false;
+            }
         }
     } else {
         zombie_rider_overmap_ai::rider_pursuit_state &state =
