@@ -3798,3 +3798,125 @@ TEST_CASE( "stalker_abstract_sound_keeps_its_carrier_when_light_is_active_or_exp
     CHECK( local->writhing_stalker_state().evidence_turn == -1 );
     clear_map_without_vision();
 }
+
+TEST_CASE( "stalker_distant_remembered_goal_routes_local_steps_after_real_sound",
+           "[writhing_stalker][predator][pursuit][routing][signal]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    stalker.anger = 100;
+    const auto remembered = stalker.pos_abs() + point::west * 180;
+    REQUIRE_FALSE( here.inbounds( remembered ) );
+    REQUIRE( scout_observation::site_sightline( stalker.pos_abs(), remembered ).empty() );
+    auto &memory = stalker.writhing_stalker_state();
+    memory.advance_to( 1000 );
+    // Accepted observation fixture; navigation does not claim remote sensing.
+    REQUIRE( memory.observe_target( 77, 1, remembered, 1000 ) );
+    memory.finish_search();
+    const auto due = memory.familiar[0].revisit_at_active;
+    const bool followed_sound = GENERATE( false, true );
+    if( followed_sound ) {
+        const auto before = stalker.pos_abs();
+        const auto sound = center + point::east * 8;
+        stalker.hear_sound( sound, 2000, 8, true );
+        REQUIRE( stalker.provocative_sound );
+        for( int turn = 0; turn < 40 && stalker.pos_bub() != sound; ++turn ) {
+            stalker.plan();
+            stalker.set_moves( 100 );
+            stalker.move();
+            set_time( calendar::turn + 1_turns );
+        }
+        REQUIRE( stalker.pos_bub() == sound );
+        REQUIRE( stalker.pos_abs() != before );
+        REQUIRE( memory.familiar[0].revisit_at_active == due );
+    }
+    const bool light = GENERATE( false, true );
+    if( light ) {
+        // Recent direct evidence deliberately outranks a light observation.
+        set_time( calendar::turn + 201_turns );
+        memory.advance_to( to_turn<int>( calendar::turn ) );
+        REQUIRE( memory.observe_light_interest( remembered, "remembered-distant-source",
+                 to_turn<int>( calendar::turn ), 300 ) );
+    } else {
+        set_time( calendar::turn_zero + time_duration::from_turns( 1000 + due + 1 ) );
+    }
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    const auto before = stalker.pos_abs();
+    const auto evidence = stalker.writhing_stalker_state().evidence_turn;
+    stalker.plan();
+    REQUIRE( stalker.has_dest() );
+    const auto step = stalker.get_dest();
+    CHECK( here.inbounds( step ) );
+    CHECK( step != before );
+    CHECK( step != remembered );
+    CHECK( rl_dist( step, remembered ) < rl_dist( before, remembered ) );
+    REQUIRE_FALSE( here.route( stalker, pathfinding_target::point( here.get_bub( step ) ) ).empty() );
+    if( !light ) {
+        CHECK( stalker.writhing_stalker_state().revisiting_slot == 0 );
+        CHECK( stalker.writhing_stalker_state().searched_positions == 0 );
+    }
+    for( int turn = 0; turn < 6 && stalker.pos_abs() == before; ++turn ) {
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+        stalker.plan();
+    }
+    CHECK( rl_dist( stalker.pos_abs(), remembered ) < rl_dist( before, remembered ) );
+    CHECK( stalker.writhing_stalker_state().evidence_turn == evidence );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_distant_remembered_navigation_keeps_loaded_and_blocked_limits",
+           "[writhing_stalker][predator][pursuit][routing]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 2, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    const bool blocked = GENERATE( false, true );
+    if( blocked ) {
+        for( const auto &p : here.points_in_radius( center, 1 ) ) {
+            if( p != center ) {
+                here.ter_set( p, ter_id( "t_wall" ) );
+            }
+        }
+        refresh_writhing_stalker_arena( here );
+    }
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    auto &memory = stalker.writhing_stalker_state();
+    memory.advance_to( 1000 );
+    const auto remembered = stalker.pos_abs() + point::west * 180;
+    REQUIRE( memory.observe_target( 77, 1, remembered, 1000 ) );
+    memory.finish_search();
+    set_time( calendar::turn_zero + time_duration::from_turns(
+                  1000 + memory.familiar[0].revisit_at_active + 1 ) );
+    stalker.plan();
+    if( blocked ) {
+        CHECK_FALSE( stalker.has_dest() );
+        CHECK_FALSE( memory.has_committed_waypoint );
+        CHECK( memory.searched_positions == 0 );
+    } else {
+        REQUIRE( stalker.has_dest() );
+        CHECK( stalker.get_dest() != stalker.pos_abs() );
+        CHECK( here.inbounds( stalker.get_dest() ) );
+        CHECK( stalker.get_dest() != remembered );
+        CHECK( rl_dist( stalker.get_dest(), remembered ) < rl_dist( stalker.pos_abs(), remembered ) );
+        CHECK_FALSE( here.route( stalker,
+                                pathfinding_target::point( here.get_bub( stalker.get_dest() ) ) ).empty() );
+        CHECK( memory.revisiting_slot == 0 );
+    }
+    CHECK( memory.evidence_turn == 1000 );
+    clear_map_without_vision();
+}

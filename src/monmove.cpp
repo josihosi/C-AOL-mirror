@@ -1289,17 +1289,6 @@ static std::optional<tripoint_abs_ms> writhing_stalker_local_step( monster &stal
         const bool avoid_exposure )
 {
     tripoint_abs_ms aim = desired;
-    if( !here.inbounds( aim ) ) {
-        // Only route through the currently loaded physical corridor. The
-        // ordinary owner transfer, not this planner, crosses its boundary.
-        aim = stalker.pos_abs();
-        for( const auto &cell : scout_observation::site_sightline( stalker.pos_abs(), desired ) ) {
-            if( !here.inbounds( cell ) ) {
-                break;
-            }
-            aim = cell;
-        }
-    }
     // Keep native short-path capabilities. A distant remembered OMT is a
     // sequence of reachable steps, not permission to raise melee/path range.
     const auto delta = aim - stalker.pos_abs();
@@ -1309,6 +1298,19 @@ static std::optional<tripoint_abs_ms> writhing_stalker_local_step( monster &stal
     if( native_limit > 0 && length > step ) {
         aim = stalker.pos_abs() + tripoint_rel_ms( delta.x() * step / length,
                 delta.y() * step / length, 0 );
+    }
+    if( !here.inbounds( aim ) ) {
+        // Clip only this bounded navigation segment to the loaded physical
+        // corridor. Distant memory is not a perception ray. The
+        // ordinary owner transfer, not this planner, crosses its boundary.
+        const auto segment = aim;
+        aim = stalker.pos_abs();
+        for( const auto &cell : scout_observation::site_sightline( stalker.pos_abs(), segment ) ) {
+            if( !here.inbounds( cell ) ) {
+                break;
+            }
+            aim = cell;
+        }
     }
     static const std::array<point, 9> choices = {{ point::zero, point( -4, 0 ), point( 4, 0 ),
             point( 0, -4 ), point( 0, 4 ), point( -4, -4 ), point( -4, 4 ), point( 4, -4 ), point( 4, 4 )
