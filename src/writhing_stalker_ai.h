@@ -123,6 +123,9 @@ struct persistent_state {
 Creature *observe_current_target( monster &stalker );
 bool can_observe_actor( const monster &stalker, const Creature &actor );
 std::optional<tripoint_abs_ms> pursuit_destination( monster &stalker, bool abstract_owner );
+// Settle a reached native sound carrier without changing route/combat state.
+bool retire_arrived_sound( monster &stalker, const tripoint_abs_ms &destination,
+                           const tripoint_abs_ms &position );
 
 // Persisted on monster::value; this is an attempt count, not a plan/turn count.
 inline constexpr const char *burst_count_key = "caol_writhing_stalker_burst_count";

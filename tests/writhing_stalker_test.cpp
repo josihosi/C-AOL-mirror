@@ -32,6 +32,7 @@
 #include "player_helpers.h"
 #include "projectile.h"
 #include "scout_observation.h"
+#include "scent_map.h"
 #include "type_id.h"
 #include "weather.h"
 #include "weather_type.h"
@@ -2402,11 +2403,17 @@ TEST_CASE( "stalker_pursuit_native_flight_preempts_visible_and_remembered_approa
     REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
     auto &state = stalker.writhing_stalker_state();
     state.begin_search();
+    const bool arrived_sound = GENERATE( false, true );
+    if( arrived_sound ) {
+        stalker.hear_sound( stalker.pos_bub(), 30, 0, true );
+        REQUIRE( stalker.provocative_sound );
+    }
 
     SECTION( "current visible threat retains the native away destination" ) {
         stalker.add_effect( efftype_id( "run" ), 5_minutes );
         REQUIRE( stalker.is_fleeing( you ) );
         stalker.plan();
+        CHECK_FALSE( stalker.provocative_sound );
         REQUIRE( stalker.has_dest() );
         CHECK( stalker.get_dest() == stalker.pos_abs() - you.pos_abs() + stalker.pos_abs() );
         CHECK( state.searched_positions == 0 );
@@ -2418,6 +2425,7 @@ TEST_CASE( "stalker_pursuit_native_flight_preempts_visible_and_remembered_approa
         REQUIRE_FALSE( writhing_stalker::can_observe_actor( stalker, you ) );
         set_time( calendar::turn + 1_turns );
         stalker.plan();
+        CHECK_FALSE( stalker.provocative_sound );
         REQUIRE( stalker.has_dest() );
         REQUIRE( state.has_committed_waypoint );
         const auto approach = state.committed_waypoint;
@@ -2426,6 +2434,7 @@ TEST_CASE( "stalker_pursuit_native_flight_preempts_visible_and_remembered_approa
         const auto cursor = state.search_cursor;
         set_time( calendar::turn + 1_turns );
         stalker.plan();
+        CHECK_FALSE( stalker.provocative_sound );
         CHECK_FALSE( stalker.has_dest() );
         CHECK( state.committed_waypoint == approach );
         CHECK( state.search_cursor == cursor );
@@ -3443,12 +3452,13 @@ TEST_CASE( "stalker_native_combat_consumes_old_recovery_without_erasing_sound_or
     stalker = *owner.monster_data;
     REQUIRE( stalker.wander_pos == old_retreat );
     REQUIRE( stalker.wandf > 0 );
-    const bool sound = GENERATE( false, true );
+    const int sound = GENERATE( 0, 1, 2 );
+    const auto heard = sound == 2 ? stalker.pos_abs() : old_retreat;
     if( sound ) {
         stalker.morale = 20;
-        stalker.hear_sound( here.get_bub( old_retreat ), 2000, 6, true );
+        stalker.hear_sound( here.get_bub( heard ), 2000, sound == 2 ? 0 : 6, true );
         REQUIRE( stalker.provocative_sound );
-        REQUIRE( stalker.wander_pos == old_retreat );
+        REQUIRE( stalker.wander_pos == heard );
     }
     const auto sequence = stalker.writhing_stalker_state().attempt_sequence;
     stalker.attack_at( you.pos_bub() );
@@ -3458,9 +3468,9 @@ TEST_CASE( "stalker_native_combat_consumes_old_recovery_without_erasing_sound_or
     CHECK( stalker.writhing_stalker_state().cooldown_until_turn == -1 );
     CHECK_FALSE( stalker.writhing_stalker_state().has_retreat_waypoint );
     CHECK_FALSE( stalker.has_dest() );
-    CHECK( ( stalker.wandf > 0 ) == sound );
+    CHECK( ( stalker.wandf > 0 ) == ( sound != 0 ) );
     if( sound ) {
-        CHECK( stalker.wander_pos == old_retreat );
+        CHECK( stalker.wander_pos == heard );
     }
     const bool reload = GENERATE( false, true );
     if( reload ) {
@@ -3475,6 +3485,7 @@ TEST_CASE( "stalker_native_combat_consumes_old_recovery_without_erasing_sound_or
     CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::retreating );
     CHECK( stalker.writhing_stalker_state().cooldown_until_turn > to_turn<int>( calendar::turn ) );
     CHECK( stalker.writhing_stalker_state().attempts_spent == spent );
+    CHECK( stalker.provocative_sound == ( sound == 1 ) );
     clear_map_without_vision();
 }
 
@@ -4846,5 +4857,113 @@ TEST_CASE( "stalker_abstract_retreat_arrival_retires_only_its_own_carrier",
         CHECK( owner->monster_data->writhing_stalker_state().attempts_spent == 0 );
     }
     om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_local_sound_arrival_cannot_reactivate_during_speculative_navigation",
+           "[writhing_stalker][predator][pursuit][signal][routing][recovery]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    get_scent().reset();
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    stalker.anger = 100;
+    const auto desired = stalker.pos_abs() + point::west * 24;
+    const auto sound = stalker.pos_abs() + point::east * 6;
+    const int mode = GENERATE( 0, 1, 2 );
+    auto &state = stalker.writhing_stalker_state();
+    state.advance_to( 1000 );
+    if( mode < 2 ) {
+        // Accepted sight fixture, not a new acquisition. Subsequent movement
+        // has neither current native sight nor a scent route to the avatar.
+        REQUIRE( state.observe_target( 77, 1, desired, 1000 ) );
+        if( mode == 1 ) {
+            state.finish_search();
+        }
+    } else {
+        REQUIRE( state.observe_light_interest( desired, "local-sound-arrival-light", 1000, 300 ) );
+    }
+    REQUIRE_FALSE( writhing_stalker::can_observe_actor( stalker, get_player_character() ) );
+    REQUIRE( stalker.scent_move().x() == -1 );
+    stalker.hear_sound( here.get_bub( sound ), 2000, 6, true );
+    REQUIRE( stalker.provocative_sound );
+    for( int turn = 0; turn < 40 && stalker.pos_abs() != sound; ++turn ) {
+        stalker.plan();
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+    }
+    REQUIRE( stalker.pos_abs() == sound );
+    REQUIRE( stalker.wandf > 0 );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    if( mode == 1 ) {
+        set_time( calendar::turn_zero + time_duration::from_turns(
+                      1000 + stalker.writhing_stalker_state().familiar[0].revisit_at_active + 1 ) );
+    }
+    const auto evidence = stalker.writhing_stalker_state().evidence_turn;
+    bool left_source = false;
+    for( int turn = 0; turn < 12; ++turn ) {
+        stalker.plan();
+        CHECK_FALSE( stalker.provocative_sound );
+        if( reload && turn == 6 ) {
+            stalker = round_trip_writhing_stalker( stalker );
+        }
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+        if( stalker.pos_abs() != sound ) {
+            left_source = true;
+        }
+        if( left_source ) {
+            CHECK( stalker.pos_abs() != sound );
+        }
+        CHECK( stalker.writhing_stalker_state().evidence_turn == evidence );
+    }
+    CHECK( rl_dist( stalker.pos_abs(), desired ) < rl_dist( sound, desired ) - 4 );
+    // A genuinely new event may reuse the completed coordinate. It owns a
+    // new native budget and must still be followed above speculative work.
+    stalker.hear_sound( here.get_bub( sound ), 2000,
+                        rl_dist( stalker.pos_abs(), sound ), true );
+    REQUIRE( stalker.provocative_sound );
+    for( int turn = 0; turn < 60 && stalker.pos_abs() != sound; ++turn ) {
+        stalker.plan();
+        REQUIRE( stalker.provocative_sound );
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+    }
+    REQUIRE( stalker.pos_abs() == sound );
+    stalker.plan();
+    CHECK_FALSE( stalker.provocative_sound );
+    if( mode == 2 ) {
+        for( int turn = 0; turn < 100 && stalker.pos_abs() != desired; ++turn ) {
+            stalker.plan();
+            stalker.set_moves( 100 );
+            stalker.move();
+            set_time( calendar::turn + 1_turns );
+        }
+        REQUIRE( stalker.pos_abs() == desired );
+        stalker.plan();
+        REQUIRE( stalker.writhing_stalker_state().search_until_turn >= 0 );
+        set_time( calendar::turn_zero + time_duration::from_turns(
+                      stalker.writhing_stalker_state().search_until_turn + 1 ) );
+    } else {
+        set_time( calendar::turn + ( mode == 0 ? 31_minutes : 11_minutes ) );
+    }
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( stalker.has_dest() );
+    CHECK_FALSE( stalker.provocative_sound );
+    CHECK( stalker.wandf == 0 );
+    CHECK( stalker.writhing_stalker_state().evidence_turn == evidence );
     clear_map_without_vision();
 }

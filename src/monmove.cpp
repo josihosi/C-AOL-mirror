@@ -1246,6 +1246,18 @@ bool writhing_stalker::can_observe_actor( const monster &stalker, const Creature
     return writhing_stalker_watches( stalker, actor, reader );
 }
 
+bool writhing_stalker::retire_arrived_sound( monster &stalker,
+        const tripoint_abs_ms &destination, const tripoint_abs_ms &position )
+{
+    if( destination != position || !stalker.provocative_sound || stalker.wandf <= 0 ||
+        stalker.wander_pos != destination ) {
+        return false;
+    }
+    stalker.wander_to( position, 0 );
+    stalker.provocative_sound = false;
+    return true;
+}
+
 Creature *writhing_stalker::observe_current_target( monster &stalker )
 {
     // Settle the owning interval before assigning an acquisition's active time.
@@ -2546,6 +2558,9 @@ void monster::plan()
     }
 
     if( type->id == mon_writhing_stalker ) {
+        // A completed heard source cannot regain ownership after another
+        // plan moves away. This changes no pending source or combat order.
+        writhing_stalker::retire_arrived_sound( *this, wander_pos, pos_abs() );
         const Creature *target = mon_plan.target;
         const monster *target_mon = dynamic_cast<const monster *>( target );
         hostile_ecology_debug_log() << "writhing_stalker target_probe: stalker_pos="
