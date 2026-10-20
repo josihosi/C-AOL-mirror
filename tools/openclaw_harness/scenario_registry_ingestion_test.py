@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sqlite3
 import subprocess
@@ -12,6 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from contextlib import redirect_stdout
 
 
 HARNESS_DIR = Path(__file__).resolve().parent
@@ -21,6 +23,7 @@ from scenario_registry_store import (  # noqa: E402
     BindingAdapters,
     RegistryQueryCandidateResult,
     RegistryLaunchToken,
+    RegistryQueryExecution,
     RegistryQueryCandidateSnapshot,
     RegistryQueryEvaluation,
     RegistryQueryPredicateResult,
@@ -35,6 +38,7 @@ from scenario_registry_store import (  # noqa: E402
     execute_registry_query,
     evaluate_registry_query_from_store,
     ingest_report_reference,
+    ingest_token_linked_report_reference,
     ingest_repair_compatibility_terminal,
     issue_wec_authority,
     ingest_repair_token_linked_report_reference,
@@ -56,6 +60,7 @@ from scenario_registry_store import (  # noqa: E402
     windows_feel_handoff_status,
 )
 import scenario_registry_store  # noqa: E402
+import scenario_registry_cli  # noqa: E402
 import startup_harness  # noqa: E402
 from startup_harness import seal_wec_authority  # noqa: E402
 from identity_binding import canonical_digest, component_identity  # noqa: E402
@@ -563,6 +568,188 @@ class ScenarioRegistryIngestionTest(unittest.TestCase):
         connection = open_registry(str(root / "registry.sqlite3"))
         rebuild_manifest_projection(connection, scenarios)
         return connection, scenarios, manifest_path, report_path
+
+    def select_outcome_first_run(self, connection: sqlite3.Connection) -> RegistryQueryExecution:
+        selected = execute_registry_query(
+            connection,
+            parse_registry_query_request({"requirements": [], "preferences": []}),
+            scenario_id="strict.ingestion.fixture",
+            coordinator_brief={"outcome": "Exercise this exact native proof route."},
+        )
+        self.assertIsNotNone(selected.token_id)
+        launch = reload_selection_token_for_launch(connection, selected.token_id)
+        self.assertTrue(launch.accepted, launch.reason)
+        self.assertEqual(launch.reason, "coordinator_brief_charter")
+        return selected
+
+    def test_outcome_first_run_token_links_report_once_without_promoting_proof(self) -> None:
+        for proof_status in ("green", "yellow"):
+            with self.subTest(proof_status=proof_status), tempfile.TemporaryDirectory() as temp_dir:
+                connection, _scenarios, manifest_path, report_path = self.setup_registry(Path(temp_dir))
+                try:
+                    selected = self.select_outcome_first_run(connection)
+                    issued = connection.execute(
+                        "SELECT * FROM token_history WHERE token_id = ? AND event_kind = 'issued'",
+                        (selected.token_id,),
+                    ).fetchone()
+                    details = json.loads(issued["details_json"])
+                    self.assertEqual(details["authority_kind"], "coordinator_brief_charter")
+                    self.assertEqual(details["route_evidence"]["details"]["source"], "coordinator_brief")
+                    self.assertEqual(details["route_evidence"]["internal_resolution_state"], "first_run")
+                    self.assertIn("brief_sha256", details["coordinator_authorization"])
+                    report = self.report_with_proof(
+                        manifest_path, status=proof_status, feature_proof=proof_status == "green",
+                    )
+                    report["cleanup"] = {"status": "already_exited", "pid": 42}
+                    report_path = Path(temp_dir) / "finalized" / "probe.report.json"
+                    adapters = self.adapters({"runtime": "compatible", "fixture": "compatible", "profile": "compatible"})
+                    finalize = scenario_registry_cli._registry_post_finalize_ingest(json.dumps({
+                        "registry_path": str(Path(temp_dir) / "registry.sqlite3"),
+                        "token_id": selected.token_id,
+                        "authority_kind": "coordinator_brief_charter",
+                    }))
+                    def finalize_current_report() -> dict:
+                        linked = {}
+                        def ingest(path: Path, durable_report: dict) -> None:
+                            linked.update(finalize(path, durable_report))
+                        # Exercise the cleaned durable-report producer, token
+                        # finalizer and identity guard. Only native environment
+                        # observation is a controlled adapter.
+                        with mock.patch.object(scenario_registry_cli, "production_binding_adapters", return_value=adapters), \
+                                redirect_stdout(io.StringIO()):
+                            startup_harness.finalize_probe_report(
+                                report_path.parent, report, post_finalize_hook=ingest,
+                            )
+                        return linked
+                    result = finalize_current_report()
+                    self.assertEqual(result["status"], "ingested", result)
+                    verification = connection.execute(
+                        "SELECT manifest_id, route_key, proof_status FROM verification_history WHERE report_id = ?",
+                        (result["report_id"],),
+                    ).fetchone()
+                    self.assertEqual((verification["manifest_id"], verification["route_key"]),
+                                     (issued["manifest_id"], issued["route_key"]))
+                    self.assertEqual(verification["proof_status"], proof_status)
+                    self.assertFalse(final_gate_eligibility(connection)["automated_certification"])
+                    counts = {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                              for table in ("token_history", "report_ingestion_history", "verification_history", "binding_history")}
+                    repeat = finalize_current_report()
+                    self.assertTrue(repeat["idempotent"])
+                    self.assertEqual(repeat["report_id"], result["report_id"])
+                    self.assertEqual(counts, {table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                                              for table in counts})
+                    other_report_path = Path(temp_dir) / "other.probe.report.json"
+                    other_report_path.write_bytes(report_path.read_bytes())
+                    another = ingest_token_linked_report_reference(
+                        connection, selected.token_id, other_report_path, adapters=adapters,
+                    )
+                    self.assertEqual(another["status"], "rejected_multiple_reports")
+                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM verification_history").fetchone()[0],
+                                     counts["verification_history"])
+                finally:
+                    connection.close()
+
+    def test_outcome_first_run_rejects_report_from_other_source_or_scenario(self) -> None:
+        for difference in ("source", "scenario"):
+            with self.subTest(difference=difference), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                connection, scenarios, manifest_path, report_path = self.setup_registry(root)
+                try:
+                    selected = self.select_outcome_first_run(connection)
+                    issued_before = tuple(connection.execute(
+                        "SELECT * FROM token_history WHERE token_id = ? AND event_kind = 'issued'",
+                        (selected.token_id,),
+                    ).fetchone())
+                    if difference == "source":
+                        other_source = scenarios / "other.json"
+                        self.write_json(other_source, self.strict_manifest())
+                        rebuild_manifest_projection(connection, scenarios)
+                        report = self.report(other_source)
+                    else:
+                        report = self.report(manifest_path)
+                        report["scenario"] = "different.scenario"
+                    self.write_json(report_path, report)
+                    result = ingest_token_linked_report_reference(
+                        connection, selected.token_id, report_path,
+                        adapters=self.adapters({"runtime": "compatible", "fixture": "compatible", "profile": "compatible"}),
+                    )
+                    self.assertEqual(result["status"], "rejected_report_identity", result)
+                    self.assertEqual(issued_before, tuple(connection.execute(
+                        "SELECT * FROM token_history WHERE token_id = ? AND event_kind = 'issued'",
+                        (selected.token_id,),
+                    ).fetchone()))
+                    self.assertEqual(connection.execute(
+                        "SELECT COUNT(*) FROM token_history WHERE token_id = ? AND event_kind = 'verification_run'",
+                        (selected.token_id,),
+                    ).fetchone()[0], 0)
+                    self.assertFalse(final_gate_eligibility(connection)["automated_certification"])
+                finally:
+                    connection.close()
+
+    def test_outcome_first_run_rejects_changed_manifest_before_report_ingestion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            connection, _scenarios, manifest_path, report_path = self.setup_registry(Path(temp_dir))
+            try:
+                selected = self.select_outcome_first_run(connection)
+                changed = self.strict_manifest()
+                changed["description"] = "Changed after selection."
+                self.write_json(manifest_path, changed)
+                self.write_json(report_path, self.report(manifest_path))
+                result = ingest_token_linked_report_reference(
+                    connection, selected.token_id, report_path,
+                    adapters=self.adapters({"runtime": "compatible", "fixture": "compatible", "profile": "compatible"}),
+                )
+                self.assertEqual(result["status"], "rejected_token")
+                self.assertEqual(result["reason"], "manifest_source_changed")
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM verification_history").fetchone()[0], 0)
+            finally:
+                connection.close()
+
+    def test_outcome_first_run_stale_runtime_keeps_certification_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            connection, _scenarios, _manifest_path, report_path = self.setup_registry(Path(temp_dir))
+            try:
+                selected = self.select_outcome_first_run(connection)
+                result = ingest_token_linked_report_reference(
+                    connection, selected.token_id, report_path,
+                    adapters=self.adapters({"runtime": "stale", "runtime_sha": "different-native-source",
+                                            "fixture": "compatible", "profile": "compatible"}),
+                )
+                self.assertEqual(result["status"], "ingested")
+                resolution = connection.execute(
+                    "SELECT resolution_kind FROM verification_resolution_history WHERE verification_id = ? "
+                    "ORDER BY resolution_event_id DESC LIMIT 1", (result["verification_id"],),
+                ).fetchone()[0]
+                self.assertEqual(resolution, "stale")
+                self.assertFalse(final_gate_eligibility(connection)["automated_certification"])
+            finally:
+                connection.close()
+
+    def test_old_literal_outcome_token_is_not_relabelled_or_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            connection, _scenarios, _manifest_path, report_path = self.setup_registry(Path(temp_dir))
+            try:
+                # Reproduce the old issuance producer only; ingestion uses current code.
+                # No persisted receipt is edited to turn it into a canonical token.
+                with mock.patch.object(scenario_registry_store, "_scenario_proof_route_key", return_value="outcome-context"):
+                    selected = self.select_outcome_first_run(connection)
+                issued_before = tuple(connection.execute(
+                    "SELECT * FROM token_history WHERE token_id = ? AND event_kind = 'issued'",
+                    (selected.token_id,),
+                ).fetchone())
+                adapters = self.adapters({"runtime": "compatible", "fixture": "compatible", "profile": "compatible"})
+                first = ingest_token_linked_report_reference(connection, selected.token_id, report_path, adapters=adapters)
+                self.assertEqual(first["status"], "rejected_report_identity")
+                second = ingest_token_linked_report_reference(connection, selected.token_id, report_path, adapters=adapters)
+                self.assertEqual((second["status"], second["reason"]), ("rejected_token", "token_invalidated"))
+                self.assertEqual(issued_before, tuple(connection.execute(
+                    "SELECT * FROM token_history WHERE token_id = ? AND event_kind = 'issued'",
+                    (selected.token_id,),
+                ).fetchone()))
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM verification_history").fetchone()[0], 1)
+                self.assertFalse(final_gate_eligibility(connection)["automated_certification"])
+            finally:
+                connection.close()
 
     def register_valid_round(
         self, connection: sqlite3.Connection, *, source_sha256: str, round_id: str = "registry-owned",

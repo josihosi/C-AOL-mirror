@@ -1789,8 +1789,7 @@ def _first_run_certification_route(
         valid = False
     if not valid:
         return None
-    route_key = _identity(
-        "caol-scenario-proof-route-v2",
+    route_key = _scenario_proof_route_key(
         str(manifest.get("source_path", "")),
         str(manifest.get("name", "")),
     )
@@ -2975,7 +2974,10 @@ def execute_registry_query(
             # This is technical authority only.  It deliberately carries no
             # verification evidence and cannot promote bootstrap/setup facts.
             route = {
-                "route_key": "outcome-context",
+                "route_key": _scenario_proof_route_key(
+                    str(selected.explanation["manifest"]["source_path"]),
+                    str(selected.explanation["manifest"]["name"]),
+                ),
                 "evidence_state": "first_run",
                 "internal_resolution_state": "first_run",
                 "details": {"source": "coordinator_brief", **dict(coordinator_authorization)},
@@ -7007,6 +7009,11 @@ def _identity(prefix: str, *parts: str) -> str:
     return hashlib.sha256(source).hexdigest()
 
 
+def _scenario_proof_route_key(source_path: str, scenario: str) -> str:
+    """Identify the proof route independently of its launch authorization."""
+    return _identity("caol-scenario-proof-route-v2", source_path, scenario)
+
+
 def _report_path_and_bytes(report_path: Path) -> Tuple[str, bytes]:
     canonical_path = str(report_path.resolve())
     try:
@@ -9574,8 +9581,7 @@ def ingest_report_reference(
             )
         return {"report_id": report_id, "status": "invalid_report", "error": str(exc), "idempotent": False}
 
-    route_key = _identity(
-        "caol-scenario-proof-route-v2",
+    route_key = _scenario_proof_route_key(
         facts["manifest"]["source_path"],
         facts["scenario"],
     )
