@@ -1584,6 +1584,15 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
             return true;
         }
         case writhing_stalker::decision::shadow: {
+            // Every shadow exit takes movement ownership from the attack
+            // planner, including direct evaluator exits. Reachability alone
+            // does not make its old target-square goal a safe standoff.
+            if( state.phase == writhing_stalker::lifecycle_phase::attacking ||
+                state.phase == writhing_stalker::lifecycle_phase::approaching ||
+                ( state.has_committed_waypoint && state.committed_waypoint == target.pos_abs() ) ) {
+                state.has_committed_waypoint = false;
+                stalker.unset_dest();
+            }
             const bool phase_changed = state.phase != writhing_stalker::lifecycle_phase::shadowing;
             state.phase = writhing_stalker::lifecycle_phase::shadowing;
             if( phase_changed ) {

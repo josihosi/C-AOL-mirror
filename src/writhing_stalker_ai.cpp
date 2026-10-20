@@ -71,7 +71,8 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
     // The existing short burst recovery is distinct from the longer pursuit
     // search budget. A reacquisition must not turn spent combat into an
     // indefinitely renewed retreat merely because search now has more steps.
-    if( has_pursuit_memory && search_until_turn >= 0 && now_turn >= search_until_turn ) {
+    if( has_pursuit_memory && search_started_active >= 0 &&
+        search_until_turn >= 0 && now_turn >= search_until_turn ) {
         attempts_spent = 0;
         search_until_turn = -1;
     }
