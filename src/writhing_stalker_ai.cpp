@@ -69,22 +69,25 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
     if( cooldown_until_turn >= 0 && now_turn >= cooldown_until_turn ) {
         const int recovered_at = cooldown_until_turn;
         cooldown_until_turn = -1;
+        attempts_spent = 0;
+        has_retreat_waypoint = false;
         if( phase == lifecycle_phase::cooldown || phase == lifecycle_phase::retreating ) {
             phase = lifecycle_phase::searching;
             phase_entered_turn = recovered_at;
-            search_until_turn = recovered_at + 20;
+            search_until_turn = -1;
             if( has_pursuit_memory && sighting_active_turn >= 0 ) {
                 begin_search();
                 // A delayed executor/reload cannot restart recovery's search.
                 search_started_active -= std::min<std::int64_t>( std::max( 0, elapsed ),
                                          now_turn - recovered_at );
+            } else {
+                search_until_turn = recovered_at + 20;
             }
         }
     }
-    // The finite burst-recovery deadline survives reacquisition. Only legacy
-    // search owns an idle transition; active pursuit has its separate budget.
+    // Legacy investigation and bounded pursuit search own navigation only.
+    // Combat recovery is consumed above, before a new burst can begin.
     if( search_until_turn >= 0 && now_turn >= search_until_turn ) {
-        attempts_spent = 0;
         search_until_turn = -1;
         if( search_started_active < 0 && phase == lifecycle_phase::searching ) {
             phase = lifecycle_phase::idle;
@@ -94,6 +97,21 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
             remaining_route_progress = -1;
         }
     }
+}
+
+void persistent_state::record_attack( const int now_turn )
+{
+    advance_to( now_turn );
+    // Real combat takes priority over an older recovery/legacy investigation.
+    // Bounded pursuit work keeps its independent elapsed-time budget, but
+    // no navigation completion or old recovery can erase these new attempts.
+    cooldown_until_turn = -1;
+    search_until_turn = -1;
+    has_retreat_waypoint = false;
+    ++attempts_spent;
+    ++attempt_sequence;
+    phase = lifecycle_phase::attacking;
+    phase_entered_turn = now_turn;
 }
 
 bool persistent_state::owns_waypoint( const tripoint_abs_ms &position ) const
@@ -145,9 +163,8 @@ bool persistent_state::observe_target( const actor_identity target, const int ch
     last_observed_position = position;
     has_last_observed_position = true;
     has_pursuit_memory = true;
-    if( phase == lifecycle_phase::searching && search_started_active < 0 && attempts_spent == 0 ) {
-        // Recognition ends a legacy investigation, including its deadline.
-        // A spent burst's independent recovery deadline must survive instead.
+    if( phase == lifecycle_phase::searching ) {
+        // Recognition ends navigation search, independently of combat recovery.
         search_until_turn = -1;
     }
     if( phase == lifecycle_phase::idle || phase == lifecycle_phase::searching ) {
@@ -199,7 +216,6 @@ void persistent_state::finish_search()
     heading = tripoint_rel_ms::zero;
     heading_interval = 0;
     sighting_active_turn = -1;
-    attempts_spent = 0;
     remaining_route_progress = -1;
     for( familiar_place &place : familiar ) {
         if( place.valid && place.revisit_at_active < active_turns + to_turns<int>( 6_hours ) ) {

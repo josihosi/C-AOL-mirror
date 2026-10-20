@@ -69,6 +69,7 @@ struct persistent_state {
     int last_progress_turn = -1;
     int last_advanced_turn = -1;
     int remaining_route_progress = -1;
+    // Legacy light investigation only; never owns combat recovery.
     int search_until_turn = -1;
 
     // Acquisition timestamps are world facts. These elapsed-work counters are
@@ -90,6 +91,8 @@ struct persistent_state {
     // is the integration seam for REL-AI-ACTIVATION; first admission never
     // charges an untracked old-save backlog.
     void advance_to( int now_turn, int active_elapsed = -1 );
+    // A real attack starts/continues combat and ends older recovery/search authority.
+    void record_attack( int now_turn );
     bool owns_waypoint( const tripoint_abs_ms &position ) const;
     // A real executor position completes an arrival without renewing timers.
     bool arrive_at( const tripoint_abs_ms &position );

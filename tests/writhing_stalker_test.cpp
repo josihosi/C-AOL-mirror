@@ -3074,8 +3074,8 @@ TEST_CASE( "stalker_recovery_budget_survives_visible_reacquisition_before_local_
     }
     REQUIRE( stalker.writhing_stalker_state().evidence_turn == recovery + 1 );
     REQUIRE( stalker.writhing_stalker_state().search_started_active == -1 );
-    REQUIRE( stalker.writhing_stalker_state().search_until_turn == recovery + 20 );
-    CHECK( stalker.writhing_stalker_state().attempts_spent == 2 );
+    REQUIRE( stalker.writhing_stalker_state().search_until_turn == -1 );
+    CHECK( stalker.writhing_stalker_state().attempts_spent == 0 );
     const bool reload = GENERATE( false, true );
     if( reload ) {
         stalker = round_trip_writhing_stalker( stalker );
@@ -3251,5 +3251,270 @@ TEST_CASE( "stalker_legacy_light_search_acquisition_cannot_reset_a_new_native_bu
     CHECK( state.attempts_spent == spent );
     CHECK( state.attempt_sequence == sequence );
     CHECK( state.search_until_turn == -1 );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_old_recovery_cannot_erase_an_early_native_burst",
+           "[writhing_stalker][predator][pursuit][recovery]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero );
+    const int old_spent = GENERATE( 1, 2 );
+    if( old_spent == 1 ) {
+        set_time_to_day();
+    } else {
+        set_time( calendar::turn - time_past_midnight( calendar::turn ) + 1_days );
+    }
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::north_east );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    stalker.writhing_stalker_state().attempts_spent = old_spent;
+    stalker.plan();
+    REQUIRE( ( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::retreating ||
+               stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::cooldown ) );
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::cooldown );
+    const int recovered_at = stalker.writhing_stalker_state().cooldown_until_turn;
+    for( int turn = 0; turn < 8; ++turn ) {
+        set_time( calendar::turn + 1_turns );
+        stalker.process_turn();
+    }
+    set_time( calendar::turn_zero + time_duration::from_turns( recovered_at + 1 ) );
+    // The opening changes after the original, smaller burst was spent.
+    // Actual low stamina/bleeding adds vulnerability to the new opening.
+    you.set_stamina( 0 );
+    you.add_effect( efftype_id( "bleed" ), 1_hours, bodypart_id( "arm_l" ) );
+    refresh_writhing_stalker_arena( here );
+    const bool abstract_owner = GENERATE( false, true );
+    if( abstract_owner ) {
+        horde_entity owner( stalker );
+        REQUIRE( owner.advance_predator_intent( stalker.pos_abs(), recovered_at + 1 ) );
+        stalker = *owner.monster_data;
+    } else {
+        REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
+    }
+    std::vector<monster *> zombies;
+    for( const point &offset : { point::west, point::south, point::east, point::south_west } ) {
+        monster &zombie = spawn_test_monster( mon_zombie.str(), center + offset );
+        zombie.aggro_character = true;
+        zombie.set_dest( you.pos_abs() );
+        REQUIRE( zombie.attack_target() == &you );
+        zombies.push_back( &zombie );
+    }
+    refresh_writhing_stalker_arena( here );
+    REQUIRE( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 4 );
+    CHECK( you.deal_melee_attack( zombies.front(), -1000 ) < 0 );
+    REQUIRE( writhing_stalker::has_recent_observed_attack( &stalker, zombies.front(), &you,
+             to_turn<int>( calendar::turn ), 0 ) );
+    const auto sequence = stalker.writhing_stalker_state().attempt_sequence;
+    for( int step = 0; step < 6 && stalker.writhing_stalker_state().attempt_sequence == sequence; ++step ) {
+        // A real adjacent attack uses native combat, independent of path occupancy.
+        stalker.plan();
+        INFO( "old_spent=" << old_spent << " phase=" << static_cast<int>( stalker.writhing_stalker_state().phase ) );
+        CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::attacking );
+        stalker.set_moves( 100 );
+        stalker.attack_at( you.pos_bub() );
+        set_time( calendar::turn + 1_turns );
+    }
+    const auto fresh_attempts = stalker.writhing_stalker_state().attempt_sequence - sequence;
+    REQUIRE( fresh_attempts > 0 );
+    REQUIRE( to_turn<int>( calendar::turn ) < recovered_at + 20 );
+    CHECK( static_cast<std::uint64_t>( stalker.writhing_stalker_state().attempts_spent ) == fresh_attempts );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    set_time( calendar::turn_zero + time_duration::from_turns( recovered_at + 21 ) );
+    stalker.plan();
+    CHECK( static_cast<std::uint64_t>( stalker.writhing_stalker_state().attempts_spent ) == fresh_attempts );
+    CHECK( stalker.writhing_stalker_state().attempt_sequence == sequence + fresh_attempts );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_hidden_recovery_cannot_own_a_later_withdrawal_toward_moved_prey",
+           "[writhing_stalker][predator][pursuit][recovery][flight]" )
+{
+    clear_map_without_vision();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero );
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 2 );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    stalker.writhing_stalker_state().attempts_spent = 2;
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().has_retreat_waypoint );
+    const auto old_retreat = stalker.writhing_stalker_state().retreat_waypoint;
+    you.setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    refresh_writhing_stalker_arena( here );
+    for( int step = 0; step < 30 && stalker.pos_abs() != old_retreat; ++step ) {
+        set_time( calendar::turn + 1_turns );
+        stalker.process_turn();
+        stalker.plan();
+        stalker.set_moves( 100 );
+        stalker.move();
+    }
+    REQUIRE( stalker.pos_abs() == old_retreat );
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::cooldown );
+    const int recovered_at = stalker.writhing_stalker_state().cooldown_until_turn;
+    for( int turn = 0; turn < 8; ++turn ) {
+        set_time( calendar::turn + 1_turns );
+        stalker.process_turn();
+    }
+    set_time( calendar::turn_zero + time_duration::from_turns( recovered_at + 1 ) );
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().search_started_active >= 0 );
+    CHECK_FALSE( stalker.writhing_stalker_state().has_retreat_waypoint );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    you.setpos( here, here.get_bub( old_retreat ) + point::west );
+    refresh_writhing_stalker_arena( here );
+    set_time( calendar::turn + 1_turns );
+    REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
+    // Genuine native damage supplies a later withdrawal reason, independent
+    // of either the old spent budget or the completed retreat episode.
+    stalker.apply_damage( &you, bodypart_id( "torso" ), stalker.get_hp() / 2 );
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::retreating );
+    REQUIRE( stalker.has_dest() );
+    CHECK( stalker.get_dest() != old_retreat );
+    CHECK( rl_dist( stalker.get_dest(), you.pos_abs() ) >= 8 );
+    const int separation = rl_dist( stalker.pos_abs(), you.pos_abs() );
+    const auto sequence = stalker.writhing_stalker_state().attempt_sequence;
+    // Native stumbling/movement cost need not produce a tile in one call.
+    for( int step = 0; step < 8 && rl_dist( stalker.pos_abs(), you.pos_abs() ) <= separation; ++step ) {
+        set_time( calendar::turn + 1_turns );
+        stalker.process_turn();
+        stalker.plan();
+        stalker.set_moves( 100 );
+        stalker.move();
+    }
+    CHECK( rl_dist( stalker.pos_abs(), you.pos_abs() ) > separation );
+    CHECK( stalker.writhing_stalker_state().attempt_sequence == sequence );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_native_combat_consumes_old_recovery_without_erasing_sound_or_attempts",
+           "[writhing_stalker][predator][pursuit][recovery][fallback]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero );
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::north_east );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    stalker.writhing_stalker_state().attempts_spent = 2;
+    stalker.plan();
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::cooldown );
+    const int old_deadline = stalker.writhing_stalker_state().cooldown_until_turn;
+    for( int turn = 0; turn < 8; ++turn ) {
+        set_time( calendar::turn + 1_turns );
+        stalker.process_turn();
+    }
+    set_time( calendar::turn_zero + time_duration::from_turns( old_deadline - 1 ) );
+    const auto old_retreat = stalker.writhing_stalker_state().retreat_waypoint;
+    horde_entity owner( stalker );
+    owner.synchronize_payload( stalker.pos_abs() );
+    stalker = *owner.monster_data;
+    REQUIRE( stalker.wander_pos == old_retreat );
+    REQUIRE( stalker.wandf > 0 );
+    const bool sound = GENERATE( false, true );
+    if( sound ) {
+        stalker.morale = 20;
+        stalker.hear_sound( here.get_bub( old_retreat ), 2000, 6, true );
+        REQUIRE( stalker.provocative_sound );
+        REQUIRE( stalker.wander_pos == old_retreat );
+    }
+    const auto sequence = stalker.writhing_stalker_state().attempt_sequence;
+    stalker.attack_at( you.pos_bub() );
+    REQUIRE( stalker.writhing_stalker_state().attempt_sequence > sequence );
+    const auto spent = stalker.writhing_stalker_state().attempts_spent;
+    CHECK( static_cast<std::uint64_t>( spent ) == 2 + stalker.writhing_stalker_state().attempt_sequence - sequence );
+    CHECK( stalker.writhing_stalker_state().cooldown_until_turn == -1 );
+    CHECK_FALSE( stalker.writhing_stalker_state().has_retreat_waypoint );
+    CHECK_FALSE( stalker.has_dest() );
+    CHECK( ( stalker.wandf > 0 ) == sound );
+    if( sound ) {
+        CHECK( stalker.wander_pos == old_retreat );
+    }
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    set_time( calendar::turn_zero + time_duration::from_turns( old_deadline + 21 ) );
+    REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
+    CHECK( stalker.writhing_stalker_state().attempts_spent == spent );
+    // Still-spent combat now chooses a fresh finite native recovery, rather
+    // than refunding attempts or reviving the consumed old deadline.
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::retreating );
+    CHECK( stalker.writhing_stalker_state().cooldown_until_turn > to_turn<int>( calendar::turn ) );
+    CHECK( stalker.writhing_stalker_state().attempts_spent == spent );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_bounded_search_completion_cannot_refund_native_combat",
+           "[writhing_stalker][predator][pursuit][recovery]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero );
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::north_east );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
+    stalker.writhing_stalker_state().begin_search();
+    const auto search_start = stalker.writhing_stalker_state().search_started_active;
+    stalker.attack_at( you.pos_bub() );
+    const auto sequence = stalker.writhing_stalker_state().attempt_sequence;
+    const auto spent = stalker.writhing_stalker_state().attempts_spent;
+    REQUIRE( sequence > 0 );
+    CHECK( stalker.writhing_stalker_state().search_started_active == search_start );
+    you.setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    refresh_writhing_stalker_arena( here );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    set_time( calendar::turn + 31_minutes );
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK( stalker.writhing_stalker_state().attempts_spent == spent );
+    CHECK( stalker.writhing_stalker_state().attempt_sequence == sequence );
+    CHECK_FALSE( stalker.has_dest() );
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().attempts_spent == spent );
     clear_map_without_vision();
 }

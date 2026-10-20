@@ -942,10 +942,17 @@ void writhing_stalker::record_attack_attempt( monster &stalker )
 {
     if( stalker.type->id == mon_writhing_stalker ) {
         writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
-        ++state.attempts_spent;
-        ++state.attempt_sequence;
-        state.phase = lifecycle_phase::attacking;
-        state.phase_entered_turn = to_turn<int>( calendar::turn );
+        // Retire only the previous retreat's executable carriers; a genuine
+        // sound remains independently owned even at the same coordinate.
+        if( state.has_retreat_waypoint ) {
+            if( stalker.has_dest() && stalker.get_dest() == state.retreat_waypoint ) {
+                stalker.unset_dest();
+            }
+            if( !stalker.provocative_sound && stalker.wander_pos == state.retreat_waypoint ) {
+                stalker.wander_to( stalker.pos_abs(), 0 );
+            }
+        }
+        state.record_attack( to_turn<int>( calendar::turn ) );
     }
 }
 
@@ -1634,7 +1641,7 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
             if( phase_changed ) {
                 state.phase_entered_turn = now_turn;
             }
-            if( !state.has_retreat_waypoint ||
+            if( phase_changed || !state.has_retreat_waypoint ||
                 !writhing_stalker_waypoint_is_reachable( stalker, here, state.retreat_waypoint ) ) {
                 state.retreat_waypoint = writhing_stalker_retreat_destination( stalker, here, target,
                                          response.retreat_distance );
