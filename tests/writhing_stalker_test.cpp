@@ -2767,3 +2767,258 @@ TEST_CASE( "stalker_idle_memory_offload_schedules_without_fabricated_movement_an
     om.hordes.clear();
     clear_map_without_vision();
 }
+
+TEST_CASE( "stalker_idle_abstract_sound_survives_pending_familiar_revisit",
+           "[writhing_stalker][predator][pursuit][scheduler][signal]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    const auto source = get_map().get_abs( tripoint_bub_ms( -36, 65, 0 ) );
+    const auto sound = source + point::east * 5;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = 0; x <= 5; ++x ) {
+        overmap_buffer.set_passable( source + point::east * x, true );
+    }
+    monster original( mon_writhing_stalker );
+    original.set_pos_abs_only( source );
+    original.set_moves( 100 );
+    const bool learned = GENERATE( false, true );
+    if( learned ) {
+        auto &state = original.writhing_stalker_state();
+        state.advance_to( 100 );
+        REQUIRE( state.observe_target( 77, 1, sound, 100 ) );
+        state.finish_search();
+        state.advance_to( 1000 );
+        REQUIRE( state.familiar[0].revisit_at_active > state.active_turns );
+    }
+    const auto actor = original.predator_state().actor_id;
+    REQUIRE( om.hordes.spawn_entity( source, original ) );
+    // The actual horde sound owner assigns this independent order. No
+    // tracking field is patched after intent dispatch.
+    om.hordes.signal_entities( sound, 20 );
+    auto *owner = overmap_buffer.entity_at( source );
+    REQUIRE( owner != nullptr );
+    REQUIRE( owner->destination == sound );
+    REQUIRE( owner->tracking_intensity > 0 );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( source );
+    }
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( source + point::east );
+    CHECK( owner != nullptr );
+    if( owner ) {
+        CHECK( owner->destination == sound );
+        CHECK( owner->tracking_intensity > 0 );
+        CHECK( owner->monster_data->predator_state().actor_id == actor );
+        if( learned ) {
+            CHECK( owner->monster_data->writhing_stalker_state().evidence_turn == 100 );
+            CHECK( owner->monster_data->writhing_stalker_state().phase ==
+                   writhing_stalker::lifecycle_phase::idle );
+        }
+        const auto active = owner->monster_data->writhing_stalker_state().active_turns;
+        overmap_buffer.move_hordes();
+        CHECK( overmap_buffer.entity_at( source + point::east ) == owner );
+        CHECK( owner->monster_data->writhing_stalker_state().active_turns == active );
+    }
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_abstract_retreat_arrival_and_recovery_are_finite",
+           "[writhing_stalker][predator][pursuit][scheduler][recovery]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    const auto source = get_map().get_abs( tripoint_bub_ms( -36, 65, 0 ) );
+    const auto retreat = source + point::east;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = -40; x <= 40; ++x ) {
+        for( int y = -40; y <= 40; ++y ) {
+            overmap_buffer.set_passable( source + point( x, y ), true );
+        }
+    }
+    monster original( mon_writhing_stalker );
+    original.set_pos_abs_only( source );
+    original.set_moves( 100 );
+    auto &state = original.writhing_stalker_state();
+    state.advance_to( 100 );
+    REQUIRE( state.observe_target( 77, 1, source + point::west * 3, 100 ) );
+    state.advance_to( 1000 );
+    // Native withdraw/cooling-off payloads are already covered by the local
+    // caller controls. This fixture follows their real abstract arrival.
+    const bool cooling = GENERATE( false, true );
+    state.phase = cooling ? writhing_stalker::lifecycle_phase::cooldown :
+                  writhing_stalker::lifecycle_phase::retreating;
+    state.retreat_waypoint = retreat;
+    state.has_retreat_waypoint = true;
+    state.committed_waypoint = source + point::west * 5;
+    state.has_committed_waypoint = true;
+    state.cooldown_until_turn = 1060;
+    state.attempts_spent = 2;
+    original.set_dest( retreat );
+    const auto actor = original.predator_state().actor_id;
+    REQUIRE( om.hordes.spawn_entity( source, original ) );
+    overmap_buffer.move_hordes();
+    auto *owner = overmap_buffer.entity_at( retreat );
+    REQUIRE( owner != nullptr );
+    REQUIRE( owner->tracking_intensity == 0 );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( retreat );
+    }
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( retreat );
+    REQUIRE( owner != nullptr );
+    CHECK( owner->monster_data->writhing_stalker_state().phase ==
+           writhing_stalker::lifecycle_phase::cooldown );
+    CHECK( owner->tracking_intensity == 0 );
+    CHECK( owner->monster_data->writhing_stalker_state().cooldown_until_turn == 1060 );
+    const bool delayed = GENERATE( false, true );
+    set_time( calendar::turn_zero + ( delayed ? 3000_turns : 1061_turns ) );
+    overmap_buffer.move_hordes();
+    owner = nullptr;
+    for( const auto &entry : om.horde_entities() ) {
+        if( entry.second->monster_data &&
+            entry.second->monster_data->predator_state().actor_id == actor ) {
+            owner = entry.second;
+        }
+    }
+    REQUIRE( owner != nullptr );
+    auto &recovered = owner->monster_data->writhing_stalker_state();
+    CHECK( recovered.phase != writhing_stalker::lifecycle_phase::retreating );
+    CHECK( recovered.phase != writhing_stalker::lifecycle_phase::cooldown );
+    CHECK( recovered.cooldown_until_turn == -1 );
+    if( delayed ) {
+        CHECK( recovered.phase == writhing_stalker::lifecycle_phase::idle );
+    }
+    const auto active = recovered.active_turns;
+    const auto search_start = recovered.search_started_active;
+    overmap_buffer.move_hordes();
+    CHECK( owner->monster_data->writhing_stalker_state().active_turns == active );
+    CHECK( owner->monster_data->writhing_stalker_state().search_started_active == search_start );
+    set_time( calendar::turn + 31_minutes );
+    overmap_buffer.move_hordes();
+    owner = nullptr;
+    for( const auto &entry : om.horde_entities() ) {
+        if( entry.second->monster_data &&
+            entry.second->monster_data->predator_state().actor_id == actor ) {
+            owner = entry.second;
+        }
+    }
+    REQUIRE( owner != nullptr );
+    CHECK( owner->monster_data->writhing_stalker_state().phase ==
+           writhing_stalker::lifecycle_phase::idle );
+    CHECK( owner->tracking_intensity == 0 );
+    CHECK( owner->monster_data->writhing_stalker_state().evidence_turn == 100 );
+    CHECK( owner->monster_data->writhing_stalker_state().familiar[0].revisit_at_active >
+           owner->monster_data->writhing_stalker_state().active_turns );
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_abstract_light_arrival_expires_without_replacing_new_sound",
+           "[writhing_stalker][predator][pursuit][scheduler][signal][light_transition]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    const auto source = get_map().get_abs( tripoint_bub_ms( -36, 65, 0 ) );
+    const auto light = source + point::east;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = -5; x <= 5; ++x ) {
+        for( int y = -5; y <= 5; ++y ) {
+            overmap_buffer.set_passable( source + point( x, y ), true );
+        }
+    }
+    monster original( mon_writhing_stalker );
+    original.set_pos_abs_only( source );
+    original.set_moves( 100 );
+    auto &state = original.writhing_stalker_state();
+    state.advance_to( 100 );
+    const bool learned = GENERATE( false, true );
+    if( learned ) {
+        REQUIRE( state.observe_target( 77, 1, source + point::west * 3, 100 ) );
+        state.finish_search();
+    }
+    state.advance_to( 1000 );
+    const auto actor = original.predator_state().actor_id;
+    REQUIRE( om.hordes.spawn_entity( source, original ) );
+    const bool blocked = GENERATE( false, true );
+    if( blocked ) {
+        for( const auto &candidate : squares_closer_to( source, light ) ) {
+            overmap_buffer.set_passable( candidate, false );
+        }
+    }
+    // A physical-light adapter packet fixture feeds the production owner;
+    // this does not claim a native fire or newly observed target.
+    REQUIRE( om.hordes.attract_entities_to_light( light, 6, 20, "abstract-arrival-light",
+             calendar::turn, []( const tripoint_abs_ms & ) { return true; }, nullptr ) == 1 );
+    overmap_buffer.move_hordes();
+    const auto arrival = blocked ? source : light;
+    auto *owner = overmap_buffer.entity_at( arrival );
+    REQUIRE( owner != nullptr );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( arrival );
+    }
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( arrival );
+    REQUIRE( owner != nullptr );
+    const auto &arrived = owner->monster_data->writhing_stalker_state();
+    if( !blocked ) {
+        CHECK( arrived.phase == writhing_stalker::lifecycle_phase::searching );
+        CHECK( arrived.search_until_turn == 1021 );
+        CHECK( owner->tracking_intensity == 0 );
+    }
+    set_time( calendar::turn_zero + 1022_turns );
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( arrival );
+    REQUIRE( owner != nullptr );
+    CHECK( owner->monster_data->writhing_stalker_state().phase ==
+           writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( owner->monster_data->writhing_stalker_state().has_committed_waypoint );
+    CHECK( owner->tracking_intensity == 0 );
+    CHECK( owner->is_active() == learned );
+    const int finished_turn = owner->monster_data->writhing_stalker_state().last_advanced_turn;
+    set_time( calendar::turn_zero + 1200_turns );
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( arrival );
+    REQUIRE( owner != nullptr );
+    if( !learned ) {
+        // The actual scheduler must stop admitting this finite legacy job.
+        CHECK( owner->monster_data->writhing_stalker_state().last_advanced_turn == finished_turn );
+        CHECK_FALSE( owner->is_active() );
+    }
+    for( int x = -5; x <= 5; ++x ) {
+        for( int y = -5; y <= 5; ++y ) {
+            overmap_buffer.set_passable( source + point( x, y ), true );
+        }
+    }
+    const auto sound = arrival + point::south * 3;
+    om.hordes.signal_entities( sound, 20 );
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( arrival + point::south );
+    CHECK( owner != nullptr );
+    if( owner ) {
+        CHECK( owner->destination == sound );
+        CHECK( owner->monster_data->predator_state().actor_id == actor );
+        CHECK( owner->monster_data->writhing_stalker_state().has_pursuit_memory == learned );
+        if( learned ) {
+            CHECK( owner->monster_data->writhing_stalker_state().evidence_turn == 100 );
+        }
+    }
+    om.hordes.clear();
+    clear_map_without_vision();
+}

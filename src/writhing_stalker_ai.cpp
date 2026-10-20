@@ -52,19 +52,32 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
         }
     }
     if( has_light_observed_position && light_expires_turn >= 0 && now_turn >= light_expires_turn ) {
+        const bool expired_route = sighting_active_turn < 0 && search_started_active < 0 &&
+                                   has_committed_waypoint && committed_waypoint == light_observed_position &&
+                                   ( phase == lifecycle_phase::shadowing || phase == lifecycle_phase::approaching );
         has_light_observed_position = false;
         light_observed_turn = -1;
         light_expires_turn = -1;
         light_sample_id.clear();
+        if( expired_route ) {
+            has_committed_waypoint = false;
+            phase = lifecycle_phase::idle;
+            phase_entered_turn = now_turn;
+            remaining_route_progress = -1;
+        }
     }
     if( cooldown_until_turn >= 0 && now_turn >= cooldown_until_turn ) {
+        const int recovered_at = cooldown_until_turn;
         cooldown_until_turn = -1;
-        if( phase == lifecycle_phase::cooldown ) {
+        if( phase == lifecycle_phase::cooldown || phase == lifecycle_phase::retreating ) {
             phase = lifecycle_phase::searching;
-            phase_entered_turn = now_turn;
-            search_until_turn = now_turn + 20;
+            phase_entered_turn = recovered_at;
+            search_until_turn = recovered_at + 20;
             if( has_pursuit_memory && sighting_active_turn >= 0 ) {
                 begin_search();
+                // A delayed executor/reload cannot restart recovery's search.
+                search_started_active -= std::min<std::int64_t>( std::max( 0, elapsed ),
+                                         now_turn - recovered_at );
             }
         }
     }
@@ -85,6 +98,35 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
         attempts_spent = 0;
         remaining_route_progress = -1;
     }
+}
+
+bool persistent_state::owns_waypoint( const tripoint_abs_ms &position ) const
+{
+    return ( has_committed_waypoint && committed_waypoint == position ) ||
+           ( has_retreat_waypoint && retreat_waypoint == position );
+}
+
+bool persistent_state::arrive_at( const tripoint_abs_ms &position )
+{
+    if( has_retreat_waypoint && position == retreat_waypoint &&
+        ( phase == lifecycle_phase::retreating || phase == lifecycle_phase::cooldown ) ) {
+        if( phase == lifecycle_phase::retreating ) {
+            phase = lifecycle_phase::cooldown;
+            phase_entered_turn = last_advanced_turn;
+        }
+        return true;
+    }
+    if( sighting_active_turn < 0 && search_started_active < 0 &&
+        has_light_observed_position && has_committed_waypoint && position == committed_waypoint &&
+        ( phase == lifecycle_phase::shadowing || phase == lifecycle_phase::approaching ) ) {
+        phase = lifecycle_phase::searching;
+        phase_entered_turn = last_advanced_turn;
+        search_until_turn = last_advanced_turn + 20;
+        has_committed_waypoint = false;
+        remaining_route_progress = -1;
+        return true;
+    }
+    return false;
 }
 
 bool persistent_state::observe_target( const actor_identity target, const int character_id,

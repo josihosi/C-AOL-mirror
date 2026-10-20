@@ -90,6 +90,9 @@ struct persistent_state {
     // is the integration seam for REL-AI-ACTIVATION; first admission never
     // charges an untracked old-save backlog.
     void advance_to( int now_turn, int active_elapsed = -1 );
+    bool owns_waypoint( const tripoint_abs_ms &position ) const;
+    // A real executor position completes an arrival without renewing timers.
+    bool arrive_at( const tripoint_abs_ms &position );
     bool observe_target( actor_identity target, int character_id,
                          const tripoint_abs_ms &position, int world_turn );
     void begin_search();

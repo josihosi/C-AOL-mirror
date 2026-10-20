@@ -87,6 +87,15 @@ bool horde_entity::is_active() const
     }
     const monster &payload = *monster_data;
     const auto &state = payload.writhing_stalker_state();
+    // A finite light investigation/search also needs arrival and expiry
+    // service when this actor has never acquired a character.
+    if( ( state.has_light_observed_position && state.has_committed_waypoint &&
+          ( state.phase == writhing_stalker::lifecycle_phase::shadowing ||
+            state.phase == writhing_stalker::lifecycle_phase::approaching ) ) ||
+        ( state.phase == writhing_stalker::lifecycle_phase::searching &&
+          state.search_until_turn >= 0 ) ) {
+        return true;
+    }
     // Arrival and a pending familiar-place visit still need lifecycle turns.
     // Scheduling them does not create a movement or sound-tracking budget.
     if( !state.has_pursuit_memory ) {
@@ -139,12 +148,12 @@ void horde_entity::synchronize_payload( const tripoint_abs_ms &position )
     monster_data->set_pos_abs_only( position );
     monster_data->set_moves( moves );
     if( tracking_intensity > 0 ) {
+        const bool heard_here = monster_data->provocative_sound && monster_data->wandf > 0 &&
+                                monster_data->wander_pos == destination;
         monster_data->wander_to( destination, tracking_intensity );
         if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
             const auto &state = monster_data->writhing_stalker_state();
-            if( state.has_pursuit_memory &&
-                ( ( state.has_committed_waypoint && destination == state.committed_waypoint ) ||
-                  ( state.has_retreat_waypoint && destination == state.retreat_waypoint ) ) ) {
+            if( state.has_pursuit_memory && state.owns_waypoint( destination ) && !heard_here ) {
                 // This carrier came from the pursuit route, not a sound.
                 // A later real hear_sound call owns its own provocative flag.
                 monster_data->provocative_sound = false;
@@ -184,6 +193,8 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
     life.last_advanced_turn = now_turn;
     if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
         writhing_stalker::persistent_state &state = monster_data->writhing_stalker_state();
+        const bool carried_route = !monster_data->provocative_sound &&
+                                   state.owns_waypoint( destination );
         state.advance_to( now_turn, active_elapsed );
         if( active_elapsed == 0 ) {
             // The shared activation owner must also gate transport/evolution
@@ -192,23 +203,18 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         }
         monster_data->set_pos_abs_only( position );
         writhing_stalker::observe_current_target( *monster_data );
+        if( !monster_data->provocative_sound && destination == light_source &&
+            !light_sample_id.empty() && to_turn<int>( light_observed ) <= now_turn &&
+            to_turn<int>( light_expires ) > now_turn ) {
+            state.observe_light_interest( light_source, light_sample_id,
+                                          to_turn<int>( light_observed ),
+                                          to_turns<int>( light_expires - light_observed ) );
+        }
+        state.arrive_at( position );
         if( state.has_pursuit_memory && ( state.sighting_active_turn >= 0 ||
                                         state.phase == writhing_stalker::lifecycle_phase::idle ||
                                         state.revisiting_slot >= 0 ) ) {
-            const auto waypoint = writhing_stalker::pursuit_destination( *monster_data, true );
-            if( waypoint ) {
-                state.committed_waypoint = *waypoint;
-                state.has_committed_waypoint = true;
-            } else if( state.phase == writhing_stalker::lifecycle_phase::idle ) {
-                tracking_intensity = 0;
-                monster_data->unset_dest();
-                monster_data->wander_to( position, 0 );
-            }
-        }
-        if( !light_sample_id.empty() && light_expires > light_observed ) {
-            state.observe_light_interest( light_source, light_sample_id,
-                                          to_turn<int>( light_observed ),
-                                          std::max( 1, to_turns<int>( light_expires - light_observed ) ) );
+            writhing_stalker::pursuit_destination( *monster_data, true );
         }
         if( state.phase == writhing_stalker::lifecycle_phase::retreating ||
             state.phase == writhing_stalker::lifecycle_phase::cooldown ) {
@@ -216,11 +222,17 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
             // A retained approach hypothesis cannot supersede that authority.
             if( state.has_retreat_waypoint ) {
                 destination = state.retreat_waypoint;
-                tracking_intensity = std::max( tracking_intensity, 1 );
+                tracking_intensity = position == destination ? 0 : std::max( tracking_intensity, 1 );
             }
         } else if( state.has_committed_waypoint ) {
             destination = state.committed_waypoint;
-            tracking_intensity = std::max( tracking_intensity, 1 );
+            tracking_intensity = position == destination ? 0 : std::max( tracking_intensity, 1 );
+        } else if( carried_route ) {
+            tracking_intensity = 0;
+        }
+        if( tracking_intensity == 0 && carried_route ) {
+            monster_data->unset_dest();
+            monster_data->wander_to( position, 0 );
         }
     } else {
         zombie_rider_overmap_ai::rider_pursuit_state &state =

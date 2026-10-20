@@ -225,20 +225,27 @@ static void signal_sm( const tripoint_abs_ms &origin, const tripoint_abs_sm &sm_
     int scaled_eff_power = eff_power * SEEX;
     for( std::unordered_map<tripoint_abs_ms, horde_entity>::iterator mon = sm_iter->second.begin();
          mon != sm_iter->second.end(); ) {
+        if( active && mon->second.tracking_intensity >= scaled_eff_power ) {
+            ++mon;
+            continue;
+        }
+        mon->second.destination = origin;
+        mon->second.tracking_intensity = scaled_eff_power;
+        if( mon->second.monster_data &&
+            mon->second.monster_data->type->id.str() == "mon_writhing_stalker" ) {
+            // Accepted sound owns the native carrier, even if its coordinate
+            // happens to match an old pursuit/light hypothesis.
+            mon->second.monster_data->wander_to( origin, scaled_eff_power );
+            mon->second.monster_data->provocative_sound = true;
+        }
         // Avoid unecessary extract/insert for already-active horde entities.
         if( !active ) {
-            mon->second.destination = origin;
-            mon->second.tracking_intensity = scaled_eff_power;
             std::unordered_map<tripoint_abs_ms, horde_entity>::iterator moving_mon = mon;
             // Advance the loop iterator past the current node, which we will be removing.
             mon++;
             auto monster_node = sm_iter->second.extract( moving_mon );
             migrating_hordes.insert( std::move( monster_node ) );
         } else {
-            if( mon->second.tracking_intensity < scaled_eff_power ) {
-                mon->second.destination = origin;
-                mon->second.tracking_intensity = scaled_eff_power;
-            }
             ++mon;
         }
     }
@@ -328,6 +335,11 @@ int horde_map::attract_entities_to_light( const tripoint_abs_ms &origin, const i
                 entity.light_observed = observed;
                 entity.light_expires = observed + intensity * 1_turns;
                 entity.light_interest_strength = remaining_interest;
+                if( entity.monster_data &&
+                    entity.monster_data->type->id.str() == "mon_writhing_stalker" ) {
+                    entity.monster_data->wander_to( origin, remaining_interest );
+                    entity.monster_data->provocative_sound = false;
+                }
                 auto moving = entity_it++;
                 auto node = bucket.extract( moving );
                 migrating_hordes.insert( std::move( node ) );

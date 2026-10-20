@@ -1457,8 +1457,10 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
 
     const int distance = rl_dist( stalker.pos_abs(), waypoint );
     if( distance == 0 ) {
-        writhing_stalker_enter_search( state, now_turn );
-        state.has_committed_waypoint = false;
+        if( !state.arrive_at( stalker.pos_abs() ) ) {
+            writhing_stalker_enter_search( state, now_turn );
+            state.has_committed_waypoint = false;
+        }
         stalker.unset_dest();
         return true;
     }
@@ -2505,8 +2507,7 @@ void monster::plan()
         ( mon_plan.target == nullptr || mon_plan.target->as_character() ) ) {
         const auto &state = writhing_stalker_state();
         if( state.has_pursuit_memory && wandf > 0 && !provocative_sound &&
-            ( ( state.has_committed_waypoint && wander_pos == state.committed_waypoint ) ||
-              ( state.has_retreat_waypoint && wander_pos == state.retreat_waypoint ) ) ) {
+            state.owns_waypoint( wander_pos ) ) {
             // The abstract route used the native wander carrier during handoff.
             // This local planner now owns that route through set_dest instead;
             // its expiry, retargeting or flight must not revive the old carrier.
