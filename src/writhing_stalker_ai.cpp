@@ -53,7 +53,7 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
     }
     if( has_light_observed_position && light_expires_turn >= 0 && now_turn >= light_expires_turn ) {
         const bool expired_route = sighting_active_turn < 0 && search_started_active < 0 &&
-                                   has_committed_waypoint && committed_waypoint == light_observed_position &&
+                                   has_committed_waypoint &&
                                    ( phase == lifecycle_phase::shadowing || phase == lifecycle_phase::approaching );
         has_light_observed_position = false;
         light_observed_turn = -1;
@@ -131,7 +131,7 @@ bool persistent_state::arrive_at( const tripoint_abs_ms &position )
         return true;
     }
     if( sighting_active_turn < 0 && search_started_active < 0 &&
-        has_light_observed_position && has_committed_waypoint && position == committed_waypoint &&
+        has_light_observed_position && position == light_observed_position &&
         ( phase == lifecycle_phase::shadowing || phase == lifecycle_phase::approaching ) ) {
         phase = lifecycle_phase::searching;
         phase_entered_turn = last_advanced_turn;

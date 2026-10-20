@@ -202,7 +202,7 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
             return true;
         }
         monster_data->set_pos_abs_only( position );
-        writhing_stalker::observe_current_target( *monster_data );
+        const bool saw_target = writhing_stalker::observe_current_target( *monster_data ) != nullptr;
         if( !monster_data->provocative_sound && destination == light_source &&
             !light_sample_id.empty() && to_turn<int>( light_observed ) <= now_turn &&
             to_turn<int>( light_expires ) > now_turn ) {
@@ -211,10 +211,30 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
                                           to_turns<int>( light_expires - light_observed ) );
         }
         state.arrive_at( position );
+        const bool sound_owns_navigation = tracking_intensity > 0 && monster_data->provocative_sound &&
+                                           monster_data->wandf > 0 && monster_data->wander_pos == destination &&
+                                           !saw_target && state.phase != writhing_stalker::lifecycle_phase::retreating &&
+                                           state.phase != writhing_stalker::lifecycle_phase::cooldown;
+        // Abstract transport executes its own native one-tile steps. A local
+        // intermediate light step must not replace the observed source goal.
+        if( state.sighting_active_turn < 0 && state.search_started_active < 0 &&
+            state.light_interest_active( now_turn ) &&
+            ( state.phase == writhing_stalker::lifecycle_phase::shadowing ||
+              state.phase == writhing_stalker::lifecycle_phase::approaching ) ) {
+            state.committed_waypoint = state.light_observed_position;
+            state.has_committed_waypoint = true;
+        }
         if( state.has_pursuit_memory && ( state.sighting_active_turn >= 0 ||
                                         state.phase == writhing_stalker::lifecycle_phase::idle ||
-                                        state.revisiting_slot >= 0 ) ) {
+                                        state.revisiting_slot >= 0 ) &&
+            !( sound_owns_navigation && state.phase == writhing_stalker::lifecycle_phase::idle ) ) {
             writhing_stalker::pursuit_destination( *monster_data, true );
+        }
+        if( sound_owns_navigation ) {
+            // Accepted sound outranks speculative light/memory navigation.
+            // Due visits wait; active searches keep their finite elapsed budget.
+            // Actual sight and native retreat retain their higher authority.
+            return true;
         }
         if( state.phase == writhing_stalker::lifecycle_phase::retreating ||
             state.phase == writhing_stalker::lifecycle_phase::cooldown ) {

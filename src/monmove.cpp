@@ -1284,6 +1284,53 @@ static bool writhing_stalker_waypoint_is_reachable( monster &stalker, map &here,
              !here.route( stalker, pathfinding_target::point( local ) ).empty() );
 }
 
+static std::optional<tripoint_abs_ms> writhing_stalker_local_step( monster &stalker,
+        map &here, const tripoint_abs_ms &desired, const bool require_progress,
+        const bool avoid_exposure )
+{
+    tripoint_abs_ms aim = desired;
+    if( !here.inbounds( aim ) ) {
+        // Only route through the currently loaded physical corridor. The
+        // ordinary owner transfer, not this planner, crosses its boundary.
+        aim = stalker.pos_abs();
+        for( const auto &cell : scout_observation::site_sightline( stalker.pos_abs(), desired ) ) {
+            if( !here.inbounds( cell ) ) {
+                break;
+            }
+            aim = cell;
+        }
+    }
+    // Keep native short-path capabilities. A distant remembered OMT is a
+    // sequence of reachable steps, not permission to raise melee/path range.
+    const auto delta = aim - stalker.pos_abs();
+    const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
+    const int native_limit = stalker.get_pathfinding_settings().max_dist;
+    const int step = native_limit > 2 ? native_limit - 2 : 1;
+    if( native_limit > 0 && length > step ) {
+        aim = stalker.pos_abs() + tripoint_rel_ms( delta.x() * step / length,
+                delta.y() * step / length, 0 );
+    }
+    static const std::array<point, 9> choices = {{ point::zero, point( -4, 0 ), point( 4, 0 ),
+            point( 0, -4 ), point( 0, 4 ), point( -4, -4 ), point( -4, 4 ), point( 4, -4 ), point( 4, 4 )
+        }};
+    for( const auto &offset : choices ) {
+        const auto candidate = aim + offset;
+        const auto local = here.get_bub( candidate );
+        if( !here.inbounds( local ) || !stalker.can_move_to( local ) ||
+            ( require_progress && candidate != stalker.pos_abs() &&
+              rl_dist( candidate, desired ) >= rl_dist( stalker.pos_abs(), desired ) ) ||
+            ( avoid_exposure && writhing_stalker_bright_exposure( here, local ) &&
+              !writhing_stalker_bright_exposure( here, stalker.pos_bub() ) ) ) {
+            continue;
+        }
+        if( candidate == stalker.pos_abs() ||
+            !here.route( stalker, pathfinding_target::point( local ) ).empty() ) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<tripoint_abs_ms> writhing_stalker::pursuit_destination( monster &stalker,
         const bool abstract_owner )
 {
@@ -1331,46 +1378,7 @@ std::optional<tripoint_abs_ms> writhing_stalker::pursuit_destination( monster &s
             return overmap_buffer.passable( aim ) ? std::optional<tripoint_abs_ms>( aim ) :
                    std::nullopt;
         }
-        if( !here.inbounds( aim ) ) {
-            // Only route through the currently loaded physical corridor. The
-            // ordinary owner transfer, not this planner, crosses its boundary.
-            aim = stalker.pos_abs();
-            for( const auto &cell : scout_observation::site_sightline( stalker.pos_abs(), desired ) ) {
-                if( !here.inbounds( cell ) ) {
-                    break;
-                }
-                aim = cell;
-            }
-        }
-        // Keep native short-path capabilities. A distant remembered OMT is a
-        // sequence of reachable steps, not permission to raise melee/path range.
-        const auto delta = aim - stalker.pos_abs();
-        const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
-        const int native_limit = stalker.get_pathfinding_settings().max_dist;
-        const int step = native_limit > 2 ? native_limit - 2 : 1;
-        if( native_limit > 0 && length > step ) {
-            aim = stalker.pos_abs() + tripoint_rel_ms( delta.x() * step / length,
-                    delta.y() * step / length, 0 );
-        }
-        static const std::array<point, 9> choices = {{ point::zero, point( -4, 0 ), point( 4, 0 ),
-                point( 0, -4 ), point( 0, 4 ), point( -4, -4 ), point( -4, 4 ), point( 4, -4 ), point( 4, 4 )
-            }};
-        for( const auto &offset : choices ) {
-            const auto candidate = aim + offset;
-            const auto local = here.get_bub( candidate );
-            if( !here.inbounds( local ) || !stalker.can_move_to( local ) ||
-                ( search && candidate != stalker.pos_abs() &&
-                  rl_dist( candidate, desired ) >= rl_dist( stalker.pos_abs(), desired ) ) ||
-                ( writhing_stalker_bright_exposure( here, local ) &&
-                  !writhing_stalker_bright_exposure( here, stalker.pos_bub() ) ) ) {
-                continue;
-            }
-            if( candidate == stalker.pos_abs() ||
-                !here.route( stalker, pathfinding_target::point( local ) ).empty() ) {
-                return candidate;
-            }
-        }
-        return std::nullopt;
+        return writhing_stalker_local_step( stalker, here, aim, search, true );
     } );
     if( state.phase != before_phase || state.search_cursor != before_cursor ||
         state.has_committed_waypoint != had_waypoint ||
@@ -1410,12 +1418,21 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
     writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
     const int now_turn = to_turn<int>( calendar::turn );
     state.advance_to( now_turn );
+    const bool sound_owns_navigation = stalker.provocative_sound && stalker.wandf > 0 &&
+                                       stalker.wander_pos != stalker.pos_abs() &&
+                                       state.phase != writhing_stalker::lifecycle_phase::retreating &&
+                                       state.phase != writhing_stalker::lifecycle_phase::cooldown;
     if( state.has_pursuit_memory && ( state.sighting_active_turn >= 0 ||
                                     state.phase == writhing_stalker::lifecycle_phase::idle ||
                                     state.revisiting_slot >= 0 ) &&
         state.phase != writhing_stalker::lifecycle_phase::retreating &&
-        state.phase != writhing_stalker::lifecycle_phase::cooldown ) {
+        state.phase != writhing_stalker::lifecycle_phase::cooldown &&
+        !( sound_owns_navigation && state.phase == writhing_stalker::lifecycle_phase::idle ) ) {
         const auto waypoint = writhing_stalker::pursuit_destination( stalker, false );
+        if( sound_owns_navigation ) {
+            stalker.unset_dest();
+            return false;
+        }
         if( waypoint ) {
             stalker.set_dest( *waypoint );
             return true;
@@ -1423,16 +1440,31 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
         stalker.unset_dest();
         return state.phase != writhing_stalker::lifecycle_phase::idle;
     }
+    if( sound_owns_navigation ) {
+        // Let ordinary native sound movement execute without replacing it by
+        // a light hypothesis or consuming a merely due familiar visit.
+        stalker.unset_dest();
+        return false;
+    }
     if( state.phase == writhing_stalker::lifecycle_phase::idle ) {
         return false;
     }
 
+    // The observation is the goal; committed_waypoint owns only the next
+    // executable step. Reaching a short step is not arriving at the light.
+    const bool light_route = state.sighting_active_turn < 0 && state.search_started_active < 0 &&
+                             state.light_interest_active( now_turn ) &&
+                             ( state.phase == writhing_stalker::lifecycle_phase::shadowing ||
+                               state.phase == writhing_stalker::lifecycle_phase::approaching );
     tripoint_abs_ms waypoint;
     bool has_waypoint = false;
     if( state.phase == writhing_stalker::lifecycle_phase::retreating ||
         state.phase == writhing_stalker::lifecycle_phase::cooldown ) {
         waypoint = state.retreat_waypoint;
         has_waypoint = state.has_retreat_waypoint;
+    } else if( light_route ) {
+        waypoint = state.light_observed_position;
+        has_waypoint = true;
     } else {
         waypoint = state.committed_waypoint;
         has_waypoint = state.has_committed_waypoint;
@@ -1446,7 +1478,11 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
         }
     }
 
-    if( !has_waypoint || !writhing_stalker_waypoint_is_reachable( stalker, here, waypoint ) ) {
+    const auto native_step = light_route ?
+                             writhing_stalker_local_step( stalker, here, waypoint, true, false ) :
+                             std::nullopt;
+    if( !has_waypoint || ( light_route ? !native_step :
+                          !writhing_stalker_waypoint_is_reachable( stalker, here, waypoint ) ) ) {
         writhing_stalker_enter_search( state, now_turn );
         state.has_committed_waypoint = false;
         if( state.has_last_observed_position &&
@@ -1491,7 +1527,13 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
         stalker.unset_dest();
         return true;
     }
-    stalker.set_dest( waypoint );
+    if( native_step && state.phase != writhing_stalker::lifecycle_phase::searching ) {
+        state.committed_waypoint = *native_step;
+        state.has_committed_waypoint = true;
+        stalker.set_dest( *native_step );
+    } else {
+        stalker.set_dest( waypoint );
+    }
     return true;
 }
 

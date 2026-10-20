@@ -3518,3 +3518,283 @@ TEST_CASE( "stalker_bounded_search_completion_cannot_refund_native_combat",
     CHECK( stalker.writhing_stalker_state().attempts_spent == spent );
     clear_map_without_vision();
 }
+
+TEST_CASE( "stalker_distant_light_uses_reachable_native_steps_before_finite_arrival_search",
+           "[writhing_stalker][predator][pursuit][light_transition][routing]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    const bool slow = GENERATE( false, true );
+    here.ter_set( center + point::east * 4, ter_id( slow ? "t_dirtmound" : "t_wall" ) );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    stalker.anger = 100;
+    const auto light = here.get_abs( center + point::east * 24 );
+    REQUIRE( stalker.get_pathfinding_settings().max_dist == 10 );
+    INFO( "native max_length=" << stalker.get_pathfinding_settings().max_length << " slow=" << slow );
+    REQUIRE( stalker.can_move_to( here.get_bub( light ) ) );
+    // The full route refuses solely because regular pathfinding is bounded;
+    // a real short route can still detour around this wall/slow tile.
+    REQUIRE( here.route( stalker, pathfinding_target::point( here.get_bub( light ) ) ).empty() );
+    REQUIRE_FALSE( here.route( stalker,
+                              pathfinding_target::point( center + point( 8, 4 ) ) ).empty() );
+    auto &state = stalker.writhing_stalker_state();
+    const bool learned = GENERATE( false, true );
+    if( learned ) {
+        state.advance_to( 100 );
+        REQUIRE( state.observe_target( 77, 1, light + point::north * 24, 100 ) );
+        state.finish_search();
+    }
+    state.advance_to( 1000 );
+    // Accepted physical-light adapter input, not native fire/sight proof.
+    REQUIRE( state.observe_light_interest( light, "distant-native-light", 1000, 300 ) );
+    stalker.plan();
+    REQUIRE( stalker.has_dest() );
+    CHECK( state.phase != writhing_stalker::lifecycle_phase::searching );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    for( int step = 0; step < 100 && stalker.pos_abs() != light; ++step ) {
+        stalker.plan();
+        REQUIRE( stalker.writhing_stalker_state().phase != writhing_stalker::lifecycle_phase::searching );
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+    }
+    REQUIRE( stalker.pos_abs() == light );
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::searching );
+    const int deadline = stalker.writhing_stalker_state().search_until_turn;
+    REQUIRE( deadline == to_turn<int>( calendar::turn ) + 20 );
+    stalker = round_trip_writhing_stalker( stalker );
+    set_time( calendar::turn_zero + time_duration::from_turns( deadline ) );
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( stalker.has_dest() );
+    CHECK( stalker.writhing_stalker_state().evidence_turn == ( learned ? 100 : -1 ) );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_due_or_started_familiar_visit_preserves_accepted_sound_then_finishes",
+           "[writhing_stalker][predator][pursuit][scheduler][signal]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    const auto source = get_map().get_abs( tripoint_bub_ms( -36, 65, 0 ) );
+    const auto sound = source + point::east * 5;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    for( int x = -100; x <= 10; ++x ) {
+        for( int y = -24; y <= 24; ++y ) {
+            overmap_buffer.set_passable( source + point( x, y ), true );
+        }
+    }
+    monster original( mon_writhing_stalker );
+    original.set_pos_abs_only( source );
+    original.set_moves( 100 );
+    auto &memory = original.writhing_stalker_state();
+    memory.advance_to( 100 );
+    REQUIRE( memory.observe_target( 77, 1, source + point::west * 48, 100 ) );
+    memory.finish_search();
+    const auto due = memory.familiar[0].revisit_at_active;
+    memory.advance_to( 1000 );
+    const auto actor = original.predator_state().actor_id;
+    REQUIRE( om.hordes.spawn_entity( source, original ) );
+    const auto find_owner = [&]() -> std::pair<tripoint_abs_ms, horde_entity *> {
+        for( const auto &entry : om.horde_entities() ) {
+            if( entry.second->monster_data &&
+                entry.second->monster_data->predator_state().actor_id == actor ) {
+                return { entry.first, entry.second };
+            }
+        }
+        return { source, nullptr };
+    };
+    set_time( calendar::turn_zero + time_duration::from_turns( 100 + due + 1 ) );
+    const bool started = GENERATE( false, true );
+    if( started ) {
+        overmap_buffer.move_hordes();
+        REQUIRE( find_owner().second != nullptr );
+        REQUIRE( find_owner().second->monster_data->writhing_stalker_state().revisiting_slot == 0 );
+        set_time( calendar::turn + 1_turns );
+    }
+    const auto before = find_owner().first;
+    om.hordes.signal_entities( sound, 20 );
+    auto *owner = find_owner().second;
+    REQUIRE( owner != nullptr );
+    REQUIRE( owner->destination == sound );
+    REQUIRE( owner->monster_data->provocative_sound );
+    const auto search_start = owner->monster_data->writhing_stalker_state().search_started_active;
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( before );
+    }
+    overmap_buffer.move_hordes();
+    owner = find_owner().second;
+    REQUIRE( owner != nullptr );
+    CHECK( owner->destination == sound );
+    CHECK( owner->monster_data->wander_pos == sound );
+    CHECK( owner->monster_data->provocative_sound );
+    CHECK( rl_dist( find_owner().first, sound ) < rl_dist( before, sound ) );
+    const auto &pending = owner->monster_data->writhing_stalker_state();
+    CHECK( pending.search_started_active == search_start );
+    CHECK( pending.familiar[0].revisit_at_active == ( started ? -1 : due ) );
+    for( int turn = 0; turn < 12 && find_owner().first != sound; ++turn ) {
+        set_time( calendar::turn + 1_turns );
+        overmap_buffer.move_hordes();
+        REQUIRE( find_owner().second != nullptr );
+        REQUIRE( find_owner().second->destination == sound );
+    }
+    REQUIRE( find_owner().first == sound );
+    REQUIRE( find_owner().second->tracking_intensity == 0 );
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    owner = find_owner().second;
+    REQUIRE( owner != nullptr );
+    CHECK( owner->monster_data->writhing_stalker_state().revisiting_slot == 0 );
+    CHECK( owner->destination != sound );
+    set_time( calendar::turn + 11_minutes );
+    overmap_buffer.move_hordes();
+    owner = find_owner().second;
+    REQUIRE( owner != nullptr );
+    CHECK( owner->monster_data->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK( owner->monster_data->writhing_stalker_state().revisiting_slot == -1 );
+    CHECK( owner->monster_data->writhing_stalker_state().familiar[0].revisit_at_active >
+           owner->monster_data->writhing_stalker_state().active_turns );
+    CHECK( owner->monster_data->writhing_stalker_state().evidence_turn == 100 );
+    CHECK( owner->tracking_intensity == 0 );
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_distant_light_short_step_survives_transfer_then_expires_without_motion",
+           "[writhing_stalker][predator][pursuit][light_transition][fallback]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
+    refresh_writhing_stalker_arena( here );
+    monster *local = &spawn_test_monster( mon_writhing_stalker.str(), center );
+    local->anger = 100;
+    const auto light = here.get_abs( center + point::east * 24 );
+    REQUIRE( local->writhing_stalker_state().observe_light_interest(
+                 light, "transferred-light-step", 1000, 30 ) );
+    local->plan();
+    REQUIRE( local->has_dest() );
+    REQUIRE( local->get_dest() != light );
+    REQUIRE( local->writhing_stalker_state().owns_waypoint( local->get_dest() ) );
+    const auto actor = local->predator_state().actor_id;
+    const auto epoch = local->predator_state().handoff_epoch;
+    const bool transfer = GENERATE( false, true );
+    if( transfer ) {
+        const auto source = local->pos_abs();
+        overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+        om.hordes.clear();
+        g->despawn_monster( *local );
+        local = nullptr;
+        set_time( calendar::turn + 1_turns );
+        overmap_buffer.move_hordes();
+        for( monster &candidate : g->all_monsters() ) {
+            if( candidate.predator_state().actor_id == actor ) {
+                local = &candidate;
+            }
+        }
+        REQUIRE( local != nullptr );
+        CHECK( local->predator_state().handoff_epoch == epoch + 2 );
+        CHECK( local->writhing_stalker_state().light_observed_position == light );
+        CHECK( local->writhing_stalker_state().phase != writhing_stalker::lifecycle_phase::searching );
+        local->plan();
+    }
+    REQUIRE( local->has_dest() );
+    REQUIRE( local->get_dest() != light );
+    REQUIRE( local->writhing_stalker_state().owns_waypoint( local->get_dest() ) );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *local = round_trip_writhing_stalker( *local );
+    }
+    const auto position = local->pos_abs();
+    const auto expiry = local->writhing_stalker_state().light_expires_turn;
+    set_time( calendar::turn_zero + time_duration::from_turns( expiry ) );
+    local->plan();
+    CHECK( local->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( local->writhing_stalker_state().has_light_observed_position );
+    CHECK_FALSE( local->has_dest() );
+    CHECK( local->wandf == 0 );
+    local->set_moves( 100 );
+    local->move();
+    CHECK( local->pos_abs() == position );
+    CHECK( horde_entity( *local ).tracking_intensity == 0 );
+    CHECK( local->writhing_stalker_state().evidence_turn == -1 );
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_abstract_sound_keeps_its_carrier_when_light_is_active_or_expires",
+           "[writhing_stalker][predator][pursuit][light_transition][signal]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
+    refresh_writhing_stalker_arena( here );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    original.anger = 100;
+    const auto source = original.pos_abs();
+    const auto sound = source + point::south * 6;
+    REQUIRE( original.writhing_stalker_state().observe_light_interest(
+                 source + point::east * 24, "sound-versus-light-step", 1000, 90 ) );
+    original.plan();
+    REQUIRE( original.has_dest() );
+    const auto old_step = original.get_dest();
+    const auto actor = original.predator_state().actor_id;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    g->despawn_monster( original );
+    om.hordes.signal_entities( sound, 200 );
+    REQUIRE( overmap_buffer.entity_at( source ) != nullptr );
+    REQUIRE( overmap_buffer.entity_at( source )->destination == sound );
+    const bool expired = GENERATE( false, true );
+    set_time( calendar::turn + ( expired ? 91_turns : 1_turns ) );
+    overmap_buffer.move_hordes();
+    monster *local = nullptr;
+    for( monster &candidate : g->all_monsters() ) {
+        if( candidate.predator_state().actor_id == actor ) {
+            local = &candidate;
+        }
+    }
+    REQUIRE( local != nullptr );
+    CHECK( local->provocative_sound );
+    CHECK( local->wander_pos == sound );
+    CHECK( rl_dist( local->pos_abs(), sound ) < rl_dist( source, sound ) );
+    CHECK_FALSE( ( local->has_dest() && local->get_dest() == old_step ) );
+    if( expired ) {
+        CHECK_FALSE( local->writhing_stalker_state().has_light_observed_position );
+    }
+    {
+        const int separation = rl_dist( local->pos_abs(), sound );
+        for( int turn = 0; turn < 6 && rl_dist( local->pos_abs(), sound ) >= separation; ++turn ) {
+            set_time( calendar::turn + 1_turns );
+            local->plan();
+            local->set_moves( 100 );
+            local->move();
+        }
+        CHECK( rl_dist( local->pos_abs(), sound ) < separation );
+    }
+    CHECK( local->writhing_stalker_state().evidence_turn == -1 );
+    clear_map_without_vision();
+}
