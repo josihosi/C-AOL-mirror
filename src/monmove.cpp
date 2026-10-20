@@ -1275,6 +1275,10 @@ Creature *writhing_stalker::observe_current_target( monster &stalker )
     return seen;
 }
 
+// The existing projection fallback stops this far short on each horizontal
+// axis. Its completed native segments outside that footprint are not arrival.
+static constexpr int writhing_stalker_pursuit_standoff = 8;
+
 static bool writhing_stalker_waypoint_is_reachable( monster &stalker, map &here,
         const tripoint_abs_ms &waypoint )
 {
@@ -1351,9 +1355,10 @@ std::optional<tripoint_abs_ms> writhing_stalker::pursuit_destination( monster &s
             const auto delta = stalker.pos_abs() - desired;
             const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
             if( length > 0 ) {
-                aim += tripoint_rel_ms( delta.x() * 8 / length, delta.y() * 8 / length, 0 );
+                aim += tripoint_rel_ms( delta.x() * writhing_stalker_pursuit_standoff / length,
+                                       delta.y() * writhing_stalker_pursuit_standoff / length, 0 );
             } else {
-                aim += point::north * 8;
+                aim += point::north * writhing_stalker_pursuit_standoff;
             }
         }
         if( abstract_owner ) {
@@ -1653,7 +1658,14 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
             }
             bool found_shadow = false;
             tripoint_abs_ms shadow_dest = state.committed_waypoint;
-            if( !state.has_committed_waypoint ||
+            const auto target_offset = shadow_dest - target.pos_abs();
+            const bool completed_intermediate = state.has_committed_waypoint &&
+                                                shadow_dest == stalker.pos_abs() &&
+                                                std::max( std::abs( target_offset.x() ), std::abs( target_offset.y() ) ) >
+                                                writhing_stalker_pursuit_standoff;
+            // A reached quiet-side/fallback standoff may hold. A completed
+            // approach segment must request the next native segment instead.
+            if( !state.has_committed_waypoint || completed_intermediate ||
                 !writhing_stalker_waypoint_is_reachable( stalker, here, shadow_dest ) ) {
                 shadow_dest = writhing_stalker_shadow_destination( stalker, here, target, found_shadow );
                 found_shadow = found_shadow && writhing_stalker_waypoint_is_reachable( stalker, here,

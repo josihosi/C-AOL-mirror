@@ -3920,3 +3920,150 @@ TEST_CASE( "stalker_distant_remembered_navigation_keeps_loaded_and_blocked_limit
     CHECK( memory.evidence_turn == 1000 );
     clear_map_without_vision();
 }
+
+TEST_CASE( "stalker_visible_stationary_shadow_continues_steps_then_holds_standoff",
+           "[writhing_stalker][predator][pursuit][routing][shadow_continuation]" )
+{
+    clear_map_without_vision();
+    clear_npcs();
+    clear_avatar();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1_days + 12_hours );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    map &here = get_map();
+    Character &you = get_player_character();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    for( const auto &p : here.points_in_radius( center, 35 ) ) {
+        here.ter_set( p, ter_id( "t_floor" ) );
+        here.furn_clear( p );
+        here.clear_fields( p );
+    }
+    // Native route permits long straight cheap paths before its bounded
+    // detour search. A transparent slow tile exercises the short-step path
+    // without obstructing the actual continuous sight under test.
+    for( int dy = -1; dy <= 1; ++dy ) {
+        here.ter_set( center + point( 28, dy ), ter_id( "t_dirtmound" ) );
+    }
+    you.setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 32 );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    // Actual same-target pressure keeps this native bright/focused approach
+    // in Shadow; a lone exposed observer legitimately enters cooldown.
+    for( const point &offset : { point::west, point::south, point::east, point::north } ) {
+        monster &zombie = spawn_test_monster( mon_zombie.str(), center + offset );
+        zombie.aggro_character = true;
+        zombie.set_dest( you.pos_abs() );
+    }
+    const bool occupied_standoffs = GENERATE( false, true );
+    if( occupied_standoffs ) {
+        for( const auto &p : here.points_in_radius( center, 4 ) ) {
+            const int distance = rl_dist( p, center );
+            if( distance >= 2 && distance <= 4 ) {
+                monster &zombie = spawn_test_monster( mon_zombie.str(), p );
+                zombie.aggro_character = true;
+                zombie.set_dest( you.pos_abs() );
+            }
+        }
+    }
+    REQUIRE( writhing_stalker::observed_zombie_pressure( stalker, here, you ) >= 4 );
+    const auto target_position = you.pos_abs();
+    const int target_hp = you.get_hp();
+    REQUIRE( writhing_stalker::can_observe_actor( stalker, you ) );
+    REQUIRE( stalker.get_pathfinding_settings().max_dist == 10 );
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::shadowing );
+    REQUIRE( stalker.has_dest() );
+    const auto first = stalker.get_dest();
+    REQUIRE( first != stalker.pos_abs() );
+    REQUIRE( rl_dist( first, target_position ) > 10 );
+    // A native route may become unreachable after a partial move. Follow
+    // its actual accepted replacement step, not an assumed fixed first goal.
+    tripoint_abs_ms completed = first;
+    bool reached = false;
+    for( int turn = 0; turn < 40 && !reached; ++turn ) {
+        REQUIRE( writhing_stalker::can_observe_actor( stalker, you ) );
+        stalker.plan();
+        REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::shadowing );
+        REQUIRE( stalker.has_dest() );
+        completed = stalker.get_dest();
+        stalker.set_moves( 100 );
+        stalker.move();
+        reached = stalker.pos_abs() == completed;
+        set_time( calendar::turn + 1_turns );
+    }
+    REQUIRE( reached );
+    REQUIRE( rl_dist( completed, target_position ) > 10 );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        stalker = round_trip_writhing_stalker( stalker );
+    }
+    stalker.plan();
+    REQUIRE( stalker.writhing_stalker_state().last_observed_position == target_position );
+    REQUIRE( stalker.writhing_stalker_state().evidence_turn == to_turn<int>( calendar::turn ) );
+    REQUIRE( stalker.has_dest() );
+    REQUIRE( stalker.get_dest() != completed );
+    for( int turn = 0; turn < 80 && rl_dist( stalker.pos_abs(), target_position ) > 8; ++turn ) {
+        REQUIRE( writhing_stalker::can_observe_actor( stalker, you ) );
+        stalker.plan();
+        REQUIRE( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::shadowing );
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+    }
+    REQUIRE( rl_dist( stalker.pos_abs(), target_position ) <= 8 );
+    // A legitimate final shadow destination is allowed to remain occupied;
+    // renewal of intermediate steps must not create perpetual movement.
+    for( int turn = 0; turn < 20; ++turn ) {
+        stalker.plan();
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+    }
+    const auto settled = stalker.pos_abs();
+    REQUIRE( rl_dist( settled, target_position ) >= 2 );
+    REQUIRE( rl_dist( settled, target_position ) <= 8 );
+    REQUIRE( stalker.writhing_stalker_state().has_committed_waypoint );
+    const auto final_goal = stalker.writhing_stalker_state().committed_waypoint;
+    if( occupied_standoffs ) {
+        CHECK( rl_dist( final_goal, target_position ) >= 7 );
+    } else {
+        CHECK( rl_dist( final_goal, target_position ) <= 4 );
+    }
+    stalker = round_trip_writhing_stalker( stalker );
+    for( int turn = 0; turn < 20; ++turn ) {
+        stalker.plan();
+        CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::shadowing );
+        CHECK( stalker.writhing_stalker_state().committed_waypoint == final_goal );
+        stalker.set_moves( 100 );
+        stalker.move();
+        set_time( calendar::turn + 1_turns );
+        // Ordinary idle movement may stumble one square; it must not renew
+        // the approach or walk a chain of new goals beside stationary prey.
+        CHECK( rl_dist( stalker.pos_abs(), final_goal ) <= 1 );
+    }
+    CHECK( you.pos_abs() == target_position );
+    CHECK( you.get_hp() == target_hp );
+    CHECK( stalker.writhing_stalker_state().attempts_spent == 0 );
+    const auto observed = stalker.writhing_stalker_state().last_observed_position;
+    const int last_seen = stalker.writhing_stalker_state().evidence_turn;
+    const auto wall_x = ( stalker.pos_bub().x() + you.pos_bub().x() ) / 2;
+    for( int y = 30; y <= 100; ++y ) {
+        here.ter_set( tripoint_bub_ms( wall_x, y, 0 ), ter_id( "t_wall" ) );
+    }
+    you.setpos( here, center + point::south );
+    refresh_writhing_stalker_arena( here );
+    REQUIRE_FALSE( writhing_stalker::can_observe_actor( stalker, you ) );
+    set_time( calendar::turn + 1_turns );
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().evidence_turn == last_seen );
+    CHECK( stalker.writhing_stalker_state().last_observed_position == observed );
+    CHECK( stalker.writhing_stalker_state().heading == tripoint_rel_ms::zero );
+    set_time( calendar::turn + 31_minutes );
+    stalker.plan();
+    CHECK( stalker.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( stalker.has_dest() );
+    clear_map_without_vision();
+}
