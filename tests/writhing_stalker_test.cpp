@@ -3654,12 +3654,30 @@ TEST_CASE( "stalker_due_or_started_familiar_visit_preserves_accepted_sound_then_
     }
     REQUIRE( find_owner().first == sound );
     REQUIRE( find_owner().second->tracking_intensity == 0 );
-    set_time( calendar::turn + 1_turns );
-    overmap_buffer.move_hordes();
-    owner = find_owner().second;
-    REQUIRE( owner != nullptr );
-    CHECK( owner->monster_data->writhing_stalker_state().revisiting_slot == 0 );
-    CHECK( owner->destination != sound );
+    CHECK_FALSE( find_owner().second->monster_data->provocative_sound );
+    CHECK( find_owner().second->monster_data->wandf == 0 );
+    if( reload ) {
+        *find_owner().second->monster_data = round_trip_writhing_stalker(
+                *find_owner().second->monster_data );
+        om.hordes.refresh_entity_bucket( sound );
+    }
+    // A completed sound cannot be reselected after each step of the due
+    // visit. Exercise more than its first resume, including arrival reload.
+    int previous_distance = rl_dist( find_owner().first, source + point::west * 48 );
+    for( int step = 0; step < 6; ++step ) {
+        set_time( calendar::turn + 1_turns );
+        overmap_buffer.move_hordes();
+        owner = find_owner().second;
+        REQUIRE( owner != nullptr );
+        CHECK( owner->monster_data->writhing_stalker_state().revisiting_slot == 0 );
+        CHECK( owner->destination != sound );
+        const int distance = rl_dist( find_owner().first, source + point::west * 48 );
+        CHECK( distance < previous_distance );
+        previous_distance = distance;
+        const auto position = find_owner().first;
+        overmap_buffer.move_hordes();
+        CHECK( find_owner().first == position );
+    }
     set_time( calendar::turn + 11_minutes );
     overmap_buffer.move_hordes();
     owner = find_owner().second;
@@ -4452,5 +4470,192 @@ TEST_CASE( "stalker_pending_sound_spends_native_budget_on_committed_route_steps"
         CHECK( owner->monster_data->wandf == remaining );
     }
     om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_native_recovery_rejects_light_before_touching_pending_sound",
+           "[writhing_stalker][predator][pursuit][scheduler][signal][light_transition]" )
+{
+    clear_map_without_vision();
+    clear_avatar();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1_days );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, center );
+    refresh_writhing_stalker_arena( here );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    original.anger = 100;
+    original.aggro_character = true;
+    // Exhausted budget is a fixture; actual native planning owns withdrawal,
+    // its destination and recovery deadline. No phase is assigned here.
+    original.writhing_stalker_state().attempts_spent = 2;
+    original.plan();
+    REQUIRE( original.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::retreating );
+    const auto goal = original.writhing_stalker_state().retreat_waypoint;
+    const int deadline = original.writhing_stalker_state().cooldown_until_turn;
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    refresh_writhing_stalker_arena( here );
+    const bool arrived = GENERATE( false, true );
+    if( arrived ) {
+        for( int turn = 0; turn < 40 && original.pos_abs() != goal; ++turn ) {
+            original.plan();
+            original.set_moves( 100 );
+            original.move();
+            set_time( calendar::turn + 1_turns );
+        }
+        REQUIRE( original.pos_abs() == goal );
+        original.plan();
+        REQUIRE( original.writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::cooldown );
+    }
+    // Remove recent direct evidence as an alternative rejection cause, while
+    // retaining the original native recovery deadline.
+    set_time( calendar::turn + 201_turns );
+    original.plan();
+    REQUIRE_FALSE( original.writhing_stalker_state().has_direct_evidence( to_turn<int>( calendar::turn ) ) );
+    REQUIRE( original.writhing_stalker_state().cooldown_active( to_turn<int>( calendar::turn ) ) );
+    REQUIRE( original.writhing_stalker_state().cooldown_until_turn == deadline );
+    const auto position = original.pos_abs();
+    const auto actor = original.predator_state().actor_id;
+    const auto epoch = original.predator_state().handoff_epoch;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( position ).xy() );
+    om.hordes.clear();
+    g->despawn_monster( original );
+    auto *owner = overmap_buffer.entity_at( position );
+    REQUIRE( owner != nullptr );
+    REQUIRE( owner->monster_data->predator_state().handoff_epoch == epoch + 1 );
+    if( arrived ) {
+        REQUIRE( owner->tracking_intensity == 0 );
+    }
+    const bool pending_sound = GENERATE( false, true );
+    const bool same_coordinate = GENERATE( false, true );
+    const auto sound = position + point::south * 6;
+    const auto light = same_coordinate ? sound : position + point::west * 6;
+    if( pending_sound ) {
+        // Real native callback on the retained payload; the light packet
+        // below is an admitted adapter fixture, not native fire proof.
+        owner->monster_data->hear_sound( here.get_bub( sound ), 30, 6, true );
+        REQUIRE( owner->monster_data->provocative_sound );
+        REQUIRE( owner->monster_data->wandf > 0 );
+    }
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( position );
+        owner = overmap_buffer.entity_at( position );
+    }
+    const auto before_destination = owner->destination;
+    const int before_tracking = owner->tracking_intensity;
+    const auto before_wander = owner->monster_data->wander_pos;
+    const int before_budget = owner->monster_data->wandf;
+    const bool before_sound = owner->monster_data->provocative_sound;
+    const auto before_phase = owner->monster_data->writhing_stalker_state().phase;
+    for( int packet = 0; packet < 2; ++packet ) {
+        CHECK( om.hordes.attract_entities_to_light( light, 2000, 20,
+                "recovery-light-" + std::to_string( packet ), calendar::turn,
+                []( const tripoint_abs_ms & ) { return true; }, nullptr ) == 0 );
+        owner = overmap_buffer.entity_at( position );
+        REQUIRE( owner != nullptr );
+        CHECK( owner->destination == before_destination );
+        CHECK( owner->tracking_intensity == before_tracking );
+        CHECK( owner->light_sample_id.empty() );
+        CHECK( owner->monster_data->wander_pos == before_wander );
+        CHECK( owner->monster_data->wandf == before_budget );
+        CHECK( owner->monster_data->provocative_sound == before_sound );
+        CHECK( owner->monster_data->writhing_stalker_state().phase == before_phase );
+        CHECK_FALSE( owner->monster_data->writhing_stalker_state().has_light_observed_position );
+        CHECK( owner->monster_data->predator_state().actor_id == actor );
+    }
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_idle_light_admission_preserves_independent_native_sound",
+           "[writhing_stalker][predator][pursuit][scheduler][signal][light_transition]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
+    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    const auto source = original.pos_abs();
+    const auto sound = source + point::south * 6;
+    const bool pending = GENERATE( false, true );
+    if( pending ) {
+        original.hear_sound( here.get_bub( sound ), 30, 6, true );
+        REQUIRE( original.provocative_sound );
+    }
+    const bool same_coordinate = GENERATE( false, true );
+    const auto light = same_coordinate ? sound : source + point::west * 6;
+    const auto actor = original.predator_state().actor_id;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    om.hordes.clear();
+    g->despawn_monster( original );
+    auto *owner = overmap_buffer.entity_at( source );
+    REQUIRE( owner != nullptr );
+    const auto prior_destination = owner->destination;
+    const auto prior_tracking = owner->tracking_intensity;
+    const int budget = owner->monster_data->wandf;
+    CHECK( om.hordes.attract_entities_to_light( light, 2000, 20, "idle-light-admission",
+            calendar::turn, []( const tripoint_abs_ms & ) { return true; }, nullptr ) ==
+           ( pending ? 0 : 1 ) );
+    owner = overmap_buffer.entity_at( source );
+    REQUIRE( owner != nullptr );
+    if( pending ) {
+        CHECK( owner->destination == prior_destination );
+        CHECK( owner->tracking_intensity == prior_tracking );
+        CHECK( owner->monster_data->wander_pos == sound );
+        CHECK( owner->monster_data->wandf == budget );
+        CHECK( owner->monster_data->provocative_sound );
+        CHECK_FALSE( owner->monster_data->writhing_stalker_state().has_light_observed_position );
+        CHECK( owner->monster_data->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    } else {
+        CHECK( owner->destination == light );
+        CHECK_FALSE( owner->monster_data->provocative_sound );
+        CHECK( owner->monster_data->writhing_stalker_state().light_observed_position == light );
+    }
+    set_time( calendar::turn + 1_turns );
+    overmap_buffer.move_hordes();
+    monster *local = nullptr;
+    for( monster &candidate : g->all_monsters() ) {
+        if( candidate.is_caol_predator() && candidate.predator_state().actor_id == actor ) {
+            REQUIRE( local == nullptr );
+            local = &candidate;
+        }
+    }
+    REQUIRE( local != nullptr );
+    CHECK( rl_dist( local->pos_abs(), pending ? sound : light ) < 6 );
+    CHECK( local->provocative_sound == pending );
+    om.hordes.clear();
+    clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_arrived_sound_settlement_respects_zero_active_time",
+           "[writhing_stalker][predator][pursuit][signal]" )
+{
+    clear_map_and_put_player_underground();
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const auto position = here.get_abs( tripoint_bub_ms( 65, 65, 0 ) );
+    monster original( mon_writhing_stalker );
+    original.set_pos_abs_only( position );
+    original.hear_sound( here.get_bub( position ), 30, 0, true );
+    REQUIRE( original.provocative_sound );
+    const int budget = original.wandf;
+    REQUIRE( budget > 0 );
+    horde_entity owner( original );
+    REQUIRE( owner.advance_predator_intent( position, 1000, 0 ) );
+    CHECK( owner.monster_data->provocative_sound );
+    CHECK( owner.monster_data->wandf == budget );
+    CHECK( owner.tracking_intensity == budget );
+    REQUIRE( owner.advance_predator_intent( position, 1001, 1 ) );
+    CHECK_FALSE( owner.monster_data->provocative_sound );
+    CHECK( owner.monster_data->wandf == 0 );
+    CHECK( owner.tracking_intensity == 0 );
     clear_map_without_vision();
 }

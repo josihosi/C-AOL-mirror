@@ -39,6 +39,9 @@ struct horde_entity {
     // Placement clears explicit goals. Restore this owner's navigation
     // without replacing an independently heard native sound.
     void synchronize_navigation( monster &payload ) const;
+    // Refusal leaves navigation and native sound carriers unchanged.
+    bool accept_light_interest( const tripoint_abs_ms &position, const std::string &sample_id,
+                                int observed_turn, int duration_turns );
     // Advance natural evolution through monster::try_upgrade once for this
     // abstract owner.  The payload is retained once it owns evolution timing.
     bool advance_evolution( const tripoint_abs_ms &position );

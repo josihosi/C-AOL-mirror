@@ -328,6 +328,11 @@ int horde_map::attract_entities_to_light( const tripoint_abs_ms &origin, const i
                     ++entity_it;
                     continue;
                 }
+                if( !entity.accept_light_interest( origin, sample_id, to_turn<int>( observed ),
+                                                  intensity ) ) {
+                    ++entity_it;
+                    continue;
+                }
                 entity.destination = origin;
                 entity.tracking_intensity = remaining_interest;
                 entity.light_source = origin;

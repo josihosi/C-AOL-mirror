@@ -29,6 +29,17 @@ bool sound_owns_destination( const monster &payload, const tripoint_abs_ms &dest
     return has_live_sound( payload ) && payload.wander_pos == destination;
 }
 
+bool retire_arrived_sound( monster &payload, const tripoint_abs_ms &destination,
+                          const tripoint_abs_ms &position )
+{
+    if( destination != position || !sound_owns_destination( payload, destination ) ) {
+        return false;
+    }
+    payload.wander_to( position, 0 );
+    payload.provocative_sound = false;
+    return true;
+}
+
 } // namespace
 
 horde_entity::horde_entity( const monster &original )
@@ -169,6 +180,10 @@ void horde_entity::synchronize_payload( const tripoint_abs_ms &position )
 
 void horde_entity::synchronize_navigation( monster &payload ) const
 {
+    if( payload.type->id.str() == "mon_writhing_stalker" &&
+        retire_arrived_sound( payload, destination, payload.pos_abs() ) ) {
+        return;
+    }
     if( tracking_intensity > 0 ) {
         const bool stalker = payload.type->id.str() == "mon_writhing_stalker";
         const bool heard_here = sound_owns_destination( payload, destination );
@@ -185,6 +200,19 @@ void horde_entity::synchronize_navigation( monster &payload ) const
             }
         }
     }
+}
+
+bool horde_entity::accept_light_interest( const tripoint_abs_ms &position,
+        const std::string &sample_id, const int observed_turn, const int duration_turns )
+{
+    if( !monster_data || monster_data->type->id.str() != "mon_writhing_stalker" ) {
+        return true;
+    }
+    // Admission must precede carrier writes. Light cannot displace a native
+    // sound pending beneath another route, or bypass combat/recovery refusal.
+    return !has_live_sound( *monster_data ) &&
+           monster_data->writhing_stalker_state().observe_light_interest(
+               position, sample_id, observed_turn, duration_turns );
 }
 
 bool horde_entity::advance_evolution( const tripoint_abs_ms &position )
@@ -225,6 +253,11 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
             // The shared activation owner must also gate transport/evolution
             // before this entrypoint; this seam does not implement that system.
             return true;
+        }
+        // Also settle an arrived carrier restored from an older payload
+        // before a new speculative waypoint can replace its destination.
+        if( retire_arrived_sound( *monster_data, destination, position ) ) {
+            tracking_intensity = 0;
         }
         monster_data->set_pos_abs_only( position );
         const bool saw_target = writhing_stalker::observe_current_target( *monster_data ) != nullptr;
