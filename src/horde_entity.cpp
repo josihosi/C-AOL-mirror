@@ -1,5 +1,7 @@
 #include "horde_entity.h"
 
+#include <algorithm>
+
 #include "mtype.h"
 #include "monster.h"
 #include "point.h"
@@ -77,7 +79,23 @@ const mtype *horde_entity::get_type() const
 
 bool horde_entity::is_active() const
 {
-    return tracking_intensity > 0;
+    if( tracking_intensity > 0 ) {
+        return true;
+    }
+    if( !monster_data || monster_data->type->id.str() != "mon_writhing_stalker" ) {
+        return false;
+    }
+    const monster &payload = *monster_data;
+    const auto &state = payload.writhing_stalker_state();
+    // Arrival and a pending familiar-place visit still need lifecycle turns.
+    // Scheduling them does not create a movement or sound-tracking budget.
+    if( !state.has_pursuit_memory ) {
+        return false;
+    }
+    return state.sighting_active_turn >= 0 || state.search_started_active >= 0 ||
+    std::any_of( state.familiar.begin(), state.familiar.end(), []( const auto &place ) {
+        return place.valid;
+    } );
 }
 
 bool horde_entity::can_perceive_light() const
@@ -122,6 +140,16 @@ void horde_entity::synchronize_payload( const tripoint_abs_ms &position )
     monster_data->set_moves( moves );
     if( tracking_intensity > 0 ) {
         monster_data->wander_to( destination, tracking_intensity );
+        if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
+            const auto &state = monster_data->writhing_stalker_state();
+            if( state.has_pursuit_memory &&
+                ( ( state.has_committed_waypoint && destination == state.committed_waypoint ) ||
+                  ( state.has_retreat_waypoint && destination == state.retreat_waypoint ) ) ) {
+                // This carrier came from the pursuit route, not a sound.
+                // A later real hear_sound call owns its own provocative flag.
+                monster_data->provocative_sound = false;
+            }
+        }
     }
 }
 

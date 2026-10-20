@@ -2503,6 +2503,16 @@ void monster::plan()
 
     if( type->id == mon_writhing_stalker &&
         ( mon_plan.target == nullptr || mon_plan.target->as_character() ) ) {
+        const auto &state = writhing_stalker_state();
+        if( state.has_pursuit_memory && wandf > 0 && !provocative_sound &&
+            ( ( state.has_committed_waypoint && wander_pos == state.committed_waypoint ) ||
+              ( state.has_retreat_waypoint && wander_pos == state.retreat_waypoint ) ) ) {
+            // The abstract route used the native wander carrier during handoff.
+            // This local planner now owns that route through set_dest instead;
+            // its expiry, retargeting or flight must not revive the old carrier.
+            // A genuinely heard sound retains its independent native authority.
+            wander_to( pos_abs(), 0 );
+        }
         if( mon_plan.fleeing && !writhing_stalker_owns_retreat( *this ) &&
             mon_plan.target == nullptr ) {
             const auto &state = writhing_stalker_state();

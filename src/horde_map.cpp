@@ -151,14 +151,15 @@ std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde
     return result;
 }
 
-// TODO: check for a goal in horde_entity and put in active vs idle.
+// Use the same movement/lifecycle admission as node reinsertion and reload.
 std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde_map::spawn_entity(
     const tripoint_abs_ms &p, const monster &mon )
 {
+    const horde_entity candidate( mon );
     std::unordered_map <tripoint_om_sm, std::unordered_map<tripoint_abs_ms, horde_entity>> &target_map =
                 mon.type->has_flag( mon_flag_DORMANT ) ? dormant_monster_map :
                 !is_alert( *mon.type ) ? immobile_monster_map :
-                ( mon.has_dest() || mon.wandf > 0 ) ? active_monster_map :
+                candidate.is_active() ? active_monster_map :
                 idle_monster_map;
     std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> result;
     point_abs_om omp;
@@ -167,7 +168,6 @@ std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde
     // Do this before emplacing.  Returning an iterator to an already-owned
     // actor looks like a successful local->abstract handoff to callers and
     // can make them release the real local owner.
-    const horde_entity candidate( mon );
     if( !can_accept_entity( p, candidate ) ) {
         DebugLog( D_WARNING, D_GAME ) << "Refused duplicate predator ownership for " << mon.name();
         return result;
