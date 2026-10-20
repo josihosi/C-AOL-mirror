@@ -81,22 +81,18 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
             }
         }
     }
-    // The existing short burst recovery is distinct from the longer pursuit
-    // search budget. A reacquisition must not turn spent combat into an
-    // indefinitely renewed retreat merely because search now has more steps.
-    if( has_pursuit_memory && search_started_active >= 0 &&
-        search_until_turn >= 0 && now_turn >= search_until_turn ) {
+    // The finite burst-recovery deadline survives reacquisition. Only legacy
+    // search owns an idle transition; active pursuit has its separate budget.
+    if( search_until_turn >= 0 && now_turn >= search_until_turn ) {
         attempts_spent = 0;
         search_until_turn = -1;
-    }
-    if( search_started_active < 0 && phase == lifecycle_phase::searching && search_until_turn >= 0 &&
-        now_turn >= search_until_turn ) {
-        phase = lifecycle_phase::idle;
-        phase_entered_turn = now_turn;
-        has_committed_waypoint = false;
-        has_retreat_waypoint = false;
-        attempts_spent = 0;
-        remaining_route_progress = -1;
+        if( search_started_active < 0 && phase == lifecycle_phase::searching ) {
+            phase = lifecycle_phase::idle;
+            phase_entered_turn = now_turn;
+            has_committed_waypoint = false;
+            has_retreat_waypoint = false;
+            remaining_route_progress = -1;
+        }
     }
 }
 
@@ -149,6 +145,11 @@ bool persistent_state::observe_target( const actor_identity target, const int ch
     last_observed_position = position;
     has_last_observed_position = true;
     has_pursuit_memory = true;
+    if( phase == lifecycle_phase::searching && search_started_active < 0 && attempts_spent == 0 ) {
+        // Recognition ends a legacy investigation, including its deadline.
+        // A spent burst's independent recovery deadline must survive instead.
+        search_until_turn = -1;
+    }
     if( phase == lifecycle_phase::idle || phase == lifecycle_phase::searching ) {
         phase = lifecycle_phase::shadowing;
     }

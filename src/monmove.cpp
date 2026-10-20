@@ -2506,23 +2506,14 @@ void monster::plan()
     if( type->id == mon_writhing_stalker &&
         ( mon_plan.target == nullptr || mon_plan.target->as_character() ) ) {
         const auto &state = writhing_stalker_state();
-        if( state.has_pursuit_memory && wandf > 0 && !provocative_sound &&
-            state.owns_waypoint( wander_pos ) ) {
-            // The abstract route used the native wander carrier during handoff.
-            // This local planner now owns that route through set_dest instead;
-            // its expiry, retargeting or flight must not revive the old carrier.
-            // A genuinely heard sound retains its independent native authority.
-            wander_to( pos_abs(), 0 );
+        // Retire this route's executable carriers before observation advances
+        // or expires its state. The owning planner will renew a current route;
+        // unrelated escape destinations and genuinely heard sound stay native.
+        if( has_dest() && state.owns_waypoint( get_dest() ) ) {
+            unset_dest();
         }
-        if( mon_plan.fleeing && !writhing_stalker_owns_retreat( *this ) &&
-            mon_plan.target == nullptr ) {
-            const auto &state = writhing_stalker_state();
-            // Yield only the approach destination owned by this memory. An
-            // already chosen native escape/sound destination remains native.
-            if( state.has_committed_waypoint && has_dest() &&
-                get_dest() == state.committed_waypoint ) {
-                unset_dest();
-            }
+        if( wandf > 0 && !provocative_sound && state.owns_waypoint( wander_pos ) ) {
+            wander_to( pos_abs(), 0 );
         }
         if( Creature *watched = writhing_stalker::observe_current_target( *this ) ) {
             if( ( !mon_plan.fleeing || writhing_stalker_owns_retreat( *this ) ) &&
