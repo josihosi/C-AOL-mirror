@@ -47838,6 +47838,8 @@ TEST_CASE( "binocular acquisition ends with native watch interruption and reload
 TEST_CASE( "production lookout route scoring precedes exact member assignment",
            "[bandit][binocular_056][deferred_route]" )
 {
+    const int home_distance = GENERATE( 1, 2, 5 );
+    CAPTURE( home_distance );
     clear_avatar();
     clear_npcs();
     clear_map_with_vision( -1, 1, false );
@@ -47864,7 +47866,7 @@ TEST_CASE( "production lookout route scoring precedes exact member assignment",
     overmap_buffer.ter_set( watch, oter_str_id( "forest" ).id() );
     bandit_live_world::site_record site;
     site.site_id = "test:r056-deferred-route";
-    site.anchor = target + tripoint( 0, 5, 0 );
+    site.anchor = target + tripoint( 0, home_distance, 0 );
     bandit_live_world::structural_outing_plan plan;
     plan.lead_id = "structural_bounty:r056-deferred";
     plan.target_omt = target;
@@ -47878,6 +47880,18 @@ TEST_CASE( "production lookout route scoring precedes exact member assignment",
     int budget = 8;
     const auto read = live_bandit_structural_route_read_for_test( site, plan, budget );
     CAPTURE( read.summary );
+    if( home_distance == 1 ) {
+        // The native departure owner excludes every point within two OMT of
+        // this target, including home. Admission must not reserve a pair for
+        // a lookout whose departure cannot satisfy that same contract.
+        CHECK_FALSE( read.reachable );
+        const auto chosen = bandit_live_world::select_watch_ring_candidate( read.target_footprint,
+                            read.watch_candidates );
+        CHECK_FALSE( chosen.valid );
+        CHECK( plan.member_ids.empty() );
+        CHECK( site.active_outing.observations.empty() );
+        return;
+    }
     REQUIRE( read.reachable );
     REQUIRE( read.watch_geography_supplied );
     REQUIRE_FALSE( read.watch_candidates.empty() );
@@ -66259,6 +66273,119 @@ class r067_fresh_scout_journey
         }
 };
 
+
+TEST_CASE( "legacy impossible scout departure cancels only an authenticated unstarted home party",
+           "[bandit_live_world][scout_departure_origin][raid_search]" )
+{
+    using namespace bandit_live_world;
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    const std::string condition = GENERATE( "home", "reload", "departed", "outside_home", "contact",
+                                            "foreign_lease", "missing", "travel" );
+    CAPTURE( condition );
+    r067_fresh_scout_journey journey;
+    journey.start( true );
+    auto &site = journey.site();
+    const auto ids = journey.members();
+    auto &outing = site.active_outing;
+    const auto source = site.anchor + point( -1, 0 );
+    const auto watch = source + point( 3, -1 );
+    auto *lead = site.intelligence_map.find_lead( outing.target_lead_id );
+    REQUIRE( lead );
+    // Reproduce the old, already-admitted shape. This is declared legacy
+    // test setup, not a claim that the corrected qualifier admitted it.
+    lead->omt = source;
+    lead->target_id = "camp-smoke@" + source.to_string();
+    lead->source_key = "camp-signal:" + lead->target_id;
+    lead->lead_id = site.site_id + "#lead:smoke_signal:" + lead->target_id + "@" +
+                    std::to_string( source.x() ) + "," + std::to_string( source.y() ) + "," +
+                    std::to_string( source.z() );
+    outing.target_omt = source;
+    outing.target_id = outing.target_lead_id = lead->lead_id;
+    outing.target_footprint = { source };
+    outing.selected_watch_omt = watch;
+    const auto path = overmap_buffer.get_travel_path( site.anchor, watch,
+                      overmap_path_params::for_npc(), { source } );
+    REQUIRE_FALSE( path.points.empty() );
+    outing.shared_route = make_structural_watch_shared_route( site.anchor, watch, path.points,
+                          outing.target_footprint );
+    REQUIRE( outing.shared_route.size() == 5 );
+    outing.expected_return_minutes = outing.started_minutes + 90;
+    outing.missing_deadline_minutes = outing.expected_return_minutes + 24 * 60;
+    REQUIRE( current_external_simulation_cursor( site ) );
+    REQUIRE( round_trip_world( journey.world() ).find_site( site.site_id ) );
+    for( const auto id : ids ) {
+        auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( actor );
+        REQUIRE_FALSE( actor->is_active() );
+        REQUIRE( actor->pos_abs_omt() == site.anchor );
+        actor->reach_omt_destination();
+    }
+    if( condition == "reload" ) {
+        journey.reload();
+    } else if( condition == "departed" ) {
+        outing.actor_departure_observed = true;
+    } else if( condition == "outside_home" ) {
+        overmap_buffer.find_npc( ids.back() )->spawn_at_precise(
+            project_to<coords::ms>( site.anchor + point( 0, 1 ) ) + point( 12, 12 ) );
+    } else if( condition == "contact" ) {
+        outing.local_contact_minutes = journey.minute();
+    } else if( condition == "foreign_lease" ) {
+        bandit_live_world_projection_lease foreign;
+        foreign.present = true;
+        foreign.site_id = "other-departure-owner";
+        foreign.activity_id = "other-departure-operation";
+        foreign.owner = "local";
+        foreign.generation = 1;
+        foreign.handoff_epoch = 1;
+        foreign.last_advanced_minutes = journey.minute();
+        overmap_buffer.find_npc( ids.front() )->set_bandit_live_world_projection_lease( foreign );
+    } else if( condition == "missing" ) {
+        overmap_buffer.remove_npc( ids.back() );
+    } else if( condition == "travel" ) {
+        auto actor = overmap_buffer.find_npc( ids.front() );
+        actor->goal = outing.shared_route[1];
+        actor->omt_path = { actor->goal, actor->pos_abs_omt() };
+        actor->set_mission( NPC_MISSION_TRAVELLING );
+    }
+    const auto report = r067_return_record_bytes( journey.site().current_scout_report );
+    const int next_generation = journey.site().next_outing_generation;
+    using body_key = decltype( r067_finite_body_key( *overmap_buffer.find_npc( ids.front() ) ) );
+    std::map<character_id, body_key> bodies;
+    for( const auto id : ids ) {
+        if( const auto actor = overmap_buffer.find_npc( id ) ) {
+            bodies.emplace( id, r067_finite_body_key( *actor ) );
+        }
+    }
+    prepare_live_bandit_abstract_scout_travel_for_test();
+    auto &after = journey.site();
+    const bool cancel = condition == "home" || condition == "reload";
+    CHECK( after.active_outing.is_active() != cancel );
+    CHECK( r067_return_record_bytes( after.current_scout_report ) == report );
+    CHECK( after.next_outing_generation == next_generation );
+    if( condition == "foreign_lease" ) {
+        const auto &lease = overmap_buffer.find_npc( ids.front() )->get_bandit_live_world_projection_lease();
+        CHECK( lease.present );
+        CHECK( lease.site_id == "other-departure-owner" );
+    } else if( condition == "missing" ) {
+        CHECK_FALSE( overmap_buffer.find_npc( ids.back() ) );
+        CHECK( after.active_outing.casualty_ids.empty() );
+    } else if( condition == "outside_home" ) {
+        CHECK( overmap_buffer.find_npc( ids.back() )->pos_abs_omt() == site.anchor + point( 0, 1 ) );
+    }
+    if( cancel ) {
+        for( const auto id : ids ) {
+            REQUIRE( overmap_buffer.find_npc( id ) );
+            CHECK( after.find_member( id )->state == member_state::at_home );
+            CHECK( r067_finite_body_key( *overmap_buffer.find_npc( id ) ) == bodies.at( id ) );
+        }
+        const auto once = serialize_world( journey.world() );
+        prepare_live_bandit_abstract_scout_travel_for_test();
+        CHECK( serialize_world( journey.world() ) == once );
+        CHECK( serialize_world( round_trip_world( journey.world() ) ) == once );
+    }
+}
 
 TEST_CASE( "C++-built normal level-one report commits only an exact authorized claim",
            "[bandit_live_world][fresh_report_claim_067]" )

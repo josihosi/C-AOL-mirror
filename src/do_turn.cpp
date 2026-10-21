@@ -9903,6 +9903,39 @@ std::set<character_id> prepare_live_bandit_abstract_scout_travel()
             held.insert( outing.member_ids.begin(), outing.member_ids.end() );
             continue;
         }
+        const auto minimum_distance =
+            bandit_live_world::covert_scout_travel_minimum_target_distance( outing );
+        const bool forbidden_home_origin = minimum_distance && std::any_of(
+                members.begin(), members.end(), [&]( const npc *member ) {
+            const auto distance = bandit_live_world::target_footprint_watch_distance(
+                                      member->pos_abs_omt(), outing.target_footprint );
+            return distance && *distance < *minimum_distance;
+        } );
+        // Older admissions could reserve an impossible departure from inside
+        // the stand-off margin. Release only an authenticated party still at
+        // home, without native travel, departure or earned field knowledge.
+        // This is cancellation, never a return/report or a moved actor.
+        if( forbidden_home_origin && live_bandit_initial_abstract_body_owner_is_bound( outing ) &&
+            outing.phase == bandit_live_world::scout_phase::outbound &&
+            outing.waypoint_index == 0 && outing.actor_route_waypoint <= 0 &&
+            !outing.actor_departure_observed && outing.local_contact_minutes < 0 &&
+            outing.observations.empty() && outing.assessment.observation_started_minutes < 0 &&
+        std::all_of( members.begin(), members.end(), [&site]( const npc *member ) {
+            return site_contains_omt( site, member->pos_abs_omt() ) &&
+                   !member->is_travelling() && member->omt_path.empty();
+        } ) && read_live_bandit_abstract_bodies( site ) ) {
+            const auto canceled = outing;
+            if( bandit_live_world::release_structural_outing_reservation(
+                    site, canceled.activity_id, canceled.generation,
+                    "assigned scout departure canceled at home: origin inside covert stand-off" ) ) {
+                held.insert( canceled.member_ids.begin(), canceled.member_ids.end() );
+                for( const auto id : canceled.member_ids ) {
+                    record_live_bandit_scout_travel_trace( site, canceled, id, "canceled",
+                            "authenticated home party has no permitted covert departure; no field report" );
+                }
+                continue;
+            }
+        }
         if( outing.actor_route_waypoint < 0 ) {
             // Bind a new departure only.  A legacy homeward record with no
             // movement history cannot turn camp-parked NPCs into return proof.
@@ -12500,8 +12533,6 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
         }
     }
 
-    const std::unordered_set<tripoint_abs_omt> target_footprint_exclusions(
-        target_footprint.begin(), target_footprint.end() );
     std::vector<std::pair<tripoint_abs_omt, std::vector<tripoint_abs_omt>>> watch_paths;
     // Route scoring precedes materialization and exact member assignment. This
     // prospective human optical model only scores physical lookout geometry;
@@ -12605,7 +12636,6 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
         return terrain;
     };
     const auto watch_route_lookup = [&site, &npc_route, &source_node_cost, &target_footprint,
-                                            &target_footprint_exclusions,
                                             &watch_path_budget, route_budget,
            &watch_paths, &member_route_check]( const tripoint_abs_omt & candidate ) {
         bandit_live_world::structural_watch_route_read route;
@@ -12613,12 +12643,23 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
             return route;
         }
         watch_path_budget--;
+        // Qualify the same departure contract that the native executor will
+        // enforce. Excluding only the target admitted homes inside its covert
+        // margin and routes which could never receive a native travel order.
+        auto route_owner = site.active_outing;
+        if( !member_route_check ) {
+            route_owner = {};
+            route_owner.schema_version = 10;
+            route_owner.phase = bandit_live_world::scout_phase::outbound;
+            route_owner.target_footprint = target_footprint;
+            route_owner.selected_watch_omt = candidate;
+        }
+        const auto exclusions = live_bandit_covert_route_exclusions( route_owner );
         const auto watch_path = overmap_buffer.get_travel_path(
                                     site.anchor, candidate, npc_route,
-                                    target_footprint_exclusions );
+                                    exclusions );
         if( watch_path.cost < 0 ||
-            !bandit_live_world::structural_watch_route_avoids_target_footprint(
-                watch_path.points, target_footprint ) ) {
+            !live_bandit_route_respects_covert_ring( route_owner, watch_path.points ) ) {
             return route;
         }
         const bool diagonal_departure = watch_path.points.size() >= 2 &&

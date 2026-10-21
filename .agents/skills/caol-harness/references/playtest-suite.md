@@ -5,6 +5,16 @@ owns assignments; the registry owns compatible scenario/build selection; run wit
 A working recipe is reusable even when a game bug prevents its intended outcome.
 
 
+## Final long-running soak batch
+
+After the planned mechanism/regression playtests, run the owner-selected
+[five-seed natural-play soak](long-running-soak.md): at least seven actual game days and
+four full save/exit/reload cycles per seed, varied travel and revisits, primarily checking
+crashes and stuck scouts. Existing accepted coverage remains intact. Parallelism follows
+measured capacity; the work ledger owns scheduling. Then select one useful world for the
+[single-world month crash soak](long-running-soak.md#final-single-world-month-crash-soak),
+continuing to30 actual game days total with minimal logging and brief failure-focused notes.
+
 ## Current shared two-round execution — 2026-10-12
 
 Current scheduling, parallel host allocations, repair batches and release sequencing belong in
