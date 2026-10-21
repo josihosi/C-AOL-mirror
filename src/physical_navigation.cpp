@@ -125,6 +125,10 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     pathfinding_settings settings = native;
     settings.allow_climb_stairs = false;
     settings.allow_open_doors = can_open;
+    // The callback above enforces this creature's actual field safety.
+    // The pathfinder's generic danger penalty ignores immunity and can
+    // exhaust the native route budget on harmless home-world atmosphere.
+    settings.avoid_dangerous_fields = false;
     settings.bash_strength.clear(); // An unseen wall is not an invented doorway.
     std::vector<tripoint_bub_ms> route;
     if( origin.z() != goal.z() ) {

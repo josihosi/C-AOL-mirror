@@ -1714,12 +1714,17 @@ TEST_CASE( "migo_native_loop_boundary_handoff_yields_released_handle_and_preserv
 TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
            "[migo_tower][native][ownership]" )
 {
-    const int scenario = GENERATE( 0, 1, 2, 3, 4, 5 );
-    const bool remote = scenario != 0 && scenario != 4;
+    const int scenario = GENERATE( 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 );
+    const bool remote = scenario == 1 || scenario == 2 || scenario == 3 ||
+                        scenario == 5 || scenario == 7;
     const bool occupied_approach = scenario == 2;
     const bool missing_stairs = scenario == 3;
-    const bool walled_approach = scenario >= 4;
-    CAPTURE( remote, occupied_approach, missing_stairs, walled_approach );
+    const bool walled_approach = scenario == 4 || scenario == 5;
+    const bool native_floorplan = scenario >= 6;
+    const bool native_atmosphere = scenario >= 8;
+    const bool real_fire = scenario == 9;
+    CAPTURE( remote, occupied_approach, missing_stairs, walled_approach, native_floorplan,
+             native_atmosphere, real_fire );
     clear_avatar();
     clear_map_without_vision();
     get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
@@ -1730,16 +1735,25 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     overmap_buffer.global_state.bandit_live_world = {};
     map &here = get_map();
     get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ) );
+    const auto offset = native_floorplan ? tripoint( 55, 108, 0 ) :
+                        tripoint( walled_approach ? 44 : 36, 60, 0 );
     const auto start = remote ?
                        project_to<coords::ms>( project_to<coords::om>( get_avatar().pos_abs() ).xy() +
-                                              point( 2, 0 ) ) + tripoint( walled_approach ? 44 : 36, 60, 0 ) :
-                       here.get_abs( tripoint_bub_ms( 20, 60, 0 ) );
-    const auto home = start + tripoint( occupied_approach ? 12 : 85, 0,
-                                       occupied_approach ? 0 : 2 );
+                                              point( 2, 0 ) ) + offset :
+                       here.get_abs( native_floorplan ? tripoint_bub_ms( 55, 108, 0 ) :
+                                     tripoint_bub_ms( 20, 60, 0 ) );
+    const auto home = start + ( native_floorplan ? tripoint( 5, -48, 2 ) :
+                               tripoint( occupied_approach ? 12 : 85, 0, occupied_approach ? 0 : 2 ) );
     const auto anchor = project_to<coords::omt>( home );
     overmap &owner = overmap_buffer.get( project_to<coords::om>( start ).xy() );
     const std::string id = "return-route-" + std::to_string( scenario );
     std::vector<std::pair<tripoint_abs_omt, oter_id>> old_terrain;
+    std::set<character_id> old_npcs;
+    for( int z = 0; z < 4; ++z ) {
+        for( const auto &npc : overmap_buffer.get_npcs_near_omt( tripoint_abs_omt( anchor.xy(), z ), 1 ) ) {
+            old_npcs.insert( npc->getID() );
+        }
+    }
     on_out_of_scope restore( [&]() {
         clear_creatures();
         clear_avatar();
@@ -1757,6 +1771,11 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
         for( const auto &entry : old_terrain ) {
             overmap_buffer.ter_set( entry.first, entry.second );
         }
+        for( const auto &npc : overmap_buffer.get_npcs_near_omt( tripoint_abs_omt( anchor.xy(), 0 ), 1 ) ) {
+            if( old_npcs.count( npc->getID() ) == 0 ) {
+                overmap_buffer.remove_npc( npc->getID() );
+            }
+        }
         overmap_buffer.global_state.migo_populations = old_populations;
         overmap_buffer.global_state.migo_towers = old_towers;
         overmap_buffer.global_state.bandit_live_world = old_bandits;
@@ -1764,47 +1783,118 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
         MAPBUFFER.clear_outside_reality_bubble();
         set_time( old_turn );
     } );
-    // A real ground corridor reaches the building. For the upper-home cases,
-    // matching stairs exist only at home, beyond the native short path.
     const auto first = project_to<coords::omt>( start );
-    for( int z = 0; z <= home.z(); ++z ) {
-        for( int x = z == 0 ? first.x() : anchor.x(); x <= anchor.x(); ++x ) {
-            const tripoint_abs_omt cell( x, anchor.y(), z );
+    if( native_floorplan ) {
+        // Use the production north-facing tower, including its irregular
+        // footprint, off-axis resin portals, emitters and real floor pairs.
+        // The return starts only48 MS from home's XY; that projection is
+        // still an approach on the wrong floor, not the physical home.
+        for( int z = 0; z < 4; ++z ) {
+            const tripoint_abs_omt cell( anchor.xy(), z );
             old_terrain.emplace_back( cell, overmap_buffer.ter_existing( cell ) );
-            overmap_buffer.ter_set( cell, oter_str_id( "field" ) );
-            tinymap terrain;
-            terrain.load( cell, false );
-            for( const auto &tile : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, z ),
-                    tripoint_omt_ms( 23, 23, z ) ) ) {
-                terrain.ter_set( tile, ter_str_id( "t_floor" ) );
-                terrain.furn_set( tile, furn_str_id::NULL_ID() );
-            }
-            if( walled_approach && cell.x() == anchor.x() ) {
-                // The bounded projection lands on the real building wall
-                // before its off-axis entrance/stairs fit the native route.
-                const int wall_x = home.x() - cell.x() * 24 - 5;
-                const int entry_y = home.y() - cell.y() * 24 + 3;
-                REQUIRE( wall_x >= 0 );
-                REQUIRE( wall_x < 24 );
-                REQUIRE( entry_y >= 0 );
-                REQUIRE( entry_y < 24 );
-                for( int y = 0; y < 24; ++y ) {
-                    terrain.ter_set( tripoint_omt_ms( wall_x, y, z ),
-                                     ter_str_id( y == entry_y ? "t_resin_hole_c" : "t_wall_resin" ) );
+            overmap_buffer.ter_set( cell, oter_str_id( "mi-go_scout_tower_" +
+                                   std::to_string( z + 1 ) + "_north" ) );
+        }
+        smallmap generated;
+        generated.generate( tripoint_abs_omt( anchor.xy(), 0 ), calendar::turn, false );
+        REQUIRE( generated.ter( tripoint_omt_ms( 12, 12, 2 ) ) == ter_str_id( "t_floor_resin" ) );
+        REQUIRE( generated.ter( tripoint_omt_ms( 5, 8, 0 ) ) == ter_str_id( "t_slope_up" ) );
+        REQUIRE( generated.ter( tripoint_omt_ms( 5, 8, 1 ) ) == ter_str_id( "t_slope_down" ) );
+        REQUIRE( generated.ter( tripoint_omt_ms( 5, 9, 1 ) ) == ter_str_id( "t_slope_up" ) );
+        REQUIRE( generated.ter( tripoint_omt_ms( 5, 9, 2 ) ) == ter_str_id( "t_slope_down" ) );
+        for( int z = 0; z < 3; ++z ) {
+            for( int y = anchor.y(); y <= ( z == 0 ? project_to<coords::omt>( start ).y() :
+                                          anchor.y() ); ++y ) {
+                const tripoint_abs_omt cell( anchor.x(), y, z );
+                if( y != anchor.y() ) {
+                    old_terrain.emplace_back( cell, overmap_buffer.ter_existing( cell ) );
+                    overmap_buffer.ter_set( cell, oter_str_id( "field" ) );
+                }
+                tinymap terrain;
+                terrain.load( cell, false );
+                for( const auto &tile : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, z ),
+                        tripoint_omt_ms( 23, 23, z ) ) ) {
+                    terrain.ter_set( tile, y == anchor.y() ? generated.ter( tile ) :
+                                     ter_str_id( "t_grass" ).id() );
+                    terrain.furn_set( tile, y == anchor.y() ? generated.furn( tile ) :
+                                      furn_str_id::NULL_ID().id() );
                 }
             }
-            const tripoint_omt_ms stairs( ( walled_approach ?
-                                          home.x() - cell.x() * 24 + 4 : 6 ) + ( z == 2 ),
-                                         home.y() - cell.y() * 24, z );
-            if( home.z() > 0 && !missing_stairs && cell.x() == anchor.x() ) {
-                if( z == 0 ) {
-                    terrain.ter_set( stairs, ter_str_id( "t_stairs_up" ) );
-                    REQUIRE( terrain.ter( stairs ) == ter_str_id( "t_stairs_up" ) );
-                } else if( z == 1 ) {
-                    terrain.ter_set( stairs, ter_str_id( "t_stairs_down" ) );
-                    terrain.ter_set( stairs + point::east, ter_str_id( "t_stairs_up" ) );
-                } else {
-                    terrain.ter_set( stairs, ter_str_id( "t_stairs_down" ) );
+        }
+        generated.delete_unmerged_submaps();
+        // Isolate navigation from generated captives' legitimate native
+        // combat, and refresh the main map after editing shared submaps
+        // through tinymaps. Neither is an assertion waiver or product change.
+        for( int z = 0; z < 4; ++z ) {
+            for( const auto &npc : overmap_buffer.get_npcs_near_omt( tripoint_abs_omt( anchor.xy(), z ), 1 ) ) {
+                if( old_npcs.count( npc->getID() ) == 0 ) {
+                    overmap_buffer.remove_npc( npc->getID() );
+                }
+            }
+        }
+        // Reload the owning map once after shared-submap edits, including
+        // routing and emitter-location caches, rather than partial refreshes.
+        here.load( here.get_abs_sub(), false );
+        for( int z = 0; z < 4; ++z ) {
+            here.build_map_cache( z, true );
+        }
+        g->reload_npcs();
+        clear_creatures();
+        if( native_atmosphere ) {
+            REQUIRE_FALSE( here.get_furn_field_locations().empty() );
+            for( int turn = 0; turn < 40; ++turn ) {
+                calendar::turn += 1_turns;
+                here.furniture_terrain_emit_fields();
+                here.process_fields();
+            }
+            bool emitted = false;
+            for( const auto &tile : here.points_on_zlevel( 1 ) ) {
+                emitted |= here.get_field_intensity( tile, field_type_id( "fd_migo_atmosphere" ) ) > 0;
+            }
+            REQUIRE( emitted );
+        }
+    } else {
+        // A real ground corridor reaches the building. For the upper-home cases,
+        // matching stairs exist only at home, beyond the native short path.
+        for( int z = 0; z <= home.z(); ++z ) {
+            for( int x = z == 0 ? first.x() : anchor.x(); x <= anchor.x(); ++x ) {
+                const tripoint_abs_omt cell( x, anchor.y(), z );
+                old_terrain.emplace_back( cell, overmap_buffer.ter_existing( cell ) );
+                overmap_buffer.ter_set( cell, oter_str_id( "field" ) );
+                tinymap terrain;
+                terrain.load( cell, false );
+                for( const auto &tile : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, z ),
+                        tripoint_omt_ms( 23, 23, z ) ) ) {
+                    terrain.ter_set( tile, ter_str_id( "t_floor" ) );
+                    terrain.furn_set( tile, furn_str_id::NULL_ID() );
+                }
+                if( walled_approach && cell.x() == anchor.x() ) {
+                    // The bounded projection lands on the real building wall
+                    // before its off-axis entrance/stairs fit the native route.
+                    const int wall_x = home.x() - cell.x() * 24 - 5;
+                    const int entry_y = home.y() - cell.y() * 24 + 3;
+                    REQUIRE( wall_x >= 0 );
+                    REQUIRE( wall_x < 24 );
+                    REQUIRE( entry_y >= 0 );
+                    REQUIRE( entry_y < 24 );
+                    for( int y = 0; y < 24; ++y ) {
+                        terrain.ter_set( tripoint_omt_ms( wall_x, y, z ),
+                                         ter_str_id( y == entry_y ? "t_resin_hole_c" : "t_wall_resin" ) );
+                    }
+                }
+                const tripoint_omt_ms stairs( ( walled_approach ?
+                                              home.x() - cell.x() * 24 + 4 : 6 ) + ( z == 2 ),
+                                             home.y() - cell.y() * 24, z );
+                if( home.z() > 0 && !missing_stairs && cell.x() == anchor.x() ) {
+                    if( z == 0 ) {
+                        terrain.ter_set( stairs, ter_str_id( "t_stairs_up" ) );
+                        REQUIRE( terrain.ter( stairs ) == ter_str_id( "t_stairs_up" ) );
+                    } else if( z == 1 ) {
+                        terrain.ter_set( stairs, ter_str_id( "t_stairs_down" ) );
+                        terrain.ter_set( stairs + point::east, ter_str_id( "t_stairs_up" ) );
+                    } else {
+                        terrain.ter_set( stairs, ter_str_id( "t_stairs_down" ) );
+                    }
                 }
             }
         }
@@ -1850,6 +1940,15 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     intent.phase = migo_tower::member_phase::returning;
     intent.home = home;
     original.set_migo_intent( intent );
+    if( native_atmosphere ) {
+        REQUIRE( original.is_immune_field( field_type_id( "fd_migo_atmosphere" ) ) );
+    }
+    const auto fire_stair = project_to<coords::ms>( tripoint_abs_omt( anchor.xy(), 1 ) ) +
+                            tripoint( 5, 9, 0 );
+    if( real_fire ) {
+        here.furn_set( here.get_bub( fire_stair ), furn_str_id( "f_brazier" ) );
+        here.add_field( here.get_bub( fire_stair ), field_type_id( "fd_fire" ), 1 );
+    }
     if( remote ) {
         REQUIRE( owner.retain_monster_payload( start, original ) );
     } else {
@@ -1865,13 +1964,30 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     INFO( first_step.reason );
     CHECK( first_step.next == physical_navigation::action::walk );
     CHECK( first_step.position.z() == start.z() );
-    CHECK( first_step.position.x() > start.x() );
+    if( native_floorplan ) {
+        CHECK( first_step.position.y() < start.y() );
+    } else {
+        CHECK( first_step.position.x() > start.x() );
+    }
     bool reloaded = false;
     bool refused_missing_connection = false;
     std::string final_position;
     std::string final_reason;
+    std::string final_geometry;
     for( int turn = 0; turn < 250; ++turn ) {
         calendar::turn += 1_turns;
+        if( native_atmosphere ) {
+            here.furniture_terrain_emit_fields();
+            here.process_fields();
+        }
+        if( real_fire && turn == 80 ) {
+            for( int z = 0; z < 3; ++z ) {
+                for( const auto &tile : here.points_on_zlevel( z ) ) {
+                    here.remove_field( tile, field_type_id( "fd_fire" ) );
+                }
+            }
+            here.furn_set( here.get_bub( fire_stair ), furn_str_id::NULL_ID() );
+        }
         if( remote ) {
             overmap_buffer.move_hordes();
         } else {
@@ -1918,6 +2034,11 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
             reloaded = true;
             CHECK( current->migo_intent()->phase == migo_tower::member_phase::returning );
         }
+        if( real_fire && turn < 80 ) {
+            CHECK( current->posz() < home.z() );
+            CHECK( record->assignment == migo_population::duty::returning );
+            CHECK_FALSE( overmap_buffer.global_state.migo_towers.find( id )->operation->members[0].returned );
+        }
         if( record->assignment == migo_population::duty::available ) {
             CHECK( project_to<coords::omt>( current->pos_abs() ) == anchor );
             CHECK( current->pos_abs().z() == home.z() );
@@ -1937,10 +2058,29 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
         final_position = current->pos_abs().to_string_writable();
         if( turn == 249 ) {
             final_reason = physical_navigation::read_step( *current, home ).reason;
+            if( native_floorplan && !remote ) {
+                std::ostringstream details;
+                details << "native max_dist=" << current->get_pathfinding_settings().max_dist
+                        << " max_length=" << current->get_pathfinding_settings().max_length;
+                for( int z = current->posz(); z <= home.z(); ++z ) {
+                    for( const auto &tile : here.points_in_radius( here.get_bub(
+                             tripoint_abs_ms( current->pos_abs().xy(), z ) ), 2 ) ) {
+                        details << " " << here.get_abs( tile ).to_string_writable()
+                                << ":" << here.ter( tile ).id().str()
+                                << "/" << here.furn( tile ).id().str()
+                                << ":move=" << current->will_move_to( &here, tile )
+                                << ":safe=" << current->know_danger_at( &here, tile );
+                        for( const auto &f : here.field_at( tile ) ) {
+                            details << ":field=" << f.first.id().str();
+                        }
+                    }
+                }
+                final_geometry = details.str();
+            }
         }
     }
     CHECK( reloaded );
-    CAPTURE( final_position, final_reason );
+    CAPTURE( final_position, final_reason, final_geometry );
     const auto &finished = *overmap_buffer.global_state.migo_towers.find( id )->operation;
     const auto assignment = overmap_buffer.global_state.migo_populations.find( id )->find(
                                 "returnee" )->assignment;
