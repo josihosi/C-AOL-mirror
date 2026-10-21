@@ -5,6 +5,7 @@
 #include <set>
 #include <limits>
 #include <utility>
+#include <tuple>
 
 #include "calendar.h"
 #include "avatar.h"
@@ -623,7 +624,21 @@ physical_navigation::step_read prepare_step( monster &body, migo_population::rep
             intent.phase = member_phase::searching;
         }
     }
-    result = physical_navigation::read_step( body, *goal );
+    result = physical_navigation::read_step( body, *goal, [&]( const tripoint_abs_ms &p ) {
+        if( owner != migo_population::representation::abstract || p == body.pos_abs() ) {
+            return false;
+        }
+        // Route around stationary retained residents. Scheduled actors may
+        // move in this same batch; their current/source reservations remain
+        // the transport owner's responsibility, including rollback. Treating
+        // them as fixed walls can abandon an otherwise usable stair queue.
+        point_abs_om om_position;
+        tripoint_om_ms local;
+        std::tie( om_position, local ) = project_remain<coords::om>( p );
+        overmap *existing = overmap_buffer.get_existing( om_position );
+        const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
+        return resident && !resident->is_active();
+    } );
     intent.waypoint = result.next == physical_navigation::action::none ?
                       body.pos_abs() : result.position;
     return result;

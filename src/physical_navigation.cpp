@@ -70,7 +70,8 @@ bool fire_approach( const map &here, const tripoint_bub_ms &p )
 }
 } // namespace
 
-step_read read_step( const monster &body, const tripoint_abs_ms &goal )
+step_read read_step( const monster &body, const tripoint_abs_ms &goal,
+                     const std::function<bool( const tripoint_abs_ms & )> &occupied )
 {
     const auto origin = body.pos_abs();
     step_read out;
@@ -80,24 +81,22 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal )
         out.reason = "no_native_pathfinding";
         return out;
     }
-    tripoint_abs_ms aim = goal;
-    if( origin.z() != goal.z() ) {
-        // Resolve one real floor connection first. Do not call the generic
-        // cross-z route's main-map stair helper with remote-view coordinates.
-        aim = tripoint_abs_ms( origin.xy(), goal.z() );
-    } else {
-        const auto delta = goal - origin;
-        const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
-        const int segment = std::max( 1, std::min( 60, native.max_dist - 2 ) );
-        if( length > segment ) {
-            aim = origin + tripoint_rel_ms( delta.x() * segment / length,
-                                            delta.y() * segment / length, 0 );
-        }
+    const auto delta = goal - origin;
+    const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
+    const int segment = std::max( 1, std::min( 60, native.max_dist - 2 ) );
+    tripoint_abs_ms aim( goal.xy(), origin.z() );
+    if( length > segment ) {
+        aim = origin + tripoint_rel_ms( delta.x() * segment / length,
+                                        delta.y() * segment / length, 0 );
     }
+    // Include the bounded horizontal approach when looking for a real floor
+    // connection. A distant upper-floor home need not have stairs beside the
+    // returning actor; a safe current-floor segment can bring it closer.
+    const tripoint_abs_ms extent( aim.xy(), goal.z() );
     std::unique_ptr<navigation_view> remote;
     map *here = &get_map();
-    if( !here->inbounds( origin ) || !here->inbounds( aim ) ) {
-        remote = std::make_unique<navigation_view>( origin, aim );
+    if( !here->inbounds( origin ) || !here->inbounds( extent ) ) {
+        remote = std::make_unique<navigation_view>( origin, extent );
         here = remote.get();
     }
     const auto known = [&]( const tripoint_bub_ms & p ) {
@@ -114,11 +113,13 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal )
     };
     const auto avoid = [&]( const tripoint_bub_ms & p ) {
         return !known( p ) || fire_approach( *here, p ) ||
+               ( occupied && occupied( here->get_abs( p ) ) ) ||
                ( !body.will_move_to( here, p ) && !door( p ) ) ||
                ( !body.flies() && !here->has_floor_or_water( p ) ) || !body.know_danger_at( here, p );
     };
     const auto geometry_only = [&]( const tripoint_bub_ms &p ) {
-        return !known( p ) || ( !body.will_move_to( here, p ) && !door( p ) ) ||
+        return !known( p ) || ( occupied && occupied( here->get_abs( p ) ) ) ||
+               ( !body.will_move_to( here, p ) && !door( p ) ) ||
                ( !body.flies() && !here->has_floor_or_water( p ) );
     };
     pathfinding_settings settings = native;
@@ -147,7 +148,8 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal )
                 route = std::move( candidate );
             }
         }
-    } else {
+    }
+    if( route.empty() ) {
         const auto to = here->get_bub( aim );
         if( !known( to ) ) {
             out.reason = "segment_geometry_unknown";
@@ -155,7 +157,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal )
         }
         out.known = true;
         if( aim == origin ) {
-            out.reason = "goal_reached";
+            out.reason = origin == goal ? "goal_reached" : "no_existing_safe_native_route";
             return out;
         }
         if( !avoid( to ) ) {

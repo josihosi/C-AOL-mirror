@@ -1764,14 +1764,18 @@ void overmap::move_hordes( bool migo_operations_only )
             body.set_pos_abs_only( mon->first );
             auto &intent = *body.migo_intent();
             const int now = to_turn<int>( calendar::turn );
-            if( intent.last_energy_world != now ) {
-                acting->moves += body.get_speed();
-                intent.last_energy_world = now;
-            }
             if( body.attitude() == MATT_FLEE ) {
                 intent.retreat();
             }
             migo_step = migo_tower::prepare_step( body, migo_population::representation::abstract );
+            // A route refusal consumed no physical action. Credit only an
+            // executable step, so blocked owners retain their energy guard
+            // without accumulating a delayed movement budget.
+            if( migo_step.next != physical_navigation::action::none &&
+                intent.last_energy_world != now ) {
+                acting->moves += body.get_speed();
+                intent.last_energy_world = now;
+            }
             if( acting->moves > 0 && migo_step.next == physical_navigation::action::open_door ) {
                 if( physical_navigation::commit_door( body, migo_step.position ) ) {
                     acting->moves -= migo_step.move_cost;

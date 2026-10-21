@@ -1710,3 +1710,229 @@ TEST_CASE( "migo_native_loop_boundary_handoff_yields_released_handle_and_preserv
     reentered->process_turn();
     CHECK( reentered->get_moves() == budget + reentered->get_speed() );
 }
+
+TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
+           "[migo_tower][native][ownership]" )
+{
+    const int scenario = GENERATE( 0, 1, 2, 3 );
+    const bool remote = scenario != 0;
+    const bool occupied_approach = scenario == 2;
+    const bool missing_stairs = scenario == 3;
+    CAPTURE( remote, occupied_approach, missing_stairs );
+    clear_avatar();
+    clear_map_without_vision();
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    overmap_buffer.global_state.bandit_live_world = {};
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ) );
+    const auto start = remote ?
+                       project_to<coords::ms>( project_to<coords::om>( get_avatar().pos_abs() ).xy() +
+                                              point( 2, 0 ) ) + tripoint( 36, 60, 0 ) :
+                       here.get_abs( tripoint_bub_ms( 20, 60, 0 ) );
+    const auto home = start + tripoint( occupied_approach ? 12 : 85, 0,
+                                       occupied_approach ? 0 : 2 );
+    const auto anchor = project_to<coords::omt>( home );
+    overmap &owner = overmap_buffer.get( project_to<coords::om>( start ).xy() );
+    const std::string id = "return-route-" + std::to_string( scenario );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> old_terrain;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        clear_avatar();
+        std::vector<std::pair<tripoint_abs_ms, std::string>> retained;
+        for( const auto &entry : owner.horde_entities() ) {
+            if( entry.second->monster_data &&
+                entry.second->monster_data->population_identity().site_id == id ) {
+                retained.emplace_back( entry.first,
+                                       entry.second->monster_data->population_identity().member_id );
+            }
+        }
+        for( const auto &entry : retained ) {
+            CHECK( owner.release_monster_payload( entry.first, entry.second ) );
+        }
+        for( const auto &entry : old_terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+        clear_map_without_vision();
+        MAPBUFFER.clear_outside_reality_bubble();
+        set_time( old_turn );
+    } );
+    // A real ground corridor reaches the building. For the upper-home cases,
+    // matching stairs exist only at home, beyond the native short path.
+    const auto first = project_to<coords::omt>( start );
+    for( int z = 0; z <= home.z(); ++z ) {
+        for( int x = z == 0 ? first.x() : anchor.x(); x <= anchor.x(); ++x ) {
+            const tripoint_abs_omt cell( x, anchor.y(), z );
+            old_terrain.emplace_back( cell, overmap_buffer.ter_existing( cell ) );
+            overmap_buffer.ter_set( cell, oter_str_id( "field" ) );
+            tinymap terrain;
+            terrain.load( cell, false );
+            for( const auto &tile : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, z ),
+                    tripoint_omt_ms( 23, 23, z ) ) ) {
+                terrain.ter_set( tile, ter_str_id( "t_floor" ) );
+                terrain.furn_set( tile, furn_str_id::NULL_ID() );
+            }
+            const tripoint_omt_ms stairs( 6 + ( z == 2 ), home.y() - cell.y() * 24, z );
+            if( home.z() > 0 && !missing_stairs && cell.x() == anchor.x() ) {
+                if( z == 0 ) {
+                    terrain.ter_set( stairs, ter_str_id( "t_stairs_up" ) );
+                    REQUIRE( terrain.ter( stairs ) == ter_str_id( "t_stairs_up" ) );
+                } else if( z == 1 ) {
+                    terrain.ter_set( stairs, ter_str_id( "t_stairs_down" ) );
+                    terrain.ter_set( stairs + point::east, ter_str_id( "t_stairs_up" ) );
+                } else {
+                    terrain.ter_set( stairs, ter_str_id( "t_stairs_down" ) );
+                }
+            }
+        }
+    }
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = anchor;
+    migo_population::member_record member;
+    member.token = {id, "returnee", 1, anchor};
+    member.type = mtype_id( "mon_mi_go_scout" );
+    member.home = home;
+    member.owner = remote ? migo_population::representation::abstract :
+                   migo_population::representation::local;
+    member.assignment = migo_population::duty::returning;
+    member.hp = member.type->hp;
+    std::vector<migo_population::member_record> residents{member};
+    if( occupied_approach ) {
+        auto blocker = member;
+        blocker.token.member_id = "home-defender";
+        blocker.assignment = migo_population::duty::available;
+        blocker.home = start + point::east;
+        residents.push_back( blocker );
+    }
+    REQUIRE( population.commit_seed( residents, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = anchor;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = first;
+    operation.members = {{member.token.member_id}};
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    site.operation = operation;
+    site.remember_source( first );
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    monster original( member.type );
+    original.set_pos_abs_only( start );
+    original.population_identity() = member.token;
+    original.set_moves( 0 );
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.phase = migo_tower::member_phase::returning;
+    intent.home = home;
+    original.set_migo_intent( intent );
+    if( remote ) {
+        REQUIRE( owner.retain_monster_payload( start, original ) );
+    } else {
+        REQUIRE( g->place_critter_at( make_shared_fast<monster>( original ), here.get_bub( start ) ) );
+    }
+    if( occupied_approach ) {
+        monster blocker( member.type );
+        blocker.population_identity() = residents[1].token;
+        blocker.set_pos_abs_only( residents[1].home );
+        REQUIRE( owner.retain_monster_payload( blocker.pos_abs(), blocker ) );
+    }
+    const auto first_step = physical_navigation::read_step( original, home );
+    INFO( first_step.reason );
+    CHECK( first_step.next == physical_navigation::action::walk );
+    CHECK( first_step.position.z() == start.z() );
+    CHECK( first_step.position.x() > start.x() );
+    bool reloaded = false;
+    bool refused_missing_connection = false;
+    std::string final_position;
+    std::string final_reason;
+    for( int turn = 0; turn < 250; ++turn ) {
+        calendar::turn += 1_turns;
+        if( remote ) {
+            overmap_buffer.move_hordes();
+        } else {
+            process_monsters_and_npcs_turn_for_test();
+        }
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        monster *current = nullptr;
+        int copies = 0;
+        int blockers = 0;
+        auto inspect = [&]( monster &body ) {
+            if( body.population_identity().site_id == id ) {
+                if( body.population_identity().member_id == "returnee" ) {
+                    current = &body;
+                    ++copies;
+                } else {
+                    ++blockers;
+                    CHECK( body.pos_abs() == residents[1].home );
+                    CHECK( body.get_hp() == residents[1].hp );
+                }
+            }
+        };
+        for( monster &body : g->all_monsters() ) {
+            inspect( body );
+        }
+        for( const auto &entry : owner.horde_entities() ) {
+            if( entry.second->monster_data ) {
+                inspect( *entry.second->monster_data );
+            }
+        }
+        REQUIRE( copies == 1 );
+        CHECK( blockers == ( occupied_approach ? 1 : 0 ) );
+        REQUIRE( current );
+        const auto *record = overmap_buffer.global_state.migo_populations.find( id )->find( "returnee" );
+        REQUIRE( record );
+        CHECK( current->get_hp() == member.hp );
+        CHECK( record->token.epoch == current->population_identity().epoch );
+        CHECK( record->token.site_id == current->population_identity().site_id );
+        if( turn == 3 ) {
+            std::ostringstream saved;
+            { JsonOut json( saved ); current->serialize( json ); }
+            monster loaded;
+            loaded.deserialize( json_loader::from_string( saved.str() ) );
+            *current = loaded;
+            reloaded = true;
+            CHECK( current->migo_intent()->phase == migo_tower::member_phase::returning );
+        }
+        if( record->assignment == migo_population::duty::available ) {
+            CHECK( project_to<coords::omt>( current->pos_abs() ) == anchor );
+            CHECK( current->pos_abs().z() == home.z() );
+            CHECK( overmap_buffer.global_state.migo_towers.find( id )->operation->members[0].returned );
+            break;
+        }
+        if( missing_stairs && current->pos_abs().xy() == home.xy() ) {
+            // The existing ground route is usable, but sharing home's XY
+            // is not arrival upstairs and cannot create a floor connection.
+            const auto refused = physical_navigation::read_step( *current, home );
+            CHECK( refused.next == physical_navigation::action::none );
+            CHECK( current->pos_abs().z() == 0 );
+            CHECK( current->migo_intent()->phase == migo_tower::member_phase::returning );
+            refused_missing_connection = true;
+            break;
+        }
+        final_position = current->pos_abs().to_string_writable();
+        if( turn == 249 ) {
+            final_reason = physical_navigation::read_step( *current, home ).reason;
+        }
+    }
+    CHECK( reloaded );
+    CAPTURE( final_position, final_reason );
+    const auto &finished = *overmap_buffer.global_state.migo_towers.find( id )->operation;
+    const auto assignment = overmap_buffer.global_state.migo_populations.find( id )->find(
+                                "returnee" )->assignment;
+    if( missing_stairs ) {
+        CHECK( refused_missing_connection );
+        CHECK( assignment == migo_population::duty::returning );
+        CHECK_FALSE( finished.members[0].returned );
+        CHECK_FALSE( finished.resolved );
+    } else {
+        CHECK( assignment == migo_population::duty::available );
+    }
+}
