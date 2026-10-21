@@ -1714,11 +1714,12 @@ TEST_CASE( "migo_native_loop_boundary_handoff_yields_released_handle_and_preserv
 TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
            "[migo_tower][native][ownership]" )
 {
-    const int scenario = GENERATE( 0, 1, 2, 3 );
-    const bool remote = scenario != 0;
+    const int scenario = GENERATE( 0, 1, 2, 3, 4, 5 );
+    const bool remote = scenario != 0 && scenario != 4;
     const bool occupied_approach = scenario == 2;
     const bool missing_stairs = scenario == 3;
-    CAPTURE( remote, occupied_approach, missing_stairs );
+    const bool walled_approach = scenario >= 4;
+    CAPTURE( remote, occupied_approach, missing_stairs, walled_approach );
     clear_avatar();
     clear_map_without_vision();
     get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
@@ -1731,7 +1732,7 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ) );
     const auto start = remote ?
                        project_to<coords::ms>( project_to<coords::om>( get_avatar().pos_abs() ).xy() +
-                                              point( 2, 0 ) ) + tripoint( 36, 60, 0 ) :
+                                              point( 2, 0 ) ) + tripoint( walled_approach ? 44 : 36, 60, 0 ) :
                        here.get_abs( tripoint_bub_ms( 20, 60, 0 ) );
     const auto home = start + tripoint( occupied_approach ? 12 : 85, 0,
                                        occupied_approach ? 0 : 2 );
@@ -1778,7 +1779,23 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
                 terrain.ter_set( tile, ter_str_id( "t_floor" ) );
                 terrain.furn_set( tile, furn_str_id::NULL_ID() );
             }
-            const tripoint_omt_ms stairs( 6 + ( z == 2 ), home.y() - cell.y() * 24, z );
+            if( walled_approach && cell.x() == anchor.x() ) {
+                // The bounded projection lands on the real building wall
+                // before its off-axis entrance/stairs fit the native route.
+                const int wall_x = home.x() - cell.x() * 24 - 5;
+                const int entry_y = home.y() - cell.y() * 24 + 3;
+                REQUIRE( wall_x >= 0 );
+                REQUIRE( wall_x < 24 );
+                REQUIRE( entry_y >= 0 );
+                REQUIRE( entry_y < 24 );
+                for( int y = 0; y < 24; ++y ) {
+                    terrain.ter_set( tripoint_omt_ms( wall_x, y, z ),
+                                     ter_str_id( y == entry_y ? "t_resin_hole_c" : "t_wall_resin" ) );
+                }
+            }
+            const tripoint_omt_ms stairs( ( walled_approach ?
+                                          home.x() - cell.x() * 24 + 4 : 6 ) + ( z == 2 ),
+                                         home.y() - cell.y() * 24, z );
             if( home.z() > 0 && !missing_stairs && cell.x() == anchor.x() ) {
                 if( z == 0 ) {
                     terrain.ter_set( stairs, ter_str_id( "t_stairs_up" ) );

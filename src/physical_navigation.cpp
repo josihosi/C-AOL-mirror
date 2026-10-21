@@ -150,18 +150,38 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         }
     }
     if( route.empty() ) {
-        const auto to = here->get_bub( aim );
-        if( !known( to ) ) {
-            out.reason = "segment_geometry_unknown";
-            return out;
-        }
-        out.known = true;
         if( aim == origin ) {
+            out.known = true;
             out.reason = origin == goal ? "goal_reached" : "no_existing_safe_native_route";
             return out;
         }
-        if( !avoid( to ) ) {
+        // A shortened endpoint is an approach preference, not a required
+        // physical destination. Choose the farthest native-reachable point
+        // on this bounded segment. In particular, a projection inside a
+        // building wall must not prevent approaching its real entrance.
+        // An unshortened goal still requires its actual square; neither an
+        // unknown tile nor a nearby substitute can count as arrival.
+        const int reach = std::min( length, segment );
+        const int last = length > segment ? 1 : reach;
+        for( int distance = reach; distance >= last; --distance ) {
+            const auto approach = origin + tripoint_rel_ms( delta.x() * distance / length,
+                                  delta.y() * distance / length, 0 );
+            const auto to = here->get_bub( approach );
+            if( !known( to ) ) {
+                continue;
+            }
+            out.known = true;
+            if( avoid( to ) ) {
+                continue;
+            }
             route = here->route( from, pathfinding_target::point( to ), settings, avoid );
+            if( !route.empty() ) {
+                break;
+            }
+        }
+        if( !out.known ) {
+            out.reason = "segment_geometry_unknown";
+            return out;
         }
     }
     if( route.empty() ) {
