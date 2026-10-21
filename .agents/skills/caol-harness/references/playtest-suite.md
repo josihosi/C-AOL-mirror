@@ -1,9 +1,18 @@
 # C-AOL product playtest suite
 
-This is the coverage map and replay index. The [work ledger](../../../../.de67/work-ledger.md)
+This is the recipe library and historical family index. The [work ledger](../../../../.de67/work-ledger.md)
 owns assignments; the registry owns compatible scenario/build selection; run witnesses own proof.
 A working recipe is reusable even when a game bug prevents its intended outcome.
 
+
+## Current release selection
+
+Use the [compact release catalogue](release-playtest-catalogue.md) for the eight maintained
+recipes, original52-case reuse, movement refinements, expansion coverage and execution selection.
+The categories and individual arms below describe reusable mechanisms, not another queued suite
+or a requirement to run every historical variant. Keep stable IDs and historical verdicts;
+current assignments/results belong in the ledger and task context. The original collection had
+51 scoped passes and one E4B observed failure, not52 current-build successes.
 
 ## Final long-running soak batch
 

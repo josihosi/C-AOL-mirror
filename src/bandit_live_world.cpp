@@ -17703,7 +17703,10 @@ structural_signal_record_result record_structural_signal_observations( world_sta
         site_record candidate = site;
         const sortie_observation_effect recorded = record_structural_observation_batch(
                     candidate, *expected_cursor, observations, now_minutes );
-        if( !recorded.valid ) {
+        // A valid replay may consume no new fact. Do not republish its
+        // projection or count another site write merely for accepting a read.
+        if( !recorded.valid ||
+            ( recorded.inserted == 0 && recorded.replaced == 0 && recorded.evicted == 0 ) ) {
             continue;
         }
         result.sites_recorded++;
@@ -17764,7 +17767,10 @@ structural_signal_record_result record_local_structural_signal_observations( wor
         site_record candidate = site;
         const sortie_observation_effect recorded = record_structural_observation_batch(
                     candidate, *expected_cursor, observations, now_minutes );
-        if( !recorded.valid ) {
+        // A valid replay may consume no new fact. Do not republish its
+        // projection or count another site write merely for accepting a read.
+        if( !recorded.valid ||
+            ( recorded.inserted == 0 && recorded.replaced == 0 && recorded.evicted == 0 ) ) {
             continue;
         }
         if( projection_commit && !projection_commit( site, candidate ) ) {

@@ -72,7 +72,9 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         return out;
     }
     const auto delta = goal - origin;
-    const int length = std::max( std::abs( delta.x() ), std::abs( delta.y() ) );
+    // Match the native route's distance bound. A diagonal can exceed it even
+    // when each axis fits; slow terrain also disables its straight-line shortcut.
+    const int length = rl_dist( origin.xy(), goal.xy() );
     const int segment = std::max( 1, std::min( 60, native.max_dist - 2 ) );
     tripoint_abs_ms aim( goal.xy(), origin.z() );
     if( length > segment ) {

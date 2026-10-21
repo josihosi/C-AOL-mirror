@@ -902,14 +902,14 @@ void service_operations( int now_turn, int active_elapsed )
                 if( const auto pending = operation.sweep.pending() ) {
                     const auto approach = read_owned_step( body, *pending, owner );
                     if( operation.sweep.pending() == candidate_at_start ) {
-                        if( approach_available( body, approach ) ) {
+                        const bool available = approach_available( body, approach );
+                        if( available ) {
                             available_members.push_back( token.member_id );
                         }
                         if( approach.reason == "approach_fire_hazard" ) {
                             fire_refusal = true;
                             fire_revision = approach.hazard_revision;
-                        } else if( approach.next != physical_navigation::action::none ||
-                                   approach.reason == "goal_reached" ) {
+                        } else if( available ) {
                             safe_approach = true;
                         }
                     }

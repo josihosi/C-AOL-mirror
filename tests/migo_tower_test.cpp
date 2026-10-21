@@ -15,6 +15,7 @@
 #include "json.h"
 #include "json_loader.h"
 #include "live_light.h"
+#include "line.h"
 #include "map.h"
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
@@ -2693,5 +2694,230 @@ TEST_CASE( "migo_final_sweep_disposition_preserves_a_peers_actual_native_engagem
         CHECK( token.site_id == members[i].token.site_id );
         CHECK( token.member_id == members[i].token.member_id );
         CHECK( token.epoch == members[i].token.epoch );
+    }
+}
+
+TEST_CASE( "migo_native_sweep_crosses_a_slow_diagonal_with_native_distance_limits",
+           "[migo_tower][raid_sweep][native][sweep_diagonal]" )
+{
+    const bool circular = GENERATE( false, true );
+    const bool old_trigdist = trigdist;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    const auto old_turn = calendar::turn;
+    clear_avatar();
+    clear_map();
+    trigdist = circular;
+    overmap_buffer.global_state.migo_populations = {};
+    overmap_buffer.global_state.migo_towers = {};
+    overmap_buffer.global_state.bandit_live_world = {};
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+        trigdist = old_trigdist;
+        set_time( old_turn );
+        clear_map();
+    } );
+    set_time_to_day();
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    const tripoint_bub_ms start( 100, 40, 0 );
+    const tripoint_bub_ms destination( 52, 84, 0 );
+    // The native scene stalled on this 48-by-44 diagonal with long grass.
+    // Pure normal ground can use the native straight-line shortcut, masking
+    // its regular pathfinder's circular max_dist guard.
+    here.ter_set( tripoint_bub_ms( 76, 62, 0 ), ter_str_id( "t_grass_long" ) );
+    monster *body = g->place_critter_at( mtype_id( "mon_mi_go" ), start );
+    REQUIRE( body );
+    const auto home = body->pos_abs();
+    const auto goal = here.get_abs( destination );
+    const auto anchor = project_to<coords::omt>( home );
+    CAPTURE( circular, rl_dist( home, goal ), body->get_pathfinding_settings().max_dist );
+    CHECK( rl_dist( home, goal ) == ( circular ? 65 : 48 ) );
+    REQUIRE( body->get_pathfinding_settings().max_dist == 50 );
+    migo_population::member_record member;
+    member.token = {"slow-diagonal", "member", 1, anchor};
+    member.type = body->type->id;
+    member.home = home;
+    member.owner = migo_population::representation::local;
+    member.assignment = migo_population::duty::dispatched;
+    member.hp = body->get_hp();
+    migo_population::site_record population;
+    population.id = member.token.site_id;
+    population.anchor = anchor;
+    REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = population.id;
+    site.anchor = anchor;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = project_to<coords::omt>( goal );
+    operation.members = {{member.token.member_id, false, false, home}};
+    operation.sweep.source = operation.source.source_omt;
+    operation.sweep.generation = 1;
+    operation.sweep.candidates = {{goal}};
+    operation.overdue_after_active = 100000;
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    site.operation = operation;
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    body->population_identity() = member.token;
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.home = home;
+    body->set_migo_intent( intent );
+    const auto first = migo_tower::prepare_step( *body, migo_population::representation::local );
+    INFO( first.reason );
+    REQUIRE( first.next == physical_navigation::action::walk );
+    bool reloaded = false;
+    for( int turn = 0; turn < 120; ++turn ) {
+        calendar::turn += 1_turns;
+        process_monsters_and_npcs_turn_for_test();
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        REQUIRE( body->get_hp() == member.hp );
+        REQUIRE( body->population_identity().member_id == member.token.member_id );
+        if( turn == 3 ) {
+            std::ostringstream saved;
+            { JsonOut json( saved ); body->serialize( json ); }
+            monster loaded;
+            loaded.deserialize( json_loader::from_string( saved.str() ) );
+            *body = loaded;
+            reloaded = true;
+        }
+        const auto &sweep = overmap_buffer.global_state.migo_towers.find(
+                                population.id )->operation->sweep;
+        if( sweep.candidates.front().state == raid_sweep::disposition::searched ) {
+            CHECK( body->pos_abs() == goal );
+            break;
+        }
+    }
+    CHECK( reloaded );
+    const auto &sweep = overmap_buffer.global_state.migo_towers.find(
+                            population.id )->operation->sweep;
+    CHECK( sweep.candidates.front().state == raid_sweep::disposition::searched );
+    CHECK( sweep.cursor == 1 );
+    CHECK( sweep.outcome() == "searched" );
+}
+
+TEST_CASE( "migo_queued_party_records_a_burning_destination_as_hazardous",
+           "[migo_tower][raid_sweep][native][sweep_fire_queue]" )
+{
+    const bool contained = GENERATE( false, true );
+    const bool occupied_queue = GENERATE( false, true );
+    const bool old_trigdist = trigdist;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    const auto old_turn = calendar::turn;
+    clear_avatar();
+    clear_map();
+    trigdist = true;
+    overmap_buffer.global_state.migo_populations = {};
+    overmap_buffer.global_state.migo_towers = {};
+    overmap_buffer.global_state.bandit_live_world = {};
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+        trigdist = old_trigdist;
+        set_time( old_turn );
+        clear_map();
+    } );
+    set_time_to_day();
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    const tripoint_bub_ms first( 60, 60, 0 );
+    const tripoint_bub_ms destination( 108, 61, 0 );
+    const auto goal = here.get_abs( destination );
+    const auto anchor = project_to<coords::omt>( here.get_abs( first ) );
+    migo_population::site_record population;
+    population.id = "queued-burning-source";
+    population.anchor = anchor;
+    std::vector<migo_population::member_record> members;
+    std::vector<monster *> bodies;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = project_to<coords::omt>( goal );
+    operation.sweep.source = operation.source.source_omt;
+    operation.sweep.generation = 1;
+    operation.sweep.candidates = {{goal}, {goal + point( 0, 6 )}};
+    operation.overdue_after_active = 100000;
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    for( int i = 0; i < 3; ++i ) {
+        monster *body = g->place_critter_at( mtype_id( "mon_mi_go" ),
+                                           first + point( -i, occupied_queue ? 0 : 2 * i ) );
+        REQUIRE( body );
+        migo_population::member_record member;
+        member.token = {population.id, "member" + std::to_string( i ), 1, anchor};
+        member.type = body->type->id;
+        member.home = body->pos_abs();
+        member.owner = migo_population::representation::local;
+        member.assignment = migo_population::duty::dispatched;
+        member.hp = body->get_hp();
+        members.push_back( member );
+        bodies.push_back( body );
+        operation.members.push_back( {member.token.member_id, false, false, member.home} );
+        body->population_identity() = member.token;
+        migo_tower::member_intent intent;
+        intent.generation = 1;
+        intent.home = member.home;
+        body->set_migo_intent( intent );
+    }
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = population.id;
+    site.anchor = anchor;
+    site.operation = operation;
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    if( contained ) {
+        here.furn_set( destination, furn_str_id( "f_brazier" ) );
+    }
+    here.add_field( destination, field_type_id( "fd_fire" ), 3 );
+    const auto leading = physical_navigation::read_step( *bodies.front(), goal );
+    CAPTURE( contained, occupied_queue, leading.reason );
+    CHECK( leading.next == physical_navigation::action::none );
+    CHECK( leading.reason == "approach_fire_hazard" );
+    // A truly available intermediate approach can still advance. A follower
+    // whose next square is occupied cannot mask the leader's known fire refusal.
+    calendar::turn += 1_turns;
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+    CHECK( overmap_buffer.global_state.migo_towers.find( population.id )->operation->
+           sweep.candidates.front().state == ( occupied_queue ? raid_sweep::disposition::hazardous :
+                   raid_sweep::disposition::pending ) );
+    bool reloaded = false;
+    for( int turn = 0; turn < 1810; ++turn ) {
+        calendar::turn += 1_turns;
+        process_monsters_and_npcs_turn_for_test();
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        if( turn == 3 ) {
+            std::ostringstream saved;
+            { JsonOut json( saved ); bodies.back()->serialize( json ); }
+            monster loaded;
+            loaded.deserialize( json_loader::from_string( saved.str() ) );
+            *bodies.back() = loaded;
+            reloaded = true;
+        }
+        const auto &sweep = overmap_buffer.global_state.migo_towers.find(
+                                population.id )->operation->sweep;
+        if( turn >= 4 && sweep.candidates.front().state != raid_sweep::disposition::pending ) {
+            break;
+        }
+    }
+    const auto &sweep = overmap_buffer.global_state.migo_towers.find(
+                            population.id )->operation->sweep;
+    CHECK( reloaded );
+    CHECK( sweep.candidates.front().state == raid_sweep::disposition::hazardous );
+    CHECK( sweep.candidates.front().geometry_revision != 0 );
+    for( int i = 0; i < 3; ++i ) {
+        CHECK( bodies[i]->get_hp() == members[i].hp );
+        CHECK( bodies[i]->population_identity().member_id == members[i].token.member_id );
+        CHECK( bodies[i]->pos_abs() != goal );
     }
 }
