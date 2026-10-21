@@ -14,6 +14,7 @@
 #include "monster.h"
 #include "mtype.h"
 #include "pathfinding.h"
+#include "raid_sweep.h"
 #include "submap.h"
 
 namespace physical_navigation
@@ -57,17 +58,6 @@ class navigation_view : public map
         }
 };
 
-bool fire_approach( const map &here, const tripoint_bub_ms &p )
-{
-    static const field_type_id fire( "fd_fire" );
-    for( const auto &cell : here.points_in_radius( p, 1 ) ) {
-        if( here.get_field_intensity( cell, fire ) > 0 &&
-            ( cell == p || !here.has_flag( ter_furn_flag::TFLAG_FIRE_CONTAINER, cell ) ) ) {
-            return true;
-        }
-    }
-    return false;
-}
 } // namespace
 
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
@@ -107,12 +97,18 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         out.reason = "origin_geometry_unknown";
         return out;
     }
+    if( goal == origin && raid_sweep::fire_approach( *here, from ) ) {
+        out.known = true;
+        out.reason = "approach_fire_hazard";
+        out.hazard_revision = raid_sweep::fire_revision( *here, {from} );
+        return out;
+    }
     const bool can_open = body.has_flag( mon_flag_CAN_OPEN_DOORS );
     const auto door = [&]( const tripoint_bub_ms & p ) {
         return can_open && here->open_door( body, p, !here->is_outside( from ), true );
     };
     const auto avoid = [&]( const tripoint_bub_ms & p ) {
-        return !known( p ) || fire_approach( *here, p ) ||
+        return !known( p ) || raid_sweep::fire_approach( *here, p ) ||
                ( occupied && occupied( here->get_abs( p ) ) ) ||
                ( !body.will_move_to( here, p ) && !door( p ) ) ||
                ( !body.flies() && !here->has_floor_or_water( p ) ) || !body.know_danger_at( here, p );
@@ -196,28 +192,14 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             // candidate or an invented impassable wall. Other geometry and
             // native door/floor constraints remain in force.
             const auto approach = here->route( from, pathfinding_target::point( here->get_bub( aim ) ),
-                                              settings, geometry_only );
-            std::uint64_t revision = 14695981039346656037ULL;
-            bool fire_blocked = false;
-            for( const auto &cell : approach ) {
-                if( !fire_approach( *here, cell ) ) {
-                    continue;
-                }
-                fire_blocked = true;
-                for( const auto &nearby : here->points_in_radius( cell, 1 ) ) {
-                    const auto intensity = here->get_field_intensity( nearby, field_type_id( "fd_fire" ) );
-                    if( intensity > 0 ) {
-                        const auto facts = here->get_abs( nearby ).to_string_writable() + ":" +
-                                           std::to_string( intensity );
-                        for( unsigned char value : facts ) {
-                            revision = ( revision ^ value ) * 1099511628211ULL;
-                        }
-                    }
-                }
-            }
+                                               settings, geometry_only );
+            const bool fire_blocked = std::any_of( approach.begin(), approach.end(),
+            [&]( const auto & cell ) {
+                return raid_sweep::fire_approach( *here, cell );
+            } );
             if( fire_blocked ) {
                 out.reason = "approach_fire_hazard";
-                out.hazard_revision = revision;
+                out.hazard_revision = raid_sweep::fire_revision( *here, approach );
                 out.known = true;
             }
         }

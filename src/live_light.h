@@ -69,6 +69,7 @@ bool sample_is_current( time_point turn );
 // before packet strength/weather thresholds. Consumers may check only a
 // previously received source and must independently establish loaded geometry
 // and actual observer visibility; absence here is not itself perception.
+// Uninspected tiles return unknown, never a false source-extinction witness.
 void record_loaded_sources( time_point turn, const physical_light::loaded_z_source_index &sources );
 std::optional<bool> source_present_for_turn( time_point turn, const tripoint_abs_ms &source,
         const std::string &kind );

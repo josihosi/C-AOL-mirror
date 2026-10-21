@@ -1,5 +1,6 @@
 #pragma once
 
+#include "raid_sweep.h"
 #include "bandit_dry_run.h"
 #include "bandit_pursuit_handoff.h"
 
@@ -706,6 +707,8 @@ struct scout_report_record {
     void deserialize( const JsonObject &jo );
 };
 
+std::string raid_source_evidence( const scout_report_record &report, std::uint64_t episode = 1 );
+
 struct scout_report_effective_state {
     bool valid = false;
     int age_minutes = -1;
@@ -920,6 +923,11 @@ struct hostile_operation_state {
     int defender_observation_started_minutes = -1;
     std::vector<character_id> defender_ids;
     std::vector<character_id> defender_death_ids;
+    raid_sweep::progress sweep;
+    std::string sweep_outcome;
+    std::string sweep_source_evidence;
+    std::optional<tripoint_abs_ms> sweep_source_ms;
+    std::string sweep_source_kind;
     int site_search_waypoint = 0;
     int site_search_initial_goods_value = -1;
     bool site_search_waypoint_attempted = false;
@@ -1167,6 +1175,7 @@ struct site_record {
         scout_report_record current_scout_report;
         camp_decision_record camp_decision;
         std::vector<acted_report_summary> acted_reports;
+        raid_sweep::source_memory raid_sources;
         sortie_cargo returned_cargo_stock;
         active_outing_state active_outing;
         hostile_operation_state active_hostile_operation;

@@ -37,6 +37,7 @@
 #include "bandit_live_world_probe.h"
 #include "bandit_mark_generation.h"
 #include "physical_light.h"
+#include "raid_sweep.h"
 #include "basecamp.h"
 #include "bionics.h"
 #include "cached_options.h"
@@ -4357,6 +4358,393 @@ bool live_hostile_advance_withdrawals( bandit_live_world::site_record &site )
     return changed;
 }
 
+enum class hostile_search_route_policy { native, sweep, fire_diagnosis };
+
+std::vector<tripoint_bub_ms> live_hostile_search_route(
+    const bandit_live_world::site_record &site, const npc &member, const tripoint_abs_ms &goal,
+    int candidate, std::size_t member_index, std::string_view purpose, bool engaged_member,
+    hostile_search_route_policy policy )
+{
+    map &here = get_map();
+    const auto &outing = site.active_hostile_operation.reservation;
+    const int current_turn = to_turns<int>( calendar::turn - calendar::turn_zero );
+    auto &decision_trace = raid_decision_trace::native_recorder();
+    const auto selected_trace = decision_trace.enabled() ?
+                                raid_decision_trace::environment_selected_npcs() : raid_decision_trace::selected_npc_scope{};
+    const int actor_id = member.getID().get_value();
+    const bool capture = selected_trace.includes( actor_id ) &&
+                         selected_trace.includes_turn( current_turn );
+
+    const bool already_at_goal = member.pos_abs() == goal;
+    const tripoint_bub_ms local_goal = here.get_bub( goal );
+    const bool goal_inbounds = here.inbounds( local_goal );
+    const bool goal_passable = goal_inbounds && here.passable( local_goal );
+    std::vector<tripoint_bub_ms> route;
+    struct avoid_sample {
+        tripoint_bub_ms local;
+        std::string reason;
+        const Creature *occupant = nullptr;
+    };
+    std::vector<avoid_sample> avoid_samples;
+    bool avoid_samples_truncated = false;
+    int avoid_checks = 0;
+    int occupied_checks = 0;
+    int other_avoid_checks = 0;
+    bool route_evaluated = false;
+    bool relaxed_route_evaluated = false;
+    std::vector<tripoint_bub_ms> relaxed_route;
+
+    if( !already_at_goal && goal_passable ) {
+        route_evaluated = true;
+        pathfinding_settings settings = member.get_pathfinding_settings( false );
+        if( policy == hostile_search_route_policy::fire_diagnosis ) {
+            settings.avoid_dangerous_fields = false;
+        }
+        const auto route_with_native_avoid = [&]( const npc::path_avoid_diagnostic & diagnostic ) {
+            std::string reason;
+            const auto native = member.get_path_avoid( [&]( const auto & cell, const auto why,
+            const Creature * occupant ) {
+                reason = why;
+                if( diagnostic ) {
+                    diagnostic( cell, why, occupant );
+                }
+            } );
+            return here.route( member.pos_bub( here ), pathfinding_target::point( local_goal ), settings,
+            [&]( const tripoint_bub_ms & p ) {
+                reason.clear();
+                const bool refused = native( p );
+                if( policy == hostile_search_route_policy::fire_diagnosis &&
+                    reason == "dangerous_field" && raid_sweep::fire_approach( here, p ) ) {
+                    return false; // diagnostic only; never executed
+                }
+                return refused || ( policy == hostile_search_route_policy::sweep &&
+                                    raid_sweep::fire_approach( here, p ) );
+            } );
+        };
+        if( capture ) {
+            const npc::path_avoid_diagnostic observe_avoid = [&]( const tripoint_bub_ms & p,
+            const std::string_view reason, const Creature * occupant ) {
+                ++avoid_checks;
+                if( reason == "occupied" ) {
+                    ++occupied_checks;
+                } else {
+                    ++other_avoid_checks;
+                }
+                if( std::none_of( avoid_samples.begin(), avoid_samples.end(),
+                [&p]( const avoid_sample & sample ) {
+                return sample.local == p;
+            } ) ) {
+                    if( avoid_samples.size() < 12 ) {
+                        avoid_samples.push_back( { p, std::string( reason ), occupant } );
+                    } else {
+                        avoid_samples_truncated = true;
+                    }
+                }
+            };
+            route = route_with_native_avoid( observe_avoid );
+            if( route.empty() ) {
+                // Diagnostic comparison only: retry with the member-specific avoid predicate
+                // disabled to distinguish its dynamic blockers from an otherwise absent route.
+                relaxed_route_evaluated = true;
+                relaxed_route = here.route( member.pos_bub( here ),
+                                            pathfinding_target::point( local_goal ),
+                                            settings,
+                []( const tripoint_bub_ms & ) {
+                    return false;
+                } );
+            }
+        } else {
+            route = route_with_native_avoid( {} );
+        }
+    }
+
+    if( capture ) {
+        const std::string_view diagnosis = already_at_goal ? "already_at_goal" :
+                                           !goal_inbounds ? "goal_out_of_bounds" :
+                                           !goal_passable ? "goal_not_passable" :
+                                           !route.empty() ? "route_found" :
+                                           !relaxed_route.empty() ? "member_avoid_blocks_route" :
+                                           "no_route_without_member_avoid";
+        std::ostringstream payload;
+        const auto append_abs = [&payload]( const tripoint_abs_ms & p ) {
+            payload << '[' << p.x() << ',' << p.y() << ',' << p.z() << ']';
+        };
+        const auto append_local = [&payload]( const tripoint_bub_ms & p ) {
+            payload << '[' << p.x() << ',' << p.y() << ',' << p.z() << ']';
+        };
+        payload << "\"trace_group_id\":" << raid_decision_trace::quote( selected_trace.group_id )
+                << ",\"operation_id\":" << raid_decision_trace::quote( outing.activity_id )
+                << ",\"generation\":" << outing.generation
+                << ",\"site_id\":" << raid_decision_trace::quote( site.site_id )
+                << ",\"npc_id\":" << actor_id
+                << ",\"member_index\":" << member_index
+                << ",\"candidate\":" << candidate
+                << ",\"purpose\":" << raid_decision_trace::quote( purpose )
+                << ",\"engaged\":" << ( engaged_member ? "true" : "false" )
+                << ",\"position_abs\":";
+        append_abs( member.pos_abs() );
+        payload << ",\"goal_abs\":";
+        append_abs( goal );
+        payload << ",\"goal_local\":";
+        append_local( local_goal );
+        payload << ",\"already_at_goal\":" << ( already_at_goal ? "true" : "false" )
+                << ",\"goal_inbounds\":" << ( goal_inbounds ? "true" : "false" )
+                << ",\"goal_passable\":" << ( goal_passable ? "true" : "false" )
+                << ",\"route_evaluated\":" << ( route_evaluated ? "true" : "false" )
+                << ",\"route_found\":" << ( already_at_goal || !route.empty() ? "true" : "false" )
+                << ",\"route_length\":" << ( already_at_goal ? 0 :
+                                             route_evaluated ? static_cast<int>( route.size() ) : -1 )
+                << ",\"diagnosis\":" << raid_decision_trace::quote( diagnosis )
+                << ",\"avoid_rejected_checks\":" << avoid_checks
+                << ",\"occupied_rejected_checks\":" << occupied_checks
+                << ",\"other_avoid_rejected_checks\":" << other_avoid_checks
+                << ",\"avoid_samples_truncated\":" <<
+                ( avoid_samples_truncated ? "true" : "false" )
+                << ",\"relaxed_route_evaluated\":" << ( relaxed_route_evaluated ? "true" : "false" )
+                << ",\"relaxed_route_found\":";
+        if( relaxed_route_evaluated ) {
+            payload << ( relaxed_route.empty() ? "false" : "true" );
+        } else {
+            payload << "null";
+        }
+        payload << ",\"relaxed_route_basis\":\"same_settings_without_member_avoid\""
+                << ",\"relaxed_route_length\":";
+        if( relaxed_route_evaluated ) {
+            payload << relaxed_route.size();
+        } else {
+            payload << "null";
+        }
+        payload << ",\"avoid_samples\":[";
+        for( std::size_t index = 0; index < avoid_samples.size(); ++index ) {
+            if( index > 0 ) {
+                payload << ',';
+            }
+            const avoid_sample &sample = avoid_samples[index];
+            const tripoint_abs_ms absolute = here.get_abs( sample.local );
+            payload << "{\"local\":";
+            append_local( sample.local );
+            payload << ",\"absolute\":";
+            append_abs( absolute );
+            payload << ",\"reason\":" << raid_decision_trace::quote( sample.reason )
+                    << ",\"occupant\":";
+            if( sample.occupant == nullptr ) {
+                payload << "null";
+            } else {
+                payload << "{\"type\":" << raid_decision_trace::quote(
+                            sample.occupant->is_avatar() ? "avatar" :
+                            sample.occupant->is_npc() ? "npc" :
+                            sample.occupant->is_monster() ? "monster" : "other" )
+                        << ",\"id\":";
+                if( const Character *person = sample.occupant->as_character() ) {
+                    payload << person->getID().get_value();
+                } else {
+                    payload << "null";
+                }
+                payload << ",\"monster_type\":";
+                if( const monster *mon = sample.occupant->as_monster() ) {
+                    payload << raid_decision_trace::quote( mon->type->id.str() );
+                } else {
+                    payload << "null";
+                }
+                payload << '}';
+            }
+            payload << '}';
+        }
+        payload << ']';
+        decision_trace.record( outing.activity_id + '#' + std::to_string( outing.generation ) +
+                               ':' + std::to_string( actor_id ), "raid_site_route_probe", current_turn,
+                               payload.str() );
+    }
+    return route;
+}
+
+// Only the raid search policy enters here. Fight keeps its existing finite
+// departure contract, and peaceful collection never acquires a sweep.
+bool live_cannibal_raid_sweep( bandit_live_world::site_record &site,
+                               const std::vector<npc *> &party, const std::vector<npc *> &engaged )
+{
+    auto &operation = site.active_hostile_operation;
+    auto &sweep = operation.sweep;
+    const auto &outing = operation.reservation;
+    const int now = to_turns<int>( calendar::turn - calendar::turn_zero );
+    if( sweep.generation != static_cast<std::uint64_t>( outing.generation ) ) {
+        // A report supplies an OMT, not an exact emitter square. In particular
+        // neither the avatar nor the current target is an invented source MS.
+        sweep.begin( outing.target_omt, outing.generation );
+        operation.sweep_source_evidence = bandit_live_world::raid_source_evidence(
+                                              site.current_scout_report );
+    }
+    // This is the actual local per-turn aftermath service, not elapsed time
+    // since the last loaded visit. Reentry grants no missed-time catch-up.
+    sweep.advance( now, 1 );
+    map &here = get_map();
+    const auto busy = [&]( const npc * member ) {
+        return std::find( engaged.begin(), engaged.end(), member ) != engaged.end();
+    };
+    const auto route = [&]( npc & member, const tripoint_abs_ms & goal, bool avoid_fire ) {
+        return live_hostile_search_route( site, member, goal, sweep.cursor,
+                                          std::distance( party.begin(), std::find( party.begin(), party.end(), &member ) ),
+                                          avoid_fire ? "raid_sweep" : "raid_fire_comparison", busy( &member ),
+                                          avoid_fire ? hostile_search_route_policy::sweep : hostile_search_route_policy::fire_diagnosis );
+    };
+    if( operation.sweep_source_ms && !operation.sweep_source_kind.empty() &&
+        here.inbounds( *operation.sweep_source_ms ) ) {
+        const auto source_square = here.get_bub( *operation.sweep_source_ms );
+        for( const npc *member : party ) {
+            if( busy( member ) || !live_bandit_can_make_ordinary_visual_observation( *member ) ||
+                !member->sees( here, source_square ) ) {
+                continue;
+            }
+            auto present = live_light::source_present_for_turn( calendar::turn,
+                *operation.sweep_source_ms, operation.sweep_source_kind );
+            if( !present && operation.sweep_source_kind == "smoke" ) {
+                present = here.get_field_intensity( source_square, field_type_id( "fd_fire" ) ) > 0 ||
+                          here.get_field_intensity( source_square, field_type_id( "fd_smoke" ) ) > 0;
+            }
+            if( present && !*present ) {
+                site.raid_sources.observe_absence( outing.target_omt, now );
+            }
+            break;
+        }
+    }
+    // A genuinely reopened local approach is material evidence. Probing an
+    // unchanged refusal cannot refresh the deadline; each exclusion retries once.
+    for( const auto &candidate : sweep.candidates ) {
+        if( ( candidate.state != raid_sweep::disposition::hazardous &&
+              candidate.state != raid_sweep::disposition::unreachable ) || candidate.reconsidered ) {
+            continue;
+        }
+        for( npc *member : party ) {
+            if( busy( member ) || !here.inbounds( candidate.position ) ||
+                raid_sweep::fire_approach( here, here.get_bub( candidate.position ) ) ) {
+                continue;
+            }
+            if( member->pos_abs() == candidate.position ||
+                !route( *member, candidate.position, true ).empty() ) {
+                sweep.reconsider( candidate.position, 0, std::to_string( member->getID().get_value() ) );
+                break;
+            }
+        }
+    }
+    bool changed = false;
+    while( const auto target = sweep.pending() ) {
+        npc *observer = nullptr;
+        for( npc *member : party ) {
+            if( !busy( member ) && member->pos_abs() == *target && here.inbounds( *target ) &&
+                !raid_sweep::fire_approach( here, here.get_bub( *target ) ) &&
+                live_bandit_can_make_ordinary_visual_observation( *member ) &&
+                member->sight_range( here.ambient_light_at( here.get_bub( *target ) ) ) > 0 &&
+                member->sees( here, here.get_bub( *target ) ) ) {
+                observer = member;
+                break;
+            }
+        }
+        if( !observer ) {
+            break;
+        }
+        for( const auto &stair : here.points_in_radius( observer->pos_bub( here ), 24, 0 ) ) {
+            if( !observer->sees( here, stair ) ) {
+                continue;
+            }
+            for( int dz : {
+                     -1, 1
+                 } ) {
+                const auto landing = stair + tripoint_rel_ms( 0, 0, dz );
+                if( here.inbounds( landing ) && here.on_matching_stairs( stair, landing ) &&
+                    here.valid_move( stair, landing ) ) {
+                    sweep.add( here.get_abs( landing ) );
+                    sweep.add_floor( project_to<coords::omt>( here.get_abs( landing ) ) );
+                }
+            }
+        }
+        changed |= sweep.arrive( observer->pos_abs(), true );
+    }
+    bool safe_approach = false;
+    std::vector<std::string> available_members;
+    bool fire_refusal = false;
+    std::uint64_t revision = 0;
+    const auto pending = sweep.pending();
+    if( !pending ) {
+        operation.sweep_outcome = sweep.outcome();
+        site.raid_sources.finish( outing.target_omt, outing.generation,
+                                  operation.sweep_source_evidence, operation.sweep_outcome );
+        return false;
+    }
+    for( const npc *member : party ) {
+        if( !busy( member ) ) {
+            sweep.approach( member->pos_abs(), std::to_string( member->getID().get_value() ) );
+        }
+    }
+    for( npc *member : party ) {
+        if( busy( member ) ) {
+            sweep.made_progress(); // actual selected native combat, not raw sight
+            continue;
+        }
+        if( member->goto_to_this_pos && member->goto_to_this_pos != pending &&
+        std::any_of( sweep.candidates.begin(), sweep.candidates.end(), [&]( const auto & candidate ) {
+        return candidate.position == *member->goto_to_this_pos;
+    } ) ) {
+            // Retire only this sweep's obsolete order. Unknown next geometry
+            // cannot leave the executor walking a deferred/searched goal.
+            member->goto_to_this_pos.reset();
+            member->path.clear();
+            changed = true;
+        }
+        if( !here.inbounds( *pending ) ) {
+            continue; // unknown geometry remains unsearched
+        }
+        const auto destination = here.get_bub( *pending );
+        if( raid_sweep::fire_approach( here, destination ) ) {
+            fire_refusal = true;
+            revision = raid_sweep::fire_revision( here, {destination} );
+            if( member->goto_to_this_pos == pending ) {
+                member->goto_to_this_pos.reset();
+                member->path.clear();
+            }
+            continue;
+        }
+        if( member->pos_abs() == *pending ) {
+            safe_approach = true; // no eligible observation in the arrival pass
+            available_members.push_back( std::to_string( member->getID().get_value() ) );
+            continue;
+        }
+        auto path = route( *member, *pending, true );
+        if( path.empty() ) {
+            const auto unsafe = route( *member, *pending, false );
+            if( std::any_of( unsafe.begin(), unsafe.end(), [&]( const auto & p ) {
+            return raid_sweep::fire_approach( here, p );
+            } ) ) {
+                fire_refusal = true;
+                revision = raid_sweep::fire_revision( here, unsafe );
+            }
+            // Clear only this search order, never a native combat/escape order.
+            if( member->goto_to_this_pos == pending ) {
+                member->goto_to_this_pos.reset();
+                member->path.clear();
+            }
+            continue;
+        }
+        safe_approach = true;
+        available_members.push_back( std::to_string( member->getID().get_value() ) );
+        changed |= member->goto_to_this_pos != pending;
+        member->goto_to_this_pos = *pending;
+        member->path = std::move( path );
+    }
+    if( sweep.pending() == pending ) {
+        if( !safe_approach && fire_refusal ) {
+            changed |= sweep.exclude( raid_sweep::disposition::hazardous, revision );
+        } else if( sweep.obstructed() ) {
+            changed |= sweep.exclude( raid_sweep::disposition::unreachable, 0, available_members );
+        }
+    }
+    if( !sweep.pending() ) {
+        operation.sweep_outcome = sweep.outcome();
+        site.raid_sources.finish( outing.target_omt, outing.generation,
+                                  operation.sweep_source_evidence, operation.sweep_outcome );
+    }
+    return changed;
+}
+
 bool live_cannibal_raid_advance_site_search( bandit_live_world::site_record &site )
 {
     bandit_live_world::hostile_operation_state &operation = site.active_hostile_operation;
@@ -4521,289 +4909,134 @@ bool live_cannibal_raid_advance_site_search( bandit_live_world::site_record &sit
         return false;
     }
 
-    const tripoint_abs_omt approach = outing.shared_route.empty() ? outing.target_omt :
-                                      outing.shared_route.back();
-    const int floor_step = outing.target_omt.z() >= approach.z() ? 1 : -1;
-    const int floor_count = std::abs( outing.target_omt.z() - approach.z() ) + 1;
-    const int total_waypoints = floor_count * static_cast<int>
-                                ( live_bandit_site_search_waypoints.size() );
-    const int current_turn = to_turns<int>( calendar::turn - calendar::turn_zero );
-    raid_decision_trace::recorder &decision_trace = raid_decision_trace::native_recorder();
-    const raid_decision_trace::selected_npc_scope selected_trace = decision_trace.enabled() ?
-            raid_decision_trace::environment_selected_npcs() : raid_decision_trace::selected_npc_scope{};
-    if( operation.site_search_retry_after_turn > current_turn ) {
-        return false;
-    }
-    const auto waypoint_goal = [&]( const int waypoint_index, const std::size_t member_index ) {
-        const int floor_z = approach.z() + floor_step *
-                            ( waypoint_index / static_cast<int>( live_bandit_site_search_waypoints.size() ) );
-        const tripoint_abs_omt floor_source( outing.target_omt.x(), outing.target_omt.y(), floor_z );
-        const std::size_t waypoint = ( static_cast<std::size_t>( waypoint_index ) + member_index ) %
-                                     live_bandit_site_search_waypoints.size();
-        return project_to<coords::ms>( floor_source ) + live_bandit_site_search_waypoints[waypoint];
-    };
-    const auto path_to_goal = [&]( const npc & member, const tripoint_abs_ms & goal,
-                                   const int candidate, const std::size_t member_index,
-    const std::string_view purpose ) {
-        const int actor_id = member.getID().get_value();
-        const bool capture = selected_trace.includes( actor_id ) &&
-                             selected_trace.includes_turn( current_turn );
-        const bool engaged_member = std::find( engaged.begin(), engaged.end(), &member ) != engaged.end();
-        const bool already_at_goal = member.pos_abs() == goal;
-        const tripoint_bub_ms local_goal = here.get_bub( goal );
-        const bool goal_inbounds = here.inbounds( local_goal );
-        const bool goal_passable = goal_inbounds && here.passable( local_goal );
-        std::vector<tripoint_bub_ms> route;
-        struct avoid_sample {
-            tripoint_bub_ms local;
-            std::string reason;
-            const Creature *occupant = nullptr;
+    if( !fight_shakedown ) {
+        const bool sweep_changed = live_cannibal_raid_sweep( site, party, engaged );
+        if( operation.sweep.pending() ) {
+            trace_search( "physical_sweep_pending", nullptr, nullptr, party );
+            return withdrawal_changed || sweep_changed;
+        }
+    } else {
+        const tripoint_abs_omt approach = outing.shared_route.empty() ? outing.target_omt :
+                                          outing.shared_route.back();
+        const int floor_step = outing.target_omt.z() >= approach.z() ? 1 : -1;
+        const int floor_count = std::abs( outing.target_omt.z() - approach.z() ) + 1;
+        const int total_waypoints = floor_count * static_cast<int>
+                                    ( live_bandit_site_search_waypoints.size() );
+        const int current_turn = to_turns<int>( calendar::turn - calendar::turn_zero );
+        if( operation.site_search_retry_after_turn > current_turn ) {
+            return false;
+        }
+        const auto waypoint_goal = [&]( const int waypoint_index, const std::size_t member_index ) {
+            const int floor_z = approach.z() + floor_step *
+                                ( waypoint_index / static_cast<int>( live_bandit_site_search_waypoints.size() ) );
+            const tripoint_abs_omt floor_source( outing.target_omt.x(), outing.target_omt.y(), floor_z );
+            const std::size_t waypoint = ( static_cast<std::size_t>( waypoint_index ) + member_index ) %
+                                         live_bandit_site_search_waypoints.size();
+            return project_to<coords::ms>( floor_source ) + live_bandit_site_search_waypoints[waypoint];
         };
-        std::vector<avoid_sample> avoid_samples;
-        bool avoid_samples_truncated = false;
-        int avoid_checks = 0;
-        int occupied_checks = 0;
-        int other_avoid_checks = 0;
-        bool route_evaluated = false;
-        bool relaxed_route_evaluated = false;
-        std::vector<tripoint_bub_ms> relaxed_route;
-
-        if( !already_at_goal && goal_passable ) {
-            route_evaluated = true;
-            const pathfinding_settings &settings = member.get_pathfinding_settings( false );
-            if( capture ) {
-                const npc::path_avoid_diagnostic observe_avoid = [&]( const tripoint_bub_ms & p,
-                const std::string_view reason, const Creature * occupant ) {
-                    ++avoid_checks;
-                    if( reason == "occupied" ) {
-                        ++occupied_checks;
-                    } else {
-                        ++other_avoid_checks;
+        const auto path_to_goal = [&]( const npc & member, const tripoint_abs_ms & goal,
+        int candidate, std::size_t member_index, std::string_view purpose ) {
+            return member.pos_abs() == goal || !live_hostile_search_route( site, member, goal,
+                candidate, member_index, purpose,
+                std::find( engaged.begin(), engaged.end(), &member ) != engaged.end(),
+                hostile_search_route_policy::native ).empty();
+        };
+        while( operation.site_search_waypoint < total_waypoints ) {
+            const int floor_end = std::min( total_waypoints,
+                                            ( operation.site_search_waypoint /
+                                              static_cast<int>( live_bandit_site_search_waypoints.size() ) + 1 ) *
+                                            static_cast<int>( live_bandit_site_search_waypoints.size() ) );
+            bool floor_accessible = false;
+            for( int candidate = operation.site_search_waypoint; candidate < floor_end && !floor_accessible;
+                 ++candidate ) {
+                for( std::size_t index = 0; index < party.size(); ++index ) {
+                    if( std::find( engaged.begin(), engaged.end(), party[index] ) == engaged.end() &&
+                        path_to_goal( *party[index], waypoint_goal( candidate, index ), candidate, index,
+                                      "floor_access" ) ) {
+                        floor_accessible = true;
+                        break;
                     }
-                    if( std::none_of( avoid_samples.begin(), avoid_samples.end(),
-                    [&p]( const avoid_sample & sample ) {
-                    return sample.local == p;
-                } ) ) {
-                        if( avoid_samples.size() < 12 ) {
-                            avoid_samples.push_back( { p, std::string( reason ), occupant } );
-                        } else {
-                            avoid_samples_truncated = true;
-                        }
-                    }
-                };
-                route = here.route( member.pos_bub( here ), pathfinding_target::point( local_goal ),
-                                    settings, member.get_path_avoid( observe_avoid ) );
-                if( route.empty() ) {
-                    // Diagnostic comparison only: retry with the member-specific avoid predicate
-                    // disabled to distinguish its dynamic blockers from an otherwise absent route.
-                    relaxed_route_evaluated = true;
-                    relaxed_route = here.route( member.pos_bub( here ),
-                                                pathfinding_target::point( local_goal ),
-                                                settings,
-                    []( const tripoint_bub_ms & ) {
-                        return false;
-                    } );
                 }
-            } else {
-                route = here.route( member.pos_bub( here ), pathfinding_target::point( local_goal ),
-                                    settings, member.get_path_avoid() );
             }
-        }
-
-        if( capture ) {
-            const std::string_view diagnosis = already_at_goal ? "already_at_goal" :
-                                               !goal_inbounds ? "goal_out_of_bounds" :
-                                               !goal_passable ? "goal_not_passable" :
-                                               !route.empty() ? "route_found" :
-                                               !relaxed_route.empty() ? "member_avoid_blocks_route" :
-                                               "no_route_without_member_avoid";
-            std::ostringstream payload;
-            const auto append_abs = [&payload]( const tripoint_abs_ms & p ) {
-                payload << '[' << p.x() << ',' << p.y() << ',' << p.z() << ']';
-            };
-            const auto append_local = [&payload]( const tripoint_bub_ms & p ) {
-                payload << '[' << p.x() << ',' << p.y() << ',' << p.z() << ']';
-            };
-            payload << "\"trace_group_id\":" << raid_decision_trace::quote( selected_trace.group_id )
-                    << ",\"operation_id\":" << raid_decision_trace::quote( outing.activity_id )
-                    << ",\"generation\":" << outing.generation
-                    << ",\"site_id\":" << raid_decision_trace::quote( site.site_id )
-                    << ",\"npc_id\":" << actor_id
-                    << ",\"member_index\":" << member_index
-                    << ",\"candidate\":" << candidate
-                    << ",\"purpose\":" << raid_decision_trace::quote( purpose )
-                    << ",\"engaged\":" << ( engaged_member ? "true" : "false" )
-                    << ",\"position_abs\":";
-            append_abs( member.pos_abs() );
-            payload << ",\"goal_abs\":";
-            append_abs( goal );
-            payload << ",\"goal_local\":";
-            append_local( local_goal );
-            payload << ",\"already_at_goal\":" << ( already_at_goal ? "true" : "false" )
-                    << ",\"goal_inbounds\":" << ( goal_inbounds ? "true" : "false" )
-                    << ",\"goal_passable\":" << ( goal_passable ? "true" : "false" )
-                    << ",\"route_evaluated\":" << ( route_evaluated ? "true" : "false" )
-                    << ",\"route_found\":" << ( already_at_goal || !route.empty() ? "true" : "false" )
-                    << ",\"route_length\":" << ( already_at_goal ? 0 :
-                                                 route_evaluated ? static_cast<int>( route.size() ) : -1 )
-                    << ",\"diagnosis\":" << raid_decision_trace::quote( diagnosis )
-                    << ",\"avoid_rejected_checks\":" << avoid_checks
-                    << ",\"occupied_rejected_checks\":" << occupied_checks
-                    << ",\"other_avoid_rejected_checks\":" << other_avoid_checks
-                    << ",\"avoid_samples_truncated\":" <<
-                    ( avoid_samples_truncated ? "true" : "false" )
-                    << ",\"relaxed_route_evaluated\":" << ( relaxed_route_evaluated ? "true" : "false" )
-                    << ",\"relaxed_route_found\":";
-            if( relaxed_route_evaluated ) {
-                payload << ( relaxed_route.empty() ? "false" : "true" );
-            } else {
-                payload << "null";
+            if( !floor_accessible ) {
+                operation.site_search_retry_after_turn = current_turn + 60;
+                trace_search( "floor_access_unavailable", nullptr, nullptr, {} );
+                return false;
             }
-            payload << ",\"relaxed_route_basis\":\"same_settings_without_member_avoid\""
-                    << ",\"relaxed_route_length\":";
-            if( relaxed_route_evaluated ) {
-                payload << relaxed_route.size();
-            } else {
-                payload << "null";
-            }
-            payload << ",\"avoid_samples\":[";
-            for( std::size_t index = 0; index < avoid_samples.size(); ++index ) {
-                if( index > 0 ) {
-                    payload << ',';
-                }
-                const avoid_sample &sample = avoid_samples[index];
-                const tripoint_abs_ms absolute = here.get_abs( sample.local );
-                payload << "{\"local\":";
-                append_local( sample.local );
-                payload << ",\"absolute\":";
-                append_abs( absolute );
-                payload << ",\"reason\":" << raid_decision_trace::quote( sample.reason )
-                        << ",\"occupant\":";
-                if( sample.occupant == nullptr ) {
-                    payload << "null";
-                } else {
-                    payload << "{\"type\":" << raid_decision_trace::quote(
-                                sample.occupant->is_avatar() ? "avatar" :
-                                sample.occupant->is_npc() ? "npc" :
-                                sample.occupant->is_monster() ? "monster" : "other" )
-                            << ",\"id\":";
-                    if( const Character *person = sample.occupant->as_character() ) {
-                        payload << person->getID().get_value();
-                    } else {
-                        payload << "null";
-                    }
-                    payload << ",\"monster_type\":";
-                    if( const monster *mon = sample.occupant->as_monster() ) {
-                        payload << raid_decision_trace::quote( mon->type->id.str() );
-                    } else {
-                        payload << "null";
-                    }
-                    payload << '}';
-                }
-                payload << '}';
-            }
-            payload << ']';
-            decision_trace.record( outing.activity_id + '#' + std::to_string( outing.generation ) +
-                                   ':' + std::to_string( actor_id ), "raid_site_route_probe", current_turn,
-                                   payload.str() );
-        }
-        return already_at_goal || !route.empty();
-    };
-    while( operation.site_search_waypoint < total_waypoints ) {
-        const int floor_end = std::min( total_waypoints,
-                                        ( operation.site_search_waypoint /
-                                          static_cast<int>( live_bandit_site_search_waypoints.size() ) + 1 ) *
-                                        static_cast<int>( live_bandit_site_search_waypoints.size() ) );
-        bool floor_accessible = false;
-        for( int candidate = operation.site_search_waypoint; candidate < floor_end && !floor_accessible;
-             ++candidate ) {
+            operation.site_search_retry_after_turn = 0;
+            // The operation remembers the attempted waypoint, but an NPC's local
+            // goto order may be lost across load.  Reissue only a physically
+            // reachable goal the member has not reached.  A failed path does not
+            // count an inaccessible upper floor as searched.
+            bool missing_order = false;
             for( std::size_t index = 0; index < party.size(); ++index ) {
-                if( std::find( engaged.begin(), engaged.end(), party[index] ) == engaged.end() &&
-                    path_to_goal( *party[index], waypoint_goal( candidate, index ), candidate, index,
-                                  "floor_access" ) ) {
-                    floor_accessible = true;
+                const npc *member = party[index];
+                const tripoint_abs_ms goal = waypoint_goal( operation.site_search_waypoint, index );
+                if( std::find( engaged.begin(), engaged.end(), member ) == engaged.end() &&
+                    !member->goto_to_this_pos && member->pos_abs() != goal &&
+                    path_to_goal( *member, goal, operation.site_search_waypoint, index,
+                                  "order_recovery" ) ) {
+                    missing_order = true;
                     break;
                 }
             }
-        }
-        if( !floor_accessible ) {
-            operation.site_search_retry_after_turn = current_turn + 60;
-            trace_search( "floor_access_unavailable", nullptr, nullptr, {} );
-            return false;
-        }
-        operation.site_search_retry_after_turn = 0;
-        // The operation remembers the attempted waypoint, but an NPC's local
-        // goto order may be lost across load.  Reissue only a physically
-        // reachable goal the member has not reached.  A failed path does not
-        // count an inaccessible upper floor as searched.
-        bool missing_order = false;
-        for( std::size_t index = 0; index < party.size(); ++index ) {
-            const npc *member = party[index];
-            const tripoint_abs_ms goal = waypoint_goal( operation.site_search_waypoint, index );
-            if( std::find( engaged.begin(), engaged.end(), member ) == engaged.end() &&
-                !member->goto_to_this_pos && member->pos_abs() != goal &&
-                path_to_goal( *member, goal, operation.site_search_waypoint, index,
-                              "order_recovery" ) ) {
-                missing_order = true;
-                break;
+            if( !operation.site_search_waypoint_attempted || missing_order ) {
+                bool assigned = false;
+                std::vector<npc *> recipients;
+                for( std::size_t index = 0; index < party.size(); ++index ) {
+                    if( std::find( engaged.begin(), engaged.end(), party[index] ) != engaged.end() ||
+                        party[index]->goto_to_this_pos ) {
+                        continue;
+                    }
+                    const tripoint_abs_ms goal = waypoint_goal( operation.site_search_waypoint, index );
+                    if( party[index]->pos_abs() != goal &&
+                        path_to_goal( *party[index], goal, operation.site_search_waypoint, index,
+                                      "waypoint_assignment" ) ) {
+                        party[index]->goto_to_this_pos = goal;
+                        assigned = true;
+                        recipients.push_back( party[index] );
+                    }
+                }
+                operation.site_search_waypoint_attempted = true;
+                if( assigned ) {
+                    trace_search( "waypoint_assigned", nullptr, nullptr, recipients );
+                    return true;
+                }
+                trace_search( "waypoint_unreachable", nullptr, nullptr, {} );
             }
-        }
-        if( !operation.site_search_waypoint_attempted || missing_order ) {
-            bool assigned = false;
-            std::vector<npc *> recipients;
+            bool travelling = false;
+            std::vector<npc *> travelling_members;
             for( std::size_t index = 0; index < party.size(); ++index ) {
-                if( std::find( engaged.begin(), engaged.end(), party[index] ) != engaged.end() ||
-                    party[index]->goto_to_this_pos ) {
-                    continue;
-                }
-                const tripoint_abs_ms goal = waypoint_goal( operation.site_search_waypoint, index );
-                if( party[index]->pos_abs() != goal &&
-                    path_to_goal( *party[index], goal, operation.site_search_waypoint, index,
-                                  "waypoint_assignment" ) ) {
-                    party[index]->goto_to_this_pos = goal;
-                    assigned = true;
-                    recipients.push_back( party[index] );
-                }
-            }
-            operation.site_search_waypoint_attempted = true;
-            if( assigned ) {
-                trace_search( "waypoint_assigned", nullptr, nullptr, recipients );
-                return true;
-            }
-            trace_search( "waypoint_unreachable", nullptr, nullptr, {} );
-        }
-        bool travelling = false;
-        std::vector<npc *> travelling_members;
-        for( std::size_t index = 0; index < party.size(); ++index ) {
-            npc *member = party[index];
-            if( std::find( engaged.begin(), engaged.end(), member ) == engaged.end() &&
-                member->goto_to_this_pos && member->pos_abs() != *member->goto_to_this_pos ) {
-                if( !member->path.empty() ||
-                    path_to_goal( *member, *member->goto_to_this_pos,
-                                  operation.site_search_waypoint, index, "existing_order_validation" ) ) {
-                    travelling = true;
-                    travelling_members.push_back( member );
-                } else {
-                    member->goto_to_this_pos.reset();
+                npc *member = party[index];
+                if( std::find( engaged.begin(), engaged.end(), member ) == engaged.end() &&
+                    member->goto_to_this_pos && member->pos_abs() != *member->goto_to_this_pos ) {
+                    if( !member->path.empty() ||
+                        path_to_goal( *member, *member->goto_to_this_pos,
+                                      operation.site_search_waypoint, index, "existing_order_validation" ) ) {
+                        travelling = true;
+                        travelling_members.push_back( member );
+                    } else {
+                        member->goto_to_this_pos.reset();
+                    }
                 }
             }
+            if( travelling ) {
+                trace_search( "waiting_for_movement", nullptr, nullptr, travelling_members );
+                return false;
+            }
+            if( !engaged.empty() && std::any_of( party.begin(), party.end(), [&]( const npc * member ) {
+            return std::find( engaged.begin(), engaged.end(), member ) == engaged.end() &&
+                       member->goto_to_this_pos.has_value();
+            } ) ) {
+                trace_search( "combat_target_search_hold", engaged.front(), first_combat_target, {} );
+                return false;
+            }
+            for( npc *member : party ) {
+                member->goto_to_this_pos.reset();
+            }
+            operation.site_search_waypoint++;
+            operation.site_search_waypoint_attempted = false;
         }
-        if( travelling ) {
-            trace_search( "waiting_for_movement", nullptr, nullptr, travelling_members );
-            return false;
-        }
-        if( !engaged.empty() && std::any_of( party.begin(), party.end(), [&]( const npc * member ) {
-        return std::find( engaged.begin(), engaged.end(), member ) == engaged.end() &&
-                   member->goto_to_this_pos.has_value();
-        } ) ) {
-            trace_search( "combat_target_search_hold", engaged.front(), first_combat_target, {} );
-            return false;
-        }
-        for( npc *member : party ) {
-            member->goto_to_this_pos.reset();
-        }
-        operation.site_search_waypoint++;
-        operation.site_search_waypoint_attempted = false;
     }
 
     if( !engaged.empty() ) {
@@ -6499,6 +6732,10 @@ bool note_live_bandit_aftermath()
     }
 
     for( bandit_live_world::site_record &site : state.sites ) {
+        if( !site.retired_empty_site &&
+            site.site_kind == bandit_live_world::owned_site_kind::cannibal_camp ) {
+            site.raid_sources.advance( to_turns<int>( calendar::turn - calendar::turn_zero ), 1 );
+        }
         const bandit_live_world::active_outing_state &assault_reservation =
             site.active_hostile_operation.reservation;
         for( const character_id member_id : assault_reservation.member_ids ) {
@@ -7311,7 +7548,6 @@ void record_r008_production_channel_scan(
 }
 
 static constexpr int live_bandit_system_envelope_omt = 40;
-static constexpr int live_bandit_local_source_scan_radius_ms = 60;
 static constexpr int live_bandit_structural_scan_budget = 12;
 static constexpr int live_bandit_structural_dispatch_cap = 2;
 static constexpr int live_bandit_structural_watch_path_budget = 8;
@@ -10937,7 +11173,7 @@ std::vector<live_bandit_signal_observation> observe_loaded_z_light_sources()
                                    "bandit_live_world signal scan: signal_packet=no kind=smoke/fire/light"
                                    << " now_minutes=" << live_bandit_current_minutes()
                                    << " tiles_examined=" << source_index.tiles_examined
-                                   << " scan_radius_ms=" << live_bandit_local_source_scan_radius_ms
+                                   << " discovery_interval_turns=" << physical_light::loaded_source_sampler::discovery_interval_turns
                                    << " weather=" << bandit_mark_generation::to_string( weather_band )
                                    << " light_time=" << bandit_mark_generation::to_string( light_time )
                                    << " light_weather=" << bandit_mark_generation::to_string( light_weather )
@@ -10953,7 +11189,7 @@ std::vector<live_bandit_signal_observation> observe_loaded_z_light_sources()
                                    << " packets=" << observations.size()
                                    << " smoke_packets=" << smoke_packets
                                    << " light_packets=" << light_packets
-                                   << " scan_radius_ms=" << live_bandit_local_source_scan_radius_ms
+                                   << " discovery_interval_turns=" << physical_light::loaded_source_sampler::discovery_interval_turns
                                    << " weather=" << bandit_mark_generation::to_string( weather_band )
                                    << " light_time=" << bandit_mark_generation::to_string( light_time )
                                    << " light_weather=" << bandit_mark_generation::to_string( light_weather )

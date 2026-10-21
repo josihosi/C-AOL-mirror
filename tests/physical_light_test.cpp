@@ -653,7 +653,7 @@ TEST_CASE( "live_light_delivers_empty_current_samples_to_known_migo_owners_once"
 }
 
 TEST_CASE( "live_light_raw_source_presence_is_current_and_independent_of_packet_threshold",
-           "[physical_light][continuity]" )
+           "[physical_light][continuity][raid_sweep]" )
 {
     live_light::reset();
     live_light::callbacks callbacks;
@@ -678,7 +678,9 @@ TEST_CASE( "live_light_raw_source_presence_is_current_and_independent_of_packet_
     CHECK( live_light::source_present_for_turn( turn, source, "light" ) == true );
     CHECK_FALSE( live_light::source_present_for_turn( turn + 1_turns, source, "light" ) );
     callbacks.discover = [&]() {
-        live_light::record_loaded_sources( turn + 1_turns, {} );
+        physical_light::loaded_z_source_index absent;
+        absent.examined_positions.push_back( source );
+        live_light::record_loaded_sources( turn + 1_turns, absent );
         return std::vector<live_bandit_signal_observation>();
     };
     live_light::run_advancing_turn( turn + 1_turns, callbacks );
@@ -686,6 +688,13 @@ TEST_CASE( "live_light_raw_source_presence_is_current_and_independent_of_packet_
     CHECK( *live_light::source_present_for_turn( turn + 1_turns, source, "light" ) == false );
     CHECK( *live_light::source_present_for_turn( turn + 1_turns, source, "smoke" ) == false );
     CHECK_FALSE( live_light::source_present_for_turn( turn, source, "light" ) );
+    callbacks.discover = [&]() {
+        live_light::record_loaded_sources( turn + 2_turns, {} );
+        return std::vector<live_bandit_signal_observation>();
+    };
+    live_light::run_advancing_turn( turn + 2_turns, callbacks );
+    CHECK_FALSE( live_light::source_present_for_turn( turn + 2_turns, source, "light" ) );
+    CHECK_FALSE( live_light::source_present_for_turn( turn + 2_turns, source, "smoke" ) );
     live_light::reset();
 }
 
@@ -1317,7 +1326,10 @@ TEST_CASE( "physical_light_stationary_records_are_source_bound", "[physical_ligh
     clear_map_without_vision();
     avatar &guy = get_avatar();
     map &here = get_map();
-    const tripoint_bub_ms origin = guy.pos_bub();
+    const auto source_omt = coords::project_to<coords::omt>( guy.pos_abs() );
+    const tripoint_bub_ms origin = here.get_bub( coords::project_to<coords::ms>( source_omt ) +
+                                   point( SEEX, SEEY ) );
+    REQUIRE( here.inbounds( origin ) );
     const tripoint_bub_ms terrain_pos = origin + tripoint::east;
     const tripoint_bub_ms furniture_pos = origin + tripoint::west;
     const tripoint_bub_ms field_a = origin + tripoint::north;
@@ -1596,4 +1608,23 @@ TEST_CASE( "underground or smoke-suppressing sources need an actual outlet",
     here.build_map_cache( 1 );
     REQUIRE( here.has_flag( ter_furn_flag::TFLAG_SUPPRESS_SMOKE, ground ) );
     CHECK_FALSE( physical_light::evaluate_smoke_support( here, ground ).position );
+}
+
+TEST_CASE( "raid_sweep_ignores_removed_field_light_before_field_cleanup",
+           "[physical_light][raid_sweep]" )
+{
+    clear_map();
+    map &here = get_map();
+    const tripoint_bub_ms source( 60, 60, 0 );
+    here.add_field( source, field_type_id( "fd_fire" ), 3 );
+    const auto before = physical_light::collect_stationary_emitters( here, source, 0 );
+    REQUIRE( std::any_of( before.begin(), before.end(), []( const auto & emitter ) {
+        return emitter.provenance == "field:fd_fire";
+    } ) );
+    here.remove_field( source, field_type_id( "fd_fire" ) );
+    REQUIRE( here.get_field_intensity( source, field_type_id( "fd_fire" ) ) == 0 );
+    const auto after = physical_light::collect_stationary_emitters( here, source, 0 );
+    CHECK( std::none_of( after.begin(), after.end(), []( const auto & emitter ) {
+        return emitter.provenance == "field:fd_fire";
+    } ) );
 }

@@ -10,6 +10,7 @@
 #include "calendar.h"
 #include "avatar.h"
 #include "field_type.h"
+#include "creature_tracker.h"
 #include "game.h"
 #include "horde_entity.h"
 #include "line.h"
@@ -34,14 +35,43 @@ namespace migo_tower
 namespace
 {
 constexpr int sensing_interval = 5 * 60;
-const std::array<point, 5> sweep_cross = {{ {12, 12}, {6, 12}, {18, 12}, {12, 6}, {12, 18} }};
-
-void add_search_candidate( operation_record &operation, const tripoint_abs_ms &position )
+physical_navigation::step_read read_owned_step( const monster &body,
+        const tripoint_abs_ms &goal, migo_population::representation owner )
 {
-    if( std::none_of( operation.sweep.candidates.begin(), operation.sweep.candidates.end(),
-    [&]( const auto &candidate ) { return candidate.position == position; } ) ) {
-        operation.sweep.candidates.push_back( {position} );
+    return physical_navigation::read_step( body, goal, [&]( const tripoint_abs_ms & p ) {
+        if( owner != migo_population::representation::abstract || p == body.pos_abs() ) {
+            return false;
+        }
+        // Route around stationary retained residents. Scheduled actors may
+        // move in this same batch; their current/source reservations remain
+        // the transport owner's responsibility, including rollback. Treating
+        // them as fixed walls can abandon an otherwise usable stair queue.
+        point_abs_om om_position;
+        tripoint_om_ms local;
+        std::tie( om_position, local ) = project_remain<coords::om>( p );
+        overmap *existing = overmap_buffer.get_existing( om_position );
+        const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
+        return resident && !resident->is_active();
+    } );
+}
+
+bool approach_available( const monster &body, const physical_navigation::step_read &step )
+{
+    if( step.next == physical_navigation::action::none ) {
+        return step.reason == "goal_reached";
     }
+    map &here = get_map();
+    if( here.inbounds( step.position ) ) {
+        const Creature *occupant = get_creature_tracker().creature_at( here.get_bub( step.position ) );
+        if( occupant && occupant != &body ) {
+            return false;
+        }
+    }
+    point_abs_om om_position;
+    tripoint_om_ms local;
+    std::tie( om_position, local ) = project_remain<coords::om>( step.position );
+    overmap *existing = overmap_buffer.get_existing( om_position );
+    return !existing || !existing->entity_at( local );
 }
 
 void observe_floor_connections( operation_record &operation, const monster &body,
@@ -72,11 +102,9 @@ void observe_floor_connections( operation_record &operation, const monster &body
             }
             // A visible, usable native connection makes the next floor a
             // hypothesis to visit. It does not reveal or search that floor.
-            add_search_candidate( operation, here.get_abs( landing ) );
+            operation.sweep.add( here.get_abs( landing ) );
             const tripoint_abs_omt next_floor( cell.xy(), landing.z() );
-            for( const auto &offset : sweep_cross ) {
-                add_search_candidate( operation, project_to<coords::ms>( next_floor ) + offset );
-            }
+            operation.sweep.add_floor( next_floor );
         }
     }
 }
@@ -96,6 +124,47 @@ std::vector<combat_profile> selected_profiles( const admission_decision &decisio
     return profiles;
 }
 
+void observe_source_access( source_history &history, const signal_record &source,
+                            const monster &observer, scout_observation::site_reader &reader )
+{
+    map &here = get_map();
+    if( !here.inbounds( observer.pos_abs() ) || !observer.can_see() ) {
+        return;
+    }
+    raid_sweep::progress region;
+    region.begin( source.source_omt, 1, source.source_ms );
+    for( const auto &candidate : region.candidates ) {
+        if( !here.inbounds( candidate.position ) ) {
+            continue;
+        }
+        const auto p = here.get_bub( candidate.position );
+        const int range = std::min( MAX_VIEW_DISTANCE * 2,
+                                    2 * observer.sight_range( here.ambient_light_at( p ) ) );
+        if( range <= 0 || !here.sees_with_optics( observer.pos_bub( here ), p, range, 2.0f ) ||
+            !reader.read_ray( observer.pos_abs(), candidate.position ).visible ) {
+            continue;
+        }
+        // Retain the latest actually visible fact at each bounded candidate.
+        // Darkness, leaving the bubble or another observer's narrower view
+        // cannot turn forgotten geometry into a new source episode.
+        const auto key = candidate.position.to_string_writable();
+        if( history.observed_access.size() >= 45 * OVERMAP_LAYERS + 1 &&
+            history.observed_access.count( key ) == 0 ) {
+            continue;
+        }
+        history.observed_access[key] =
+            std::to_string( here.move_cost( p ) ) + ":" +
+            std::to_string( here.has_floor_or_water( p ) ) + ":" +
+            std::to_string( here.has_flag( ter_furn_flag::TFLAG_GOES_UP, p ) ) + ":" +
+            std::to_string( here.has_flag( ter_furn_flag::TFLAG_GOES_DOWN, p ) ) + ":" +
+            std::to_string( static_cast<bool>( here.ter( p )->open ) ||
+                            static_cast<bool>( here.furn( p )->open ) ) + ":" +
+            std::to_string( here.get_field_intensity( p, field_type_id( "fd_fire" ) ) ) + ":" +
+            std::to_string( here.get_field_intensity( p, field_type_id( "fd_fire" ) ) > 0 &&
+                            here.has_flag( ter_furn_flag::TFLAG_FIRE_CONTAINER, p ) );
+    }
+}
+
 void update_source_evidence( source_history &history, const signal_record &signal )
 {
     std::vector<std::string> scenes;
@@ -103,11 +172,14 @@ void update_source_evidence( source_history &history, const signal_record &signa
         scenes.push_back( capability_key( scene ) );
     }
     std::sort( scenes.begin(), scenes.end() );
-    std::string facts = signal.kind + ":" + signal.source_omt.to_string_writable() + ":" +
+    std::string facts = signal.source_omt.to_string_writable() + ":" +
                         ( signal.source_ms ? signal.source_ms->to_string_writable() : "uncertain_square" ) +
                         ":" + std::to_string( history.episode );
     for( const auto &scene : scenes ) {
         facts += ":" + scene;
+    }
+    for( const auto &entry : history.observed_access ) {
+        facts += ":access:" + entry.first + ":" + entry.second;
     }
     // Stable compact fingerprints, independent of packet/member IDs, clocks,
     // fresh births or the ordering of the actual observed scene snapshots.
@@ -152,6 +224,7 @@ void observe_extinction( site_state &site, const signal_record &source,
     }
     if( auto *history = site.find_source( source.source_omt ) ) {
         history->observed_active = false;
+        history->extinct_world = to_turn<int>( calendar::turn );
     }
 }
 
@@ -299,9 +372,20 @@ void assess_response( site_state &state, const migo_population::site_record &pop
         return;
     }
     if( !history->observed_active ) {
-        ++history->episode; // only after a physically confirmed extinction
+        if( history->extinct_world < 0 ) {
+            // Legacy extinction lacks a trustworthy ordering boundary. Wait
+            // for an actual later receipt, rather than reusing its old packet.
+            history->extinct_world = to_turn<int>( calendar::turn );
+        }
+        if( state.signal->observed_turn <= history->extinct_world ) {
+            state.decision = {};
+            state.decision.reason = "source_not_reobserved_after_extinction";
+            return;
+        }
+        ++history->episode; // a real later receipt after physically confirmed extinction
         history->observed_active = true;
     }
+    observe_source_access( *history, *state.signal, observer, reader );
     remember_observation( history->opposition, enemies );
     update_source_evidence( *history, *state.signal );
     // Losing current recognition cannot turn a remembered firearm/reach
@@ -506,36 +590,8 @@ bool begin_response( const std::string &id, int now_turn )
     operation_record operation;
     operation.generation = site->next_generation;
     operation.source = *site->signal;
-    operation.sweep.source = site->signal->source_omt;
-    operation.sweep.generation = operation.generation;
+    operation.sweep.begin( site->signal->source_omt, operation.generation, site->signal->source_ms );
     operation.advance( now_turn, 0 );
-    auto add_candidate = [&]( const tripoint_abs_ms &position ) {
-        add_search_candidate( operation, position );
-    };
-    if( site->signal->source_ms ) {
-        add_candidate( *site->signal->source_ms );
-    }
-    // Finite source + eight-neighbour cross hypotheses. No unknown floor or
-    // occupant is declared searched by constructing a destination.
-    std::vector<int> floors = {0};
-    if( site->signal->source_omt.z() != 0 ) {
-        floors.push_back( site->signal->source_omt.z() );
-    }
-    for( int ring = 0; ring <= 1; ++ring ) {
-        for( int x = -ring; x <= ring; ++x ) {
-            for( int y = -ring; y <= ring; ++y ) {
-                if( std::max( std::abs( x ), std::abs( y ) ) != ring ) {
-                    continue;
-                }
-                for( int z : floors ) {
-                    const tripoint_abs_omt cell( site->signal->source_omt.xy() + point( x, y ), z );
-                    for( const auto &offset : sweep_cross ) {
-                        add_candidate( project_to<coords::ms>( cell ) + offset );
-                    }
-                }
-            }
-        }
-    }
     for( const auto &member_id : site->decision.members ) {
         const auto *member = population->find( member_id );
         monster *body = member ? home_body( *population, *geometry, *member, false ) : nullptr;
@@ -589,6 +645,30 @@ bool begin_response( const std::string &id, int now_turn )
     }
     return true;
 }
+namespace
+{
+bool operation_has_native_engagement( const monster &body )
+{
+    const int now = to_turn<int>( calendar::turn );
+    for( monster &peer : g->all_monsters() ) {
+        const auto *intent = peer.migo_intent();
+        if( peer.population_identity().site_id != body.population_identity().site_id ||
+            !intent || intent->generation != body.migo_intent()->generation ||
+            intent->phase == member_phase::returning ||
+            intent->last_observed_enemy_world < now - 1 ||
+            !owns_intent( peer, migo_population::representation::local ) ) {
+            continue;
+        }
+        Creature *target = peer.attack_target();
+        if( target && !target->is_dead_state() &&
+            peer.attitude_to( *target ) == Creature::Attitude::HOSTILE ) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
 physical_navigation::step_read prepare_step( monster &body, migo_population::representation owner )
 {
     physical_navigation::step_read result;
@@ -602,6 +682,14 @@ physical_navigation::step_read prepare_step( monster &body, migo_population::rep
     const auto &operation = *overmap_buffer.global_state.migo_towers.find(
                                 body.population_identity().site_id )->operation;
     if( intent.phase != member_phase::returning && !operation.sweep.pending() ) {
+        if( operation_has_native_engagement( body ) ) {
+            // Finished geometry cannot steal a peer's current native combat.
+            // Quiet members hold; individually returning members keep home.
+            intent.waypoint = body.pos_abs();
+            result.known = true;
+            result.reason = "operation_native_combat";
+            return result;
+        }
         intent.retreat();
     }
     if( intent.phase == member_phase::returning &&
@@ -624,21 +712,7 @@ physical_navigation::step_read prepare_step( monster &body, migo_population::rep
             intent.phase = member_phase::searching;
         }
     }
-    result = physical_navigation::read_step( body, *goal, [&]( const tripoint_abs_ms &p ) {
-        if( owner != migo_population::representation::abstract || p == body.pos_abs() ) {
-            return false;
-        }
-        // Route around stationary retained residents. Scheduled actors may
-        // move in this same batch; their current/source reservations remain
-        // the transport owner's responsibility, including rollback. Treating
-        // them as fixed walls can abandon an otherwise usable stair queue.
-        point_abs_om om_position;
-        tripoint_om_ms local;
-        std::tie( om_position, local ) = project_remain<coords::om>( p );
-        overmap *existing = overmap_buffer.get_existing( om_position );
-        const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
-        return resident && !resident->is_active();
-    } );
+    result = read_owned_step( body, *goal, owner );
     intent.waypoint = result.next == physical_navigation::action::none ?
                       body.pos_abs() : result.position;
     return result;
@@ -668,10 +742,6 @@ bool plan_local( monster &body, bool fleeing, Creature *target )
         if( const auto observed = observe_enemy( body, *target, reader ) ) {
             remember_observation( intent.observed_threats, {*observed} );
         }
-    }
-    if( !overmap_buffer.global_state.migo_towers.find( body.population_identity().site_id )->
-        operation->sweep.pending() ) {
-        intent.retreat();
     }
     const bool engaged = target && ( hostile || fleeing ) &&
                          ( intent.phase != member_phase::returning || fleeing ||
@@ -767,7 +837,13 @@ void service_operations( int now_turn, int active_elapsed )
             continue;
         }
         scout_observation::site_reader reader;
-        auto service_body = [&]( monster &body, migo_population::representation owner ) {
+        const auto candidate_at_start = operation.sweep.pending();
+        bool safe_approach = false;
+        bool fire_refusal = false;
+        std::uint64_t fire_revision = 0;
+        std::vector<std::string> available_members;
+        std::vector<std::pair<std::string, tripoint_abs_ms>> searching_positions;
+        auto service_body = [&]( monster & body, migo_population::representation owner ) {
             const auto &token = body.population_identity();
             if( token.site_id != site.site_id || !population->owns( token, owner ) ||
                 !body.migo_intent() || body.migo_intent()->generation != operation.generation ) {
@@ -802,28 +878,40 @@ void service_operations( int now_turn, int active_elapsed )
                     }
                 }
             } else {
-                if( ( it->last_position && *it->last_position != body.pos_abs() ) ||
-                    intent.last_combat_world >= now_turn - 1 ) {
+                if( !body.is_dead() ) {
+                    searching_positions.emplace_back( token.member_id, body.pos_abs() );
+                }
+                if( intent.last_combat_world >= now_turn - 1 ) {
                     operation.sweep.made_progress();
                 }
                 const int local_bound = std::max( 1, body.get_pathfinding_settings().max_dist - 2 );
                 for( const auto &candidate : operation.sweep.candidates ) {
-                    if( candidate.state != raid_sweep::disposition::hazardous || candidate.reconsidered ||
+                    if( ( candidate.state != raid_sweep::disposition::hazardous &&
+                          candidate.state != raid_sweep::disposition::unreachable ) || candidate.reconsidered ||
                         candidate.position.z() != body.pos_abs().z() ||
                         rl_dist( candidate.position, body.pos_abs() ) > local_bound ) {
                         continue;
                     }
-                    const auto reopened = physical_navigation::read_step( body, candidate.position );
-                    if( reopened.known && reopened.next != physical_navigation::action::none ) {
-                        operation.sweep.reconsider( candidate.position, 0 );
+                    const auto reopened = read_owned_step( body, candidate.position, owner );
+                    if( reopened.known && reopened.next != physical_navigation::action::none &&
+                        approach_available( body, reopened ) ) {
+                        operation.sweep.reconsider( candidate.position, 0, token.member_id );
                         break; // one actually reopened approach; no timer reset from probing
                     }
                 }
                 if( const auto pending = operation.sweep.pending() ) {
-                    const auto approach = physical_navigation::read_step( body, *pending );
-                    if( approach.reason == "approach_fire_hazard" ) {
-                        operation.sweep.exclude( raid_sweep::disposition::hazardous,
-                                                 approach.hazard_revision );
+                    const auto approach = read_owned_step( body, *pending, owner );
+                    if( operation.sweep.pending() == candidate_at_start ) {
+                        if( approach_available( body, approach ) ) {
+                            available_members.push_back( token.member_id );
+                        }
+                        if( approach.reason == "approach_fire_hazard" ) {
+                            fire_refusal = true;
+                            fire_revision = approach.hazard_revision;
+                        } else if( approach.next != physical_navigation::action::none ||
+                                   approach.reason == "goal_reached" ) {
+                            safe_approach = true;
+                        }
                     }
                 }
                 const auto pending = operation.sweep.pending();
@@ -832,7 +920,8 @@ void service_operations( int now_turn, int active_elapsed )
                     !body.has_effect( efftype_id( "narcosis" ) ) &&
                     !body.has_effect( efftype_id( "stunned" ) ) &&
                     !body.has_effect( efftype_id( "downed" ) ) &&
-                    reader.read_ray( body.pos_abs(), body.pos_abs() ).visible ) {
+                    reader.read_ray( body.pos_abs(), body.pos_abs() ).visible &&
+                    !physical_navigation::read_step( body, body.pos_abs() ).hazard_revision ) {
                     observe_extinction( site, operation.source, body, reader );
                     observe_floor_connections( operation, body, reader );
                     operation.sweep.arrive( body.pos_abs(), true );
@@ -876,8 +965,14 @@ void service_operations( int now_turn, int active_elapsed )
                 member.settled = true; // roster truth, not tower loss knowledge
             }
         }
+        for( const auto &entry : searching_positions ) {
+            operation.sweep.approach( entry.second, entry.first );
+        }
+        if( operation.sweep.pending() == candidate_at_start && !safe_approach && fire_refusal ) {
+            operation.sweep.exclude( raid_sweep::disposition::hazardous, fire_revision );
+        }
         if( operation.sweep.obstructed() ) {
-            operation.sweep.exclude( raid_sweep::disposition::unreachable, 0 );
+            operation.sweep.exclude( raid_sweep::disposition::unreachable, 0, available_members );
         }
         const bool all_settled = std::all_of( operation.members.begin(), operation.members.end(),
         []( const auto &member ) { return member.settled; } );
@@ -900,12 +995,7 @@ void service_operations( int now_turn, int active_elapsed )
         if( all_settled && ( knowledge_complete || overdue ) ) {
             operation.resolved = true;
             if( auto *history = site.find_source( operation.source.source_omt ) ) {
-                const bool incomplete_search = std::any_of( operation.sweep.candidates.begin(),
-                                               operation.sweep.candidates.end(), []( const auto &candidate ) {
-                    return candidate.state != raid_sweep::disposition::searched;
-                } );
-                history->finish( operation.generation, site.active_elapsed,
-                                 incomplete_search ? "incomplete_or_hazard_sweep" : "searched_returned",
+                history->finish( operation.generation, site.active_elapsed, operation.sweep.outcome(),
                                  operation.communicated_losses, !knowledge_complete,
                                  operation.party_at_departure );
             }

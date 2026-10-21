@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10023,6 +10024,11 @@ void hostile_operation_state::serialize( JsonOut &json ) const
     }
     json.member( "defender_ids", raw_defenders );
     json.member( "defender_death_ids", raw_deaths );
+    json.member( "sweep", sweep );
+    json.member( "sweep_outcome", sweep_outcome );
+    json.member( "sweep_source_evidence", sweep_source_evidence );
+    json.member( "sweep_source_ms", sweep_source_ms );
+    json.member( "sweep_source_kind", sweep_source_kind );
     json.member( "site_search_waypoint", site_search_waypoint );
     json.member( "site_search_initial_goods_value", site_search_initial_goods_value );
     json.member( "site_search_waypoint_attempted", site_search_waypoint_attempted );
@@ -10109,6 +10115,11 @@ void hostile_operation_state::deserialize( const JsonObject &jo )
         ( !candidate.defender_death_ids.empty() && candidate.defender_observation_started_minutes < 0 ) ) {
         jo.throw_error( "hostile defender observation precedes its encounter" );
     }
+    jo.read( "sweep", candidate.sweep );
+    jo.read( "sweep_outcome", candidate.sweep_outcome );
+    jo.read( "sweep_source_evidence", candidate.sweep_source_evidence );
+    jo.read( "sweep_source_ms", candidate.sweep_source_ms );
+    jo.read( "sweep_source_kind", candidate.sweep_source_kind );
     jo.read( "site_search_waypoint", candidate.site_search_waypoint );
     jo.read( "site_search_initial_goods_value", candidate.site_search_initial_goods_value );
     jo.read( "site_search_waypoint_attempted", candidate.site_search_waypoint_attempted );
@@ -10190,6 +10201,7 @@ void site_record::serialize( JsonOut &json ) const
     json.member( "current_scout_report", bounded.current_scout_report );
     json.member( "camp_decision", bounded.camp_decision );
     json.member( "acted_reports", bounded.acted_reports );
+    json.member( "raid_sources", bounded.raid_sources );
     json.member( "returned_cargo_stock", returned_cargo_stock );
     json.member( "active_outing", bounded.active_outing );
     json.member( "active_hostile_operation", bounded.active_hostile_operation );
@@ -10550,6 +10562,8 @@ void site_record::deserialize( const JsonObject &jo,
         camp_decision.deserialize( decision_json );
     }
     jo.read( "acted_reports", acted_reports );
+    raid_sources = raid_sweep::source_memory();
+    jo.read( "raid_sources", raid_sources );
     if( loaded_schema_version < 8 ) {
         hostile_site_profile legacy_profile = effective_profile( *this );
         const bool legacy_bandit_report =
@@ -20917,6 +20931,115 @@ static bool authorized_response_selection_is_current( const site_record &site,
                                 selection.reserve_member_ids.end(), check_at_home_ready );
 }
 
+std::string raid_source_evidence( const scout_report_record &report, std::uint64_t episode )
+{
+    std::vector<std::string> facts = {"episode:" + std::to_string( episode )};
+    for( const auto &observation : report.observations ) {
+        if( observation.record_schema_version >= 1 && observation.emitter_ms &&
+            project_to<coords::omt>( *observation.emitter_ms ) == report.target_omt &&
+            ( observation.sense == sortie_observation_sense::smoke ||
+              observation.sense == sortie_observation_sense::light ) ) {
+            facts.push_back( "emitter:" + observation.emitter_ms->to_string_writable() );
+        }
+        // Fresh smoke/light packets, watch duration, confidence, report IDs
+        // and a newly assigned scout are not changed occupants or access.
+        if( observation.sense != sortie_observation_sense::visual ||
+            observation.record_schema_version < 1 ) {
+            continue;
+        }
+        for( std::size_t i = 0; i < observation.defender_ids.size(); ++i ) {
+            facts.push_back( "defender:" + observation.defender_ids[i] + ":" +
+                             ( i < observation.defender_positions.size() ?
+                               observation.defender_positions[i].to_string_writable() : "unknown_position" ) );
+        }
+        if( observation.observed_defender_count >= 0 ) {
+            facts.push_back( "occupants:" + observation.source_omt.to_string_writable() + ":" +
+                             std::to_string( observation.observed_defender_count ) + ":" +
+                             std::to_string( observation.observed_power_low ) + ":" +
+                             std::to_string( observation.observed_power_high ) );
+        }
+        if( observation.kind == sortie_observation_kind::route_state ||
+            observation.kind == sortie_observation_kind::contradiction ) {
+            facts.push_back( "access:" + observation.source_omt.to_string_writable() + ":" +
+                             observation.state_key );
+        }
+    }
+    return raid_sweep::fingerprint( std::move( facts ) );
+}
+
+static int raid_signal_world( const scout_report_record &report )
+{
+    int latest = -1;
+    for( const auto &observation : report.observations ) {
+        if( observation.record_schema_version >= 1 && observation.emitter_ms &&
+            project_to<coords::omt>( *observation.emitter_ms ) == report.target_omt &&
+            ( observation.sense == sortie_observation_sense::smoke ||
+              observation.sense == sortie_observation_sense::light ) &&
+            observation.observed_minutes >= 0 && observation.observed_minutes <= INT_MAX / 60 ) {
+            latest = std::max( latest, observation.observed_minutes * 60 );
+        }
+    }
+    return latest;
+}
+
+static bool raid_source_ready( const site_record &site, hostile_operation_kind kind )
+{
+    return kind != hostile_operation_kind::raid ||
+           site.raid_sources.ready( site.current_scout_report.target_omt,
+                                    raid_source_evidence( site.current_scout_report,
+                                            site.raid_sources.next_episode( site.current_scout_report.target_omt,
+                                                    raid_signal_world( site.current_scout_report ) ) ) );
+}
+
+static void prepare_raid_sweep( hostile_operation_state &operation, const site_record &site )
+{
+    if( operation.operation_kind != hostile_operation_kind::raid ) {
+        return;
+    }
+    const auto &report = site.current_scout_report;
+    std::optional<tripoint_abs_ms> exact;
+    for( const auto &observation : report.observations ) {
+        if( observation.record_schema_version >= 1 && observation.emitter_ms &&
+            observation.source_omt == report.target_omt &&
+            project_to<coords::omt>( *observation.emitter_ms ) == report.target_omt ) {
+            exact = observation.emitter_ms;
+            operation.sweep_source_kind = observation.sense == sortie_observation_sense::smoke ? "smoke" :
+                                          observation.sense == sortie_observation_sense::light ? "light" : "";
+            break;
+        }
+    }
+    operation.sweep.begin( report.target_omt, operation.reservation.generation, exact );
+    operation.sweep_source_ms = exact;
+    operation.sweep_source_evidence = raid_source_evidence( report,
+        site.raid_sources.next_episode( report.target_omt, raid_signal_world( report ) ) );
+}
+
+static bool raid_sweep_matches_report( const hostile_operation_state &operation,
+                                       const site_record &site )
+{
+    if( operation.operation_kind != hostile_operation_kind::raid ) {
+        return true;
+    }
+    hostile_operation_state expected;
+    expected.operation_kind = operation.operation_kind;
+    expected.reservation.generation = operation.reservation.generation;
+    prepare_raid_sweep( expected, site );
+    const auto &sweep = operation.sweep;
+    return sweep.source == expected.sweep.source && sweep.generation == expected.sweep.generation &&
+           operation.sweep_source_evidence == expected.sweep_source_evidence &&
+           operation.sweep_source_ms == expected.sweep_source_ms &&
+           operation.sweep_source_kind == expected.sweep_source_kind && sweep.cursor == 0 &&
+           sweep.active_elapsed == 0 && sweep.last_world == -1 && sweep.movement.empty() &&
+           sweep.last_progress == 0 && sweep.candidate_started == 0 && sweep.retry_after_active == 30 * 60 &&
+           sweep.candidates.size() == expected.sweep.candidates.size() &&
+           std::equal( sweep.candidates.begin(), sweep.candidates.end(), expected.sweep.candidates.begin(),
+    []( const auto & actual, const auto & planned ) {
+        return actual.position == planned.position && actual.state == raid_sweep::disposition::pending &&
+               !actual.reconsidered && actual.geometry_revision == 0 &&
+               actual.available_members_at_exclusion.empty();
+    } );
+}
+
 authorized_hostile_operation_plan plan_hostile_operation_with_authorized_response(
     const site_record &site, const hostile_operation_kind operation_kind,
     const response_party_selection_result &selection,
@@ -20928,8 +21051,9 @@ authorized_hostile_operation_plan plan_hostile_operation_with_authorized_respons
     const camp_report_policy expected_policy = report_policy_for_profile(
                 effective_profile( site ) );
     const hostile_operation_kind expected_kind = operation_kind_for_report_policy(
-                site.camp_decision.report_policy );
-    if( site.retired_empty_site || site.has_active_outside_pressure() ||
+            site.camp_decision.report_policy );
+    if( site.retired_empty_site || !raid_source_ready( site, operation_kind ) ||
+        site.has_active_outside_pressure() ||
         site.camp_decision.state != camp_decision_state::preparing_follow_on ||
         site.camp_decision.report_policy != expected_policy ||
         !report_matches_camp_decision( site.current_scout_report, site.camp_decision ) ||
@@ -20982,6 +21106,7 @@ authorized_hostile_operation_plan plan_hostile_operation_with_authorized_respons
     reservation.cargo_application_key = bandit_pursuit_handoff::make_operation_component_key(
                                             reservation.activity_id, reservation.generation, "cargo" );
     authorized_plan.selection = selection;
+    prepare_raid_sweep( operation, site );
     plan.valid = true;
     plan.notes.push_back( "hostile operation ready: authorized report-pinned party at rally " +
                           rally_omt.to_string() );
@@ -21039,8 +21164,9 @@ hostile_operation_plan plan_hostile_operation( const site_record &site,
     const camp_report_policy expected_policy = report_policy_for_profile(
                 effective_profile( site ) );
     const hostile_operation_kind expected_kind = operation_kind_for_report_policy(
-                site.camp_decision.report_policy );
-    if( site.retired_empty_site || site.has_active_outside_pressure() ||
+            site.camp_decision.report_policy );
+    if( site.retired_empty_site || !raid_source_ready( site, operation_kind ) ||
+        site.has_active_outside_pressure() ||
         site.camp_decision.state != camp_decision_state::preparing_follow_on ||
         site.camp_decision.report_policy != expected_policy ||
         !report_matches_camp_decision( site.current_scout_report, site.camp_decision ) ||
@@ -21102,6 +21228,7 @@ hostile_operation_plan plan_hostile_operation( const site_record &site,
     reservation.cargo_application_key =
         bandit_pursuit_handoff::make_operation_component_key(
             reservation.activity_id, reservation.generation, "cargo" );
+    prepare_raid_sweep( operation, site );
     plan.valid = true;
     plan.notes.push_back( "hostile operation ready: fresh report-pinned party at rally " +
                           rally_omt.to_string() );
@@ -21131,8 +21258,10 @@ bool apply_hostile_operation_plan( site_record &site, const hostile_operation_pl
                                            reservation.shared_route.end(),
                                            operation.rally_omt ) != reservation.shared_route.end();
     const response_party_selection_result selection = select_fresh_response_party(
-                site, operation.operation_kind );
-    if( !plan.valid || site.retired_empty_site || site.has_active_outside_pressure() ||
+            site, operation.operation_kind );
+    if( !plan.valid || site.retired_empty_site ||
+        !raid_sweep_matches_report( operation, site ) ||
+        !raid_source_ready( site, operation.operation_kind ) || site.has_active_outside_pressure() ||
         site.camp_decision.state != camp_decision_state::preparing_follow_on ||
         site.camp_decision.report_policy != expected_policy ||
         !report_matches_camp_decision( site.current_scout_report, site.camp_decision ) ||
@@ -21193,6 +21322,13 @@ bool apply_hostile_operation_plan( site_record &site, const hostile_operation_pl
 
     site_record candidate = site;
     candidate.active_hostile_operation = operation;
+    if( operation.operation_kind == hostile_operation_kind::raid ) {
+        if( !candidate.raid_sources.reserve( operation.reservation.target_omt ) ) {
+            return false;
+        }
+        candidate.raid_sources.adopt_signal( operation.reservation.target_omt,
+                                             raid_signal_world( candidate.current_scout_report ) );
+    }
     if( operation.operation_kind == hostile_operation_kind::shakedown ) {
         candidate.last_shakedown_outcome.clear();
     }
@@ -21235,7 +21371,9 @@ bool apply_hostile_operation_plan_with_authorized_response( site_record &site,
                                    std::find( reservation.shared_route.begin(),
                                            reservation.shared_route.end(), operation.rally_omt ) !=
                                    reservation.shared_route.end();
-    if( !plan.valid || site.retired_empty_site || site.has_active_outside_pressure() ||
+    if( !plan.valid || site.retired_empty_site ||
+        !raid_sweep_matches_report( operation, site ) ||
+        !raid_source_ready( site, operation.operation_kind ) || site.has_active_outside_pressure() ||
         site.camp_decision.state != camp_decision_state::preparing_follow_on ||
         site.camp_decision.report_policy != expected_policy ||
         !report_matches_camp_decision( site.current_scout_report, site.camp_decision ) ||
@@ -21273,6 +21411,13 @@ bool apply_hostile_operation_plan_with_authorized_response( site_record &site,
 
     site_record candidate = site;
     candidate.active_hostile_operation = operation;
+    if( operation.operation_kind == hostile_operation_kind::raid ) {
+        if( !candidate.raid_sources.reserve( operation.reservation.target_omt ) ) {
+            return false;
+        }
+        candidate.raid_sources.adopt_signal( operation.reservation.target_omt,
+                                             raid_signal_world( candidate.current_scout_report ) );
+    }
     if( operation.operation_kind == hostile_operation_kind::shakedown ) {
         candidate.last_shakedown_outcome.clear();
     }

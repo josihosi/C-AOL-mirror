@@ -2,6 +2,7 @@
 
 #include "physical_light.h"
 #include <map>
+#include <set>
 
 namespace live_light
 {
@@ -13,6 +14,7 @@ bool sample_valid = false;
 physical_light::turn_sample_gate sample_gate;
 std::vector<live_light_delivery_stage> trace;
 std::map<tripoint_abs_ms, unsigned> source_presence;
+std::set<tripoint_abs_ms> source_checked;
 time_point source_presence_turn = calendar::turn_zero;
 bool source_presence_valid = false;
 
@@ -30,14 +32,17 @@ void reset()
     sample_gate = physical_light::turn_sample_gate{};
     trace.clear();
     source_presence.clear();
+    source_checked.clear();
     source_presence_valid = false;
 }
 
 void record_loaded_sources( time_point turn, const physical_light::loaded_z_source_index &sources )
 {
     source_presence.clear();
+    source_checked.clear();
     source_presence_turn = turn;
     source_presence_valid = true;
+    source_checked.insert( sources.examined_positions.begin(), sources.examined_positions.end() );
     for( const auto &field : sources.field_sources ) {
         if( field.fire_intensity > 0 || field.smoke_intensity > 0 ) {
             source_presence[field.position] |= 1;
@@ -70,7 +75,10 @@ std::optional<bool> source_present_for_turn( time_point turn, const tripoint_abs
         return std::nullopt;
     }
     const auto found = source_presence.find( source );
-    return found != source_presence.end() && ( found->second & flag ) != 0;
+    if( found != source_presence.end() && ( found->second & flag ) != 0 ) {
+        return true;
+    }
+    return source_checked.count( source ) ? std::optional<bool>( false ) : std::nullopt;
 }
 
 void run_advancing_turn( const time_point turn, const callbacks &callbacks )
@@ -84,6 +92,7 @@ void run_advancing_turn( const time_point turn, const callbacks &callbacks )
         return;
     }
     source_presence.clear();
+    source_checked.clear();
     source_presence_valid = false;
     note( live_light_delivery_stage::rider_reconciliation );
     callbacks.reconcile_riders();

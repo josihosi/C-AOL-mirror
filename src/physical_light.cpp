@@ -118,6 +118,9 @@ void append_stationary_tile_emitters( std::vector<emitter> &out, map &here,
              "furniture:" + here.furn( p )->id.str() );
     }
     for( const auto &entry : here.field_at( p ) ) {
+        if( !entry.second.is_field_alive() ) {
+            continue;
+        }
         add( source_kind::field, static_cast<int>( entry.second.get_intensity_level().light_emitted ),
              false, "field:" + entry.first.obj().id.str() );
     }
@@ -174,6 +177,7 @@ bool append_tile_sources( loaded_z_source_index &result, map &here,
                           const tripoint_bub_ms &p, const tripoint_bub_ms &carrier_pos )
 {
     ++result.tiles_examined;
+    result.examined_positions.push_back( here.get_abs( p ) );
     const std::size_t item_count = result.item_emitters.size();
     const std::size_t stationary_count = result.stationary_emitters.size();
     if( p != carrier_pos ) {

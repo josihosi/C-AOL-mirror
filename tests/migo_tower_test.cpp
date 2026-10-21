@@ -33,6 +33,7 @@
 #include "overmapbuffer.h"
 #include "player_helpers.h"
 #include "physical_navigation.h"
+#include "physical_light.h"
 #include "submap.h"
 
 TEST_CASE( "migo_signal_location_and_observer_persist_without_actor_knowledge",
@@ -97,7 +98,7 @@ TEST_CASE( "migo_signal_location_and_observer_persist_without_actor_knowledge",
 }
 
 TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
-           "[migo_tower][migo_population][physical_light][native]" )
+           "[migo_tower][migo_population][physical_light][native][raid_sweep]" )
 {
     const bool load_first = GENERATE( false, true );
     clear_avatar();
@@ -463,6 +464,187 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
            first_observation );
 }
 
+
+TEST_CASE( "migo_receiver_retains_material_access_and_orders_actual_extinction_before_relight",
+           "[migo_tower][raid_sweep][physical_light][native][serialization]" )
+{
+    // Controlled committed residents and an open balcony isolate observation.
+    // Real mapgen/seed conservation is covered by the preceding receiver test;
+    // this is no live native story, production interval or floor-plan credit.
+    clear_avatar();
+    clear_map_with_vision( -1, 4, false );
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    overmap_buffer.global_state.bandit_live_world = {};
+    reset_live_light_sample_cache();
+    set_time_to_day();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    const auto anchor = project_to<coords::omt>( here.get_abs( tripoint_bub_ms( 60, 60, 0 ) ) );
+    std::vector<oter_id> old_terrain;
+    for( int z = 0; z < 4; ++z ) {
+        const tripoint_abs_omt p( anchor.xy(), z );
+        old_terrain.push_back( overmap_buffer.ter( p ) );
+        overmap_buffer.ter_set( p, oter_str_id( "mi-go_scout_tower_" + std::to_string(
+                z + 1 ) + "_north" ) );
+    }
+    const auto source = project_to<coords::ms>( anchor ) + point( 36, 12 );
+    const auto source_area = project_to<coords::omt>( source );
+    const auto access = project_to<coords::ms>( source_area ) + point( 6, 12 );
+    const auto old_source_terrain = overmap_buffer.ter( source_area );
+    overmap_buffer.ter_set( source_area, oter_str_id( "field" ) );
+    on_out_of_scope restore( [&]() {
+        clear_map_without_vision( -1, 4 );
+        clear_creatures();
+        for( int z = 0; z < 4; ++z ) {
+            overmap_buffer.ter_set( tripoint_abs_omt( anchor.xy(), z ), old_terrain[z] );
+        }
+        overmap_buffer.ter_set( source_area, old_source_terrain );
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+        get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        reset_live_light_sample_cache();
+        set_time( old_turn );
+    } );
+    const auto geometry = migo_population::geometry_at( anchor );
+    REQUIRE( geometry );
+    migo_population::site_record population;
+    population.id = geometry->id;
+    population.anchor = anchor;
+    std::vector<migo_population::member_record> residents;
+    for( int i = 0; i < 6; ++i ) {
+        const auto position = project_to<coords::ms>( anchor ) + tripoint( 6 + i, 12, i == 5 ? 1 : 0 );
+        if( i == 5 ) {
+            here.ter_set( here.get_bub( position ), ter_str_id( "t_floor" ) );
+        }
+        const mtype_id type( "mon_mi_go" );
+        monster *body = g->place_critter_at( type, here.get_bub( position ) );
+        REQUIRE( body );
+        migo_population::member_record member;
+        member.token = {population.id, "resident-" + std::to_string( i ), 1, anchor};
+        member.type = type;
+        member.home = position;
+        member.owner = migo_population::representation::local;
+        member.hp = body->get_hp();
+        body->population_identity() = member.token;
+        residents.push_back( member );
+    }
+    REQUIRE( population.commit_seed( residents, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    // Keep the avatar off the fire. Exercise the actual discovery phases,
+    // then the actual receiver cadence, without treating clock setup as
+    // production/cooldown or whole native-story elapsed-time credit.
+    get_avatar().setpos( here, here.get_bub( source ) + point( 0, -24 ), false );
+    here.add_field( here.get_bub( source ), field_type_id( "fd_fire" ), 3 );
+    for( int z = 0; z < 4; ++z ) {
+        here.build_map_cache( z );
+    }
+    for( int tick = 0; tick < 2 * physical_light::loaded_source_sampler::discovery_interval_turns &&
+         !overmap_buffer.global_state.migo_towers.find( population.id ); ++tick ) {
+        calendar::turn += 1_turns;
+        run_live_light_delivery_for_test();
+    }
+    auto *site = overmap_buffer.global_state.migo_towers.find( population.id );
+    std::ostringstream diagnosis;
+    diagnosis << "scan=" << overmap_buffer.global_state.migo_towers.last_signal_scan
+              << " source=" << source << " outside=" << here.is_outside( here.get_bub( source ) );
+    for( const auto &sample : live_light::samples_for_turn( calendar::turn ) ) {
+        diagnosis << " sample=" << sample.mark.kind << ':' << sample.source_omt
+                  << " range=" << sample.range_cap_omt << " support=" << sample.smoke_support_reason;
+    }
+    for( const auto &registered : overmap_buffer.global_state.migo_populations.sites ) {
+        diagnosis << " population=" << registered.id << " seeded=" << registered.seed_committed
+                  << " count=" << registered.members.size();
+    }
+    for( const monster &body : g->all_monsters() ) {
+        diagnosis << " body=" << body.population_identity().member_id << ':' << body.pos_abs()
+                  << " sees=" << body.can_see() << " hp=" << body.get_hp();
+    }
+    INFO( diagnosis.str() );
+    REQUIRE( site );
+    REQUIRE( site->signal );
+    CHECK( site->signal->source_ms == source );
+    auto *history = site->find_source( source_area );
+    REQUIRE( history );
+    REQUIRE( history->observed_access.count( access.to_string_writable() ) == 1 );
+    const auto first_access = history->observed_access.at( access.to_string_writable() );
+    const auto first_evidence = history->latest_evidence;
+    // A cosmetic ground change with the same physical access is no new raid.
+    here.ter_set( here.get_bub( access ), ter_str_id( "t_dirt" ) );
+    calendar::turn += 5_minutes;
+    run_live_light_delivery_for_test();
+    CHECK( history->observed_access.at( access.to_string_writable() ) == first_access );
+    CHECK( history->latest_evidence == first_evidence );
+    here.ter_set( here.get_bub( access ), ter_str_id( "t_wall" ) );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    here.invalidate_visibility_cache();
+    calendar::turn += 5_minutes;
+    run_live_light_delivery_for_test();
+    CHECK( history->observed_access.at( access.to_string_writable() ) != first_access );
+    CHECK( history->latest_evidence != first_evidence );
+    const auto episode = history->episode;
+    here.ter_set( here.get_bub( access ), ter_str_id( "t_dirt" ) );
+    here.remove_field( here.get_bub( source ), field_type_id( "fd_fire" ) );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    here.invalidate_visibility_cache();
+    calendar::turn += 5_minutes;
+    run_live_light_delivery_for_test();
+    std::ostringstream extinction;
+    extinction << "now=" << to_turn<int>( calendar::turn ) << " scan="
+               << overmap_buffer.global_state.migo_towers.last_signal_scan
+               << " signal=" << site->signal->kind << ':' << *site->signal->source_ms
+               << " present=" << live_light::source_present_for_turn( calendar::turn,
+                       *site->signal->source_ms, site->signal->kind ).value_or( true );
+    scout_observation::site_reader extinction_reader;
+    for( const monster &body : g->all_monsters() ) {
+        if( body.pos_abs().z() == 1 ) {
+            const auto square = here.get_bub( source );
+            extinction << " observer=" << body.population_identity().member_id
+                       << " range=" << body.sight_range( here.ambient_light_at( square ) )
+                       << " optics=" << here.sees_with_optics( body.pos_bub(), square,
+                               MAX_VIEW_DISTANCE * 2, 2.0f )
+                       << " ray=" << extinction_reader.read_ray( body.pos_abs(), source ).visible;
+        }
+    }
+    INFO( extinction.str() );
+    CHECK_FALSE( history->observed_active );
+    CHECK( history->extinct_world == to_turn<int>( calendar::turn ) );
+    const int extinguished_at = history->extinct_world;
+    here.add_field( here.get_bub( source ), field_type_id( "fd_fire" ), 3 );
+    for( int tick = 0; tick < 2 * physical_light::loaded_source_sampler::discovery_interval_turns &&
+         !history->observed_active; ++tick ) {
+        calendar::turn += 1_turns;
+        run_live_light_delivery_for_test();
+    }
+    CHECK( history->observed_active );
+    CHECK( history->extinct_world == extinguished_at ); // sparse discovery is not another absence
+    CHECK( history->episode == episode + 1 );
+    const auto retained = history->observed_access;
+    for( monster &body : g->all_monsters() ) {
+        body.add_effect( efftype_id( "blind" ), 1_hours );
+    }
+    calendar::turn += 5_minutes;
+    run_live_light_delivery_for_test();
+    CHECK( history->observed_access == retained ); // lost visibility never erases known access
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        site->serialize( out );
+    }
+    migo_tower::site_state loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    REQUIRE( loaded.find_source( source_area ) );
+    CHECK( loaded.find_source( source_area )->episode == episode + 1 );
+    CHECK( loaded.find_source( source_area )->observed_access == retained );
+}
 
 TEST_CASE( "migo_capability_admission_uses_damage_survival_and_real_reserve",
            "[migo_tower]" )
@@ -1019,6 +1201,8 @@ TEST_CASE( "migo_actual_search_motor_excludes_fire_reopens_once_and_visits_conne
     operation.source.source_omt = anchor;
     operation.source.source_ms = here.get_abs( fire );
     operation.members = {{member.token.member_id, false, false, here.get_abs( start )}};
+    operation.sweep.source = anchor;
+    operation.sweep.generation = operation.generation;
     operation.sweep.candidates = {{here.get_abs( first )}, {here.get_abs( second )}};
     operation.overdue_after_active = 100000;
     operation.advance( to_turn<int>( calendar::turn ), 0 );
@@ -1444,6 +1628,280 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     CHECK( returned->owner == migo_population::representation::abstract );
 }
 
+TEST_CASE( "raid_sweep_builds_bounded_source_region_and_preserves_exclusions",
+           "[raid_sweep][serialization]" )
+{
+    const tripoint_abs_omt source( -3, 4, 2 );
+    const tripoint_abs_ms exact = project_to<coords::ms>( source ) + point( 7, 8 );
+    raid_sweep::progress sweep;
+    sweep.begin( source, 9, exact );
+    REQUIRE( sweep.pending() == exact );
+    CHECK( sweep.candidates.size() == 91 );
+    std::set<tripoint_abs_omt> areas;
+    for( const auto &candidate : sweep.candidates ) {
+        const auto area = project_to<coords::omt>( candidate.position );
+        CHECK( std::abs( area.x() - source.x() ) <= 1 );
+        CHECK( std::abs( area.y() - source.y() ) <= 1 );
+        CHECK( ( area.z() == 0 || area.z() == 2 ) );
+        areas.insert( area );
+    }
+    CHECK( areas.size() == 18 );
+    sweep.add( exact );
+    sweep.add_floor( source );
+    sweep.add_floor( source + point( 2, 0 ) );
+    CHECK( sweep.candidates.size() == 91 );
+    sweep.begin( source, 10, exact + point( 48, 0 ) );
+    CHECK( sweep.candidates.size() == 90 ); // foreign exact MS grants no fallback
+    CHECK( sweep.pending() != exact + point( 48, 0 ) );
+    while( sweep.pending() ) {
+        REQUIRE( sweep.exclude( raid_sweep::disposition::hazardous, 17 ) );
+    }
+    CHECK( sweep.outcome() == "hazard_blocked" );
+    const auto reopened = sweep.candidates.front().position;
+    REQUIRE( sweep.reconsider( reopened, 18 ) );
+    CHECK( sweep.outcome() == "pending" );
+    REQUIRE_FALSE( sweep.arrive( reopened, false ) );
+    REQUIRE( sweep.arrive( reopened, true ) );
+    CHECK( sweep.outcome() == "incomplete_sweep" );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        sweep.serialize( out );
+    }
+    raid_sweep::progress loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK( loaded.generation == 10 );
+    CHECK( loaded.source == source );
+    CHECK( loaded.outcome() == "incomplete_sweep" );
+    CHECK( loaded.candidates.front().reconsidered );
+    CHECK_FALSE( loaded.arrive( reopened, true ) );
+}
+
+TEST_CASE( "raid_sweep_does_not_extend_refusal_by_oscillation_or_reload",
+           "[raid_sweep][serialization]" )
+{
+    raid_sweep::progress sweep;
+    const tripoint_abs_ms goal( 30, 30, 0 );
+    sweep.candidates = { {goal} };
+    sweep.advance( 100, 0 );
+    sweep.approach( goal + point( -10, 0 ) );
+    for( int turn = 1; turn <= 1801; ++turn ) {
+        sweep.advance( 100 + turn, 1 );
+        sweep.approach( goal + point( turn % 2 ? -11 : -10, 0 ) );
+    }
+    CHECK( sweep.last_progress == 1 ); // first real detour step; repeats earn nothing
+    CHECK( sweep.obstructed() );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        sweep.serialize( out );
+    }
+    raid_sweep::progress loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK( loaded.obstructed() );
+    loaded.advance( 5000, 0 );
+    CHECK( loaded.active_elapsed == 1801 );
+    loaded.approach( goal + point( -10, 0 ) );
+    CHECK( loaded.obstructed() ); // persisted visited cells reject replayed loops
+    loaded.approach( goal + point( -9, 0 ) );
+    CHECK_FALSE( loaded.obstructed() );
+    CHECK( loaded.retry_after_active == 3601 );
+}
+
+TEST_CASE( "raid_sweep_tracks_member_detours_without_stationary_peer_credit",
+           "[raid_sweep][serialization]" )
+{
+    raid_sweep::progress sweep;
+    const tripoint_abs_ms goal( 30, 30, 0 );
+    sweep.candidates = {{goal}, {goal + point( 1, 0 )}};
+    sweep.advance( 100, 0 );
+    sweep.approach( goal + point( -10, 0 ), "a" );
+    sweep.approach( goal + point( -2, 0 ), "b" );
+    sweep.advance( 101, 1 );
+    sweep.approach( goal + point( -10, 0 ), "a" );
+    sweep.approach( goal + point( -2, 0 ), "b" );
+    CHECK( sweep.last_progress == 0 );
+    sweep.approach( goal + point( -11, 0 ), "a" );
+    CHECK( sweep.last_progress == 1 ); // real off-axis route may move away
+    sweep.advance( 102, 1 );
+    sweep.approach( goal + point( -10, 0 ), "a" );
+    CHECK( sweep.last_progress == 1 );
+    REQUIRE( sweep.arrive( goal, true ) );
+    CHECK( sweep.movement.empty() );
+    sweep.advance( 103, 1 );
+    sweep.approach( goal + point( -12, 0 ), "a" );
+    CHECK( sweep.last_progress == 2 ); // a new candidate starts a fresh baseline
+}
+
+TEST_CASE( "raid_source_memory_rejects_packets_and_eviction_loops_but_accepts_changed_facts",
+           "[raid_sweep][serialization]" )
+{
+    raid_sweep::source_memory memory;
+    const tripoint_abs_omt area( 2, 3, 0 );
+    memory.advance( 100, 9000 );
+    REQUIRE( memory.ready( area, "same_smoke" ) );
+    REQUIRE( memory.finish( area, 1, "same_smoke", "hazard_blocked" ) );
+    CHECK_FALSE( memory.ready( area, "same_smoke" ) );
+    CHECK_FALSE( memory.ready( area, "observed_open_route" ) );
+    CHECK_FALSE( memory.finish( area, 1, "same_smoke", "hazard_blocked" ) );
+    const auto deadline = memory.outcomes.front().retry_after_active;
+    memory.advance( 86500, 86400 );
+    CHECK( memory.active_elapsed == 86400 );
+    CHECK( memory.outcomes.front().retry_after_active == deadline );
+    CHECK_FALSE( memory.ready( tripoint_abs_omt( area.xy(), 3 ), "same_smoke" ) );
+    CHECK( memory.ready( area, "observed_open_route" ) );
+    for( int i = 1; i <= 3; ++i ) {
+        REQUIRE( memory.finish( area + point( i, 0 ), i + 1, "same_smoke", "empty" ) );
+    }
+    REQUIRE( memory.finish( area + point( 4, 0 ), 5, "same_smoke", "empty" ) );
+    CHECK( memory.outcomes.size() == 4 );
+    CHECK_FALSE( memory.ready( area, "same_smoke" ) );
+    CHECK_FALSE( memory.ready( area, "observed_open_route" ) );
+    CHECK_FALSE( memory.ready( area + point( 5, 0 ), "different_area" ) );
+    memory.advance( 172900, 86400 );
+    CHECK_FALSE( memory.ready( area, "same_smoke" ) );
+    CHECK( memory.ready( area, "observed_open_route" ) );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        memory.serialize( out );
+    }
+    raid_sweep::source_memory loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK_FALSE( loaded.ready( area, "same_smoke" ) );
+    CHECK( loaded.ready( area, "observed_open_route" ) );
+    REQUIRE( loaded.finish( area, 6, "observed_open_route", "searched" ) );
+    CHECK_FALSE( loaded.ready( area, "observed_open_route" ) );
+    CHECK_FALSE( loaded.finish( area, 6, "observed_open_route", "searched" ) );
+    CHECK( raid_sweep::fingerprint( {"a", "b", "a"} ) == raid_sweep::fingerprint( {"b", "a"} ) );
+    CHECK( raid_sweep::fingerprint( {"ab", "c"} ) != raid_sweep::fingerprint( {"a", "bc"} ) );
+}
+
+TEST_CASE( "raid_source_episode_requires_observed_extinction_and_a_later_receipt",
+           "[raid_sweep][serialization]" )
+{
+    raid_sweep::source_memory memory;
+    const tripoint_abs_omt area( 2, 3, 0 );
+    REQUIRE( memory.reserve( area ) );
+    CHECK( memory.next_episode( area, 100 ) == 1 );
+    memory.observe_absence( area, 200 );
+    CHECK( memory.next_episode( area, 100 ) == 1 );
+    CHECK( memory.next_episode( area, 200 ) == 1 );
+    CHECK( memory.next_episode( area, 201 ) == 2 );
+    memory.adopt_signal( area, 100 );
+    CHECK_FALSE( memory.outcomes.front().source_active );
+    memory.adopt_signal( area, 201 );
+    CHECK( memory.outcomes.front().source_active );
+    CHECK( memory.outcomes.front().episode == 2 );
+    memory.adopt_signal( area, 201 );
+    CHECK( memory.outcomes.front().episode == 2 );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        memory.serialize( out );
+    }
+    raid_sweep::source_memory loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK( loaded.next_episode( area, 201 ) == 2 );
+    loaded.observe_absence( area, 300 );
+    CHECK( loaded.next_episode( area, 201 ) == 2 );
+    CHECK( loaded.next_episode( area, 301 ) == 3 );
+}
+
+TEST_CASE( "raid_deferred_approach_witness_survives_reload_without_minting_progress",
+           "[raid_sweep][serialization]" )
+{
+    raid_sweep::progress sweep;
+    const tripoint_abs_ms goal( 30, 30, 0 );
+    sweep.candidates = {{goal}};
+    REQUIRE( sweep.exclude( raid_sweep::disposition::unreachable, 0, {"member-a", "member-b"} ) );
+    CHECK_FALSE( sweep.reconsider( goal, 0, "member-a" ) );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        sweep.serialize( out );
+    }
+    raid_sweep::progress loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK_FALSE( loaded.reconsider( goal, 0, "member-b" ) );
+    REQUIRE( loaded.reconsider( goal, 0, "member-c" ) ); // previously blocked, now physically available
+    CHECK( loaded.last_progress == 0 );
+    REQUIRE( loaded.exclude( raid_sweep::disposition::unreachable, 0, {"member-c"} ) );
+    CHECK_FALSE( loaded.reconsider( goal, 0, "member-d" ) );
+    // A legacy exclusion has no comparison witness; it stays honestly unsearched.
+    raid_sweep::candidate legacy;
+    legacy.deserialize( json_loader::from_string( "{\"state\":3}" ) );
+    CHECK( legacy.state == raid_sweep::disposition::unreachable );
+    CHECK( legacy.reconsidered );
+}
+
+TEST_CASE( "physical_sweep_does_not_search_a_burning_arrival_square",
+           "[migo_tower][raid_sweep][native]" )
+{
+    clear_avatar();
+    clear_map();
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_turn = calendar::turn;
+    on_out_of_scope restore( [&]() {
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        set_time( old_turn );
+        clear_map();
+    } );
+    set_time_to_day();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    const tripoint_bub_ms start( 60, 60, 0 );
+    monster *body = g->place_critter_at( mtype_id( "mon_mi_go" ), start );
+    REQUIRE( body );
+    const auto home = body->pos_abs();
+    const auto anchor = project_to<coords::omt>( home );
+    migo_population::member_record member;
+    member.token = {"burning-arrival", "member", 1, anchor};
+    member.type = body->type->id;
+    member.home = home;
+    member.owner = migo_population::representation::local;
+    member.assignment = migo_population::duty::dispatched;
+    member.hp = body->get_hp();
+    migo_population::site_record population;
+    population.id = member.token.site_id;
+    population.anchor = anchor;
+    REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = population.id;
+    site.anchor = anchor;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = anchor;
+    operation.members = {{member.token.member_id, false, false, home}};
+    operation.sweep.source = anchor;
+    operation.sweep.generation = 1;
+    operation.sweep.candidates = {{home}};
+    operation.overdue_after_active = 100000;
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    site.operation = operation;
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    body->population_identity() = member.token;
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.home = home;
+    body->set_migo_intent( intent );
+    here.add_field( start, field_type_id( "fd_fire" ), 3 );
+    const auto step = physical_navigation::read_step( *body, home );
+    CHECK( step.reason == "approach_fire_hazard" );
+    CHECK( step.hazard_revision != 0 );
+    calendar::turn += 1_turns;
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+    const auto *current = overmap_buffer.global_state.migo_towers.find( population.id );
+    REQUIRE( current );
+    CHECK( current->operation->sweep.candidates.front().state == raid_sweep::disposition::hazardous );
+    CHECK( current->operation->sweep.outcome() == "hazard_blocked" );
+    CHECK( current->operation->sweep.last_progress == 0 );
+    CHECK( body->pos_abs() == home ); // no artificial withdrawal/movement
+}
+
 TEST_CASE( "raid_sweep_requires_arrival_and_observation_and_bounds_obstruction",
            "[migo_tower][raid_sweep][serialization]" )
 {
@@ -1480,7 +1938,9 @@ TEST_CASE( "raid_sweep_requires_arrival_and_observation_and_bounds_obstruction",
     REQUIRE( sweep.exclude( raid_sweep::disposition::unreachable, 11 ) );
     CHECK_FALSE( sweep.pending() );
     CHECK_FALSE( sweep.arrive( second, true ) );
-    CHECK_FALSE( sweep.reconsider( second, 12 ) );
+    REQUIRE( sweep.reconsider( second, 12 ) );
+    REQUIRE( sweep.exclude( raid_sweep::disposition::unreachable, 12 ) );
+    CHECK_FALSE( sweep.reconsider( second, 13 ) );
     std::ostringstream saved;
     { JsonOut json( saved ); sweep.serialize( json ); }
     raid_sweep::progress restored;
@@ -2091,5 +2551,147 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
         CHECK_FALSE( finished.resolved );
     } else {
         CHECK( assignment == migo_population::duty::available );
+    }
+}
+
+TEST_CASE( "migo_final_sweep_disposition_preserves_a_peers_actual_native_engagement",
+           "[migo_tower][raid_sweep][native][ownership]" )
+{
+    const std::string completion = GENERATE( "arrival", "fire", "obstruction" );
+    const bool fire_deferral = completion == "fire";
+    const bool obstruction = completion == "obstruction";
+    clear_avatar();
+    clear_map_with_vision( -1, 1, false );
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        clear_map_without_vision( -1, 1 );
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        set_time( old_turn );
+    } );
+    set_time_to_day();
+    map &here = get_map();
+    const auto home = here.get_abs( tripoint_bub_ms( 30, 60, 0 ) );
+    const auto quiet_position = here.get_abs( tripoint_bub_ms( 60, 60, 0 ) );
+    const auto engaged_position = here.get_abs( tripoint_bub_ms( 84, 60, 0 ) );
+    const auto goal = quiet_position + point( completion == "arrival" ? 0 : 2, 0 );
+    const auto anchor = project_to<coords::omt>( home );
+    const std::string id = "last-candidate-combat-component";
+    for( int y = 0; y < here.getmapsize() * SEEY; ++y ) {
+        here.ter_set( tripoint_bub_ms( 72, y, 0 ), ter_str_id( "t_concrete_wall" ) );
+    }
+    if( fire_deferral ) {
+        here.add_field( here.get_bub( goal ), field_type_id( "fd_fire" ), 3 );
+    }
+    if( obstruction ) {
+        here.ter_set( here.get_bub( goal ), ter_str_id( "t_concrete_wall" ) );
+    }
+    get_avatar().setpos( here, tripoint_bub_ms( 94, 60, 0 ), false );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = anchor;
+    std::vector<migo_population::member_record> members;
+    for( const auto &name : {"quiet", "engaged"} ) {
+        migo_population::member_record member;
+        member.token = {id, name, 1, anchor};
+        member.type = mtype_id( "mon_mi_go" );
+        member.home = home;
+        member.hp = member.type->hp;
+        member.owner = migo_population::representation::local;
+        member.assignment = migo_population::duty::dispatched;
+        members.push_back( member );
+    }
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = anchor;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = project_to<coords::omt>( goal );
+    operation.sweep.source = operation.source.source_omt;
+    operation.sweep.generation = 1;
+    operation.sweep.candidates = {{goal}};
+    operation.members = {{"quiet"}, {"engaged"}};
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    site.operation = operation;
+    REQUIRE( site.remember_source( operation.source.source_omt ) );
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    monster *quiet = g->place_critter_at( members[0].type, here.get_bub( quiet_position ) );
+    monster *engaged = g->place_critter_at( members[1].type, here.get_bub( engaged_position ) );
+    REQUIRE( quiet );
+    REQUIRE( engaged );
+    for( int i = 0; i < 2; ++i ) {
+        monster &body = i == 0 ? *quiet : *engaged;
+        body.population_identity() = members[i].token;
+        migo_tower::member_intent intent;
+        intent.generation = 1;
+        intent.phase = migo_tower::member_phase::searching;
+        intent.home = home;
+        body.set_migo_intent( intent );
+    }
+    REQUIRE_FALSE( quiet->sees( here, get_avatar() ) );
+    REQUIRE( engaged->sees( here, get_avatar() ) );
+    REQUIRE( engaged->attitude( &get_avatar() ) == MATT_ATTACK );
+    REQUIRE_FALSE( engaged->is_adjacent( &get_avatar(), true ) );
+    REQUIRE( migo_tower::own_capability( *engaged ).ranged_range == 0 );
+    // Population leases and corridor/fire are component setup. The actual
+    // native planner chooses the visible hostile target; none is injected.
+    calendar::turn += 1_turns;
+    engaged->plan();
+    REQUIRE( engaged->get_dest() == get_avatar().pos_abs() );
+    REQUIRE( engaged->migo_intent()->last_observed_enemy_world == to_turn<int>( calendar::turn ) );
+    quiet->plan();
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+    if( obstruction ) {
+        // Hold executors while native plans keep the real visible enemy.
+        // Each service receives one actual caller tick, not a clock jump or
+        // fabricated progress; this is no whole-game elapsed-time proof.
+        for( int tick = 1; tick < 1800; ++tick ) {
+            calendar::turn += 1_turns;
+            engaged->plan();
+            quiet->plan();
+            migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        }
+    }
+    auto *current = overmap_buffer.global_state.migo_towers.find( id );
+    REQUIRE( current );
+    REQUIRE_FALSE( current->operation->sweep.pending() );
+    CHECK( current->operation->sweep.candidates.front().state ==
+           ( fire_deferral ? raid_sweep::disposition::hazardous :
+             obstruction ? raid_sweep::disposition::unreachable : raid_sweep::disposition::searched ) );
+    engaged->plan();
+    quiet->plan();
+    CHECK( engaged->migo_intent()->phase == migo_tower::member_phase::searching );
+    CHECK( engaged->get_dest() == get_avatar().pos_abs() );
+    CHECK( quiet->migo_intent()->phase == migo_tower::member_phase::searching );
+    CHECK_FALSE( current->operation->resolved );
+    const int distance = rl_dist( engaged->pos_abs(), get_avatar().pos_abs() );
+    engaged->set_moves( 100 );
+    engaged->move();
+    CHECK( rl_dist( engaged->pos_abs(), get_avatar().pos_abs() ) < distance );
+    CHECK( engaged->migo_intent()->phase == migo_tower::member_phase::searching );
+    // Native fear is a controlled condition, not a combat-victory claim.
+    // Genuine flight latches return; recovery must not restart a far chase.
+    engaged->morale = -100;
+    REQUIRE( engaged->attitude( &get_avatar() ) == MATT_FLEE );
+    engaged->plan();
+    CHECK( engaged->migo_intent()->phase == migo_tower::member_phase::returning );
+    engaged->morale = 30;
+    engaged->plan();
+    CHECK( engaged->migo_intent()->phase == migo_tower::member_phase::returning );
+    CHECK( engaged->get_dest() != get_avatar().pos_abs() );
+    quiet->plan();
+    CHECK( quiet->migo_intent()->phase == migo_tower::member_phase::returning );
+    for( int i = 0; i < 2; ++i ) {
+        const auto &token = i == 0 ? quiet->population_identity() : engaged->population_identity();
+        CHECK( token.site_id == members[i].token.site_id );
+        CHECK( token.member_id == members[i].token.member_id );
+        CHECK( token.epoch == members[i].token.epoch );
     }
 }

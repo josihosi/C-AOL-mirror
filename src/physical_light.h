@@ -37,6 +37,8 @@ struct loaded_z_source_index {
         int smoke_intensity = 0;
     };
     std::vector<field_source> field_sources;
+    // A sparse discovery pass can deny presence only at a freshly checked tile.
+    std::vector<tripoint_abs_ms> examined_positions;
     int tiles_examined = 0;
 };
 

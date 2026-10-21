@@ -605,6 +605,8 @@ void source_history::serialize( JsonOut &json ) const
     json.member( "episode", episode );
     json.member( "episode_at_outcome", episode_at_outcome );
     json.member( "observed_active", observed_active );
+    json.member( "extinct_world", extinct_world );
+    json.member( "observed_access", observed_access );
     json.member( "prior_outcome_unavailable", prior_outcome_unavailable );
     json.member( "casualty_attempts", casualty_attempts );
     json.member( "overdue_attempts", overdue_attempts );
@@ -628,6 +630,8 @@ void source_history::deserialize( const JsonObject &json )
     json.read( "episode", episode );
     json.read( "episode_at_outcome", episode_at_outcome );
     json.read( "observed_active", observed_active );
+    json.read( "extinct_world", extinct_world );
+    json.read( "observed_access", observed_access );
     json.read( "prior_outcome_unavailable", prior_outcome_unavailable );
     json.read( "casualty_attempts", casualty_attempts );
     json.read( "overdue_attempts", overdue_attempts );

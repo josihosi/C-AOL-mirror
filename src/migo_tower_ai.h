@@ -3,6 +3,7 @@
 #define CATA_SRC_MIGO_TOWER_AI_H
 
 #include <optional>
+#include <map>
 #include <cstdint>
 #include <array>
 #include <string>
@@ -107,6 +108,8 @@ struct source_history {
     std::uint64_t episode = 1;
     std::uint64_t episode_at_outcome = 0;
     bool observed_active = true;
+    int extinct_world = -1;
+    std::map<std::string, std::string> observed_access;
     // Cache eviction cannot grant the ordinary blind first-response baseline.
     // This is uncertainty about history, never an invented casualty fact.
     bool prior_outcome_unavailable = false;
@@ -149,7 +152,9 @@ struct member_intent {
     int last_combat_world = -1;
     int last_observed_enemy_world = -1;
     int last_refused_world = -1;
-    bool active() const { return generation > 0 && phase != member_phase::settled; }
+    bool active() const {
+        return generation > 0 && phase != member_phase::settled;
+    }
     void retreat();
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &json );

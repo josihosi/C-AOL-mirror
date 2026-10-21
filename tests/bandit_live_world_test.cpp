@@ -332,7 +332,7 @@ TEST_CASE( "committed local assault keeps an unseen tired raider on its search o
 }
 
 TEST_CASE( "committed raid separates actual target choice from raw sight before group search",
-           "[bandit_live_world][raid_search][target_choice]" )
+           "[bandit_live_world][raid_search][target_choice][raid_sweep]" )
 {
     clear_npcs();
     const time_point saved_turn = calendar::turn;
@@ -449,6 +449,263 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
     REQUIRE( bandit_live_world::active_local_assault_site_for(
                  overmap_buffer.global_state.bandit_live_world, sighted.getID() ) == &live_site );
 
+    SECTION( "shared raid sweep crosses source borders and requires actual observation" ) {
+        get_avatar().setpos( here, tripoint_bub_ms( 0, 0, 0 ) );
+        sighted.setpos( here, tripoint_bub_ms( 58, 60, 0 ) );
+        REQUIRE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
+        auto &sweep = live_operation.sweep;
+        REQUIRE( sweep.candidates.size() == 45 );
+        std::set<tripoint_abs_omt> areas;
+        for( const auto &candidate : sweep.candidates ) {
+            areas.insert( project_to<coords::omt>( candidate.position ) );
+            CHECK( candidate.state == raid_sweep::disposition::pending );
+        }
+        CHECK( areas.size() == 9 );
+        REQUIRE( sweep.pending() );
+        const auto goal = *sweep.pending();
+        // Losing or completing a motor order does not imply an arrival.
+        for( npc *member : party ) {
+            member->goto_to_this_pos.reset();
+            member->path.clear();
+        }
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.cursor == 0 );
+        first.setpos( here, here.get_bub( goal ) );
+        first.add_effect( efftype_id( "blind" ), 1_hours );
+        first.recalc_sight_limits();
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.cursor == 0 );
+        first.remove_effect( efftype_id( "blind" ) );
+        first.recalc_sight_limits();
+        here.build_map_cache( 0, true );
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.cursor == 1 );
+        CHECK( sweep.candidates.front().state == raid_sweep::disposition::searched );
+        const auto saved_cursor = sweep.cursor;
+        std::ostringstream bytes;
+        {
+            JsonOut out( bytes );
+            live_site.serialize( out );
+        }
+        bandit_live_world::site_record restored;
+        restored.deserialize( json_loader::from_string( bytes.str() ).get_object() );
+        const auto &loaded = restored.active_hostile_operation;
+        CHECK( loaded.sweep.cursor == saved_cursor );
+        CHECK( loaded.sweep.generation == static_cast<std::uint64_t>( loaded.reservation.generation ) );
+        CHECK( loaded.sweep.candidates.front().state == raid_sweep::disposition::searched );
+    }
+
+    SECTION( "shared raid sweep retains safe ground beside contained fires and excludes spreading fire" ) {
+        get_avatar().setpos( here, tripoint_bub_ms( 0, 0, 0 ) );
+        sighted.setpos( here, tripoint_bub_ms( 58, 60, 0 ) );
+        REQUIRE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
+        auto &sweep = live_operation.sweep;
+        REQUIRE( sweep.pending() );
+        const auto target = here.get_bub( *sweep.pending() );
+        for( const point &offset : std::array<point, 4> {{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}} ) {
+            const auto cell = target + offset;
+            here.furn_set( cell, furn_str_id( "f_brazier" ) );
+            here.add_field( cell, field_type_id( "fd_fire" ), 1 );
+        }
+        here.invalidate_map_cache( 0 );
+        here.build_map_cache( 0, true );
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.cursor == 0 );
+        CHECK( sweep.candidates.front().state == raid_sweep::disposition::pending );
+        // Actual spread onto the destination invalidates an already issued route.
+        here.add_field( target, field_type_id( "fd_fire" ), 3 );
+        calendar::turn += 1_turns;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.candidates.front().state == raid_sweep::disposition::hazardous );
+        CHECK( sweep.cursor == 1 );
+        CHECK( sweep.last_progress == 0 );
+        CHECK( sweep.candidates.front().geometry_revision != 0 );
+        here.remove_field( target, field_type_id( "fd_fire" ) );
+        here.invalidate_map_cache( 0 );
+        here.build_map_cache( 0, true );
+        calendar::turn += 1_turns;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.candidates.front().state == raid_sweep::disposition::pending );
+        CHECK( sweep.candidates.front().reconsidered );
+        here.add_field( target, field_type_id( "fd_fire" ), 3 );
+        calendar::turn += 1_turns;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.candidates.front().state == raid_sweep::disposition::hazardous );
+        here.remove_field( target, field_type_id( "fd_fire" ) );
+        calendar::turn += 1_turns;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( sweep.candidates.front().state == raid_sweep::disposition::hazardous );
+    }
+
+    SECTION( "raid dispatch revalidates stable source facts and preserves cooldown across report packets" ) {
+        auto completed = live_site;
+        const auto source = completed.active_hostile_operation.reservation.target_omt;
+        const auto evidence = bandit_live_world::raid_source_evidence( completed.current_scout_report );
+        completed.active_hostile_operation = {};
+        for( auto &member : completed.members ) {
+            member.state = bandit_live_world::member_state::at_home;
+        }
+        completed.raid_sources.advance( 100, 0 );
+        REQUIRE( completed.raid_sources.finish( source, 1, evidence, "hazard_blocked" ) );
+        const auto propose = [&]() {
+            return bandit_live_world::plan_hostile_operation( completed,
+                bandit_live_world::hostile_operation_kind::raid,
+            {completed.anchor, rally, source}, rally, 103 );
+        };
+        CHECK_FALSE( propose().valid );
+        completed.camp_decision = {};
+        completed.current_scout_report = {};
+        prepare_hostile_follow_on( completed, 2, 2, "new-report-packet", source, 100, "", 3 );
+        CHECK( bandit_live_world::raid_source_evidence( completed.current_scout_report ) == evidence );
+        completed.raid_sources.advance( 86500, 86400 );
+        CHECK_FALSE( propose().valid ); // elapsed time and new packet are insufficient
+        bandit_live_world::sortie_observation observed;
+        observed.record_schema_version = 1;
+        observed.sense = bandit_live_world::sortie_observation_sense::visual;
+        observed.source_omt = source;
+        observed.defender_ids = {"actually-observed-defender"};
+        observed.defender_positions = {project_to<coords::ms>( source ) + point( 10, 10 )};
+        completed.current_scout_report.observations.push_back( observed );
+        auto fresh = propose();
+        REQUIRE( fresh.valid );
+        auto forged = fresh;
+        forged.operation.sweep.source += point( 1, 0 );
+        CHECK_FALSE( bandit_live_world::apply_hostile_operation_plan( completed, forged ) );
+        forged = fresh;
+        forged.operation.sweep.candidates.front().position += point( 1, 0 );
+        CHECK_FALSE( bandit_live_world::apply_hostile_operation_plan( completed, forged ) );
+        forged = fresh;
+        forged.operation.sweep.candidates.front().state = raid_sweep::disposition::searched;
+        CHECK_FALSE( bandit_live_world::apply_hostile_operation_plan( completed, forged ) );
+        REQUIRE( bandit_live_world::apply_hostile_operation_plan( completed, fresh ) );
+        CHECK_FALSE( bandit_live_world::apply_hostile_operation_plan( completed, fresh ) );
+    }
+
+    SECTION( "native raid motor finishes all nine source areas before physical return admission" ) {
+        get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        get_avatar().setpos( here, tripoint_bub_ms( 0, 0, 0 ) );
+        std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
+        for( int x = -1; x <= 1; ++x ) {
+            for( int y = -1; y <= 1; ++y ) {
+                const auto area = live_operation.reservation.target_omt + point( x, y );
+                terrain.emplace_back( area, overmap_buffer.ter( area ) );
+                overmap_buffer.ter_set( area, oter_str_id( "field" ) );
+            }
+        }
+        on_out_of_scope restore_terrain( [&]() {
+            for( const auto &entry : terrain ) {
+                overmap_buffer.ter_set( entry.first, entry.second );
+            }
+            get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        } );
+        for( npc *member : party ) {
+            member->set_fac( faction_id( "cannibal_camp" ) );
+            member->set_mission( NPC_MISSION_NULL );
+            member->guard_pos.reset();
+            member->clear_ai_guard_pos();
+            member->regen_ai_cache();
+        }
+        int turns = 0;
+        while( turns++ < 2000 && live_operation.phase ==
+               bandit_live_world::hostile_operation_phase::committed_contact ) {
+            calendar::turn += 1_turns;
+            live_cannibal_raid_advance_site_search_for_test( live_site );
+            for( npc *member : party ) {
+                member->set_moves( 100 );
+                member->move();
+            }
+        }
+        CAPTURE( turns, live_operation.sweep.cursor, live_operation.sweep.pending() );
+        REQUIRE_FALSE( live_operation.sweep.pending() );
+        REQUIRE( live_operation.sweep.candidates.size() == 45 );
+        for( const auto &candidate : live_operation.sweep.candidates ) {
+            CHECK( candidate.state == raid_sweep::disposition::searched );
+        }
+        CHECK( live_operation.sweep_outcome == "searched" );
+        CHECK( live_operation.phase == bandit_live_world::hostile_operation_phase::returning_home );
+        REQUIRE( live_site.raid_sources.outcomes.size() == 1 );
+        CHECK( live_site.raid_sources.outcomes.front().generation ==
+               static_cast<std::uint64_t>( live_operation.reservation.generation ) );
+        std::ostringstream before;
+        {
+            JsonOut out( before );
+            live_site.serialize( out );
+        }
+        CHECK_FALSE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
+        std::ostringstream after;
+        {
+            JsonOut out( after );
+            live_site.serialize( out );
+        }
+        CHECK( before.str() == after.str() );
+    }
+
+    SECTION( "unchanged executable orders cannot reopen deferred ground and real opening can" ) {
+        const bool reopen = GENERATE( false, true );
+        get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        on_out_of_scope uncloak( []() {
+            get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        } );
+        get_avatar().setpos( here, tripoint_bub_ms( 0, 0, 0 ) );
+        const auto target = here.get_abs( tripoint_bub_ms( 90, 84, 0 ) );
+        live_operation.sweep.candidates = {{target}, {here.get_abs( tripoint_bub_ms( 84, 90, 0 ) )}};
+        if( reopen ) {
+            for( const auto &p : here.points_in_radius( here.get_bub( target ), 1 ) ) {
+                if( here.get_abs( p ) != target ) {
+                    here.ter_set( p, ter_str_id( "t_concrete_wall" ) );
+                }
+            }
+            here.invalidate_map_cache( 0 );
+            here.build_map_cache( 0, true );
+        }
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        // Hold the executor, not the controller's clock or progress fields.
+        // Accepted orders alone never establish physical progress.
+        for( int tick = 0; tick < 1800; ++tick ) {
+            calendar::turn += 1_turns;
+            live_cannibal_raid_advance_site_search_for_test( live_site );
+        }
+        REQUIRE( live_operation.sweep.candidates.front().state == raid_sweep::disposition::unreachable );
+        REQUIRE( live_operation.sweep.cursor == 1 );
+        if( reopen ) {
+            here.ter_set( here.get_bub( target ) + point( -1, 0 ), ter_str_id( "t_dirt" ) );
+            here.invalidate_map_cache( 0 );
+            here.build_map_cache( 0, true );
+        }
+        calendar::turn += 1_turns;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        CHECK( live_operation.sweep.candidates.front().reconsidered == reopen );
+        CHECK( live_operation.sweep.cursor == ( reopen ? 0 : 1 ) );
+        CHECK( live_operation.sweep.last_progress == 0 );
+    }
+
+    SECTION( "deferring a search clears its stale order before unknown next geometry" ) {
+        get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        on_out_of_scope uncloak( []() {
+            get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        } );
+        get_avatar().setpos( here, tripoint_bub_ms( 0, 0, 0 ) );
+        const auto target = here.get_abs( tripoint_bub_ms( 122, 84, 0 ) );
+        const auto unknown = target + point( 24, 0 );
+        REQUIRE_FALSE( here.inbounds( unknown ) );
+        live_operation.sweep.source = project_to<coords::omt>( target );
+        live_operation.sweep.candidates = {{target}, {unknown}};
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        REQUIRE( last.goto_to_this_pos == target );
+        for( int tick = 0; tick < 1800; ++tick ) {
+            calendar::turn += 1_turns;
+            live_cannibal_raid_advance_site_search_for_test( live_site );
+        }
+        REQUIRE( live_operation.sweep.cursor == 1 );
+        calendar::turn += 1_turns;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        for( const npc *member : party ) {
+            CHECK_FALSE( member->goto_to_this_pos );
+            CHECK( member->path.empty() );
+        }
+        CHECK( live_operation.sweep.candidates[1].state == raid_sweep::disposition::pending );
+    }
+
     SECTION( "a visible low-threat avatar with no selected target cannot stop the group" ) {
         get_avatar().setpos( here, here.get_bub( sighted.pos_abs() + point( 3, 15 ) ) );
         here.update_visibility_cache( 0 );
@@ -462,13 +719,11 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         sighted.regen_ai_cache();
         REQUIRE( sighted.current_target() == nullptr );
         CHECK( live_cannibal_raid_advance_site_search_for_test( live_site ) );
-        CHECK( live_operation.site_search_waypoint_attempted );
+        CHECK( live_operation.sweep.pending().has_value() );
         CHECK( first.goto_to_this_pos.has_value() );
         CHECK( sighted.goto_to_this_pos.has_value() );
         CHECK( last.goto_to_this_pos.has_value() );
-        CHECK( sighted.goto_to_this_pos ==
-               project_to<coords::ms>( live_operation.reservation.target_omt ) +
-               point( SEEX / 2, SEEY / 2 ) );
+        CHECK( sighted.goto_to_this_pos == live_operation.sweep.pending() );
     }
 
     SECTION( "one member engaging a real target leaves other members searching" ) {
@@ -763,7 +1018,7 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         REQUIRE_FALSE( first.sees( here, get_avatar() ) );
         REQUIRE_FALSE( last.sees( here, get_avatar() ) );
         CHECK( live_cannibal_raid_advance_site_search_for_test( live_site ) );
-        CHECK( live_operation.site_search_waypoint_attempted );
+        CHECK( live_operation.sweep.pending().has_value() );
         CHECK( first.goto_to_this_pos.has_value() );
         CHECK( sighted.goto_to_this_pos.has_value() );
         CHECK( last.goto_to_this_pos.has_value() );
@@ -773,10 +1028,8 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         const character_id first_id = first.getID();
         const character_id sighted_id = sighted.getID();
         const character_id last_id = last.getID();
-        live_operation.site_search_waypoint = 1;
-        live_operation.site_search_waypoint_attempted = true;
-        // A prior order can be transient or cleared during reload; the
-        // persisted attempted bit must not suppress fresh physical orders.
+        // Motor orders are transient. Persisted sweep work, followed by an
+        // actual observation at the already occupied first candidate, owns arrival.
         first.goto_to_this_pos.reset();
         sighted.goto_to_this_pos.reset();
         last.goto_to_this_pos.reset();
@@ -809,14 +1062,13 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         REQUIRE( bandit_live_world::active_local_assault_site_for(
                      overmap_buffer.global_state.bandit_live_world, sighted_id ) == &loaded_site );
         CHECK( live_cannibal_raid_advance_site_search_for_test( loaded_site ) );
-        CHECK( loaded_site.active_hostile_operation.site_search_waypoint == 1 );
-        CHECK( loaded_site.active_hostile_operation.site_search_waypoint_attempted );
+        CHECK( loaded_site.active_hostile_operation.sweep.cursor == 1 );
+        CHECK( loaded_site.active_hostile_operation.sweep.candidates.front().state ==
+               raid_sweep::disposition::searched );
         CHECK( loaded_first->goto_to_this_pos.has_value() );
         CHECK( loaded_sighted->goto_to_this_pos.has_value() );
         CHECK( loaded_last->goto_to_this_pos.has_value() );
-        CHECK( loaded_first->goto_to_this_pos ==
-               project_to<coords::ms>( loaded_site.active_hostile_operation.reservation.target_omt ) +
-               point( SEEX / 2, SEEY / 2 ) );
+        CHECK( loaded_first->goto_to_this_pos == loaded_site.active_hostile_operation.sweep.pending() );
     }
 
     SECTION( "roof source search uses real stairs through five connected floors" ) {
@@ -852,35 +1104,39 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         live_site.camp_decision.target_omt = live_operation.reservation.target_omt;
         live_site.current_scout_report.target_omt = live_operation.reservation.target_omt;
         live_operation.reservation.shared_route.back() = ground;
-        live_operation.site_search_waypoint = 5;
-        live_operation.site_search_waypoint_attempted = false;
-        live_operation.site_search_retry_after_turn = 0;
+        live_operation.sweep.begin( live_operation.reservation.target_omt,
+                                    live_operation.reservation.generation );
+        live_operation.sweep.candidates = {
+            {tripoint_abs_ms( floor_origin_abs.xy() + point( 12, 12 ), 1 )},
+            {tripoint_abs_ms( floor_origin_abs.xy() + point( 12, 12 ), 5 )}
+        };
         REQUIRE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
         REQUIRE( sighted.goto_to_this_pos.has_value() );
         CHECK( sighted.goto_to_this_pos->z() == 1 );
         const character_id sighted_id = sighted.getID();
-        for( int action = 0; action < 250 && sighted.posz() == 0; ++action ) {
+        for( int action = 0; action < 250 &&
+             sighted.pos_abs() != *live_operation.sweep.pending(); ++action ) {
             sighted.set_moves( 100 );
             sighted.move();
         }
         REQUIRE( sighted.posz() == 1 );
+        REQUIRE( sighted.pos_abs() == *live_operation.sweep.pending() );
         CHECK( sighted.getID() == sighted_id );
 
         for( npc *member : party ) {
             member->goto_to_this_pos.reset();
             member->path.clear();
         }
-        live_operation.site_search_waypoint = 25;
-        live_operation.site_search_waypoint_attempted = false;
+        live_cannibal_raid_advance_site_search_for_test( live_site );
+        REQUIRE( live_operation.sweep.cursor == 1 );
         const tripoint_bub_ms blocked_stair( floor_origin.x() + 13,
                                              floor_origin.y() + 10, 3 );
         here.ter_set( blocked_stair, ter_str_id( "t_floor" ) );
         here.invalidate_map_cache( 3 );
         here.build_map_cache( 3, true );
         CHECK_FALSE( live_cannibal_raid_advance_site_search_for_test( live_site ) );
-        CHECK( live_operation.site_search_waypoint == 25 );
-        CHECK( live_operation.site_search_retry_after_turn >
-               to_turns<int>( calendar::turn - calendar::turn_zero ) );
+        CHECK( live_operation.sweep.cursor == 1 );
+        CHECK( live_operation.sweep.retry_after_active > live_operation.sweep.active_elapsed );
         CHECK_FALSE( sighted.goto_to_this_pos.has_value() );
 
         here.ter_set( blocked_stair, ter_str_id( "t_stairs_up" ) );
@@ -971,8 +1227,9 @@ TEST_CASE( "committed raid separates actual target choice from raw sight before 
         live_site.camp_decision.target_omt = live_operation.reservation.target_omt;
         live_site.current_scout_report.target_omt = live_operation.reservation.target_omt;
         live_operation.reservation.shared_route.back() = ground;
-        live_operation.site_search_waypoint = 25;
-        live_operation.site_search_waypoint_attempted = false;
+        live_operation.sweep.begin( live_operation.reservation.target_omt,
+                                    live_operation.reservation.generation );
+        live_operation.sweep.candidates = {{project_to<coords::ms>( live_operation.reservation.target_omt ) + point( 12, 12 )}};
         live_operation.site_search_retry_after_turn = 0;
 
         const std::filesystem::path trace_path = std::filesystem::temp_directory_path() /
@@ -36826,7 +37083,33 @@ TEST_CASE( "loaded hostile approach retires the saved rally guard for the reserv
     REQUIRE( lagging != nullptr );
     REQUIRE( arrived != nullptr );
     calendar::turn = calendar::turn_zero + 12_hours;
-    g->place_player_overmap( rally + point( 2, 2 ) );
+    const bool peaceful_loaded = kind == bandit_live_world::hostile_operation_kind::shakedown;
+    if( peaceful_loaded ) {
+        g->place_player_overmap( rally + point( -1, 1 ), false );
+        get_avatar().setpos( get_map(), tripoint_bub_ms( get_map().getmapsize() * SEEX / 2,
+                             get_map().getmapsize() * SEEY / 2, 0 ), false );
+        g->reload_npcs();
+    } else {
+        g->place_player_overmap( rally + point( 2, 2 ) );
+    }
+    const bool was_cloaked = get_avatar().has_trait( trait_id( "DEBUG_CLOAK" ) );
+    on_out_of_scope restore_cloak( [was_cloaked]() {
+        if( !was_cloaked ) {
+            get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        }
+    } );
+    if( peaceful_loaded ) {
+        // Keep the whole native approach loaded on a known passable corridor.
+        // The player is incidental to this guard/travel ownership control.
+        get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        for( const auto &p : get_map().points_on_zlevel( 0 ) ) {
+            get_map().ter_set( p, ter_str_id( "t_grass" ) );
+            get_map().furn_set( p, furn_str_id::NULL_ID() );
+        }
+        clear_fields( 0 );
+        get_map().invalidate_map_cache( 0 );
+        get_map().build_map_cache( 0 );
+    }
     lagging = g->find_npc( party_ids[0] );
     REQUIRE( lagging != nullptr );
     lagging->spawn_at_omt( rally );
@@ -36863,13 +37146,13 @@ TEST_CASE( "loaded hostile approach retires the saved rally guard for the reserv
     REQUIRE( lagging != nullptr );
     REQUIRE( arrived != nullptr );
     REQUIRE( lagging->pos_abs_omt() == rally );
-    REQUIRE( get_map().inbounds( lagging->pos_abs() ) );
     INFO( "kind=" << ( kind == bandit_live_world::hostile_operation_kind::raid ? "raid" :
                        "shakedown" ) << " lagging=" << lagging->pos_abs().to_string() <<
           " player=" << get_avatar().pos_abs().to_string() <<
           " map=" << get_map().get_abs_sub().to_string() <<
           " inbounds=" << get_map().inbounds( lagging->pos_abs() ) <<
           " companion=" << lagging->has_companion_mission() );
+    REQUIRE( get_map().inbounds( lagging->pos_abs() ) );
     REQUIRE( lagging->is_active() );
     REQUIRE( lagging->guard_pos == old_rally_guard );
     const tripoint_abs_omt before_omt = lagging->pos_abs_omt();
@@ -36882,6 +37165,41 @@ TEST_CASE( "loaded hostile approach retires the saved rally guard for the reserv
     process_overmap_npc_move_for_test();
     lagging = g->find_npc( party_ids[0] );
     REQUIRE( lagging != nullptr );
+    if( peaceful_loaded ) {
+        // The established loaded shakedown owner deliberately refuses an
+        // abstract jump. Exercise its real NPC motor instead of demanding one.
+        CHECK( lagging->pos_abs_omt() == rally );
+        CHECK( live_site.active_hostile_operation.reservation.last_progress_minutes == before_progress );
+        CHECK( lagging->guard_pos == std::nullopt );
+        CHECK( lagging->get_ai_guard_pos() == std::nullopt );
+        const auto actual_start = lagging->pos_abs();
+        bool moved = false;
+        for( int tick = 0; tick < 200 && live_site.active_hostile_operation.phase !=
+             bandit_live_world::hostile_operation_phase::committed_contact; ++tick ) {
+            calendar::turn += 1_turns;
+            for( const character_id id : party_ids ) {
+                npc *member = g->find_npc( id );
+                REQUIRE( member );
+                member->set_moves( 100 ); // controlled action budget, charged by native NPC motor
+            }
+            process_monsters_and_npcs_turn_for_test();
+            process_overmap_npc_move_for_test();
+            lagging = g->find_npc( party_ids[0] );
+            REQUIRE( lagging );
+            moved |= lagging->pos_abs() != actual_start;
+        }
+        CHECK( moved );
+        CHECK( live_site.active_hostile_operation.phase ==
+               bandit_live_world::hostile_operation_phase::committed_contact );
+        for( const character_id id : party_ids ) {
+            const npc *member = g->find_npc( id );
+            REQUIRE( member );
+            CHECK( member->pos_abs_omt() == target );
+            CHECK( live_site.find_member( id )->state == bandit_live_world::member_state::local_contact );
+        }
+        CHECK( g->find_npc( unrelated_id )->guard_pos == unrelated_guard );
+        return;
+    }
     CHECK( lagging->pos_abs_omt() != rally );
     CHECK( lagging->goal == target );
     CHECK( lagging->guard_pos == std::nullopt );
@@ -53072,9 +53390,10 @@ TEST_CASE( "retained Fight motor distinguishes encounter ownership from ordinary
         const auto original_body = r054_actor_bytes( actor );
         const std::string body_name = std::string( "motor-" ) + ( operation ? "operation" : "ordinary" ) +
                                       ( heard ? "-shout" : "-quiet" );
-        std::ofstream
-        body_output( "build_logs/first-smoke-067/phone-light-only/source-diagnosis/committed-fight-9096/" +
-                     body_name + "-body.json" );
+        const auto out =
+            std::filesystem::path( "build_logs/first-smoke-067/phone-light-only/source-diagnosis/committed-fight-9096" );
+        std::filesystem::create_directories( out );
+        std::ofstream body_output( out / ( body_name + "-body.json" ) );
         body_output << original_body;
         if( operation ) {
             initial_bodies.push_back( motor_body( original_body ) );
@@ -53103,8 +53422,6 @@ TEST_CASE( "retained Fight motor distinguishes encounter ownership from ordinary
         REQUIRE( pending.at( "fetching_item" ) == "false" );
         const std::string name = std::string( "motor-" ) + ( operation ? "operation" : "ordinary" ) +
                                  ( heard ? "-shout" : "-quiet" );
-        const auto out =
-            std::filesystem::path( "build_logs/first-smoke-067/phone-light-only/source-diagnosis/committed-fight-9096" );
         const auto trace_path = std::filesystem::absolute( out / ( name + ".jsonl" ) );
         std::error_code ignored;
         std::filesystem::remove( trace_path, ignored );
