@@ -3104,8 +3104,19 @@ bool local_handoff_snapshot_matches_outing(
     const bool physical_homeward_cursor =
         scout_phase_requires_homeward_only( snapshot.phase ) &&
         snapshot.route_position != canonical_route_position;
-    const bool assembled_physical_homeward_pair = physical_homeward_cursor &&
-            snapshot.cohesion_assembled;
+    // A retained assembled pair can already occupy its attained staging cells.
+    // Native route commits preserve those offsets through forward arrival and
+    // the change to homeward purpose. Local ingress still needs its distinct
+    // assembly destination; resumes retain the route and full-pair checks below.
+    const bool retained_route_cursor = outing.owner == simulation_owner::abstract &&
+                                       snapshot.is_abstract_resume() &&
+                                       ( scout_phase_requires_homeward_only( snapshot.phase ) ||
+                                         ( snapshot.phase == scout_phase::observing &&
+                                           !structural_outing_uses_watch_route( outing ) &&
+                                           snapshot.waypoint_index > 0 &&
+                                           snapshot.waypoint_index <= structural_outing_destination_waypoint( outing ) ) );
+    const bool assembled_physical_resume_pair = snapshot.cohesion_assembled &&
+            ( physical_homeward_cursor || retained_route_cursor );
     // A party which was already abstract when its watch fell outside the player
     // bubble has no local assembly event.  Its two exact physical actors can be
     // in different squares of the same OMT while the overmap return owns them.
@@ -3258,7 +3269,7 @@ snapshot.cohesion_reroutes_used > local_pair_reroute_cap ||
             std::find( staging_positions.begin(), staging_positions.end(),
                        member.staging_position ) != staging_positions.end() ||
             ( !member.dead && member.staging_position == member.entry_position &&
-              !assembled_physical_homeward_pair && !abstract_homeward_pair ) ||
+              !assembled_physical_resume_pair && !abstract_homeward_pair ) ||
             ( abstract_homeward_pair && !snapshot.cohesion_abort_return && !member.dead &&
               ( project_to<coords::omt>( member.entry_position ) != snapshot.route_position ||
                 project_to<coords::omt>( member.staging_position ) != snapshot.route_position ) ) ||
@@ -5582,8 +5593,8 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
     record_live_transition( site, &site.active_outing, "local_pair_abstract_resume_progress",
                             moved ? "committed" : "cadence_service",
                             "abstract", "abstract",
-                            moved ? "paired physical resume advanced its persisted homeward cursor" :
-                            "paired native debt service consumed its homeward cadence without displacement",
+                            moved ? "paired physical resume advanced its persisted route cursor" :
+                            "paired native debt service consumed its cadence without displacement",
                             current_minutes, site.active_outing.member_ids );
     return true;
 }

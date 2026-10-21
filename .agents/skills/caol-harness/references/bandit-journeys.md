@@ -27,6 +27,33 @@ input owner. Enable the existing harness decision trace for the relevant bandits
 
 Use the shared [decision points](smoke-raid-replay.md#decision-points-for-efficient-repeats) and [validated counted-action limits](smoke-raid-replay.md#counted-actions-after-the-r043-pilot); the bandit-specific inspection boundary is the actual shakedown choice and resulting transfer or fight. Do not borrow cannibal night timing.
 
+## Existing movement variants: retained-pair regression detail
+
+Use the existing [6b outbound, 6k bubble/split and 6m reload variants](away-return-journeys.md)
+for these continuity checks. This refines their coverage; it creates no additional movement
+family or automatic replay of accepted stories.
+
+Follow two living identities through actual local assembly, unload before completing the
+forward leg, then let native abstract travel reach the assigned destination. Include an
+ordinary non-watch outing such as scavenging where compatible, rather than inferring its
+coverage from a watch/report journey. Continue through the outing's real observation or
+collection, change to homeward purpose, physical return and normal finalization. Perform a
+full native exit/same-save reload and continued service at a useful boundary. Check identity,
+injury/casualty conservation and once-only report/cargo/return settlement. Incapacity and
+missing/foreign ownership must still refuse safely. Do not move actors, restore casualties
+or force arrival/report state to make the journey finish.
+
+Use plausibly separated actual source/home geometry and viable native routes for scouting.
+The 2026-10-21 one-OMT source beside the cannibal home was unsuitable scenario setup, not a
+representative gameplay failure. Preserve its admission/executor consistency fix as a
+secondary defensive regression: admission must not promise departure through its own covert
+stand-off exclusion. An old impossible reservation may release only an authenticated
+unstarted party still home; that cancellation earns no travel, watch or report credit.
+Do not repeat artificial near-home setup as the principal native story.
+
+Connected automated regressions reproduce these exact boundaries. Native coverage still
+needs the actual journey; a reservation, successful reload or phase label alone is insufficient.
+
 ## Physical return before report — owner correction, 2026-10-07
 
 After scouts physically reach home, allow the natural return finalization and report service to run through longer useful supported interruptible waits. Home coordinates and a `returning_home` label alone do not establish a stall or report success. Use the actual faction cadence and current native time, preserving danger, fire maintenance and actor identity; historical timing is comparison evidence, not a deadline. Before declaring nonprogress, establish the relevant current completion predicate and whether its service opportunity has actually passed. Continue the same journey without repeated setup, forced reports or arbitrary wait quotas.

@@ -70814,7 +70814,7 @@ bandit_live_world::site_record &retained_survivor_site( bandit_live_world::world
 }
 
 void cross_retained_survivor_11375( bandit_live_world::site_record &site,
-                                    const bool casualty = true )
+                                    const bool casualty = true, const bool staged = false )
 {
     using namespace bandit_live_world;
     REQUIRE( site.active_outing.schema_version == 9 );
@@ -70830,8 +70830,9 @@ void cross_retained_survivor_11375( bandit_live_world::site_record &site,
         read.readable = true;
         read.dead = member.dead;
         read.hp_percent = member.hp_percent;
-        read.current_position = tripoint_abs_ms( member.npc_id == character_id( 5 ) ? 3240 : 3241,
-                                                3382, 0 );
+        read.current_position = staged && !member.dead ? member.staging_position :
+                                tripoint_abs_ms( member.npc_id == character_id( 5 ) ? 3240 : 3241,
+                                        3382, 0 );
         reads.push_back( read );
     }
     const auto plan = plan_local_pair_dematerialization( site, *cursor, 11375, reads,
@@ -70973,6 +70974,13 @@ TEST_CASE( "retained arrival rejects stale foreign and unobserved movement atomi
         reads[1].current_position = tripoint_abs_ms( 3241, 3430, 0 );
     }
     SECTION( "missing survivor read" ) { reads.pop_back(); }
+    SECTION( "unassembled forward pair cannot certify an attained stage" ) {
+        site.active_outing.local_handoff.cohesion_assembled = false;
+        REQUIRE( current_external_simulation_cursor( site ) );
+        // Matching the destination's staging offset is insufficient without
+        // the original native assembly witness, even for a valid resume.
+        reads[1].current_position = tripoint_abs_ms( 3241, 3407, 0 );
+    }
     SECTION( "observation cannot consume a stationary interval" ) {
         reads[1].current_position = site.active_outing.local_handoff.members[1].exit_position;
         const auto before = serialize_world( world );
@@ -71021,12 +71029,13 @@ TEST_CASE( "retained arrival projection refusal cannot publish finite stock",
     CHECK( current_external_simulation_cursor( site ).has_value() );
 }
 
-TEST_CASE( "retained survivor uses the native motor before cargo and after return transition",
+TEST_CASE( "retained physical party uses the native motor before cargo and after return transition",
            "[bandit_live_world][retained_arrival_067][retained_arrival_motor_067]" )
 {
     using namespace bandit_live_world;
     const bool incapacitated = GENERATE( false, true );
-    CAPTURE( incapacitated );
+    const bool staged_pair = GENERATE( false, true );
+    CAPTURE( incapacitated, staged_pair );
     override_option food( "NO_NPC_FOOD", "true" );
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     const auto old_world = overmap_buffer.global_state.bandit_live_world;
@@ -71035,6 +71044,10 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
     const auto old_player = get_avatar().pos_abs_omt();
     std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
     on_out_of_scope restore( [&]() {
+        if( overmap_buffer.find_npc( character_id( 5 ) ) ) {
+            g->remove_npc( character_id( 5 ) );
+            overmap_buffer.remove_npc( character_id( 5 ) );
+        }
         g->remove_npc( character_id( 6 ) );
         overmap_buffer.remove_npc( character_id( 6 ) );
         overmap_buffer.global_state.bandit_live_world = old_world;
@@ -71063,14 +71076,51 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
     auto &world = overmap_buffer.global_state.bandit_live_world;
     world = retained_survivor_11371();
     auto &site = retained_survivor_site( world );
-    cross_retained_survivor_11375( site );
+    if( staged_pair ) {
+        // A declared two-living-member countercontrol, not revival of the
+        // historical casualty. Both actually reach their native staging cells
+        // before unload, as in the raid-sweep gen3 prerequisite refusal.
+        ++site.living_total;
+        auto *first = site.find_member( character_id( 5 ) );
+        first->state = member_state::outbound;
+        for( auto &spawn : site.spawn_tiles ) {
+            if( spawn.tile == first->home_spawn_tile ) {
+                ++spawn.assigned_living_total;
+            }
+        }
+        site.active_outing.casualty_ids.clear();
+        site.active_outing.resolved_member_ids.clear();
+        site.active_outing.local_handoff.casualty_ids.clear();
+        auto &snapshot = site.active_outing.local_handoff.members.front();
+        snapshot.dead = false;
+        snapshot.hp_percent = 100;
+        snapshot.exit_position = snapshot.entry_position;
+    }
+    cross_retained_survivor_11375( site, !staged_pair, staged_pair );
+    const int start_y = staged_pair ? 3383 : 3382;
+    shared_ptr_fast<npc> partner;
+    if( staged_pair ) {
+        partner = make_shared_fast<npc>();
+        partner->normalize();
+        partner->load_npc_template( npc_template_id( "test_talker" ) );
+        clear_character( *partner, true );
+        partner->setID( character_id( 5 ), true );
+        partner->set_fac( faction_id( "cannibal_camp" ) );
+        partner->spawn_at_precise( tripoint_abs_ms( 3240, start_y, 0 ) );
+        partner->set_moves( -39 );
+        overmap_buffer.insert_npc( partner );
+        partner->catch_up_body();
+        REQUIRE_FALSE( partner->is_active() );
+        REQUIRE_FALSE( partner->is_dead() );
+        REQUIRE( partner->get_last_updated() == calendar::turn );
+    }
     auto body = make_shared_fast<npc>();
     body->normalize();
     body->load_npc_template( npc_template_id( "test_talker" ) );
     clear_character( *body, true );
     body->setID( character_id( 6 ), true );
     body->set_fac( faction_id( "cannibal_camp" ) );
-    body->spawn_at_precise( tripoint_abs_ms( 3241, 3382, 0 ) );
+    body->spawn_at_precise( tripoint_abs_ms( 3241, start_y, 0 ) );
     body->set_moves( -39 );
     overmap_buffer.insert_npc( body );
     REQUIRE_FALSE( body->is_active() );
@@ -71086,7 +71136,10 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
         calendar::turn += 5_minutes;
         process_overmap_npc_move_for_test();
         REQUIRE( body->has_effect( efftype_id( "narcosis" ) ) );
-        CHECK( body->pos_abs() == tripoint_abs_ms( 3241, 3382, 0 ) );
+        CHECK( body->pos_abs() == tripoint_abs_ms( 3241, start_y, 0 ) );
+        if( partner ) {
+            CHECK( partner->pos_abs() == tripoint_abs_ms( 3240, start_y, 0 ) );
+        }
         CHECK( retained_survivor_site( world ).active_outing.cargo.supply_units == 0 );
         REQUIRE( current_external_simulation_cursor( site ) );
         body->remove_effect( efftype_id( "narcosis" ) ); // Changed condition, same owner.
@@ -71094,6 +71147,11 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
     calendar::turn += 5_minutes;
     process_overmap_npc_move_for_test();
     REQUIRE( body->pos_abs_omt() == tripoint_abs_omt( 135, 141, 0 ) );
+    if( partner ) {
+        REQUIRE( partner->pos_abs_omt() == body->pos_abs_omt() );
+        CHECK( partner->pos_abs() != body->pos_abs() );
+        CHECK( site.active_outing.local_handoff.cohesion_assembled );
+    }
     REQUIRE( retained_survivor_site( world ).active_outing.local_handoff.route_position == body->pos_abs_omt() );
     REQUIRE( retained_survivor_site( world ).active_outing.cargo.supply_units == 0 );
     REQUIRE( g->save() );
@@ -71110,6 +71168,11 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
     r067_handover_reload( world_name );
     body = overmap_buffer.find_npc( character_id( 6 ) );
     REQUIRE( body );
+    if( staged_pair ) {
+        partner = overmap_buffer.find_npc( character_id( 5 ) );
+        REQUIRE( partner );
+        REQUIRE( partner->pos_abs_omt() == body->pos_abs_omt() );
+    }
     REQUIRE( body->pos_abs() == arrived_position );
     REQUIRE( retained_survivor_site( world ).active_outing.cargo.supply_units == 2 );
     REQUIRE( current_external_simulation_cursor( retained_survivor_site( world ) ) );
@@ -71124,10 +71187,18 @@ TEST_CASE( "retained survivor uses the native motor before cargo and after retur
     CHECK( body->pos_abs_omt() == tripoint_abs_omt( 135, 137, 0 ) );
     CHECK( steps > 0 );
     CHECK( steps < 24 );
-    CHECK( retained_survivor_site( world ).find_member( character_id( 5 ) )->state == member_state::dead );
-    REQUIRE( retained_survivor_site( world ).active_outing.member_return_receipts.size() == 1 );
-    CHECK( retained_survivor_site( world ).active_outing.member_return_receipts.front().member_id ==
-           character_id( 6 ) );
+    CHECK( retained_survivor_site( world ).find_member( character_id( 5 ) )->state ==
+           ( staged_pair ? member_state::at_home : member_state::dead ) );
+    const auto &returns = retained_survivor_site( world ).active_outing.member_return_receipts;
+    REQUIRE( returns.size() == ( staged_pair ? 2 : 1 ) );
+    CHECK( std::count_if( returns.begin(), returns.end(), []( const auto &receipt ) {
+        return receipt.member_id == character_id( 6 );
+    } ) == 1 );
+    if( staged_pair ) {
+        CHECK( std::count_if( returns.begin(), returns.end(), []( const auto &receipt ) {
+            return receipt.member_id == character_id( 5 );
+        } ) == 1 );
+    }
     for( int cadence = 0; cadence < 24 &&
          retained_survivor_site( world ).active_outing.is_active(); ++cadence ) {
         calendar::turn += 5_minutes;
