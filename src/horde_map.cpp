@@ -8,6 +8,7 @@
 #include "debug.h"
 #include "map_scale_constants.h"
 #include "monster.h"
+#include "migo_tower_native.h"
 #include "mtype.h"
 
 static const species_id species_FERAL( "FERAL" );
@@ -158,7 +159,8 @@ std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde
     const horde_entity candidate( mon );
     std::unordered_map <tripoint_om_sm, std::unordered_map<tripoint_abs_ms, horde_entity>> &target_map =
                 mon.type->has_flag( mon_flag_DORMANT ) ? dormant_monster_map :
-                !is_alert( *mon.type ) ? immobile_monster_map :
+                !is_alert( *mon.type ) && !migo_tower::owns_intent( mon,
+                        migo_population::representation::abstract ) ? immobile_monster_map :
                 candidate.is_active() ? active_monster_map :
                 idle_monster_map;
     std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> result;

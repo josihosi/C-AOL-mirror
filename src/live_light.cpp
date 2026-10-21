@@ -1,6 +1,7 @@
 #include "live_light.h"
 
 #include "physical_light.h"
+#include <map>
 
 namespace live_light
 {
@@ -11,6 +12,9 @@ time_point sample_turn = calendar::turn_zero;
 bool sample_valid = false;
 physical_light::turn_sample_gate sample_gate;
 std::vector<live_light_delivery_stage> trace;
+std::map<tripoint_abs_ms, unsigned> source_presence;
+time_point source_presence_turn = calendar::turn_zero;
+bool source_presence_valid = false;
 
 void note( const live_light_delivery_stage stage )
 {
@@ -25,6 +29,48 @@ void reset()
     sample_valid = false;
     sample_gate = physical_light::turn_sample_gate{};
     trace.clear();
+    source_presence.clear();
+    source_presence_valid = false;
+}
+
+void record_loaded_sources( time_point turn, const physical_light::loaded_z_source_index &sources )
+{
+    source_presence.clear();
+    source_presence_turn = turn;
+    source_presence_valid = true;
+    for( const auto &field : sources.field_sources ) {
+        if( field.fire_intensity > 0 || field.smoke_intensity > 0 ) {
+            source_presence[field.position] |= 1;
+        }
+        if( field.fire_intensity > 0 ) {
+            source_presence[field.position] |= 2;
+        }
+    }
+    for( const auto &emitter : sources.item_emitters ) {
+        if( emitter.luminance > 0 ) {
+            source_presence[emitter.position] |= 2;
+        }
+    }
+    for( const auto &emitter : sources.stationary_emitters ) {
+        if( emitter.luminance > 0 ) {
+            source_presence[emitter.position] |= 2;
+        }
+    }
+}
+
+std::optional<bool> source_present_for_turn( time_point turn, const tripoint_abs_ms &source,
+        const std::string &kind )
+{
+    if( !source_presence_valid || source_presence_turn != turn || !sample_is_current( turn ) ) {
+        return std::nullopt;
+    }
+    const unsigned flag = kind == "smoke" ? 1 :
+                          ( kind == "light" || kind == "searchlight" ? 2 : 0 );
+    if( flag == 0 ) {
+        return std::nullopt;
+    }
+    const auto found = source_presence.find( source );
+    return found != source_presence.end() && ( found->second & flag ) != 0;
 }
 
 void run_advancing_turn( const time_point turn, const callbacks &callbacks )
@@ -37,6 +83,8 @@ void run_advancing_turn( const time_point turn, const callbacks &callbacks )
     if( !sample_gate.begin_advancing_turn( turn_number, true ) ) {
         return;
     }
+    source_presence.clear();
+    source_presence_valid = false;
     note( live_light_delivery_stage::rider_reconciliation );
     callbacks.reconcile_riders();
     note( live_light_delivery_stage::rider_memory_aging );
@@ -78,6 +126,10 @@ void run_advancing_turn( const time_point turn, const callbacks &callbacks )
     if( !cannibal_samples.empty() ) {
         callbacks.deliver_cannibals( cannibal_samples );
     }
+    note( live_light_delivery_stage::migo_delivery );
+    if( callbacks.deliver_migo ) {
+        callbacks.deliver_migo( cannibal_samples );
+    }
 }
 
 const std::vector<live_bandit_signal_observation> &samples_for_turn( const time_point turn )
@@ -107,6 +159,7 @@ std::vector<live_light_delivery_stage> delivery_order()
              live_light_delivery_stage::stalker_delivery,
              live_light_delivery_stage::rider_delivery,
              live_light_delivery_stage::cannibal_delivery,
+             live_light_delivery_stage::migo_delivery,
              live_light_delivery_stage::staffed_observer_recording };
 }
 

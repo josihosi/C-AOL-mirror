@@ -36,9 +36,13 @@ struct live_bandit_signal_observation {
 
 enum class live_light_delivery_stage {
     rider_reconciliation, rider_memory_aging, fresh_sampling, horde_delivery,
-    stalker_delivery, rider_delivery, cannibal_delivery, staffed_observer_recording
+    stalker_delivery, rider_delivery, cannibal_delivery, migo_delivery, staffed_observer_recording
 };
 
+namespace physical_light
+{
+struct loaded_z_source_index;
+}
 namespace live_light
 {
 struct callbacks {
@@ -49,6 +53,7 @@ struct callbacks {
     std::function<void( const std::vector<live_bandit_signal_observation> & )> deliver_stalkers;
     std::function<void( const std::vector<live_bandit_signal_observation> & )> deliver_riders;
     std::function<void( const std::vector<live_bandit_signal_observation> & )> deliver_cannibals;
+    std::function<void( const std::vector<live_bandit_signal_observation> & )> deliver_migo;
 };
 
 void reset();
@@ -60,6 +65,13 @@ const std::vector<live_bandit_signal_observation> &samples_for_turn( time_point 
 void record_staffed_observer( time_point turn,
                               const std::function<void( const std::vector<live_bandit_signal_observation> & )> &record );
 bool sample_is_current( time_point turn );
+// The advancing-turn discovery producer records raw loaded emitter presence
+// before packet strength/weather thresholds. Consumers may check only a
+// previously received source and must independently establish loaded geometry
+// and actual observer visibility; absence here is not itself perception.
+void record_loaded_sources( time_point turn, const physical_light::loaded_z_source_index &sources );
+std::optional<bool> source_present_for_turn( time_point turn, const tripoint_abs_ms &source,
+        const std::string &kind );
 std::vector<live_light_delivery_stage> delivery_order();
 std::vector<live_light_delivery_stage> delivery_trace();
 }

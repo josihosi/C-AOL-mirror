@@ -323,6 +323,7 @@ void overmap_global_state::clear()
     highway_intersections.clear();
     bandit_live_world.clear();
     migo_populations.clear();
+    migo_towers.clear();
     zombie_rider_light_memory.clear();
     zombie_rider_light_memory_last_turn = calendar::turn_zero;
     zombie_rider_bands.clear();
@@ -938,8 +939,30 @@ void overmapbuffer::move_hordes()
     // arbitrary radius to include nearby overmaps (aside from the current one)
     const int radius = MAPSIZE * 2;
     const tripoint_abs_sm center = get_player_character().pos_abs_sm();
+    std::set<overmap *> processed;
     for( overmap *&om : get_overmaps_near( center, radius ) ) {
+        processed.insert( om );
         om->move_hordes();
+    }
+    // Follow only already leased operation bodies beyond the ordinary
+    // player-near pass. This neither discovers sites nor admits unrelated
+    // far hordes, and supplies no catch-up or 40-OMT activation policy.
+    for( const auto &site : global_state.migo_towers.sites ) {
+        const auto *population = global_state.migo_populations.find( site.site_id );
+        if( !population || !site.operation || site.operation->resolved ) {
+            continue;
+        }
+        for( const auto &member : site.operation->members ) {
+            const auto *lease = population->find( member.member_id );
+            if( !member.last_position || member.settled || !lease ||
+                lease->owner != migo_population::representation::abstract ) {
+                continue;
+            }
+            overmap *owner = get_existing( project_to<coords::om>( *member.last_position ).xy() );
+            if( owner && processed.insert( owner ).second ) {
+                owner->move_hordes( true );
+            }
+        }
     }
 }
 

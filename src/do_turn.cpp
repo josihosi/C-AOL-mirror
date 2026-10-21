@@ -68,6 +68,7 @@
 #include "help.h"
 #include "horde_entity.h"
 #include "migo_population_native.h"
+#include "migo_tower_native.h"
 #include "input.h"
 #include "input_context.h"
 #include "item_wakeup.h"
@@ -10764,6 +10765,7 @@ std::vector<live_bandit_signal_observation> observe_loaded_z_light_sources()
     std::map<tripoint_abs_ms, live_bandit_local_source_reading> readings;
     const physical_light::loaded_z_source_index source_index =
         live_source_sampler.sample( u, here, to_turns<int>( calendar::turn - calendar::turn_zero ) );
+    live_light::record_loaded_sources( calendar::turn, source_index );
 
     for( const physical_light::loaded_z_source_index::field_source &source :
          source_index.field_sources ) {
@@ -13323,6 +13325,15 @@ void sample_and_deliver_live_light_for_advancing_turn()
     };
     callbacks.deliver_cannibals = []( const std::vector<live_bandit_signal_observation> &samples ) {
         observe_live_hostile_signal_sources( samples );
+    };
+    callbacks.deliver_migo = []( const std::vector<live_bandit_signal_observation> &samples ) {
+        const int now = to_turn<int>( calendar::turn );
+        migo_tower::receive_signals( samples, now );
+        for( const auto &site : overmap_buffer.global_state.migo_towers.sites ) {
+            if( site.last_sense_turn == now ) {
+                migo_tower::begin_response( site.site_id, now );
+            }
+        }
     };
     live_light::run_advancing_turn( calendar::turn, callbacks );
 }
@@ -17137,6 +17148,14 @@ void monmove()
                 break;
             }
             critter.move(); // Move one square, possibly hit u
+            if( critter.migo_intent() &&
+                ( critter.migo_intent()->last_refused_world == to_turn<int>( calendar::turn ) ||
+                  ( !critter.population_identity().empty() && !migo_population::can_transfer( critter,
+                          migo_population::representation::local ) ) ) ) {
+                // Refusal preserves the budget; committed handoff yields the
+                // released handle before it can receive more local effects.
+                break;
+            }
             bandit_live_world_probe::record_fixture_monster_lifecycle( critter, "move_after", "local" );
             critter.process_triggers();
             m.creature_in_field( critter );
@@ -20423,6 +20442,7 @@ bool game::do_turn()
     }
 
     // Move hordes every turn, move_hordes has its own rate limiting
+    migo_tower::service_operations( to_turn<int>( calendar::turn ) );
     overmap_buffer.move_hordes();
     migo_population::service_loaded();
     if( calendar::once_every( time_duration::from_minutes( 2.5 ) ) ) {

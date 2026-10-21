@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -191,4 +192,35 @@ TEST_CASE( "migo_due_birth_waits_for_admitted_active_time_after_freeze_or_reload
     REQUIRE( site.advance( 10 * week + 1, 1, true, place ) );
     CHECK( births == 1 );
     CHECK( site.production_elapsed == 0 );
+}
+
+TEST_CASE( "migo_exact_party_reservation_authenticates_all_members_and_keeps_defenders",
+           "[migo_population][migo_tower]" )
+{
+    using namespace migo_population;
+    site_record site = tower();
+    for( const auto &m : site.members ) {
+        REQUIRE( site.transfer( m.token, representation::slot, representation::abstract ) );
+    }
+    const auto healthy = []( const member_record &m ) { return m.hp >= 50; };
+    const std::vector<identity> preferred = {site.members[0].token, site.members[1].token,
+                                           site.members[6].token};
+    auto bad = preferred;
+    ++bad.back().epoch;
+    CHECK( site.reserve_exact( bad, healthy ).empty() );
+    CHECK( site.reserve_exact( {preferred[0], preferred[0], preferred[2]}, healthy ).empty() );
+    CHECK( std::all_of( site.members.begin(), site.members.end(), []( const auto &m ) {
+        return m.assignment == duty::available;
+    } ) );
+    REQUIRE( site.reserve_exact( preferred, healthy ).size() == 3 );
+    CHECK( site.find( preferred[2].member_id )->assignment == duty::dispatched );
+    CHECK( site.members[2].assignment == duty::available );
+    CHECK( site.reserve_exact( preferred, healthy ).empty() );
+    site = reload( site );
+    site.members[2].hp = 1; // Five unleased bodies, only four capable.
+    CHECK( site.reserve_exact( {site.members[3].token, site.members[4].token,
+                               site.members[5].token}, healthy ).empty() );
+    REQUIRE( site.reserve_exact( {site.members[3].token, site.members[7].token}, healthy ).size() == 2 );
+    CHECK( site.members[4].assignment == duty::available );
+    CHECK( site.members[5].assignment == duty::available );
 }

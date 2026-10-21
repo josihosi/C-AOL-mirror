@@ -1,4 +1,7 @@
 #include "monster.h"
+#include "migo_tower_ai.h"
+#include "migo_tower_native.h"
+#include "migo_population_native.h"
 #include "writhing_stalker_ai.h"
 #include "rng.h"
 
@@ -393,6 +396,15 @@ const predator_lifecycle_state &monster::predator_state() const
     return lifecycle_state;
 }
 monster::~monster() = default;
+void monster::set_migo_intent( const migo_tower::member_intent &intent )
+{
+    tower_intent = cata::make_value<migo_tower::member_intent>( intent );
+}
+
+void monster::clear_migo_intent()
+{
+    tower_intent.reset();
+}
 monster &monster::operator=( const monster & ) = default;
 monster &monster::operator=( monster && ) noexcept( string_is_noexcept ) = default;
 
@@ -2336,6 +2348,7 @@ bool monster::melee_attack( Creature &target, float accuracy )
         // We don't hit, so just return
         return true;
     }
+    migo_tower::record_combat_action( *this );
 
     Character &player_character = get_player_character();
     if( target.is_avatar() ||
@@ -3097,6 +3110,24 @@ void monster::explode()
 
 void monster::process_turn()
 {
+    const bool owned_migo = !population_identity().empty() && migo_population::can_transfer( *this,
+                            migo_population::representation::local );
+    if( owned_migo && !migo_intent() ) {
+        // Retain the ordinary resident's current native credit even if its
+        // first reservation is made later in this same physical turn.
+        set_migo_intent( migo_tower::member_intent() );
+    }
+    migo_tower::member_intent *intent = migo_intent();
+    const int now = to_turn<int>( calendar::turn );
+    if( owned_migo && intent->last_native_process_world == now ) {
+        return;
+    }
+    const bool credit_moves = !owned_migo || ( intent->last_energy_world != now &&
+                              !( intent->last_refused_world >= 0 && intent->last_refused_world >= intent->last_energy_world &&
+                                 get_moves() > 0 ) );
+    if( owned_migo ) {
+        intent->last_native_process_world = now;
+    }
     bandit_live_world_probe::record_fixture_monster_lifecycle( *this, "process_turn_before", "local" );
     map &here = get_map();
     if( !is_hallucination() ) {
@@ -3210,7 +3241,14 @@ void monster::process_turn()
         }
     }
 
-    Creature::process_turn();
+    if( credit_moves ) {
+        Creature::process_turn();
+        if( owned_migo ) {
+            intent->last_energy_world = now;
+        }
+    } else {
+        Creature::process_turn_no_moves();
+    }
     bandit_live_world_probe::record_fixture_monster_lifecycle( *this, "process_turn_after", "local" );
 }
 
@@ -3232,6 +3270,7 @@ void monster::die( map *here, Creature *nkiller )
             overmap_buffer.global_state.migo_populations.find( population_member.site_id ) ) {
             site->record_death( population_member );
         }
+        migo_tower::witness_death( *this );
     }
     if( type->id == mon_zombie_rider && !lifecycle_state.actor_id.empty() ) {
         overmap_buffer.global_state.zombie_rider_bands.record_casualty( lifecycle_state.actor_id,
@@ -4137,6 +4176,9 @@ void monster::on_hit( map *here, Creature *source, bodypart_id,
 {
     if( is_hallucination() ) {
         return;
+    }
+    if( source && source != this ) {
+        migo_tower::record_combat_action( *this );
     }
 
     if( rng( 0, 100 ) <= static_cast<int>( type->def_chance ) ) {

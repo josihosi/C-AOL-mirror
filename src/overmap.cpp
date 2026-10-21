@@ -44,6 +44,8 @@
 #include "messages.h"
 #include "mongroup.h"
 #include "monster.h"
+#include "migo_tower_ai.h"
+#include "migo_tower_native.h"
 #include "mtype.h"
 #include "npc.h"
 #include "options.h"
@@ -1657,14 +1659,21 @@ std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> overmap::hordes_
  * Moves hordes around the map according to their behaviour and target.
  * If they enter the coordinate space of the loaded map, spawn them there.
  */
-void overmap::move_hordes()
+void overmap::refresh_monster_schedule( const tripoint_abs_ms &p )
+{
+    hordes.refresh_entity_bucket( p );
+}
+
+void overmap::move_hordes( bool migo_operations_only )
 {
     // TODO: throttle processing of monsters.
     // Specifically for throttling, only a process a subset of the eligible monster buckets per invocation.
     // This is the existing horde scheduler; light discovery never adds a
     // second movement pass.  It also returns finite light-only interest to
     // the idle bucket before selecting active entities for this turn.
-    hordes.expire_light_interest( calendar::turn );
+    if( !migo_operations_only ) {
+        hordes.expire_light_interest( calendar::turn );
+    }
     // Retain the source key independently of the extracted node.  A failed
     // cross-overmap insertion must restore this exact owner/position.
     struct pending_horde_migration {
@@ -1675,6 +1684,12 @@ void overmap::move_hordes()
     std::vector<pending_horde_migration> migrating_hordes;
     for( horde_map::iterator mon = hordes.get_view( horde_map_flavors::active ).begin(),
          mon_end = hordes.end(); mon != mon_end; ) {
+        if( migo_operations_only && ( !mon->second.monster_data ||
+                                     !migo_tower::owns_intent( *mon->second.monster_data,
+                                             migo_population::representation::abstract ) ) ) {
+            ++mon;
+            continue;
+        }
         // This might have an issue where a monster prevented from acting possibly should
         // get another chance to act?
         // This is here so that when a entity moves from one bucket to another it doesn't
@@ -1741,10 +1756,47 @@ void overmap::move_hordes()
         // A predator becomes heavy only when it is actually scheduled by the
         // abstract owner.  This preserves ordinary type-only horde entries.
         acting->advance_predator_intent( mon->first, to_turn<int>( calendar::turn ) );
-        // If we have a goal, proceed toward it.
-        if( acting->tracking_intensity > 0 && mon->first != acting->destination ) {
-            acting->tracking_intensity--;
-            acting->moves += acting->type_id->speed;
+        const bool migo_work = acting->monster_data && migo_tower::owns_intent(
+                                   *acting->monster_data, migo_population::representation::abstract );
+        physical_navigation::step_read migo_step;
+        if( migo_work ) {
+            monster &body = *acting->monster_data;
+            body.set_pos_abs_only( mon->first );
+            auto &intent = *body.migo_intent();
+            const int now = to_turn<int>( calendar::turn );
+            if( intent.last_energy_world != now ) {
+                acting->moves += body.get_speed();
+                intent.last_energy_world = now;
+            }
+            if( body.attitude() == MATT_FLEE ) {
+                intent.retreat();
+            }
+            migo_step = migo_tower::prepare_step( body, migo_population::representation::abstract );
+            if( acting->moves > 0 && migo_step.next == physical_navigation::action::open_door ) {
+                if( physical_navigation::commit_door( body, migo_step.position ) ) {
+                    acting->moves -= migo_step.move_cost;
+                    if( body.wandf > 0 ) {
+                        --body.wandf;
+                    }
+                } else {
+                    acting->moves = 0;
+                }
+                acting->synchronize_payload( mon->first );
+                mon->second = std::move( *prepared_predator );
+                ++mon;
+                continue;
+            }
+            if( migo_step.next == physical_navigation::action::none ) {
+                acting->moves = 0;
+            }
+        }
+        // Operation scheduling and movement are independent of a sound budget.
+        if( ( migo_work && migo_step.next == physical_navigation::action::walk ) ||
+            ( !migo_work && acting->tracking_intensity > 0 && mon->first != acting->destination ) ) {
+            if( !migo_work ) {
+                acting->tracking_intensity--;
+                acting->moves += acting->type_id->speed;
+            }
             if( acting->moves <= 0 ) {
                 if( prepared_predator ) {
                     mon->second = std::move( *prepared_predator );
@@ -1753,12 +1805,20 @@ void overmap::move_hordes()
                 continue;
             }
             std::vector<tripoint_abs_ms> viable_candidates;
-            // Call up to overmapbuffer in case it needs to dispatch to an adjacent overmap.
-            for( const tripoint_abs_ms &candidate :
-                 squares_closer_to( mon->first, acting->destination ) ) {
-                // Just filter out cross-level candidates for now.
-                if( candidate.z() == mon->first.z() && overmap_buffer.passable( candidate ) ) {
-                    viable_candidates.push_back( candidate );
+            if( migo_work ) {
+                // The native physical reader already checked actual geometry,
+                // stairs and the entire safe short route. Never replace that
+                // step with a same-level greedy or nearby transport guess.
+                if( overmap_buffer.get_existing( project_to<coords::om>( migo_step.position ).xy() ) ) {
+                    viable_candidates.push_back( migo_step.position );
+                }
+            } else {
+                // Call up to overmapbuffer in case it needs an adjacent overmap.
+                for( const tripoint_abs_ms &candidate :
+                     squares_closer_to( mon->first, acting->destination ) ) {
+                    if( candidate.z() == mon->first.z() && overmap_buffer.passable( candidate ) ) {
+                        viable_candidates.push_back( candidate );
+                    }
                 }
             }
             if( viable_candidates.empty() ) {
@@ -1776,8 +1836,12 @@ void overmap::move_hordes()
                 continue;
             }
             // TODO: nuanced move costs.
-            acting->moves -= 100;
-            if( viable_candidates.front() == acting->destination ) {
+            acting->moves -= migo_work ? migo_step.move_cost : 100;
+            if( migo_work ) {
+                if( acting->monster_data->wandf > 0 ) {
+                    --acting->monster_data->wandf;
+                }
+            } else if( viable_candidates.front() == acting->destination ) {
                 acting->tracking_intensity = 0;
             }
             // squares_closer_to already orders candidates by how close to the main line they are.
@@ -1833,6 +1897,9 @@ void overmap::move_hordes()
                 // spawn clears explicit goals; the same owning handoff must
                 // restore route priority without replacing a pending sound.
                 acting->synchronize_navigation( *placed_monster );
+                if( migo_work ) {
+                    placed_monster->on_load();
+                }
                 mon = hordes.erase( mon );
                 continue;
             }
@@ -1860,6 +1927,9 @@ void overmap::move_hordes()
             // Scheduling/intent with no selected step remains an abstract
             // state transition, so commit it once rather than reprocessing it
             // on a later bucket visit in the same turn.
+            if( migo_work ) {
+                acting->synchronize_payload( mon->first );
+            }
             mon->second = std::move( *prepared_predator );
             mon++;
         } else {

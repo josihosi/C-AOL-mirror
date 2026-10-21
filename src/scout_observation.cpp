@@ -530,6 +530,44 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
     return { true, observer.sees_site_with_range( *here, target, range, footprint ),
              "actor_light_weather_cover_visibility" };
 }
+visibility_read site_reader::read_ray( const tripoint_abs_ms &origin,
+                                      const tripoint_abs_ms &target )
+{
+    if( rl_dist( origin, target ) > MAX_VIEW_DISTANCE * 2 ||
+        std::abs( origin.z() - target.z() ) > fov_3d_z_range ) {
+        return { true, false, "physical_ray_range" };
+    }
+    std::vector<tripoint_abs_omt> footprint{ project_to<coords::omt>( origin ) };
+    for( const auto &point : site_sightline( origin, target ) ) {
+        const auto omt = project_to<coords::omt>( point );
+        if( std::find( footprint.begin(), footprint.end(), omt ) == footprint.end() ) {
+            footprint.push_back( omt );
+        }
+    }
+    const map *here = &get_map();
+    if( !here->inbounds( origin ) || !here->inbounds( target ) ) {
+        existing_view *view = nullptr;
+        for( const auto &candidate : impl->views ) {
+            if( candidate->covers( origin, target ) && candidate->scope_matches( &footprint ) ) {
+                view = candidate.get();
+                break;
+            }
+        }
+        if( !view ) {
+            auto owned = std::make_unique<existing_view>( impl->vehicles, origin, target, true,
+                         false, false, &footprint );
+            owned->prepare_visibility();
+            view = owned.get();
+            impl->views.push_back( std::move( owned ) );
+        }
+        if( !view->has_ray( origin, target ) ) {
+            return { false, false, "physical_ray_geometry_unavailable" };
+        }
+        here = view;
+    }
+    return { true, here->sees( here->get_bub( origin ), here->get_bub( target ),
+                              MAX_VIEW_DISTANCE * 2 ), "physical_ray" };
+}
 visibility_read site_reader::read_signal( const Character &observer, const tripoint_abs_ms &origin,
         const tripoint_abs_ms &target,
         const std::vector<tripoint_abs_omt> &footprint )

@@ -44,6 +44,11 @@ class site_reader
         // including the observer. Unknown cells cannot reveal an occupant.
         visibility_read read_actor( const Creature &observer, const Creature &target,
                                     const actor_capability &capability );
+        // Exact physical geometry only, including the origin. Signal consumers
+        // use this for the actual lookout's exit ray, separately from distant
+        // source reach and from recognition of any creature.
+        visibility_read read_ray( const tripoint_abs_ms &origin,
+                                  const tripoint_abs_ms &target );
         visibility_read read_signal( const Character &observer, const tripoint_abs_ms &origin,
                                      const tripoint_abs_ms &target,
                                      const std::vector<tripoint_abs_omt> &footprint );

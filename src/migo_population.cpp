@@ -151,26 +151,53 @@ bool site_record::observe_health( const identity &token, int hp )
 std::vector<identity> site_record::reserve( int count,
         const std::function<bool( const member_record & )> &healthy )
 {
-    std::vector<identity> result;
+    std::vector<identity> selected;
     if( !seed_committed || count <= 0 ) {
-        return result;
+        return selected;
     }
-    std::vector<member_record *> available;
-    for( member_record &m : members ) {
+    for( const member_record &m : members ) {
         if( m.owner != representation::dead && m.owner != representation::slot &&
             m.assignment == duty::available && m.hp > 0 &&
             healthy( m ) ) {
-            available.push_back( &m );
+            selected.push_back( m.token );
+            if( static_cast<int>( selected.size() ) == count ) {
+                break;
+            }
         }
     }
-    if( static_cast<int>( available.size() ) - count < defensive_reserve ) {
-        return result;
+    return static_cast<int>( selected.size() ) == count ? reserve_exact( selected, healthy ) :
+           std::vector<identity>();
+}
+
+std::vector<identity> site_record::reserve_exact( const std::vector<identity> &selected,
+        const std::function<bool( const member_record & )> &healthy )
+{
+    if( !seed_committed || selected.empty() ) {
+        return {};
     }
-    for( int i = 0; i < count; ++i ) {
-        available[i]->assignment = duty::dispatched;
-        result.push_back( available[i]->token );
+    std::set<std::string> available;
+    for( const member_record &m : members ) {
+        if( m.owner != representation::dead && m.owner != representation::slot &&
+            m.assignment == duty::available && m.hp > 0 && healthy( m ) ) {
+            available.insert( m.token.member_id );
+        }
     }
-    return result;
+    if( available.size() < selected.size() + static_cast<size_t>( std::max( 0,
+            defensive_reserve ) ) ) {
+        return {};
+    }
+    std::set<std::string> unique;
+    for( const identity &token : selected ) {
+        const member_record *m = find( token.member_id );
+        if( !m || token.site_id != id || token.epoch != m->token.epoch ||
+            available.count( token.member_id ) == 0 || !unique.insert( token.member_id ).second ) {
+            return {};
+        }
+    }
+    for( const identity &token : selected ) {
+        find( token.member_id )->assignment = duty::dispatched;
+    }
+    return selected;
 }
 
 bool site_record::returning( const identity &token )

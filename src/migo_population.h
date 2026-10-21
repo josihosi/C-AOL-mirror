@@ -72,6 +72,10 @@ struct site_record {
     bool observe_health( const identity &token, int hp );
     std::vector<identity> reserve( int count,
                                  const std::function<bool( const member_record & )> &healthy );
+    // Selection and home reserve are separate. Authenticate every selected
+    // lease before changing any duty; the reserve counts all capable residents.
+    std::vector<identity> reserve_exact( const std::vector<identity> &selected,
+                                       const std::function<bool( const member_record & )> &healthy );
     bool returning( const identity &token );
     bool returned( const identity &token, const tripoint_abs_ms &actual_position );
     // A birth callback accepts one fresh native payload at home, or refuses

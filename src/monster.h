@@ -42,6 +42,10 @@ enum class mon_trigger : int;
 enum class phase_id : int;
 struct monster_plan;
 struct mtype;
+namespace migo_tower
+{
+struct member_intent;
+}
 
 class mon_special_attack
 {
@@ -230,6 +234,10 @@ class monster : public Creature
         // Ordinary/mission/ambient Mi-go retain an empty token.
         migo_population::identity &population_identity() { return population_member; }
         const migo_population::identity &population_identity() const { return population_member; }
+        migo_tower::member_intent *migo_intent() { return tower_intent.get(); }
+        const migo_tower::member_intent *migo_intent() const { return tower_intent.get(); }
+        void set_migo_intent( const migo_tower::member_intent &intent );
+        void clear_migo_intent();
         // Shared native transfer identity only. Species planning continues to
         // use is_caol_predator(); membership does not turn Mi-go into predators.
         bool has_handoff_identity() const {
@@ -686,6 +694,7 @@ class monster : public Creature
         zombie_rider_overmap_ai::rider_pursuit_state rider_pursuit_state;
         predator_lifecycle_state lifecycle_state;
         migo_population::identity population_member;
+        cata::value_ptr<migo_tower::member_intent> tower_intent;
         // Set only around a successful non-forced physical move_to step.
         bool physical_move_to_step = false;
 

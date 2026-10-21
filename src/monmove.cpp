@@ -1,5 +1,6 @@
 // Monster movement code; essentially, the AI
 #include "monster.h" // IWYU pragma: associated
+#include "migo_tower_native.h"
 
 #include <algorithm>
 #include <chrono>
@@ -2557,6 +2558,15 @@ void monster::plan()
         turns_since_target = 0;
     }
 
+    if( migo_intent() ) {
+        Character *opponent = mon_plan.target ? mon_plan.target->as_character() : nullptr;
+        const bool native_flight = mon_plan.fleeing || attitude() == MATT_FLEE ||
+                                   ( opponent && is_fleeing( *opponent ) );
+        if( migo_tower::plan_local( *this, native_flight, mon_plan.target ) ) {
+            return;
+        }
+    }
+
     if( type->id == mon_writhing_stalker ) {
         // A completed heard source cannot regain ownership after another
         // plan moves away. This changes no pending source or combat order.
@@ -3035,6 +3045,9 @@ void monster::move()
             moves = 0;
             return; // don't move if friendly and passenger in a moving vehicle
         }
+    }
+    if( migo_tower::move_local( *this ) ) {
+        return;
     }
     // Set attitude to attitude to our current target
     monster_attitude current_attitude = attitude( nullptr );

@@ -445,6 +445,7 @@ TEST_CASE( "physical_light_production_facade_records_real_delivery_order",
         live_light_delivery_stage::stalker_delivery,
         live_light_delivery_stage::rider_delivery,
         live_light_delivery_stage::cannibal_delivery,
+        live_light_delivery_stage::migo_delivery,
     } );
     // Re-entry in the same real turn does not resample.  The packet remains
     // current for the later cadence owner, without a query/redraw refresh.
@@ -529,6 +530,7 @@ TEST_CASE( "live_light_discovers_each_advancing_turn_without_same_turn_replay",
         live_light_delivery_stage::stalker_delivery,
         live_light_delivery_stage::rider_delivery,
         live_light_delivery_stage::cannibal_delivery,
+        live_light_delivery_stage::migo_delivery,
     } );
 }
 
@@ -617,6 +619,74 @@ TEST_CASE( "live_light_routes_smoke_to_cannibals_but_keeps_optics_light_only",
     live_light::run_advancing_turn( first_turn + 2_turns, callbacks );
     CHECK( cannibal_packets.size() == 3 );
     CHECK( optical_packets.size() == 6 );
+}
+
+TEST_CASE( "live_light_delivers_empty_current_samples_to_known_migo_owners_once",
+           "[physical_light][continuity]" )
+{
+    live_light::reset();
+    live_light::callbacks callbacks;
+    callbacks.reconcile_riders = []() {};
+    callbacks.age_rider_memory = []() {};
+    callbacks.discover = []() { return std::vector<live_bandit_signal_observation>(); };
+    int optical = 0;
+    const auto count_optical = [&]( const std::vector<live_bandit_signal_observation> & ) { ++optical; };
+    callbacks.deliver_hordes = count_optical;
+    callbacks.deliver_stalkers = count_optical;
+    callbacks.deliver_riders = count_optical;
+    callbacks.deliver_cannibals = count_optical;
+    int migo = 0;
+    callbacks.deliver_migo = [&]( const std::vector<live_bandit_signal_observation> &samples ) {
+        CHECK( samples.empty() );
+        ++migo;
+    };
+    const auto turn = calendar::turn_zero + 500_turns;
+    live_light::run_advancing_turn( turn, callbacks );
+    CHECK( migo == 1 );
+    CHECK( optical == 0 );
+    live_light::run_advancing_turn( turn, callbacks );
+    CHECK( migo == 1 );
+    live_light::run_advancing_turn( turn + 1_turns, callbacks );
+    CHECK( migo == 2 );
+    CHECK( optical == 0 );
+    live_light::reset();
+}
+
+TEST_CASE( "live_light_raw_source_presence_is_current_and_independent_of_packet_threshold",
+           "[physical_light][continuity]" )
+{
+    live_light::reset();
+    live_light::callbacks callbacks;
+    callbacks.reconcile_riders = []() {};
+    callbacks.age_rider_memory = []() {};
+    callbacks.deliver_hordes = []( const auto & ) {};
+    callbacks.deliver_stalkers = []( const auto & ) {};
+    callbacks.deliver_riders = []( const auto & ) {};
+    callbacks.deliver_cannibals = []( const auto & ) {};
+    const tripoint_abs_ms source( 20, 30, 0 );
+    const auto turn = calendar::turn_zero + 600_turns;
+    callbacks.discover = [&]() {
+        physical_light::loaded_z_source_index index;
+        index.field_sources.push_back( {source, 0, 1} );
+        index.item_emitters.push_back( {source, physical_light::source_kind::ground_item, 1, false, "fixture"} );
+        live_light::record_loaded_sources( turn, index );
+        return std::vector<live_bandit_signal_observation>(); // no qualifying packet
+    };
+    live_light::run_advancing_turn( turn, callbacks );
+    CHECK( live_light::samples_for_turn( turn ).empty() );
+    CHECK( live_light::source_present_for_turn( turn, source, "smoke" ) == true );
+    CHECK( live_light::source_present_for_turn( turn, source, "light" ) == true );
+    CHECK_FALSE( live_light::source_present_for_turn( turn + 1_turns, source, "light" ) );
+    callbacks.discover = [&]() {
+        live_light::record_loaded_sources( turn + 1_turns, {} );
+        return std::vector<live_bandit_signal_observation>();
+    };
+    live_light::run_advancing_turn( turn + 1_turns, callbacks );
+    REQUIRE( live_light::source_present_for_turn( turn + 1_turns, source, "light" ) );
+    CHECK( *live_light::source_present_for_turn( turn + 1_turns, source, "light" ) == false );
+    CHECK( *live_light::source_present_for_turn( turn + 1_turns, source, "smoke" ) == false );
+    CHECK_FALSE( live_light::source_present_for_turn( turn, source, "light" ) );
+    live_light::reset();
 }
 
 TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_failures",

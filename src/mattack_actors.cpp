@@ -1,4 +1,5 @@
 #include "mattack_actors.h"
+#include "migo_tower_native.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -892,6 +893,8 @@ bool melee_actor::call( monster &z ) const
     }
 
     z.mod_moves( -move_cost );
+    migo_tower::record_combat_action( z );
+
 
     const std::string mon_name = get_player_character().sees( here, z.pos_bub( here ) ) ?
                                  z.disp_name( false, true ) : _( "Something" );
@@ -1621,11 +1624,17 @@ bool gun_actor::shoot( monster &z, const tripoint_bub_ms &target, const gun_mode
                    gun.gun_skill().c_str(), static_cast<int>( tmp.get_skill_level( throwing ? skill_throw :
                            skill_gun ) ) );
 
+    int fired = 0;
     if( throwing ) {
         tmp.throw_item( target, item( ammo, calendar::turn, 1 ) );
         z.ammo[ammo_type]--;
+        fired = 1;
     } else {
-        z.ammo[ammo_type] -= tmp.fire_gun( target, gun.gun_current_mode().qty );
+        fired = tmp.fire_gun( target, gun.gun_current_mode().qty );
+        z.ammo[ammo_type] -= fired;
+    }
+    if( fired > 0 ) {
+        migo_tower::record_combat_action( z );
     }
     if( z.has_flag( mon_flag_HIT_AND_RUN ) ) {
         map &here = get_map();

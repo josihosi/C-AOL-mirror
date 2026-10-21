@@ -1174,6 +1174,7 @@ TEST_CASE( "active structural scouts separate coarse hostile optics from real da
     on_out_of_scope restore( [ = ]() {
         clear_npcs();
         g->clear_zombies();
+        get_avatar().remove_weapon(); // retire this fixture's native attack weapon
         overmap_buffer.global_state.bandit_live_world = old_world;
         get_avatar().setpos( old_avatar_position, false );
         set_time( old_turn );
@@ -1276,12 +1277,27 @@ TEST_CASE( "active structural scouts separate coarse hostile optics from real da
         g->clear_zombies();
         get_avatar().setpos( here, observer.pos_bub() + point::north, false );
         get_avatar().set_skill_level( skill_id( "melee" ), 8 );
-        get_avatar().set_skill_level( skill_id( "unarmed" ), 8 );
+        get_avatar().set_skill_level( skill_id( "bashing" ), 8 );
+        // Random native doctor equipment can absorb every unarmed strike.
+        // Establish a real injury without removing the observer's optics or
+        // armor, or replacing native combat with direct damage injection.
+        item bat( itype_id( "bat" ) );
+        REQUIRE( get_avatar().wield( bat ) );
         const int initial_hp = observer.get_hp();
+        std::vector<int> attempted_attacks;
+        std::vector<int> spent_moves;
+        const int starting_dodges = observer.get_dodges_left();
         for( int hit = 0; hit < 5 && observer.get_hp() == initial_hp; ++hit ) {
             get_avatar().set_moves( 100 );
-            get_avatar().melee_attack( observer, false );
+            attempted_attacks.push_back( get_avatar().melee_attack( observer, false ) ? 1 : 0 );
+            spent_moves.push_back( 100 - get_avatar().get_moves() );
         }
+        CAPTURE( cannibal, attempted_attacks, spent_moves, starting_dodges,
+                 observer.get_dodges_left(), get_avatar().get_str(), observer.get_dodge(),
+                 get_avatar().pos_abs(), observer.pos_abs(),
+                 observer.get_armor_type( damage_type_id( "bash" ), bodypart_id( "torso" ) ),
+                 observer.get_armor_type( damage_type_id( "bash" ), bodypart_id( "arm_l" ) ),
+                 get_avatar().is_adjacent( &observer, false ) );
         REQUIRE( observer.get_hp() < initial_hp );
         REQUIRE( observer.faction_alarm );
         REQUIRE( observer.faction_alarm->received_attack.value_or( false ) );

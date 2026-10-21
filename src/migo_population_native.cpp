@@ -30,7 +30,7 @@ const field_type_str_id fd_fire( "fd_fire" );
 
 std::string terrain_type( const tripoint_abs_omt &p )
 {
-    return overmap_buffer.ter( p )->get_type_id().str();
+    return overmap_buffer.ter_existing( p )->get_type_id().str();
 }
 
 bool interior( const site_geometry &geometry, const tripoint_abs_omt &p )

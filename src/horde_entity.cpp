@@ -4,6 +4,8 @@
 
 #include "mtype.h"
 #include "monster.h"
+#include "migo_tower_ai.h"
+#include "migo_tower_native.h"
 #include "point.h"
 
 namespace
@@ -33,7 +35,16 @@ bool sound_owns_destination( const monster &payload, const tripoint_abs_ms &dest
 
 horde_entity::horde_entity( const monster &original )
 {
-    if( original.has_dest() ) {
+    if( original.migo_intent() && original.migo_intent()->active() &&
+        !original.population_identity().empty() ) {
+        // A mission/combat destination is not a heard source or a fresh
+        // thousand-turn wander budget. Keep independent native sound intact.
+        destination = original.has_dest() ? original.get_dest() : original.pos_abs();
+        if( original.provocative_sound && original.wandf > 0 ) {
+            destination = original.wander_pos;
+            tracking_intensity = original.wandf;
+        }
+    } else if( original.has_dest() ) {
         destination = original.get_dest();
         // TODO figure out a value? go here no matter what?
         tracking_intensity = 1000;
@@ -89,6 +100,10 @@ const mtype *horde_entity::get_type() const
 
 bool horde_entity::is_active() const
 {
+    if( monster_data && migo_tower::owns_intent( *monster_data,
+            migo_population::representation::abstract ) ) {
+        return true;
+    }
     if( tracking_intensity > 0 ) {
         return true;
     }
@@ -169,6 +184,13 @@ void horde_entity::synchronize_payload( const tripoint_abs_ms &position )
 
 void horde_entity::synchronize_navigation( monster &payload ) const
 {
+    if( migo_tower::owns_intent( payload, migo_population::representation::local ) ||
+        migo_tower::owns_intent( payload, migo_population::representation::abstract ) ) {
+        if( payload.migo_intent()->waypoint ) {
+            payload.set_dest( *payload.migo_intent()->waypoint );
+        }
+        return;
+    }
     if( payload.type->id.str() == "mon_writhing_stalker" &&
         writhing_stalker::retire_arrived_sound( payload, destination, payload.pos_abs() ) ) {
         return;

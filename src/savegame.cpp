@@ -2168,6 +2168,7 @@ void overmap_global_state::serialize( JsonOut &json ) const
     json.member( "unique_special_decks", unique_special_decks );
     json.member( "bandit_live_world", bandit_live_world );
     json.member( "migo_populations", migo_populations );
+    json.member( "migo_towers", migo_towers );
     json.member( "zombie_rider_light_memory" );
     json.start_array();
     for( const std::pair<const tripoint_abs_omt, zombie_rider_overmap_ai::rider_light_memory> &entry :
@@ -2227,6 +2228,8 @@ void overmap_global_state::deserialize( const JsonObject &json )
     zombie_rider_light_memory.clear();
     migo_populations.clear();
     json.read( "migo_populations", migo_populations );
+    migo_towers.clear();
+    json.read( "migo_towers", migo_towers );
     if( json.has_array( "zombie_rider_light_memory" ) ) {
         for( JsonObject memory_json : json.get_array( "zombie_rider_light_memory" ) ) {
             memory_json.allow_omitted_members();

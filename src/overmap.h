@@ -540,6 +540,7 @@ class overmap
         // caller's source intact; unlike spawn_monster this reports refusal.
         horde_entity *retain_monster_payload( const tripoint_abs_ms &p, const monster &payload );
         bool release_monster_payload( const tripoint_abs_ms &p, const std::string &actor_id );
+        void refresh_monster_schedule( const tripoint_abs_ms &p );
         // Spawn a vector of monsters at overmap scale on a specified submap.
         void spawn_monsters( const tripoint_om_sm &p, std::vector<monster> &monsters );
         // Spawn monsters from a mongroup on a specified submap.
@@ -777,7 +778,7 @@ class overmap
         void alert_entity( const tripoint_om_ms &location, const tripoint_abs_ms &destination,
                            int intensity );
         void process_mongroups();
-        void move_hordes();
+        void move_hordes( bool migo_operations_only = false );
 
         //nemesis movement for "hunted" trait
         void signal_nemesis( const tripoint_abs_sm & );

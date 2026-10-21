@@ -3,6 +3,7 @@
 // includes in such headers.
 
 #include "enums.h" // IWYU pragma: associated
+#include "migo_tower_ai.h"
 #include "npc_favor.h" // IWYU pragma: associated
 
 #include <algorithm>
@@ -2615,6 +2616,12 @@ void monster::load( const JsonObject &data )
 
     population_member = {};
     data.read( "migo_population", population_member );
+    clear_migo_intent();
+    if( !population_member.empty() && data.has_object( "migo_assault" ) ) {
+        migo_tower::member_intent intent;
+        intent.deserialize( data.get_object( "migo_assault" ) );
+        set_migo_intent( intent );
+    }
     data.read( "unique_name", unique_name );
     data.read( "nickname", nickname );
     data.read( "goal", goal );
@@ -2804,6 +2811,9 @@ void monster::store( JsonOut &json ) const
     }
     if( !population_member.empty() ) {
         json.member( "migo_population", population_member );
+        if( migo_intent() ) {
+            json.member( "migo_assault", *migo_intent() );
+        }
     }
     json.member( "unique_name", unique_name );
     json.member( "nickname", nickname );
