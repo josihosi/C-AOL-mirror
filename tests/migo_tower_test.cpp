@@ -1089,9 +1089,196 @@ TEST_CASE( "migo_actual_search_motor_excludes_fire_reopens_once_and_visits_conne
     CHECK( restored.find_source( anchor )->observed_active == contained );
 }
 
+TEST_CASE( "migo_queued_native_migrations_preserve_rejected_source_owners",
+           "[migo_tower][native][ownership]" )
+{
+    const bool stairs = GENERATE( false, true );
+    const int permutation = GENERATE( 0, 1, 2, 3, 4, 5 );
+    CAPTURE( stairs, permutation );
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto remote_om = project_to<coords::om>( get_avatar().pos_abs() ).xy() + point( 2, 0 );
+    overmap &owner = overmap_buffer.get( remote_om );
+    const tripoint_abs_omt cell( project_to<coords::omt>( remote_om ) + point( 2, 2 ), 0 );
+    const auto start = project_to<coords::ms>( cell ) + point( 12, 12 );
+    const auto goal = start + point::east;
+    const std::string id = "native-queue-conservation";
+    std::vector<oter_id> old_terrain;
+    for( int z = 0; z <= 1; ++z ) {
+        const tripoint_abs_omt p( cell.xy(), z );
+        old_terrain.push_back( overmap_buffer.ter_existing( p ) );
+        overmap_buffer.ter_set( p, oter_str_id( "field" ) );
+        tinymap terrain;
+        terrain.load( p, false );
+        for( const auto &tile : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, z ),
+                tripoint_omt_ms( 23, 23, z ) ) ) {
+            terrain.ter_set( tile, ter_str_id( "t_floor" ) );
+            terrain.furn_set( tile, furn_str_id::NULL_ID() );
+        }
+        if( stairs ) {
+            terrain.ter_set( tripoint_omt_ms( 12, 12, z ),
+                             ter_str_id( z == 0 ? "t_stairs_up" : "t_stairs_down" ) );
+        }
+    }
+    on_out_of_scope restore( [&]() {
+        for( const auto &entry : owner.horde_entities() ) {
+            if( entry.second->monster_data &&
+                entry.second->monster_data->population_identity().site_id == id ) {
+                CHECK( owner.release_monster_payload( entry.first,
+                       entry.second->monster_data->population_identity().member_id ) );
+            }
+        }
+        for( int z = 0; z <= 1; ++z ) {
+            overmap_buffer.ter_set( tripoint_abs_omt( cell.xy(), z ), old_terrain[z] );
+        }
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        MAPBUFFER.clear_outside_reality_bubble();
+        set_time( old_turn );
+    } );
+    // Leases are component setup. The real scheduler prepares overlapping
+    // physical moves; a nonparticipating resident blocks the queue's head.
+    const std::vector<tripoint_abs_ms> positions = {
+        start,
+        stairs ? start + tripoint( 0, 0, 1 ) : start + point::west,
+        stairs ? start + tripoint( -1, 0, 1 ) : start + point( -2, 0 ),
+        goal,
+        start + point( 3, 3 )
+    };
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = cell;
+    std::vector<migo_population::member_record> members;
+    for( size_t i = 0; i < positions.size(); ++i ) {
+        migo_population::member_record member;
+        member.token = {id, "queue-" + std::to_string( i ), 1, cell};
+        member.type = mtype_id( "mon_mi_go" );
+        member.home = positions[i];
+        member.owner = migo_population::representation::abstract;
+        member.assignment = i < 3 ? migo_population::duty::dispatched :
+                            migo_population::duty::available;
+        member.hp = member.type->hp;
+        members.push_back( member );
+    }
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = cell;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = cell;
+    operation.sweep.candidates = {{goal}};
+    operation.overdue_after_active = 100000;
+    for( int i = 0; i < 3; ++i ) {
+        operation.members.push_back( {members[i].token.member_id, false, false, positions[i]} );
+    }
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    site.operation = operation;
+    REQUIRE( site.remember_source( cell ) );
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    std::vector<int> insertion_order = {0, 1, 2};
+    for( int i = 0; i < permutation; ++i ) {
+        std::next_permutation( insertion_order.begin(), insertion_order.end() );
+    }
+    insertion_order.push_back( 3 );
+    insertion_order.push_back( 4 );
+    for( const int i : insertion_order ) {
+        monster body( members[i].type );
+        body.population_identity() = members[i].token;
+        body.set_pos_abs_only( positions[i] );
+        body.set_moves( 0 );
+        if( i < 3 ) {
+            migo_tower::member_intent intent;
+            intent.generation = 1;
+            intent.home = positions[i];
+            body.set_migo_intent( intent );
+        }
+        REQUIRE( owner.retain_monster_payload( positions[i], body ) );
+    }
+    auto check_conservation = [&]() {
+        std::multiset<std::string> ids;
+        for( const auto &entry : owner.horde_entities() ) {
+            if( entry.second->monster_data &&
+                entry.second->monster_data->population_identity().site_id == id ) {
+                ids.insert( entry.second->monster_data->population_identity().member_id );
+                CHECK( entry.second->monster_data->population_identity().epoch == 1 );
+                CHECK( entry.second->monster_data->get_hp() == members[0].hp );
+            }
+        }
+        REQUIRE( ids.size() == members.size() );
+        for( const auto &member : members ) {
+            REQUIRE( ids.count( member.token.member_id ) == 1 );
+        }
+    };
+    for( int turn = 0; turn < 3; ++turn ) {
+        calendar::turn += 1_turns;
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        overmap_buffer.move_hordes();
+        check_conservation();
+    }
+    for( const auto &entry : owner.horde_entities() ) {
+        if( entry.second->monster_data &&
+            entry.second->monster_data->population_identity().site_id == id ) {
+            const auto &body = *entry.second->monster_data;
+            const auto member = std::find_if( members.begin(), members.end(), [&]( const auto &m ) {
+                return m.token.member_id == body.population_identity().member_id;
+            } );
+            REQUIRE( member != members.end() );
+            CHECK( entry.first == member->home );
+            CHECK( entry.second->moves == 0 );
+            if( body.migo_intent() ) {
+                CHECK( body.migo_intent()->last_energy_world == -1 );
+                CHECK( entry.second->last_processed == calendar::turn );
+            }
+        }
+    }
+    // Use the actual overmap writer/reader, including the scheduler guard and
+    // exact body budgets. Reloading cannot spend another same-world interval.
+    std::ostringstream saved;
+    owner.serialize( saved );
+    owner.hordes.clear();
+    std::istringstream input( saved.str() );
+    owner.unserialize( input );
+    check_conservation();
+    overmap_buffer.move_hordes();
+    check_conservation();
+    for( const auto &entry : owner.horde_entities() ) {
+        if( entry.second->monster_data &&
+            entry.second->monster_data->population_identity().site_id == id ) {
+            CHECK( entry.second->moves == 0 );
+        }
+    }
+    // Move the controlled blocker, retaining its same native token. Once the
+    // physical destination is free the conserved queue must make progress.
+    monster blocker( members[3].type );
+    blocker.population_identity() = members[3].token;
+    blocker.set_pos_abs_only( goal + point( 2, 2 ) );
+    blocker.set_moves( 0 );
+    REQUIRE( owner.release_monster_payload( goal, members[3].token.member_id ) );
+    REQUIRE( owner.retain_monster_payload( blocker.pos_abs(), blocker ) );
+    bool advanced = false;
+    for( int turn = 0; turn < 20; ++turn ) {
+        calendar::turn += 1_turns;
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        overmap_buffer.move_hordes();
+        check_conservation();
+        for( const auto &entry : owner.horde_entities() ) {
+            if( entry.second->monster_data &&
+                entry.second->monster_data->population_identity().site_id == id &&
+                entry.second->monster_data->population_identity().member_id == members[0].token.member_id ) {
+                advanced |= entry.first != start;
+            }
+        }
+    }
+    CHECK( advanced );
+}
+
 TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_other_hordes",
            "[migo_tower][native][ownership]" )
 {
+    const bool deferred_geometry = GENERATE( false, true );
     // A leased native payload is component setup. The public scheduler owns
     // every physical step, cross-overmap insertion and actual home settlement.
     const auto old_turn = calendar::turn;
@@ -1101,7 +1288,8 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     const auto second_om = first_om + point::east;
     overmap &first_owner = overmap_buffer.get( first_om );
     overmap &second_owner = overmap_buffer.get( second_om );
-    const tripoint_abs_omt first_cell( project_to<coords::omt>( first_om ) + point( OMAPX - 1, 2 ), 0 );
+    const tripoint_abs_omt first_cell( project_to<coords::omt>( first_om ) +
+                                     point( OMAPX - 1, deferred_geometry ? 6 : 2 ), 0 );
     const auto second_cell = first_cell + point::east;
     const auto old_first = overmap_buffer.ter_existing( first_cell );
     const auto old_second = overmap_buffer.ter_existing( second_cell );
@@ -1129,14 +1317,19 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
         MAPBUFFER.clear_outside_reality_bubble();
         set_time( old_turn );
     } );
-    for( const auto &cell : {first_cell, second_cell} ) {
-        overmap_buffer.ter_set( cell, oter_str_id( "field" ) );
+    const auto prepare_cell = [&]( const tripoint_abs_omt &cell ) {
         tinymap terrain;
         terrain.load( cell, false );
         for( const auto &p : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, 0 ),
                 tripoint_omt_ms( 23, 23, 0 ) ) ) {
             terrain.ter_set( p, ter_str_id( "t_grass" ) );
             terrain.furn_set( p, furn_str_id::NULL_ID() );
+        }
+    };
+    for( const auto &cell : {first_cell, second_cell} ) {
+        overmap_buffer.ter_set( cell, oter_str_id( "field" ) );
+        if( cell != second_cell || !deferred_geometry ) {
+            prepare_cell( cell );
         }
     }
     migo_population::site_record population;
@@ -1185,6 +1378,29 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     const auto unrelated_processed = retained->last_processed;
     auto *current = overmap_buffer.global_state.migo_towers.find( id );
     REQUIRE( current );
+    if( deferred_geometry ) {
+        // Existing overmap field terrain is not knowledge of an ungenerated
+        // physical corridor. Keep the source lease until actual mapgen makes
+        // that geometry available, then use the same ordinary scheduler.
+        const auto unknown = physical_navigation::read_step( body, goal );
+        REQUIRE_FALSE( unknown.known );
+        CHECK( unknown.reason == "segment_geometry_unknown" );
+        calendar::turn += 1_turns;
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        overmap_buffer.move_hordes();
+        bool found = false;
+        for( const auto &entry : first_owner.horde_entities() ) {
+            if( entry.second->monster_data &&
+                entry.second->monster_data->population_identity().site_id == id ) {
+                found = true;
+                CHECK( entry.first == start );
+                CHECK( entry.second->moves == 0 );
+                CHECK( entry.second->monster_data->population_identity().epoch == 1 );
+            }
+        }
+        REQUIRE( found );
+        prepare_cell( second_cell );
+    }
     bool crossed = false;
     bool moved = false;
     for( int turns = 0; turns < 80 && !current->operation->resolved; ++turns ) {

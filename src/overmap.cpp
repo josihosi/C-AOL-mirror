@@ -1936,6 +1936,14 @@ void overmap::move_hordes( bool migo_operations_only )
             mon++;
         }
     }
+    const auto migo_lease = []( const horde_entity &entity ) {
+        return entity.monster_data && migo_tower::owns_intent( *entity.monster_data,
+                migo_population::representation::abstract );
+    };
+    const bool migo_batch = std::any_of( migrating_hordes.begin(), migrating_hordes.end(),
+    [&]( const pending_horde_migration &pending ) {
+        return migo_lease( pending.node.mapped() );
+    } );
     while( !migrating_hordes.empty() ) {
         auto migrating = std::move( migrating_hordes.back() );
         migrating_hordes.pop_back();
@@ -1950,7 +1958,17 @@ void overmap::move_hordes( bool migo_operations_only )
         // passable itself uses get_existing and returns false for a missing
         // destination, so this synchronous lookup necessarily has an owner.
         cata_assert( dest_om != nullptr );
-        if( !dest_om->hordes.can_accept_entity( monster_node.key(), monster_node.mapped() ) ) {
+        // Extraction prepares transport; it does not release the source's
+        // rollback ownership. A following body must not occupy that source
+        // while the leading Mi-go's destination is still undecided. Otherwise
+        // a blocked stair queue can discard its leading node on rollback.
+        const bool pending_source = migo_batch && std::any_of( migrating_hordes.begin(), migrating_hordes.end(),
+        [&]( const pending_horde_migration &pending ) {
+            return pending.source_position == monster_node.key() &&
+                   ( migo_lease( monster_node.mapped() ) || migo_lease( pending.node.mapped() ) );
+        } );
+        if( pending_source ||
+            !dest_om->hordes.can_accept_entity( monster_node.key(), monster_node.mapped() ) ) {
             monster_node.key() = source_position;
             monster_node.mapped() = std::move( migrating.source_state );
             // The source ownership snapshot is otherwise authoritative, but
