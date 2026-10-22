@@ -4,6 +4,8 @@
 #include "bandit_dry_run.h"
 #include "bandit_pursuit_handoff.h"
 
+#include <array>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -21,6 +23,56 @@ class npc;
 
 namespace bandit_live_world
 {
+// Existing world timestamps remain facts. These bounded marks record only the
+// suspended portion of each live execution timer; no pause history is retained.
+enum class activation_timer : std::size_t {
+    started, contact, progress, advance, expected_return, missing_deadline,
+    watch_started, watch_progress, watch_next, cohesion_deadline, cohesion_commit,
+    supply, routine_unmet, routine_activated, routine_resolved, routine_next,
+    near_tick, mid_tick, far_tick, frontier_tick, decision_next, frontier_resolved, count
+};
+constexpr std::size_t activation_timer_count = static_cast<std::size_t>( activation_timer::count );
+
+struct activation_clock {
+    struct mark {
+        std::int64_t world_turn = -1;
+        std::int64_t suspended_turns = 0;
+        void serialize( JsonOut &json ) const;
+        void deserialize( const JsonObject &jo );
+    };
+    int last_world_turn = -1;
+    bool active = true;
+    std::int64_t active_turns = 0;
+    // Current evaluated interval only; the durable elapsed total and marks
+    // above/below remain authoritative after save/load.
+    std::int64_t active_delta_turns = 0;
+    std::array<mark, activation_timer_count> timers{};
+    std::map<character_id, mark> bodies;
+    std::map<character_id, mark> member_deadlines;
+
+    bool initialized() const {
+        return last_world_turn >= 0;
+    }
+    // Timer inputs are world turns, -1 for absent. Body marks are exact native
+    // last_updated turns. Legacy adoption credits no untracked absence.
+    void evaluate( int world_turn, bool eligible,
+                   const std::array<std::int64_t, activation_timer_count> &anchors,
+                   const std::map<character_id, int> &body_anchors, int adopted_through_turn,
+                   const std::map<character_id, int> &member_deadline_minutes = {} );
+    // Native/transaction owners consume only their changed mark. These do not
+    // discover eligibility, advance time or grant work to any other entity.
+    void settle_timer( activation_timer timer, int anchor_minutes );
+    void settle_timers( const std::array<std::int64_t, activation_timer_count> &anchors );
+    void settle_body( character_id id, int last_updated_turn );
+    std::int64_t elapsed_turns( activation_timer timer, int anchor_minutes,
+                                int now_minutes ) const;
+    int elapsed_minutes( activation_timer timer, int anchor_minutes, int now_minutes ) const;
+    std::int64_t suspended_body_turns( character_id id, int last_updated_turn ) const;
+    bool member_deadline_pending( character_id id, int deadline_minutes, int now_minutes ) const;
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &jo );
+};
+
 enum class anchor_source_kind {
     none,
     overmap_special,
@@ -766,6 +818,9 @@ struct camp_decision_record {
 };
 
 struct active_outing_state {
+    activation_clock activation;
+    std::array<std::int64_t, activation_timer_count> activation_anchors() const;
+    activation_clock canonical_activation() const;
     struct local_return_eligibility_receipt {
         int schema_version = 1;
         std::string activity_id;
@@ -1140,6 +1195,9 @@ enum class response_denial_resolution {
 };
 
 struct site_record {
+        activation_clock home_activation;
+        std::array<std::int64_t, activation_timer_count> home_activation_anchors() const;
+        activation_clock canonical_home_activation() const;
         int schema_version = 12;
         std::string site_id;
         anchor_source_kind source_kind = anchor_source_kind::none;

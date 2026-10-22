@@ -12,6 +12,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <ctime>
 #include <vector>
 
 #include "cata_catch.h"
@@ -56,6 +59,7 @@
 #include "player_helpers.h"
 #include "semantic_surface.h"
 #include "raid_decision_trace.h"
+#include "ranged.h"
 #include "string_input_popup.h"
 #include "type_id.h"
 #include "ui_iteminfo.h"
@@ -4478,8 +4482,258 @@ TEST_CASE( "performance interval output preserves the real World successor",
         object.allow_omitted_members();
         CHECK( object.get_string( "mode" ) == "normal" );
         CHECK( object.get_string( "run_id" ) == run );
+        const auto names = object.get_string_array( "stage_names" );
+        for( const std::string name : { "npc_site_bootstrap", "npc_signal_copy", "npc_channel_audit" } ) {
+            CHECK( std::count( names.begin(), names.end(), name ) == 1 );
+        }
         CHECK_FALSE( object.get_array( "rows" ).empty() );
+        for( const TextJsonValue row_value : object.get_array( "rows" ) ) {
+            const TextJsonObject row = row_value.get_object();
+            row.allow_omitted_members();
+            CHECK( row.get_array( "stages_seconds" ).size() == names.size() );
+        }
     }
     CHECK( intervals >= 1 );
+}
+#endif
+
+#if !defined(TILES)
+TEST_CASE( "native targeting input stays outside simulation including resumed aiming",
+           "[semantic_surface][raid_performance_target_input]" )
+{
+    const bool nested = GENERATE( false, true );
+    CAPTURE( nested );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "quiet_signal" );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const std::string world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    REQUIRE( itype_id( "m9" ).is_valid() );
+    item gun( itype_id( "m9" ) );
+    REQUIRE( gun.is_gun() );
+    gun.ammo_set( itype_id( "9mm" ), 5 );
+    REQUIRE( u.wield( gun ) );
+    const auto position = u.pos_abs();
+    const auto run = std::string( "raid-target-input-" ) + ( nested ? "nested" : "resumed" );
+    const std::filesystem::path trace = std::filesystem::path( PATH_INFO::user_dir() ) /
+                                        ( run + ".jsonl" );
+    const std::filesystem::path requests = std::filesystem::path( PATH_INFO::user_dir() ) /
+                                           ( run + ".requests.jsonl" );
+    std::filesystem::remove( trace );
+    std::filesystem::remove( requests );
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", requests.string() }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &entry : settings ) {
+        const char *value = std::getenv( entry.first.c_str() );
+        previous[entry.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        assign_test_environment( entry.first, entry.second );
+    }
+    on_out_of_scope restore_environment( [&] {
+        for( const auto &entry : previous ) {
+            assign_test_environment( entry.first, entry.second );
+        }
+        std::filesystem::remove( requests );
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&] {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    std::thread input_writer;
+    std::atomic<bool> wrote_request{ false };
+    on_out_of_scope finish_writer( [&] {
+        if( input_writer.joinable() ) {
+            input_writer.join();
+        }
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        manager.set_transport_observer( {} );
+    } );
+    bool target_consumed_in_input = false;
+    manager.set_transport_observer( [&]( const semantic_request_transport_event &event ) {
+        if( event.event != "request_consumed" || event.request_id != "target-close" ) {
+            return;
+        }
+        // Inspect the actual producer at the instant native TARGET consumes
+        // the delayed request. Resumed aiming had no input phase here before
+        // the correction. This avoids assuming redraw between edge-scroll
+        // polls is itself blocked input, or requiring an interactive CI stdin.
+        std::string phase;
+        std::ifstream events( trace );
+        std::string line;
+        while( std::getline( events, line ) ) {
+            const auto begin = line.find( '{' );
+            if( begin == std::string::npos ) {
+                continue;
+            }
+            std::istringstream text( line.substr( begin ) );
+            TextJsonIn jsin( text );
+            const TextJsonObject value = jsin.get_object();
+            value.allow_omitted_members();
+            const auto kind = value.get_string( "event" );
+            if( kind == "turn" && value.get_string( "stage" ) == "start" ) {
+                phase = "simulation";
+            } else if( kind == "turn_phase" ) {
+                phase = value.get_string( "phase" );
+            }
+        }
+        target_consumed_in_input = phase == "input";
+    } );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    bool targeting_seen = false;
+    bool parent_entered = false;
+    bool pause_queued = false;
+    double calculation_cpu = 0.0;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind == "target" && !targeting_seen ) {
+            targeting_seen = true;
+            // Real work before TARGET acquisition must remain simulation when
+            // aiming is resumed outside handle_action, rather than masking the
+            // whole activity. This controlled CPU work is NOT a latency benchmark.
+            const auto cpu_begin = std::clock();
+            volatile double calculation = 1.0;
+            while( static_cast<double>( std::clock() - cpu_begin ) / CLOCKS_PER_SEC < 0.025 ) {
+                calculation = calculation * 1.00000001 + 0.00000001;
+            }
+            calculation_cpu = static_cast<double>( std::clock() - cpu_begin ) / CLOCKS_PER_SEC;
+            const auto descriptor = owner;
+            input_writer = std::thread( [&, descriptor] {
+                // A real delayed run-bound request reaches the input backend;
+                // no callback manufactures an input event or bypasses TARGET.
+                std::this_thread::sleep_for( std::chrono::milliseconds( 120 ) );
+                const std::string record = "{\"run_id\":\"" + run + "\",\"surface_id\":\"" +
+                                           descriptor.surface_id + "\",\"frame_id\":\"" + descriptor.frame_id +
+                                           "\",\"request_id\":\"target-close\",\"action_id\":\"target.cancel\"}\n";
+                std::ofstream output( requests, std::ios::app );
+                output << record;
+                output.close();
+                wrote_request = static_cast<bool>( output );
+            } );
+        } else if( owner.kind == "world" && !pause_queued ) {
+            if( nested && !parent_entered ) {
+                parent_entered = true;
+                pause_queued = true;
+                aim_activity_actor aim = aim_activity_actor::use_wielded();
+                CHECK( target_handler::mode_fire( u, aim ).empty() );
+                REQUIRE( manager.top() );
+                CHECK( manager.top()->kind == "world" );
+                // Closing the nested acquisition must not close the parent's
+                // existing input phase. This extra parent wait is still input.
+                std::this_thread::sleep_for( std::chrono::milliseconds( 30 ) );
+            }
+            pause_queued = true;
+            REQUIRE( ungetch( pause->front() ) != -1 );
+        }
+    } );
+    if( !nested ) {
+        u.assign_activity( aim_activity_actor::use_wielded() );
+    }
+    u.set_moves( 100 );
+    const auto before = calendar::turn;
+    REQUIRE_FALSE( g->do_turn() );
+    REQUIRE( input_writer.joinable() );
+    input_writer.join();
+    CHECK( wrote_request );
+    CHECK( targeting_seen );
+    CHECK( target_consumed_in_input );
+    CHECK( calendar::turn == before + 1_turns );
+    CHECK( u.pos_abs() == position );
+    REQUIRE( u.get_wielded_item() );
+    CHECK( u.get_wielded_item()->ammo_remaining() == 5 );
+    CHECK( std::any_of( receipts.begin(), receipts.end(), []( const auto &receipt ) {
+        return receipt.request_id == "target-close" && receipt.accepted;
+    } ) );
+    // Flush the closed measured row through the production diagnostic writer.
+    pause_queued = false;
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+
+    int input_begins = 0;
+    int input_ends = 0;
+    bool measured_row = false;
+    std::ifstream input( trace );
+    std::string line;
+    const int measured_turn = to_turn<int>( before + 1_turns );
+    while( std::getline( input, line ) ) {
+        const auto begin = line.find( '{' );
+        if( begin == std::string::npos ) {
+            continue;
+        }
+        std::istringstream record( line.substr( begin ) );
+        TextJsonIn jsin( record );
+        const TextJsonObject object = jsin.get_object();
+        object.allow_omitted_members();
+        if( object.get_string( "event" ) == "turn_phase" &&
+            object.get_int( "game_turn" ) == measured_turn ) {
+            input_begins += object.get_string( "stage" ) == "begin" &&
+                            object.get_string( "phase" ) == "input";
+            input_ends += object.get_string( "stage" ) == "end";
+        }
+        if( object.get_string( "event" ) == "raid_performance_interval" ) {
+            for( const TextJsonValue row_value : object.get_array( "rows" ) ) {
+                const TextJsonObject row = row_value.get_object();
+                row.allow_omitted_members();
+                if( row.get_int( "turn" ) == measured_turn ) {
+                    measured_row = true;
+                    CHECK( row.get_float( "input_seconds" ) > 0.0 );
+                    if( nested ) {
+                        CHECK( row.get_float( "input_seconds" ) >= 0.12 );
+                    }
+                    if( !nested ) {
+                        CHECK( row.get_float( "process_cpu_seconds" ) >= calculation_cpu * 0.8 );
+                        CHECK( row.get_float( "simulation_seconds" ) >= calculation_cpu * 0.8 );
+                    }
+                }
+            }
+        }
+    }
+    CHECK( measured_row );
+    // Edge-scroll timeouts may reacquire TARGET input repeatedly. Every
+    // acquisition is paired, while an enclosing World input remains one span.
+    if( nested ) {
+        CHECK( input_begins == 1 );
+    } else {
+        CHECK( input_begins >= 2 );
+    }
+    CHECK( input_ends == input_begins );
 }
 #endif

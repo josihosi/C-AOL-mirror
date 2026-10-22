@@ -34,6 +34,7 @@
 #include "debug.h"
 #include "dialogue.h"
 #include "dispersion.h"
+#include "do_turn.h"
 #include "enums.h"
 #include "event.h"
 #include "event_bus.h"
@@ -3167,6 +3168,10 @@ target_handler::trajectory target_ui::run()
                 action = std::move( *semantic_native_action );
                 semantic_native_action.reset();
             } else {
+                // Resumed ACT_AIM runs outside handle_action. Keep only its
+                // actual input acquisition out of simulation timing; aim,
+                // redraw and action processing remain with their native owner.
+                openclaw_harness_native_input_scope input_phase;
                 action = ctxt.handle_input( timeout );
             }
         }

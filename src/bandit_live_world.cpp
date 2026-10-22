@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -466,36 +467,43 @@ bool frontier_dispatch_is_due( const site_record &site, const int now_minutes )
             site.intelligence_map.frontier_last_resolved_minutes.begin(),
             site.intelligence_map.frontier_last_resolved_minutes.end() );
     if( latest_frontier_resolution < 0 ) {
-        return now_minutes >= minutes_after_saturated(
-                   site.routine_activated_minutes,
-                   first_frontier_due_delay_minutes( site.site_id ) );
+        return site.home_activation.elapsed_minutes(
+                   bandit_live_world::activation_timer::routine_activated,
+                   site.routine_activated_minutes, now_minutes ) >=
+               first_frontier_due_delay_minutes( site.site_id );
     }
-    return now_minutes >= minutes_after_saturated(
-               latest_frontier_resolution, routine_frontier_recurrence_minutes );
+    return site.home_activation.elapsed_minutes(
+               bandit_live_world::activation_timer::frontier_resolved,
+               latest_frontier_resolution, now_minutes ) >= routine_frontier_recurrence_minutes;
 }
 
 int routine_dispatch_wait_minutes( const site_record &site, const int now_minutes,
                                    const bool frontier_due )
 {
-    int eligible_since = site.routine_activated_minutes;
+    using bandit_live_world::activation_timer;
+    int anchor = site.routine_activated_minutes;
+    auto timer = activation_timer::routine_activated;
+    int delay = 0;
     if( frontier_due ) {
-        const int latest_frontier_resolution = *std::max_element(
-                site.intelligence_map.frontier_last_resolved_minutes.begin(),
-                site.intelligence_map.frontier_last_resolved_minutes.end() );
-        eligible_since = latest_frontier_resolution < 0 ? minutes_after_saturated(
-                             site.routine_activated_minutes,
-                             first_frontier_due_delay_minutes( site.site_id ) ) :
-                         minutes_after_saturated( latest_frontier_resolution,
-                                 routine_frontier_recurrence_minutes );
+        const int latest = *std::max_element(
+                               site.intelligence_map.frontier_last_resolved_minutes.begin(),
+                               site.intelligence_map.frontier_last_resolved_minutes.end() );
+        if( latest >= 0 ) {
+            anchor = latest;
+            timer = activation_timer::frontier_resolved;
+            delay = routine_frontier_recurrence_minutes;
+        } else {
+            delay = first_frontier_due_delay_minutes( site.site_id );
+        }
     } else if( site.next_routine_dispatch_eligible_minutes >= 0 ) {
-        eligible_since = site.next_routine_dispatch_eligible_minutes;
+        anchor = site.next_routine_dispatch_eligible_minutes;
+        timer = activation_timer::routine_next;
     } else if( site.last_routine_resolved_minutes >= 0 ) {
-        eligible_since = site.last_routine_resolved_minutes;
+        anchor = site.last_routine_resolved_minutes;
+        timer = activation_timer::routine_resolved;
     }
-    if( eligible_since < 0 || now_minutes <= eligible_since ) {
-        return 0;
-    }
-    return now_minutes - eligible_since;
+    return anchor < 0 ? 0 : std::max( 0,
+                                      site.home_activation.elapsed_minutes( timer, anchor, now_minutes ) - delay );
 }
 
 std::vector<int> least_recent_frontier_sectors( const camp_intelligence_map &intelligence )
@@ -3878,6 +3886,241 @@ bool camp_decision_allows_dispatch( const bandit_live_world::camp_decision_recor
 
 namespace bandit_live_world
 {
+void activation_clock::mark::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "world_turn", world_turn );
+    json.member( "suspended_turns", suspended_turns );
+    json.end_object();
+}
+
+void activation_clock::mark::deserialize( const JsonObject &jo )
+{
+    jo.read( "world_turn", world_turn );
+    jo.read( "suspended_turns", suspended_turns );
+    if( world_turn < INT_MIN || suspended_turns < 0 ) {
+        jo.throw_error( "invalid human activation timer" );
+    }
+}
+
+void activation_clock::evaluate( const int world_turn, const bool eligible,
+                                 const std::array<std::int64_t, activation_timer_count> &anchors,
+                                 const std::map<character_id, int> &body_anchors,
+                                 const int adopted_through_turn,
+                                 const std::map<character_id, int> &member_deadline_minutes )
+{
+    if( world_turn < 0 || ( initialized() && world_turn < last_world_turn ) ) {
+        return;
+    }
+    const bool adopting = !initialized();
+    const std::int64_t delta = adopting ? 0 : world_turn - last_world_turn;
+    // Boundary transitions grant no unseen interval. A later active tick earns
+    // its real elapsed time, once, for every surviving member of this party.
+    const std::int64_t suspended = active && eligible ? 0 : delta;
+    if( adopting || world_turn != last_world_turn || eligible != active ) {
+        active_delta_turns = delta - suspended;
+    }
+    active_turns += delta - suspended;
+    for( std::size_t i = 0; i < timers.size(); ++i ) {
+        auto &timer = timers[i];
+        if( timer.world_turn != anchors[i] || adopting ) {
+            timer = { anchors[i], anchors[i] < 0 || !adopting ? 0 :
+                      std::max( 0, world_turn - std::clamp( adopted_through_turn, 0, world_turn ) )
+                    };
+        }
+        if( timer.world_turn >= 0 ) {
+            timer.suspended_turns += suspended;
+        }
+    }
+    // Only current concrete identities retain marks. A removed/resolved body
+    // cannot accumulate debt or create a second clock after changing parties.
+    for( auto it = bodies.begin(); it != bodies.end(); ) {
+        it = body_anchors.count( it->first ) ? std::next( it ) : bodies.erase( it );
+    }
+    for( const auto &entry : body_anchors ) {
+        auto &timer = bodies[entry.first];
+        if( timer.world_turn != entry.second || adopting ) {
+            timer = { entry.second, adopting ?
+                      std::max<std::int64_t>( 0, static_cast<std::int64_t>( world_turn ) - entry.second ) : 0
+                    };
+        }
+        timer.suspended_turns += suspended;
+    }
+    for( auto it = member_deadlines.begin(); it != member_deadlines.end(); ) {
+        it = member_deadline_minutes.count( it->first ) ? std::next( it ) : member_deadlines.erase( it );
+    }
+    for( const auto &entry : member_deadline_minutes ) {
+        auto &timer = member_deadlines[entry.first];
+        const std::int64_t anchor = static_cast<std::int64_t>( entry.second ) * 60;
+        if( timer.world_turn != anchor || adopting ) {
+            timer = { anchor, adopting ?
+                      std::max( 0, world_turn - std::clamp( adopted_through_turn, 0, world_turn ) ) : 0
+                    };
+        }
+        timer.suspended_turns += suspended;
+    }
+    active = eligible;
+    last_world_turn = world_turn;
+}
+
+void activation_clock::settle_timer( const activation_timer timer, const int anchor_minutes )
+{
+    if( !initialized() ) {
+        return;
+    }
+    const auto anchor = anchor_minutes < 0 ? -1 : static_cast<std::int64_t>( anchor_minutes ) * 60;
+    auto &current = timers[static_cast<std::size_t>( timer )];
+    if( current.world_turn != anchor ) {
+        current = { anchor, 0 };
+    }
+}
+
+void activation_clock::settle_timers(
+    const std::array<std::int64_t, activation_timer_count> &anchors )
+{
+    if( !initialized() ) {
+        return;
+    }
+    for( std::size_t i = 0; i < timers.size(); ++i ) {
+        if( timers[i].world_turn != anchors[i] ) {
+            timers[i] = { anchors[i], 0 };
+        }
+    }
+}
+
+void activation_clock::settle_body( const character_id id, const int last_updated_turn )
+{
+    const auto found = bodies.find( id );
+    if( found != bodies.end() && found->second.world_turn != last_updated_turn ) {
+        found->second = { last_updated_turn, 0 };
+    }
+}
+
+std::int64_t activation_clock::elapsed_turns( const activation_timer timer,
+        const int anchor_minutes, const int now_minutes ) const
+{
+    if( anchor_minutes < 0 || now_minutes < 0 ) {
+        return -1;
+    }
+    const std::int64_t anchor = static_cast<std::int64_t>( anchor_minutes ) * 60;
+    const auto &mark = timers[static_cast<std::size_t>( timer )];
+    return static_cast<std::int64_t>( now_minutes ) * 60 - anchor -
+           ( initialized() && mark.world_turn == anchor ? mark.suspended_turns : 0 );
+}
+
+int activation_clock::elapsed_minutes( const activation_timer timer,
+                                       const int anchor_minutes, const int now_minutes ) const
+{
+    const std::int64_t turns = elapsed_turns( timer, anchor_minutes, now_minutes );
+    return static_cast<int>( std::clamp<std::int64_t>(
+                                 turns >= 0 ? turns / 60 : ( turns - 59 ) / 60,
+                                 INT_MIN, INT_MAX ) );
+}
+
+std::int64_t activation_clock::suspended_body_turns( const character_id id,
+        const int last_updated_turn ) const
+{
+    const auto found = bodies.find( id );
+    return found != bodies.end() && found->second.world_turn == last_updated_turn ?
+           found->second.suspended_turns : 0;
+}
+
+bool activation_clock::member_deadline_pending( const character_id id,
+        const int deadline_minutes, const int now_minutes ) const
+{
+    if( deadline_minutes < 0 || now_minutes < 0 ) {
+        return false;
+    }
+    const auto found = member_deadlines.find( id );
+    const std::int64_t anchor = static_cast<std::int64_t>( deadline_minutes ) * 60;
+    const auto suspended = found != member_deadlines.end() && found->second.world_turn == anchor ?
+                           found->second.suspended_turns : 0;
+    return static_cast<std::int64_t>( now_minutes ) * 60 - anchor - suspended < 0;
+}
+
+void activation_clock::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "last_world_turn", last_world_turn );
+    json.member( "active", active );
+    json.member( "active_turns", active_turns );
+    json.member( "timers", timers );
+    json.member( "bodies" );
+    json.start_array();
+    for( const auto &entry : bodies ) {
+        json.start_object();
+        json.member( "id", entry.first );
+        json.member( "timer", entry.second );
+        json.end_object();
+    }
+    json.end_array();
+    json.member( "member_deadlines" );
+    json.start_array();
+    for( const auto &entry : member_deadlines ) {
+        json.start_object();
+        json.member( "id", entry.first );
+        json.member( "timer", entry.second );
+        json.end_object();
+    }
+    json.end_array();
+    json.end_object();
+}
+
+void activation_clock::deserialize( const JsonObject &jo )
+{
+    activation_clock next;
+    jo.read( "last_world_turn", next.last_world_turn );
+    jo.read( "active", next.active );
+    jo.read( "active_turns", next.active_turns );
+    const JsonArray timers_json = jo.get_array( "timers" );
+    if( timers_json.size() != next.timers.size() ) {
+        jo.throw_error( "human activation timer shape differs" );
+    }
+    std::size_t index = 0;
+    for( const JsonObject timer : timers_json ) {
+        next.timers[index++].deserialize( timer );
+    }
+    for( const JsonObject body : jo.get_array( "bodies" ) ) {
+        character_id id;
+        body.read( "id", id );
+        mark timer;
+        timer.deserialize( body.get_object( "timer" ) );
+        if( id.get_value() <= 0 ||
+            !next.bodies.emplace( id, timer ).second ) {
+            body.throw_error( "invalid or duplicate human activation body" );
+        }
+    }
+    for( const JsonObject body : jo.get_array( "member_deadlines" ) ) {
+        character_id id;
+        body.read( "id", id );
+        mark timer;
+        timer.deserialize( body.get_object( "timer" ) );
+        if( id.get_value() <= 0 || timer.world_turn < 0 ||
+            timer.suspended_turns > next.last_world_turn ||
+            !next.member_deadlines.emplace( id, timer ).second ) {
+            body.throw_error( "invalid or duplicate human activation member deadline" );
+        }
+    }
+    if( next.last_world_turn < 0 || next.active_turns < 0 ||
+        next.active_turns > next.last_world_turn ) {
+        jo.throw_error( "invalid human activation clock" );
+    }
+    for( const auto &timer : next.timers ) {
+        if( timer.world_turn < -1 || timer.suspended_turns > next.last_world_turn ||
+            ( timer.world_turn == -1 && timer.suspended_turns != 0 ) ) {
+            jo.throw_error( "invalid human activation execution mark" );
+        }
+    }
+    for( const auto &body : next.bodies ) {
+        if( body.second.world_turn > next.last_world_turn ||
+            body.second.suspended_turns > static_cast<std::int64_t>( next.last_world_turn ) -
+            std::min<std::int64_t>( body.second.world_turn, 0 ) ) {
+            jo.throw_error( "invalid human activation body mark" );
+        }
+    }
+    *this = std::move( next );
+}
+
 static void record_scout_phase_transition_event( const active_outing_state &outing,
         scout_phase previous_phase, scout_phase next_phase,
         std::string_view reason, int current_minutes );
@@ -4517,6 +4760,9 @@ simulation_owner_transition_result advance_external_simulation(
     }
     next->last_advanced_minutes = current_minutes;
     consume_local_pair_resume_receipt( *next );
+    next->activation.settle_timer( activation_timer::advance, next->last_advanced_minutes );
+    next->activation.settle_timer( activation_timer::cohesion_commit,
+                                   next->local_handoff.committed_minutes );
     site = std::move( candidate );
     return simulation_owner_transition_result::applied;
 }
@@ -5589,6 +5835,11 @@ bool record_local_pair_abstract_resume_progress( site_record &site,
     if( commit_members ) {
         commit_members();
     }
+    auto &settled = candidate->active_outing;
+    settled.activation.settle_timer( activation_timer::advance, settled.last_advanced_minutes );
+    settled.activation.settle_timer( activation_timer::cohesion_commit,
+                                      settled.local_handoff.committed_minutes );
+    settled.activation.settle_timer( activation_timer::progress, settled.last_progress_minutes );
     site = std::move( *candidate );
     record_live_transition( site, &site.active_outing, "local_pair_abstract_resume_progress",
                             moved ? "committed" : "cadence_service",
@@ -5687,7 +5938,8 @@ local_handoff_commit_result start_local_pair_alternate_watch_reposition(
         ( !( outing.assessment.interruption && outing.assessment.interruption->pending() ) &&
           ( outing.assessment.observation_started_minutes < 0 ||
             outing.assessment.last_progress_minutes < outing.assessment.observation_started_minutes ||
-            current_minutes - outing.assessment.last_progress_minutes < 2 * 60 ) ) ||
+            outing.activation.elapsed_minutes( activation_timer::watch_progress,
+                    outing.assessment.last_progress_minutes, current_minutes ) < 2 * 60 ) ) ||
         !interrupted_reposition_pin_is_current( outing ) ||
         outing.casualty_ids.size() > 0 || outing.resolved_member_ids.size() > 0 ) {
         return local_handoff_commit_result::rejected;
@@ -5748,7 +6000,8 @@ local_handoff_commit_result abort_local_pair_alternate_watch_reposition(
             ( ( outing.assessment.interruption && outing.assessment.interruption->pending() ) ||
               ( outing.assessment.observation_started_minutes >= 0 &&
                 outing.assessment.last_progress_minutes >= outing.assessment.observation_started_minutes &&
-                current_minutes - outing.assessment.last_progress_minutes >= 2 * 60 ) ) &&
+                outing.activation.elapsed_minutes( activation_timer::watch_progress,
+                    outing.assessment.last_progress_minutes, current_minutes ) >= 2 * 60 ) ) &&
             interrupted_reposition_pin_is_current( outing ) &&
             outing.casualty_ids.empty() && outing.resolved_member_ids.empty();
         if( !eligible_start_failed ) {
@@ -6536,7 +6789,8 @@ bool reconcile_local_pair_casualties( site_record &site,
             outing.casualty_ids.end() ||
             ( read.state == member_state::missing &&
               ( outing.missing_deadline_minutes < 0 ||
-                current_minutes < outing.missing_deadline_minutes ) ) ) {
+                outing.activation.elapsed_turns( activation_timer::missing_deadline,
+                        outing.missing_deadline_minutes, current_minutes ) < 0 ) ) ) {
             return refused( "casualty_member_shape_or_eligibility", outing );
         }
         read_ids.push_back( read.npc_id );
@@ -6754,7 +7008,8 @@ local_cohesion_plan plan_local_pair_cohesion( const site_record &site,
                 snapshot.cohesion_deadline_minutes = minutes_after_saturated(
                         current_minutes, local_pair_rendezvous_minutes );
             }
-            plan.abort_return = current_minutes >= snapshot.cohesion_deadline_minutes ||
+            plan.abort_return = outing.activation.elapsed_turns( activation_timer::cohesion_deadline,
+                snapshot.cohesion_deadline_minutes, current_minutes ) >= 0 ||
                                 snapshot.cohesion_reroutes_used >= local_pair_reroute_cap;
             if( plan.abort_return ) {
                 snapshot.cohesion_abort_return = true;
@@ -6975,7 +7230,8 @@ local_cohesion_plan plan_local_pair_cohesion( const site_record &site,
                     current_minutes, local_pair_rendezvous_minutes );
         }
         const bool timed_out = snapshot.cohesion_deadline_minutes >= 0 &&
-                               current_minutes >= snapshot.cohesion_deadline_minutes;
+                               outing.activation.elapsed_turns( activation_timer::cohesion_deadline,
+                                   snapshot.cohesion_deadline_minutes, current_minutes ) >= 0;
         if( timed_out || snapshot.cohesion_reroutes_used >= local_pair_reroute_cap ||
             living_reads.empty() ) {
             snapshot.cohesion_abort_return = true;
@@ -7801,7 +8057,8 @@ camp_decision_transition_result transition_camp_decision_state( site_record &sit
     if( next_state == camp_decision_state::idle ) {
         if( expected_state != camp_decision_state::cooldown ||
             decision.next_eligible_minutes < 0 ||
-            current_minutes < decision.next_eligible_minutes ) {
+            site.home_activation.elapsed_turns( activation_timer::decision_next,
+                                                decision.next_eligible_minutes, current_minutes ) < 0 ) {
             record_result( "rejected", initial_state, "camp decision cooldown is not eligible" );
             return camp_decision_transition_result::rejected;
         }
@@ -8416,6 +8673,9 @@ camp_intelligence_aging_result advance_camp_intelligence_aging( site_record &sit
 {
     camp_intelligence_aging_result result;
     result.sites_considered = 1;
+    if( site.home_activation.initialized() && !site.home_activation.active ) {
+        return result;
+    }
     if( now_minutes < 0 ) {
         return result;
     }
@@ -9559,10 +9819,99 @@ void active_outing_state::crossing_receipt::deserialize( const JsonObject &jo )
     *this = std::move( candidate );
 }
 
+std::array<std::int64_t, activation_timer_count> active_outing_state::activation_anchors() const
+{
+    std::array<std::int64_t, activation_timer_count> anchors;
+    anchors.fill( -1 );
+    const auto pin = [&]( const activation_timer key, const int value ) {
+        anchors[static_cast<std::size_t>( key )] = value < 0 ? -1 : static_cast<std::int64_t>( value ) * 60;
+    };
+    pin( activation_timer::started, started_minutes );
+    pin( activation_timer::contact, local_contact_minutes );
+    pin( activation_timer::progress, last_progress_minutes );
+    pin( activation_timer::advance, last_advanced_minutes );
+    pin( activation_timer::expected_return, expected_return_minutes );
+    pin( activation_timer::missing_deadline, missing_deadline_minutes );
+    pin( activation_timer::watch_started, assessment.observation_started_minutes );
+    pin( activation_timer::watch_progress, assessment.last_progress_minutes );
+    pin( activation_timer::watch_next, assessment.next_eligible_minutes );
+    pin( activation_timer::cohesion_deadline, local_handoff.cohesion_deadline_minutes );
+    pin( activation_timer::cohesion_commit, local_handoff.committed_minutes );
+    return anchors;
+}
+
+activation_clock active_outing_state::canonical_activation() const
+{
+    activation_clock result = activation;
+    result.settle_timers( activation_anchors() );
+    for( auto it = result.bodies.begin(); it != result.bodies.end(); ) {
+        it = member_is_resolved( it->first ) ||
+             std::find( member_ids.begin(), member_ids.end(), it->first ) == member_ids.end() ?
+             result.bodies.erase( it ) : std::next( it );
+    }
+    return result;
+}
+
+std::array<std::int64_t, activation_timer_count> site_record::home_activation_anchors() const
+{
+    std::array<std::int64_t, activation_timer_count> anchors;
+    anchors.fill( -1 );
+    const auto pin = [&]( const activation_timer key, const int value ) {
+        anchors[static_cast<std::size_t>( key )] = value < 0 ? -1 : static_cast<std::int64_t>( value ) * 60;
+    };
+    pin( activation_timer::supply, supply_last_update_minutes );
+    pin( activation_timer::routine_unmet, routine_unmet_need_since_minutes );
+    pin( activation_timer::routine_activated, routine_activated_minutes );
+    pin( activation_timer::routine_resolved, last_routine_resolved_minutes );
+    pin( activation_timer::routine_next, next_routine_dispatch_eligible_minutes );
+    pin( activation_timer::near_tick, intelligence_map.next_near_tick_minutes );
+    pin( activation_timer::mid_tick, intelligence_map.next_mid_tick_minutes );
+    pin( activation_timer::far_tick, intelligence_map.next_far_tick_minutes );
+    pin( activation_timer::frontier_tick, intelligence_map.next_frontier_tick_minutes );
+    pin( activation_timer::decision_next, camp_decision.next_eligible_minutes );
+    if( !intelligence_map.frontier_last_resolved_minutes.empty() ) {
+        pin( activation_timer::frontier_resolved,
+             *std::max_element( intelligence_map.frontier_last_resolved_minutes.begin(),
+                                intelligence_map.frontier_last_resolved_minutes.end() ) );
+    }
+    return anchors;
+}
+
+activation_clock site_record::canonical_home_activation() const
+{
+    activation_clock result = home_activation;
+    result.settle_timers( home_activation_anchors() );
+    const auto at_home = [&]( const character_id id ) {
+        const auto *member = find_member( id );
+        return member && member->state == member_state::at_home;
+    };
+    for( auto it = result.bodies.begin(); it != result.bodies.end(); ) {
+        it = at_home( it->first ) ? std::next( it ) : result.bodies.erase( it );
+    }
+    for( auto it = result.member_deadlines.begin(); it != result.member_deadlines.end(); ) {
+        const auto *member = find_member( it->first );
+        if( !at_home( it->first ) || member->abstract_wound_until_minutes < 0 ) {
+            it = result.member_deadlines.erase( it );
+        } else {
+            const auto anchor = static_cast<std::int64_t>( member->abstract_wound_until_minutes ) * 60;
+            if( it->second.world_turn != anchor ) {
+                it->second = { anchor, 0 };
+            }
+            ++it;
+        }
+    }
+    return result;
+}
+
 void active_outing_state::serialize( JsonOut &json ) const
 {
     json.start_object();
     json.member( "schema_version", schema_version );
+    if( activation.initialized() ) {
+        // Derived marks follow the current owning facts. Unchanged keys retain
+        // all paused debt; serialization neither evaluates nor mutates the clock.
+        json.member( "activation", canonical_activation() );
+    }
     json.member( "kind", to_string( kind ) );
     json.member( "activity_id", activity_id );
     json.member( "camp_id", camp_id );
@@ -9665,6 +10014,7 @@ void active_outing_state::deserialize( const JsonObject &jo )
     active_outing_state candidate;
     candidate.schema_version = 0;
     jo.read( "schema_version", candidate.schema_version );
+    jo.read( "activation", candidate.activation );
     const int loaded_schema_version = candidate.schema_version;
     std::string kind_string = "none";
     jo.read( "kind", kind_string );
@@ -10177,6 +10527,9 @@ void site_record::serialize( JsonOut &json ) const
     normalize_acted_reports( bounded );
     json.start_object();
     json.member( "schema_version", 12 );
+    if( home_activation.initialized() ) {
+        json.member( "home_activation", canonical_home_activation() );
+    }
     json.member( "site_id", site_id );
     json.member( "source_kind", to_string( source_kind ) );
     json.member( "site_kind", to_string( site_kind ) );
@@ -10314,6 +10667,8 @@ void site_record::deserialize( const JsonObject &jo )
 void site_record::deserialize( const JsonObject &jo,
                                const std::vector<hostile_target_opportunity_record> &claims )
 {
+    home_activation = activation_clock();
+    jo.read( "home_activation", home_activation );
     schema_version = 5;
     living_total = 0;
     supply_units = 0;
@@ -11620,6 +11975,9 @@ static bool update_routine_unmet_need_start( site_record &site, const int now_mi
 
 bool advance_camp_supply( site_record &site, const int now_minutes )
 {
+    if( site.home_activation.initialized() && !site.home_activation.active ) {
+        return false;
+    }
     if( now_minutes < 0 || ( site.supply_last_update_minutes >= 0 &&
                              now_minutes < site.supply_last_update_minutes ) ) {
         return false;
@@ -11641,8 +11999,8 @@ bool advance_camp_supply( site_record &site, const int now_minutes )
         site.supply_accounted_living_total = current_living_total;
         site.supply_member_minute_remainder = 0;
     } else {
-        const long long elapsed_minutes = static_cast<long long>( now_minutes ) -
-                                          site.supply_last_update_minutes;
+        const long long elapsed_minutes = std::max( 0, site.home_activation.elapsed_minutes(
+                activation_timer::supply, site.supply_last_update_minutes, now_minutes ) );
         const long long member_minutes = site.supply_member_minute_remainder +
                                          elapsed_minutes * site.supply_accounted_living_total;
         const long long consumed_units = member_minutes / minutes_per_member_day;
@@ -12838,7 +13196,10 @@ int adopt_observed_hostile_player_opportunities( world_state &state, const int n
     std::vector<std::size_t> site_indices;
     site_indices.reserve( state.sites.size() );
     for( std::size_t index = 0; index < state.sites.size(); ++index ) {
-        site_indices.push_back( index );
+        const auto &home = state.sites[index].home_activation;
+        if( !home.initialized() || home.active ) {
+            site_indices.push_back( index );
+        }
     }
     std::sort( site_indices.begin(), site_indices.end(), [&state]( const std::size_t lhs,
     const std::size_t rhs ) {
@@ -12897,7 +13258,8 @@ int adopt_observed_hostile_player_opportunities( world_state &state, const int n
             } else if( site.routine_activated_minutes > now_minutes ) {
                 reject_reason = "routine_not_activated";
             } else if( site.next_routine_dispatch_eligible_minutes >= 0 &&
-                       now_minutes < site.next_routine_dispatch_eligible_minutes ) {
+                       site.home_activation.elapsed_turns( activation_timer::routine_next,
+                               site.next_routine_dispatch_eligible_minutes, now_minutes ) < 0 ) {
                 reject_reason = "dispatch_cooldown";
             } else if( !camp_decision_allows_dispatch( site.camp_decision,
                        bandit_dry_run::job_template::scout ) ) {
@@ -14613,7 +14975,8 @@ int hostile_camp_routine_unmet_need_days( const site_record &site,
         now_minutes < site.routine_unmet_need_since_minutes ) {
         return 0;
     }
-    return ( now_minutes - site.routine_unmet_need_since_minutes ) / minutes_per_member_day;
+    return ( site.home_activation.elapsed_minutes( activation_timer::routine_unmet,
+            site.routine_unmet_need_since_minutes, now_minutes ) ) / minutes_per_member_day;
 }
 
 int hostile_camp_routine_route_budget_omt( const site_record &site,
@@ -14831,7 +15194,8 @@ static void sample_structural_bounty_site( site_record &site,
         return;
     }
     if( site.intelligence_map.next_near_tick_minutes >= 0 &&
-        now_minutes >= 0 && now_minutes < site.intelligence_map.next_near_tick_minutes ) {
+        now_minutes >= 0 && site.home_activation.elapsed_turns( activation_timer::near_tick,
+                site.intelligence_map.next_near_tick_minutes, now_minutes ) < 0 ) {
         result.sites_deferred_by_cadence++;
         return;
     }
@@ -15303,7 +15667,8 @@ origin_loss_resolution_effect resolve_origin_loss_return( site_record &site,
               observation.state != active_member_observation_state::missing ) ||
             ( observation.state == active_member_observation_state::missing &&
               ( outing->missing_deadline_minutes < 0 ||
-                current_minutes < outing->missing_deadline_minutes ) ) ) {
+                outing->activation.elapsed_turns( activation_timer::missing_deadline,
+                        outing->missing_deadline_minutes, current_minutes ) < 0 ) ) ) {
             return effect;
         }
         observed_ids.push_back( observation.npc_id );
@@ -16532,7 +16897,8 @@ structural_outing_plan plan_frontier_outing_impl( const site_record &site,
     if( now_minutes < 0 || !supports_routine_camp_ecology( effective_profile( site ) ) ||
         site.routine_activated_minutes > now_minutes ||
         ( site.next_routine_dispatch_eligible_minutes >= 0 &&
-          now_minutes < site.next_routine_dispatch_eligible_minutes ) ||
+          site.home_activation.elapsed_turns( activation_timer::routine_next,
+                  site.next_routine_dispatch_eligible_minutes, now_minutes ) < 0 ) ||
         site.retired_empty_site || site.has_active_outside_pressure() ||
         !camp_decision_allows_dispatch( site.camp_decision,
                                         bandit_dry_run::job_template::scout ) ||
@@ -16712,7 +17078,8 @@ structural_outing_plan plan_structural_bounty_outing_impl( const site_record &si
         return plan;
     }
     if( site.next_routine_dispatch_eligible_minutes >= 0 &&
-        now_minutes < site.next_routine_dispatch_eligible_minutes ) {
+        site.home_activation.elapsed_turns( activation_timer::routine_next,
+                                            site.next_routine_dispatch_eligible_minutes, now_minutes ) < 0 ) {
         plan.notes.push_back( "structural outing blocked: camp-wide routine cooldown is active" );
         return plan;
     }
@@ -17133,7 +17500,8 @@ bool apply_structural_bounty_outing_plan( site_record &site, const structural_ou
         plan.site_id != site.site_id ||
         site.routine_activated_minutes > now_minutes ||
         ( site.next_routine_dispatch_eligible_minutes >= 0 &&
-          now_minutes < site.next_routine_dispatch_eligible_minutes ) ||
+          site.home_activation.elapsed_turns( activation_timer::routine_next,
+                  site.next_routine_dispatch_eligible_minutes, now_minutes ) < 0 ) ||
         plan.activity_id != site.site_id + "#structural" ||
         plan.generation <= 0 || plan.generation != site.next_outing_generation ||
         plan.lead_id.empty() ||
@@ -17673,6 +18041,9 @@ structural_signal_record_result record_structural_signal_observations( world_sta
         return result;
     }
     for( site_record &site : state.sites ) {
+        if( site.active_outing.activation.initialized() && !site.active_outing.activation.active ) {
+            continue;
+        }
         result.sites_considered++;
         structural_threat_observer_request request;
         if( !make_static_structural_observer_request( site, request ) ) {
@@ -17728,6 +18099,9 @@ structural_signal_record_result record_local_structural_signal_observations( wor
         return result;
     }
     for( site_record &site : state.sites ) {
+        if( site.active_outing.activation.initialized() && !site.active_outing.activation.active ) {
+            continue;
+        }
         result.sites_considered++;
         structural_threat_observer_request request;
         if( !make_static_structural_observer_request( site, request ) ) {
@@ -17845,6 +18219,9 @@ camp_signal_observation_result record_staffed_camp_signal_observations( world_st
     for( std::size_t site_index = 0; site_index < state.sites.size(); ++site_index ) {
         result.sites_considered++;
         const site_record &before_resolution = state.sites[site_index];
+        if( before_resolution.home_activation.initialized() && !before_resolution.home_activation.active ) {
+            continue;
+        }
         const roster_view roster = before_resolution.roster();
         camp_signal_observer_resolution resolution;
         if( before_resolution.retired_empty_site ) {
@@ -18453,7 +18830,8 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
         const auto &outing = site.active_outing;
         return confirmed_dead_party( site ) ||
                ( outing.missing_deadline_minutes >= 0 &&
-                 now_minutes >= outing.missing_deadline_minutes );
+                 outing.activation.elapsed_turns( activation_timer::missing_deadline,
+                         outing.missing_deadline_minutes, now_minutes ) >= 0 );
     };
     const auto trace_structural_outing = [&]( const site_record & site, const char *stage,
     const std::string & detail ) {
@@ -18475,6 +18853,10 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
     };
     for( std::size_t site_index = 0; site_index < state.sites.size(); ++site_index ) {
         site_record &site = state.sites[site_index];
+        if( site.active_outing.activation.initialized() &&
+            !site.active_outing.activation.active ) {
+            continue;
+        }
         if( projection_commit && !projection_commit( site, site ) ) {
             trace_structural_outing( site, "projection_preflight", "valid=0" );
             continue;
@@ -18695,7 +19077,8 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
               pre_advance_outing.phase == scout_phase::observing ) ) {
             if( pre_advance_outing.phase == scout_phase::outbound &&
                 pre_advance_outing.waypoint_index == 0 &&
-                now_minutes - pre_advance_outing.started_minutes >=
+                pre_advance_outing.activation.elapsed_minutes( activation_timer::started,
+                        pre_advance_outing.started_minutes, now_minutes ) >=
                 active_structural_outing_stalking_delay_minutes( candidate ) &&
                 pre_advance_outing.shared_route.size() >= 3 ) {
                 pre_advance_outing.waypoint_index = 1;
@@ -18703,7 +19086,8 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
             }
             if( pre_advance_outing.phase == scout_phase::observing &&
                 pre_advance_outing.local_contact_minutes >= 0 &&
-                now_minutes - pre_advance_outing.started_minutes >=
+                pre_advance_outing.activation.elapsed_minutes( activation_timer::started,
+                        pre_advance_outing.started_minutes, now_minutes ) >=
                 active_structural_outing_arrival_delay_minutes( candidate ) &&
                 pre_advance_outing.waypoint_index !=
                 structural_outing_destination_waypoint( pre_advance_outing ) ) {
@@ -18989,7 +19373,8 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
             continue;
         }
         if( outing.phase == scout_phase::returning_home ) {
-            if( now_minutes >= outing.expected_return_minutes ) {
+            if( outing.activation.elapsed_turns( activation_timer::expected_return,
+                                                 outing.expected_return_minutes, now_minutes ) >= 0 ) {
                 const bool has_physical_resume = outing.local_handoff.is_abstract_resume();
                 const bool has_complete_physical_return_receipts =
                     outing.member_return_receipts.size() + outing.casualty_ids.size() ==
@@ -19141,7 +19526,8 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
             continue;
         }
 
-        const int elapsed = now_minutes - outing.started_minutes;
+        const int elapsed = outing.activation.elapsed_minutes( activation_timer::started,
+            outing.started_minutes, now_minutes );
         if( outing.phase == scout_phase::outbound && outing.local_contact_minutes < 0 &&
             elapsed >= active_structural_outing_stalking_delay_minutes( candidate ) ) {
             structural_threat_read threat;
@@ -19385,7 +19771,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
     for( std::size_t index = 0; index < state.sites.size(); ++index ) {
         const site_record &site = state.sites[index];
         if( supports_routine_camp_ecology( effective_profile( site ) ) &&
-            !site.retired_empty_site && deferred_dispatch_site_ids.count( site.site_id ) == 0 ) {
+            !site.retired_empty_site && deferred_dispatch_site_ids.count( site.site_id ) == 0 &&
+            ( !site.home_activation.initialized() || site.home_activation.active ) ) {
             routine_site_indices.push_back( index );
         }
     }
@@ -19769,7 +20156,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                        << " need=" << routine_supply_need( site )
                                        << " unmet_minutes=" <<
                                        ( site.routine_unmet_need_since_minutes >= 0 ?
-                                         std::max( 0, now_minutes - site.routine_unmet_need_since_minutes ) : 0 )
+                                         std::max( 0, site.home_activation.elapsed_minutes( activation_timer::routine_unmet,
+                                                 site.routine_unmet_need_since_minutes, now_minutes ) ) : 0 )
                                        << " unmet_days=" << hostile_camp_routine_unmet_need_days(
                                            site, now_minutes )
                                        << " budget=" << hostile_camp_routine_route_budget_omt(
@@ -19780,7 +20168,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                        << '\n';
         }
         if( site.next_routine_dispatch_eligible_minutes >= 0 &&
-            now_minutes < site.next_routine_dispatch_eligible_minutes ) {
+            site.home_activation.elapsed_turns( activation_timer::routine_next,
+                                                site.next_routine_dispatch_eligible_minutes, now_minutes ) < 0 ) {
             scheduler_exit_diagnostic( &site, "dispatch_cooldown",
                                        "now_minutes=" + std::to_string( now_minutes ) +
                                        ",eligible_minutes=" + std::to_string(
@@ -23969,6 +24358,9 @@ scout_assessment_result advance_structural_scout_assessment(
     const int current_minutes )
 {
     const active_outing_state &outing = site.active_outing;
+    if( outing.activation.initialized() && !outing.activation.active ) {
+        return scout_assessment_result::unchanged;
+    }
     if( outing.kind != outing_kind::structural_sortie || outing.schema_version < 10 ||
         outing.phase != scout_phase::observing ||
         outing.activity_id != expected_activity_id ||
@@ -24047,13 +24439,15 @@ scout_assessment_result advance_structural_scout_assessment(
                                       next.assessment.certainty );
     const bool normal_success =
         !next.alternate_watch_reposition_pending &&
-        current_minutes - next.assessment.observation_started_minutes >= 120 &&
+        next.activation.elapsed_minutes( activation_timer::watch_started,
+                                         next.assessment.observation_started_minutes, current_minutes ) >= 120 &&
         next.assessment.strong_visual_windows >= 3 &&
         normal_readiness &&
         next.assessment.defenders_high - next.assessment.defenders_low <= 2;
     const sortie_observation *current_signal = latest_current_watch_optical_record( next );
     const bool site_signal_success = !next.alternate_watch_reposition_pending &&
-                                     current_minutes - next.assessment.observation_started_minutes >= 120 &&
+                                     next.activation.elapsed_minutes( activation_timer::watch_started,
+                                         next.assessment.observation_started_minutes, current_minutes ) >= 120 &&
                                      target_footprint_watch_distance( next.selected_watch_omt, next.target_footprint ) == 3 &&
                                      current_signal != nullptr &&
                                      std::none_of( next.observations.begin(), next.observations.end(),
@@ -24093,8 +24487,12 @@ scout_assessment_result advance_structural_scout_assessment(
                                              current_minutes );
         return scout_assessment_result::normal_success;
     }
+    const int active_no_progress_minutes = next.activation.elapsed_minutes(
+            activation_timer::watch_progress, next.assessment.last_progress_minutes, current_minutes );
     const int no_progress_deadline = different_watch_available ? current_minutes :
-                                     minutes_after_saturated( next.assessment.last_progress_minutes, 2 * 60 );
+                                     active_no_progress_minutes >= 120 ?
+                                     current_minutes - ( active_no_progress_minutes - 120 ) :
+                                     minutes_after_saturated( current_minutes, 120 - active_no_progress_minutes );
     const bool no_progress_window_elapsed =
         current_minutes >= no_progress_deadline || different_watch_available;
     const bool local_alternate_reposition_required = no_progress_window_elapsed &&
@@ -24225,7 +24623,8 @@ scout_assessment_result advance_structural_scout_assessment(
     }
     const bool watch_expired =
         !next.alternate_watch_reposition_pending &&
-        current_minutes - next.assessment.observation_started_minutes >= 8 * 60;
+        next.activation.elapsed_minutes( activation_timer::watch_started,
+                                         next.assessment.observation_started_minutes, current_minutes ) >= 8 * 60;
     if( watch_expired ) {
         next.assessment.readiness_latched = false;
         next.assessment.threshold_class = scout_assessment_threshold_class::none;
@@ -24281,7 +24680,10 @@ bool scout_sortie_should_return_home( const site_record &site, const int current
 
     const int anchor_minutes = site.active_outing.local_contact_minutes >= 0 ?
                                site.active_outing.local_contact_minutes : site.active_outing.started_minutes;
-    return anchor_minutes >= 0 && current_minutes - anchor_minutes >= sortie_limit_minutes;
+    return anchor_minutes >= 0 && site.active_outing.activation.elapsed_minutes(
+               site.active_outing.local_contact_minutes >= 0 ? activation_timer::contact :
+               activation_timer::started,
+               anchor_minutes, current_minutes ) >= sortie_limit_minutes;
 }
 
 shakedown_surface build_shakedown_surface( const site_record &site, const local_gate_input &input,
@@ -26413,7 +26815,8 @@ static bool record_active_outing_casualty_unchecked( site_record &site,
     }
     if( casualty_state == member_state::missing &&
         ( site.active_outing.missing_deadline_minutes < 0 ||
-          current_minutes < site.active_outing.missing_deadline_minutes ) ) {
+          site.active_outing.activation.elapsed_turns( activation_timer::missing_deadline,
+                  site.active_outing.missing_deadline_minutes, current_minutes ) < 0 ) ) {
         return false;
     }
 
@@ -26542,7 +26945,8 @@ scout_resolution_effect apply_active_scout_observations( site_record &site,
                     member_state::dead : member_state::missing;
                 if( casualty_state == member_state::missing &&
                     ( candidate.active_outing.missing_deadline_minutes < 0 ||
-                      current_minutes < candidate.active_outing.missing_deadline_minutes ) ) {
+                      candidate.active_outing.activation.elapsed_turns( activation_timer::missing_deadline,
+                              candidate.active_outing.missing_deadline_minutes, current_minutes ) < 0 ) ) {
                     return effect;
                 }
                 const int resolution_minutes = casualty_state == member_state::missing ?
@@ -26764,7 +27168,8 @@ bool record_matching_external_outing_casualty( site_record &site,
         outing->member_ids.end() || outing->member_is_resolved( npc_id ) ||
         ( casualty_state == member_state::missing &&
           ( outing->missing_deadline_minutes < 0 ||
-            current_minutes < outing->missing_deadline_minutes ) ) || !site.roster().valid ) {
+            outing->activation.elapsed_turns( activation_timer::missing_deadline,
+                    outing->missing_deadline_minutes, current_minutes ) < 0 ) ) || !site.roster().valid ) {
         return false;
     }
 

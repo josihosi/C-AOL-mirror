@@ -3,6 +3,7 @@
 #define CATA_SRC_DO_TURN_H
 
 #include "coordinates.h"
+#include "character_id.h"
 #include "live_light.h"
 
 #include <cstddef>
@@ -17,6 +18,30 @@ class Character;
 class map;
 class monster;
 class npc;
+class openclaw_harness_turn_trace;
+
+// Exclude only a native input acquisition outside handle_action's existing
+// input phase. Nested acquisitions leave their parent's phase untouched.
+class openclaw_harness_native_input_scope
+{
+    public:
+        openclaw_harness_native_input_scope();
+        ~openclaw_harness_native_input_scope();
+        openclaw_harness_native_input_scope( const openclaw_harness_native_input_scope & ) = delete;
+        openclaw_harness_native_input_scope &operator=( const openclaw_harness_native_input_scope & ) =
+            delete;
+
+    private:
+        openclaw_harness_turn_trace *trace_ = nullptr;
+};
+
+// Shared human camp/party clock boundary, also used before native on_load.
+namespace bandit_live_world
+{
+struct activation_clock;
+}
+void refresh_live_bandit_activation();
+bandit_live_world::activation_clock *live_bandit_body_activation( character_id id );
 
 namespace bandit_live_world
 {

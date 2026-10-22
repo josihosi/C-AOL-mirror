@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "avatar.h"
+#include "bandit_live_world.h"
 #include "bandit_live_world_probe.h"
 #include "calendar.h"
 #include "cata_catch.h"
@@ -27,12 +28,16 @@
 #include "common_types.h"
 #include "coordinates.h"
 #include "debug.h"
+#include "do_turn.h"
+#include "effect.h"
 #include "enum_conversions.h"
 #include "enums.h"
 #include "game.h"
 #include "global_vars.h"
 #include "item.h"
 #include "item_factory.h"
+#include "json.h"
+#include "json_loader.h"
 #include "itype.h"
 #include "map.h"
 #include "map_helpers.h"
@@ -42,14 +47,17 @@
 #include "mapbuffer.h"
 #include "monster.h"
 #include "mtype.h"
+#include "npc.h"
 #include "omdata.h"
 #include "options.h"
+#include "options_helpers.h"
 #include "output.h"
 #include "overmap.h"
 #include "overmap_location.h"
 #include "overmap_types.h"
 #include "overmapbuffer.h"
 #include "point.h"
+#include "player_helpers.h"
 #include "recipe.h"
 #include "regional_settings.h"
 #include "rng.h"
@@ -65,6 +73,283 @@
 static const overmap_special_id overmap_special_Cabin( "Cabin" );
 static const mtype_id mon_zombie( "mon_zombie" );
 static const mtype_id mon_zombie_predator( "mon_zombie_predator" );
+
+TEST_CASE( "human activation keeps a living party together and resumes native bodies once",
+           "[overmap][human_activation]" )
+{
+    using namespace bandit_live_world;
+    override_option food( "NO_NPC_FOOD", "false" );
+    const int inside_distance = GENERATE( 25, 39, 40, 41 );
+    const auto old_world = overmap_buffer.global_state.bandit_live_world;
+    const auto old_turn = calendar::turn;
+    const auto old_start = calendar::start_of_cataclysm;
+    const auto old_player = get_avatar().pos_abs();
+    std::vector<shared_ptr_fast<npc>> actors;
+    shared_ptr_fast<npc> resident;
+    on_out_of_scope restore( [&] {
+        for( const auto &actor : actors ) {
+            overmap_buffer.remove_npc( actor->getID() );
+        }
+        if( resident ) {
+            overmap_buffer.remove_npc( resident->getID() );
+        }
+        overmap_buffer.global_state.bandit_live_world = old_world;
+        calendar::turn = old_turn;
+        calendar::start_of_cataclysm = old_start;
+        get_avatar().setpos( old_player, false );
+    } );
+    calendar::turn = calendar::start_of_cataclysm + 1000_minutes;
+    const tripoint_abs_omt player( 140, 145, 0 );
+    get_avatar().setpos( project_to<coords::ms>( player ), false );
+    auto &world = overmap_buffer.global_state.bandit_live_world;
+    world = world_state();
+    world.sites.emplace_back();
+    auto &site = world.sites.back();
+    site.site_id = "human-activation-control";
+    site.anchor = player + tripoint( 45, 0, 0 );
+    site.living_total = 3;
+    site.supply_units = 5;
+    site.supply_last_update_minutes = 1000;
+    site.supply_accounted_living_total = 3;
+    resident = make_shared_fast<npc>();
+    clear_character( *resident );
+    resident->setID( g->assign_npc_id() );
+    resident->spawn_at_precise( project_to<coords::ms>( site.anchor ) );
+    overmap_buffer.insert_npc( resident );
+    member_record home;
+    home.npc_id = resident->getID();
+    home.state = member_state::at_home;
+    home.home_spawn_tile = resident->pos_abs();
+    home.wounded_or_unready = true;
+    home.abstract_wound_until_minutes = 1060;
+    site.members.push_back( home );
+    auto &outing = site.active_outing;
+    outing.kind = outing_kind::scout_sortie;
+    outing.activity_id = "human-activation-party";
+    outing.camp_id = site.site_id;
+    outing.generation = 1;
+    outing.phase = scout_phase::outbound;
+    outing.started_minutes = outing.last_advanced_minutes = outing.last_progress_minutes = 1000;
+    outing.expected_return_minutes = 1120;
+    outing.missing_deadline_minutes = 1180;
+    outing.assessment.observation_started_minutes = 1000;
+    outing.assessment.last_progress_minutes = 1000;
+    for( const int distance : {
+             inside_distance, 41
+         } ) {
+        auto actor = make_shared_fast<npc>();
+        clear_character( *actor );
+        actor->setID( g->assign_npc_id() );
+        actor->spawn_at_precise( project_to<coords::ms>( player + tripoint( distance, 0, 0 ) ) );
+        actor->add_effect( efftype_id( "stunned" ), 3_hours );
+        overmap_buffer.insert_npc( actor );
+        actors.push_back( actor );
+        outing.member_ids.push_back( actor->getID() );
+        member_record away;
+        away.npc_id = actor->getID();
+        away.state = member_state::outbound;
+        away.home_spawn_tile = resident->pos_abs();
+        site.members.push_back( away );
+    }
+    outing.leader_id = outing.member_ids.front();
+    REQUIRE( outing.is_active() );
+    refresh_live_bandit_activation();
+    REQUIRE( outing.activation.initialized() );
+    CHECK_FALSE( site.home_activation.active );
+    CHECK( outing.activation.active == ( inside_distance <= 40 ) );
+    // All living partners share this interval, even the body at41. This is
+    // genuine native physiology, not a movement or successful-party claim.
+    calendar::turn += 1_minutes;
+    refresh_live_bandit_activation();
+    for( const auto &actor : actors ) {
+        CHECK( actor->catch_up_body() == ( inside_distance <= 40 ? 1_minutes : 0_turns ) );
+        CHECK( actor->catch_up_body() == 0_turns );
+    }
+    CHECK( resident->catch_up_body() == 0_turns );
+    CHECK( resident->get_last_updated() == calendar::start_of_cataclysm + 1000_minutes );
+    if( inside_distance > 40 ) {
+        return;
+    }
+    SECTION( "an inside corpse cannot keep an outside survivor active" ) {
+        actors.front()->set_part_hp_cur( bodypart_id( "torso" ), 0 );
+        REQUIRE( actors.front()->is_dead() );
+        refresh_live_bandit_activation();
+        CHECK_FALSE( outing.activation.active );
+        CHECK( actors.back()->catch_up_body() == 0_turns );
+        // All-confirmed-dead remains eligible for the ordinary terminal
+        // casualty owner, rather than creating an immortal frozen party.
+        actors.back()->set_part_hp_cur( bodypart_id( "torso" ), 0 );
+        REQUIRE( actors.back()->is_dead() );
+        refresh_live_bandit_activation();
+        CHECK( outing.activation.active );
+    }
+    SECTION( "freeze reload and resume preserve native physiology and home timers" ) {
+        const auto duration_before = actors.back()->get_effect( efftype_id( "stunned" ) ).get_duration();
+        const auto updated_before = actors.back()->get_last_updated();
+        const std::array needs_before{ actors.back()->get_hunger(), actors.back()->get_thirst(),
+                                       actors.back()->get_sleepiness() };
+        // Move only the observer. Both real bodies now lie outside the bubble.
+        get_avatar().setpos( project_to<coords::ms>( player - tripoint( 50, 0, 0 ) ), false );
+        refresh_live_bandit_activation();
+        REQUIRE_FALSE( outing.activation.active );
+        const auto positions = std::array{ actors.front()->pos_abs(), actors.back()->pos_abs() };
+        calendar::turn += 2_days;
+        refresh_live_bandit_activation();
+        for( std::size_t i = 0; i < actors.size(); ++i ) {
+            CHECK( actors[i]->catch_up_body() == 0_turns );
+            actors[i]->on_load( &get_map() );
+            actors[i]->on_unload();
+            actors[i]->npc_update_body();
+            CHECK( actors[i]->pos_abs() == positions[i] );
+            CHECK( actors[i]->get_last_updated() == updated_before );
+        }
+        CHECK( actors.back()->get_effect( efftype_id( "stunned" ) ).get_duration() == duration_before );
+        CHECK( ( std::array{ actors.back()->get_hunger(), actors.back()->get_thirst(),
+                             actors.back()->get_sleepiness() } ) == needs_before );
+        CHECK( outing.last_advanced_minutes == 1000 );
+        CHECK( outing.expected_return_minutes == 1120 );
+        CHECK( outing.assessment.observation_started_minutes == 1000 );
+        const int now = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
+        CHECK( outing.activation.elapsed_minutes( activation_timer::watch_started, 1000, now ) == 1 );
+        CHECK( outing.activation.elapsed_turns( activation_timer::expected_return, 1120, now ) < 0 );
+        CHECK_FALSE( advance_camp_supply( site, now ) );
+        CHECK( site.supply_units == 5 );
+        CHECK( site.supply_last_update_minutes == 1000 );
+        CHECK( site.home_activation.member_deadline_pending( resident->getID(), 1060, now ) );
+
+        // Serialization canonicalizes only changed derived keys. It cannot
+        // mutate runtime state, forgive an unchanged pause, or advance a body.
+        const auto clock_bytes = []( const activation_clock &clock ) {
+            std::ostringstream bytes;
+            JsonOut output( bytes );
+            clock.serialize( output );
+            return bytes.str();
+        };
+        const auto entity_clock = [&]( const auto &entity, const std::string &key ) {
+            std::ostringstream bytes;
+            JsonOut output( bytes );
+            entity.serialize( output );
+            activation_clock restored;
+            JsonObject entity_json = json_loader::from_string( bytes.str() ).get_object();
+            entity_json.allow_omitted_members();
+            restored.deserialize( entity_json.get_object( key ) );
+            return restored;
+        };
+        const auto frozen_runtime = clock_bytes( outing.activation );
+        const auto frozen_saved = entity_clock( outing, "activation" );
+        CHECK( clock_bytes( outing.activation ) == frozen_runtime );
+        CHECK( frozen_saved.elapsed_turns( activation_timer::watch_started, 1000, now ) ==
+               outing.activation.elapsed_turns( activation_timer::watch_started, 1000, now ) );
+        CHECK( frozen_saved.timers[static_cast<std::size_t>( activation_timer::watch_started )].suspended_turns > 0 );
+        for( const auto &actor : actors ) {
+            const int body_turn = to_turns<int>( actor->get_last_updated() - calendar::start_of_cataclysm );
+            CHECK( frozen_saved.suspended_body_turns( actor->getID(), body_turn ) ==
+                   outing.activation.suspended_body_turns( actor->getID(), body_turn ) );
+        }
+        // The persisted clock, not an in-memory pause journal, carries the debt.
+        std::ostringstream saved;
+        JsonOut js( saved );
+        outing.activation.serialize( js );
+        activation_clock loaded;
+        loaded.deserialize( json_loader::from_string( saved.str() ).get_object() );
+        outing.activation = loaded;
+        get_avatar().setpos( project_to<coords::ms>( player ), false );
+        refresh_live_bandit_activation();
+        REQUIRE( outing.activation.active );
+        for( const auto &actor : actors ) {
+            CHECK( actor->catch_up_body() == 0_turns );
+            CHECK( actor->get_last_updated() == calendar::turn );
+            CHECK( actor->catch_up_body() == 0_turns );
+        }
+        calendar::turn += 1_minutes;
+        refresh_live_bandit_activation();
+        for( const auto &actor : actors ) {
+            CHECK( actor->catch_up_body() == 1_minutes );
+            CHECK( actor->catch_up_body() == 0_turns );
+        }
+        CHECK( outing.activation.elapsed_minutes( activation_timer::watch_started, 1000, now + 1 ) == 2 );
+        // The real home resident and supply owner resume independently, with no
+        // missed-day consumption or abstract wound recovery on the first callback.
+        get_avatar().setpos( project_to<coords::ms>( site.anchor ), false );
+        refresh_live_bandit_activation();
+        REQUIRE( site.home_activation.active );
+        advance_camp_supply( site, now + 1 );
+        CHECK( site.supply_units == 5 );
+        CHECK( site.home_activation.member_deadline_pending( resident->getID(), 1060, now + 1 ) );
+        calendar::turn += 1_days;
+        refresh_live_bandit_activation();
+        advance_camp_supply( site, now + 1 + 1440 );
+        CHECK( site.supply_units == 2 );
+        const auto supplied_runtime = clock_bytes( site.home_activation );
+        const auto supplied_saved = entity_clock( site, "home_activation" );
+        CHECK( clock_bytes( site.home_activation ) == supplied_runtime );
+        const auto supply_age = site.home_activation.elapsed_turns(
+                                    activation_timer::supply, site.supply_last_update_minutes, now + 1 + 1440 );
+        CHECK( supply_age == 0 );
+        CHECK( supplied_saved.elapsed_turns( activation_timer::supply,
+                site.supply_last_update_minutes, now + 1 + 1440 ) == supply_age );
+        CHECK( supplied_saved.timers[static_cast<std::size_t>( activation_timer::supply )].suspended_turns == 0 );
+        const auto resident_age = resident->get_last_updated();
+        site.home_activation = supplied_saved;
+        refresh_live_bandit_activation();
+        advance_camp_supply( site, now + 1 + 1440 );
+        CHECK( site.supply_units == 2 );
+        CHECK( resident->get_last_updated() == resident_age );
+        CHECK( site.home_activation.elapsed_turns( activation_timer::supply,
+                site.supply_last_update_minutes, now + 1 + 1440 ) == supply_age );
+        CHECK_FALSE( site.home_activation.member_deadline_pending( resident->getID(), 1060,
+                now + 1 + 1440 ) );
+    }
+}
+
+TEST_CASE( "OMT NPC query includes its radius across overmap seams",
+           "[overmap][npc_travel_radius]" )
+{
+    // 151 +/- 40 straddles the 180-OMT seam, but a wrongly unconverted
+    // 40-submap enumeration remains on the near side. Mirror at negative
+    // coordinates to exercise floor projection on both sides of zero.
+    const int sign = GENERATE( -1, 1 );
+    const tripoint_abs_omt center( sign * 151, sign * 151, 0 );
+    std::vector<character_id> inserted;
+    on_out_of_scope remove_inserted( [&] {
+        for( const character_id id : inserted ) {
+            overmap_buffer.remove_npc( id );
+        }
+    } );
+    std::set<character_id> expected;
+    for( const int distance : {
+             0, 39, 40, 41
+         } ) {
+        for( const point direction : {
+                 point::east, point::south, point::south_east
+             } ) {
+            auto actor = make_shared_fast<npc>();
+            actor->setID( g->assign_npc_id() );
+            const tripoint_abs_omt position = center + tripoint( direction * sign * distance,
+                distance == 40 ? 5 : 0 );
+            actor->spawn_at_precise( project_to<coords::ms>( position ) );
+            REQUIRE( actor->pos_abs_omt() == position );
+            overmap_buffer.insert_npc( actor );
+            inserted.push_back( actor->getID() );
+            if( distance <= 40 ) {
+                expected.insert( actor->getID() );
+            }
+        }
+    }
+    std::set<character_id> found;
+    for( const auto &actor : overmap_buffer.get_npcs_near_omt( center, 40 ) ) {
+        if( std::find( inserted.begin(), inserted.end(), actor->getID() ) != inserted.end() ) {
+            CHECK( found.insert( actor->getID() ).second );
+        }
+    }
+    CHECK( found == expected );
+    // A zero-radius query still means this XY OMT across all floors.
+    int at_center = 0;
+    for( const auto &actor : overmap_buffer.get_npcs_near_omt( center, 0 ) ) {
+        at_center += std::find( inserted.begin(), inserted.end(), actor->getID() ) != inserted.end();
+    }
+    CHECK( at_center == 3 );
+}
 
 class overmap_test_helper
 {

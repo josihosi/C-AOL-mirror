@@ -2072,9 +2072,13 @@ std::vector<shared_ptr_fast<npc>> overmapbuffer::get_npcs_near_omt( const tripoi
                                int radius )
 {
     std::vector<shared_ptr_fast<npc>> result;
-    for( overmap *&it : get_overmaps_near( project_to<coords::sm>( p.xy() ), radius ) ) {
+    // The enclosing overmap query takes submaps, while both this API's
+    // radius and its final NPC predicate use OMTs. Convert before enumeration
+    // too, otherwise a near NPC across an overmap seam can be omitted.
+    for( overmap *&it : get_overmaps_near( project_to<coords::sm>( p.xy() ),
+                                         omt_to_sm_copy( radius ) ) ) {
         auto temp = it->get_npcs( [&]( const npc & guy ) {
-            // Global position of NPC, in submap coordinates
+            // Global position of NPC, in overmap terrain coordinates
             tripoint_abs_omt pos = guy.pos_abs_omt();
             return square_dist( p.xy(), pos.xy() ) <= radius;
         } );

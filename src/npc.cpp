@@ -23,6 +23,7 @@
 #include "character.h"
 #include "character_attire.h"
 #include "character_id.h"
+#include "do_turn.h"
 #include "character_martial_arts.h"
 #include "creature.h"
 #include "creature_tracker.h"
@@ -4880,12 +4881,22 @@ void npc::add_new_mission( class mission *miss )
 void npc::on_unload()
 {
     cancel_llm_give( "give.interrupted_unload" );
+    refresh_live_bandit_activation();
+    auto *activation = live_bandit_body_activation( getID() );
+    const auto suspended = activation ? time_duration::from_turns(
+                               activation->suspended_body_turns( getID(),
+                                   to_turns<int>( last_updated - calendar::start_of_cataclysm ) ) ) : 0_turns;
+    const auto active_interval = std::max( 0_turns, calendar::turn - last_updated - suspended );
     // Active effects have already run each turn. Finish only the throttled body
     // interval so a later native catch-up cannot replay those active turns.
-    if( !is_dead() && last_updated < calendar::turn ) {
+    if( !is_dead() && active_interval > 0_turns ) {
         const auto finish_body_interval = [&]() {
-            update_body( last_updated, calendar::turn );
+            update_body( calendar::turn - active_interval, calendar::turn );
             last_updated = calendar::turn;
+            if( activation ) {
+                activation->settle_body( getID(),
+                                         to_turns<int>( last_updated - calendar::start_of_cataclysm ) );
+            }
             check_dead_state( &get_map() );
         };
         if( get_map().inbounds( pos_abs() ) ) {
@@ -4913,8 +4924,24 @@ void npc::update_bodytemp_and_wetness()
 void npc::npc_update_body()
 {
     if( calendar::once_every( 10_seconds ) ) {
-        update_body( last_updated, calendar::turn );
+        auto *activation = live_bandit_body_activation( getID() );
+        if( activation && !activation->active ) {
+            return;
+        }
+        if( activation ) {
+            const auto suspended = time_duration::from_turns(
+                                       activation->suspended_body_turns( getID(),
+                                           to_turns<int>( last_updated - calendar::start_of_cataclysm ) ) );
+            const auto interval = std::max( 0_turns, calendar::turn - last_updated - suspended );
+            update_body( calendar::turn - interval, calendar::turn );
+        } else {
+            update_body( last_updated, calendar::turn );
+        }
         last_updated = calendar::turn;
+        if( activation ) {
+            activation->settle_body( getID(),
+                                     to_turns<int>( last_updated - calendar::start_of_cataclysm ) );
+        }
         update_bodytemp_and_wetness();
         reconcile_schedule();
     }
@@ -4922,6 +4949,11 @@ void npc::npc_update_body()
 
 time_duration npc::catch_up_body()
 {
+    refresh_live_bandit_activation();
+    auto *activation = live_bandit_body_activation( getID() );
+    if( activation && !activation->active ) {
+        return 0_turns;
+    }
     if( last_updated >= calendar::turn ) {
         return 0_turns;
     }
@@ -4956,7 +4988,10 @@ time_duration npc::catch_up_body()
     };
 
     // Cap at some reasonable number, say 2 days
-    const time_duration dt = std::min( calendar::turn - last_updated, 2_days );
+    const auto suspended = activation ? time_duration::from_turns(
+                               activation->suspended_body_turns( getID(),
+                                   to_turns<int>( last_updated - calendar::start_of_cataclysm ) ) ) : 0_turns;
+    const time_duration dt = std::clamp( calendar::turn - last_updated - suspended, 0_turns, 2_days );
     // TODO: Sleeping, healing etc.
     time_point cur = calendar::turn - dt;
     add_msg_debug( debugmode::DF_NPC, "on_load() by %s, %d turns", get_name(), to_turns<int>( dt ) );
@@ -4982,6 +5017,10 @@ time_duration npc::catch_up_body()
     // Stamp completion after catch-up. Stamping first makes update_body skip
     // and rewind the first interval, so repeated loads replay needs and injury.
     last_updated = calendar::turn;
+    if( activation ) {
+        activation->settle_body( getID(),
+                                 to_turns<int>( last_updated - calendar::start_of_cataclysm ) );
+    }
     check_dead_state( &get_map() );
     // The loaded move owner releases this temporary attitude when its native
     // effect expires. Off-bubble bodies need the same expiry consequence.
@@ -4998,6 +5037,10 @@ time_duration npc::catch_up_body()
 void npc::on_load( map *here )
 {
     const time_duration dt = catch_up_body();
+    const auto *activation = live_bandit_body_activation( getID() );
+    if( activation && !activation->active ) {
+        return;
+    }
 
     // Reconcile body temperature and wetness with current weather.
     // The shared catch-up ran update_body() but not update_bodytemp();

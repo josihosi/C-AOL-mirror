@@ -14782,6 +14782,8 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
             outing.leader_id = live_ids.front();
 
             overmap_buffer.global_state.bandit_live_world = std::move( world );
+            // Adopt this legacy scene before the read-only handoff before-image.
+            refresh_live_bandit_activation();
             const std::string before = serialize_world(
                                            overmap_buffer.global_state.bandit_live_world );
             if( expect_materialized ) {
@@ -18400,7 +18402,17 @@ TEST_CASE( "hostile_camp_local_handoff_binds_the_complete_pair_transactionally",
             overmap_buffer.insert_npc( actor );
             actors.push_back( actor );
         }
-        add_bandit_work_camp_member( prepared, 0, 14600 );
+        // This positive maintenance control needs an independently active home
+        // near both observer positions, rather than an unrelated distant camp.
+        const auto independent_home = watch + point( 20, 20 );
+        REQUIRE( claim_tracked_spawn( prepared, "bandit", character_id( 14600 ),
+                 project_to<coords::ms>( independent_home ), std::string( "bandit_work_camp" ),
+                 std::nullopt, [&]( const tripoint_abs_omt &position ) -> std::optional<std::string> {
+            return position == independent_home ? std::optional<std::string>( "bandit_work_camp" ) :
+                   std::nullopt;
+        } ) );
+        REQUIRE( square_dist( independent_home.xy(), watch.xy() ) <= 40 );
+        REQUIRE( square_dist( independent_home.xy(), ( watch + point( 30, 30 ) ).xy() ) <= 40 );
         const auto independent_id = prepared.sites.back().site_id;
         prepared.sites.back().supply_last_update_minutes = 200;
         overmap_buffer.global_state.bandit_live_world = std::move( prepared );
@@ -19305,7 +19317,33 @@ TEST_CASE( "hostile_camp_assembled_ingress_commits_both_members_or_neither",
             overmap_buffer.global_state.bandit_live_world.sites.front();
         const tripoint_abs_omt route_position = exact_approach;
         const tripoint_abs_omt destination = exact_watch;
-        live_site.active_outing.local_handoff.cohesion_assembled = true;
+        refresh_live_bandit_activation();
+        CHECK( live_site.active_outing.activation.active_turns == 0 );
+        // This ingress transaction starts after assembly. Bind actual staging
+        // poses through the existing cohesion reducer and native lease writer;
+        // a flag alone cannot establish the required physical/ownership state.
+        std::vector<bandit_live_world::local_cohesion_member_read> assembly_reads;
+        for( const auto &snapshot : live_site.active_outing.local_handoff.members ) {
+            const auto member = overmap_buffer.find_npc( snapshot.npc_id );
+            REQUIRE( member );
+            REQUIRE( g->find_npc( snapshot.npc_id ) == member.get() );
+            member->setpos( snapshot.staging_position, false );
+            assembly_reads.push_back( { snapshot.npc_id, true, member->is_dead(), member->pos_abs() } );
+        }
+        const auto assembly_cursor = require_current_simulation_cursor( live_site );
+        const auto assembly = bandit_live_world::plan_local_pair_cohesion(
+                                  live_site, assembly_cursor,
+                                  to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ), assembly_reads );
+        REQUIRE( assembly.valid );
+        REQUIRE( assembly.snapshot.cohesion_assembled );
+        auto assembled_site = live_site;
+        REQUIRE( bandit_live_world::commit_local_pair_cohesion( assembled_site, assembly, false, false ) );
+        REQUIRE( persist_live_bandit_local_progress_for_test( live_site, assembled_site ) );
+        live_site = std::move( assembled_site );
+        REQUIRE( live_site.active_outing.local_handoff.cohesion_assembled );
+        REQUIRE( rl_dist( overmap_buffer.find_npc( live_ids[0] )->pos_abs(),
+                          overmap_buffer.find_npc( live_ids[1] )->pos_abs() ) <=
+                 bandit_live_world::local_pair_cohesion_radius() );
         const std::string activity_id = live_site.active_outing.activity_id;
         const int generation = live_site.active_outing.generation;
         const int waypoint_index = live_site.active_outing.waypoint_index;
@@ -19362,6 +19400,11 @@ TEST_CASE( "hostile_camp_assembled_ingress_commits_both_members_or_neither",
         for( const character_id id : live_ids ) {
             CHECK( positions_before.at( id ) != destination );
         }
+        // Legacy adoption grants no motion. Earn a real complete cadence.
+        calendar::turn += 5_minutes;
+        while( !calendar::once_every( 5_minutes ) ) {
+            calendar::turn += 1_turns;
+        }
         const auto before_commit = serialize_local_handoff( live_site.active_outing.local_handoff );
         const auto before_commit_cursor = require_current_simulation_cursor( live_site );
         CHECK( live_site.active_outing.waypoint_index == waypoint_index );
@@ -19375,7 +19418,9 @@ TEST_CASE( "hostile_camp_assembled_ingress_commits_both_members_or_neither",
                    waypoint_index : waypoint_index + 1 ) );
         CHECK( live_site.applied_return_generation == applied_return_generation );
         CHECK( live_site.applied_report_generation == applied_report_generation );
-        CHECK( live_site.active_outing.last_progress_minutes == last_progress_minutes );
+        CHECK( live_site.active_outing.last_progress_minutes ==
+               ( independently_ineligible ? last_progress_minutes :
+                 to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) ) );
         CHECK( live_site.active_outing.assessment.last_progress_minutes ==
                ( independently_ineligible ? assessment_progress_minutes :
                  to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) ) );
@@ -19403,6 +19448,10 @@ TEST_CASE( "hostile_camp_assembled_ingress_commits_both_members_or_neither",
         }
         if( independently_ineligible ) {
             CHECK( overmap_buffer.find_npc( live_ids.back() )->mission == NPC_MISSION_NULL );
+        } else {
+            CHECK( rl_dist( overmap_buffer.find_npc( live_ids[0] )->pos_abs(),
+                            overmap_buffer.find_npc( live_ids[1] )->pos_abs() ) <=
+                   bandit_live_world::local_pair_cohesion_radius() );
         }
         for( const character_id id : live_ids ) {
             g->remove_npc( id );
@@ -64016,13 +64065,13 @@ TEST_CASE( "selected native boundary settles pending body time before physical t
 }
 
 TEST_CASE( "authenticated same-owner abstract resumes consume body time and paired native travel",
-           "[bandit_live_world][abstract_body_owner_067]" )
+           "[bandit_live_world][abstract_body_owner_067][human_activation_motor]" )
 {
     using namespace bandit_live_world;
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     const bool cannibal = GENERATE( false, true );
     const std::string condition = GENERATE( "captured", "producer", "foreign", "stale_snapshot",
-                                            "missing", "divergent_hp", "incapacity", "unsafe" );
+                                            "missing", "divergent_hp", "incapacity", "unsafe", "frozen_resume" );
     CAPTURE( cannibal, condition );
     r055_scene scene;
     scene.load( cannibal, true, false, "tests/data/r067_abstract_resume_indoor_8169.json" );
@@ -64229,12 +64278,26 @@ TEST_CASE( "authenticated same-owner abstract resumes consume body time and pair
             restore.save();
         }
     } );
+    // Production evaluates eligibility at the advancing turn boundary, before
+    // the five-minute motor. Adopting this old valid scene must not charge its
+    // untracked absence; the next interval below is genuinely active time.
+    refresh_live_bandit_activation();
+    REQUIRE( scene.site().active_outing.activation.active );
+    CHECK( scene.site().active_outing.activation.active_turns == 0 );
+    CHECK( scene.site().active_outing.activation.elapsed_turns(
+               activation_timer::advance, scene.site().active_outing.last_advanced_minutes,
+               to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) ) <= 0 );
+    CHECK( first->pos_abs() == first_position );
+    CHECK( second->pos_abs() == second_position );
+    // The retained scene begins partway through a minute. Merely aligning to
+    // the next callback earns only40s here, not a five-minute motor budget.
+    calendar::turn += 5_minutes;
     calendar::turn += 5_minutes - ( calendar::turn - calendar::turn_zero ) % 5_minutes;
     process_overmap_npc_move_for_test();
     CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
     CHECK( scene.site().active_outing.member_return_receipts.empty() );
     CHECK_FALSE( scene.site().current_scout_report.is_present() );
-    if( condition != "captured" && condition != "producer" ) {
+    if( condition != "captured" && condition != "producer" && condition != "frozen_resume" ) {
         CHECK( first->pos_abs() == first_position );
         CHECK( second->pos_abs() == second_position );
         CHECK( scene.site().active_outing.local_handoff.route_position == resume );
@@ -64251,13 +64314,92 @@ TEST_CASE( "authenticated same-owner abstract resumes consume body time and pair
     CHECK( scene.site().active_outing.local_handoff.route_position == first->pos_abs_omt() );
     CHECK( scene.site().active_outing.handoff_epoch == epoch );
     REQUIRE( current_external_simulation_cursor( scene.site() ) );
+    if( condition == "frozen_resume" ) {
+        // The authenticated retained pair has actually moved above. Move only
+        // the observer outside40, not either actor or the mission/cursor.
+        const auto player_before = get_avatar().pos_abs_omt();
+        const auto first_frozen = r067_finite_body_key( *first );
+        const auto second_frozen = r067_finite_body_key( *second );
+        const auto retained_before = scene.site();
+        g->place_player_overmap( player_before + tripoint( 100, 100, 0 ) );
+        refresh_live_bandit_activation();
+        REQUIRE_FALSE( scene.site().active_outing.activation.active );
+        REQUIRE_FALSE( scene.site().home_activation.active );
+        calendar::turn += 2_days;
+        process_overmap_npc_move_for_test();
+        CHECK( r067_finite_body_key( scene.actor( ids.front().get_value() ) ) == first_frozen );
+        CHECK( r067_finite_body_key( scene.actor( ids.back().get_value() ) ) == second_frozen );
+        // Compare the actual owner record with only its evaluated pause marks
+        // normalized. Leases, route cursor, stock, watch and deadlines must not
+        // change merely because the real production callback ran while frozen.
+        auto expected = retained_before;
+        expected.home_activation = scene.site().home_activation;
+        expected.active_outing.activation = scene.site().active_outing.activation;
+        CHECK( r067_return_record_bytes( scene.site() ) == r067_return_record_bytes( expected ) );
+        const auto frozen_world_name = world_generator->active_world->world_name;
+        g->save_is_dirty = false;
+        REQUIRE( g->save() );
+        for( int reload = 0; reload < 2; ++reload ) {
+            r067_handover_reload( frozen_world_name );
+            process_overmap_npc_move_for_test();
+            REQUIRE_FALSE( scene.site().active_outing.activation.active );
+            CHECK( r067_finite_body_key( scene.actor( ids.front().get_value() ) ) == first_frozen );
+            CHECK( r067_finite_body_key( scene.actor( ids.back().get_value() ) ) == second_frozen );
+            CHECK( r067_return_record_bytes( scene.site() ) == r067_return_record_bytes( expected ) );
+        }
+        g->place_player_overmap( player_before );
+        process_overmap_npc_move_for_test();
+        REQUIRE( scene.site().active_outing.activation.active );
+        first = overmap_buffer.find_npc( ids.front() );
+        second = overmap_buffer.find_npc( ids.back() );
+        REQUIRE( first );
+        REQUIRE( second );
+        // First reentry settles the native clock without movement/backlog;
+        // the unchanged subsequent control must earn the next real cadence.
+        CHECK( first->pos_abs() == std::get<1>( std::get<0>( first_frozen ) ) );
+        CHECK( second->pos_abs() == std::get<1>( std::get<0>( second_frozen ) ) );
+        CHECK( first->get_last_updated() == calendar::turn );
+        CHECK( second->get_last_updated() == calendar::turn );
+        CHECK( scene.site().active_outing.local_handoff.route_position ==
+               retained_before.active_outing.local_handoff.route_position );
+        CHECK( scene.site().active_outing.last_advanced_minutes ==
+               retained_before.active_outing.last_advanced_minutes );
+        CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
+        CHECK( first->catch_up_body() == 0_turns );
+        CHECK( second->catch_up_body() == 0_turns );
+    }
+    // Exact effective runtime behavior must survive canonical persistence;
+    // serialized equality alone could conceal a changed cached clock mark.
+    const auto effective_clocks = [&]() {
+        std::vector<std::int64_t> result;
+        const auto append = [&]( const activation_clock &clock, const auto &anchors ) {
+            result.insert( result.end(), { clock.active, clock.last_world_turn, clock.active_turns } );
+            const int now = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
+            for( std::size_t i = 0; i < anchors.size(); ++i ) {
+                result.push_back( clock.elapsed_turns( static_cast<activation_timer>( i ),
+                                  anchors[i] < 0 ? -1 : static_cast<int>( anchors[i] / 60 ), now ) );
+            }
+        };
+        append( scene.site().active_outing.activation, scene.site().active_outing.activation_anchors() );
+        append( scene.site().home_activation, scene.site().home_activation_anchors() );
+        for( const auto id : ids ) {
+            const auto &actor = scene.actor( id.get_value() );
+            const auto *clock = live_bandit_body_activation( id );
+            const auto stamp = to_turns<int>( actor.get_last_updated() - calendar::start_of_cataclysm );
+            result.push_back( clock ? clock->suspended_body_turns( id, stamp ) : 0 );
+        }
+        return result;
+    };
+    const auto runtime_once = effective_clocks();
     const auto progressed = serialize_world( overmap_buffer.global_state.bandit_live_world );
+    CHECK( effective_clocks() == runtime_once );
     const auto first_after = r067_finite_body_key( *first );
     const auto second_after = r067_finite_body_key( *second );
     process_overmap_npc_move_for_test();
     CHECK( r067_finite_body_key( *first ) == first_after );
     CHECK( r067_finite_body_key( *second ) == second_after );
     CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == progressed );
+    CHECK( effective_clocks() == runtime_once );
     const auto world_name = world_generator->active_world->world_name;
     g->save_is_dirty = false;
     REQUIRE( g->save() );
@@ -64268,6 +64410,7 @@ TEST_CASE( "authenticated same-owner abstract resumes consume body time and pair
         REQUIRE( current_external_simulation_cursor( scene.site() ) );
         CHECK( r067_return_record_bytes( scene.site().active_outing.assessment ) == assessment );
         CHECK( scene.site().active_outing.crossing.activity_id.empty() );
+        CHECK( effective_clocks() == runtime_once );
     }
     // A second real cadence after strict reload must still accept the same
     // owner: a progressed snapshot is not the producer's initial snapshot.
@@ -64291,7 +64434,9 @@ TEST_CASE( "authenticated same-owner abstract resumes consume body time and pair
     const auto generation = scene.site().active_outing.generation;
     const auto deadline = scene.site().active_outing.missing_deadline_minutes;
     while( scene.site().active_outing.is_active() &&
-           to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) < deadline ) {
+           scene.site().active_outing.activation.elapsed_turns(
+               activation_timer::missing_deadline, deadline,
+               to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ) ) < 0 ) {
         calendar::turn += 5_minutes - ( calendar::turn - calendar::turn_zero ) % 5_minutes;
         process_overmap_npc_move_for_test();
         if( scene.site().active_outing.is_active() ) {
