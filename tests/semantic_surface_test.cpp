@@ -21,6 +21,7 @@
 #include "cached_options.h"
 #include "calendar.h"
 #include "avatar.h"
+#include "bandit_live_world.h"
 #include "bodygraph.h"
 #include "input.h"
 #include "activity_actor_definitions.h"
@@ -4816,6 +4817,239 @@ TEST_CASE( "performance interval output preserves the real World successor",
         }
     }
     CHECK( intervals >= 1 );
+}
+#endif
+
+#if !defined(TILES)
+TEST_CASE( "watch diagnostics separate actual optical and recording owners without changing admission",
+           "[semantic_surface][raid_performance_watch_split]" )
+{
+    const std::string mode = GENERATE( "normal", "quiet_signal", "off" );
+    const std::string branch = GENERATE( "watch_record", "watch_no_record", "nonwatch" );
+    CAPTURE( mode, branch );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", mode );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const auto world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto position = u.pos_abs();
+    const auto saved_turn = calendar::turn;
+    on_out_of_scope restore_turn( [&]() { set_time( saved_turn ); } );
+    // Keep the real scheduler off its periodic cadence. This test explicitly
+    // calls the real preflight from a World-publication hook to exercise the
+    // current row, not to claim natural dispatch or native performance data.
+    set_time( calendar::start_of_cataclysm + 1000_minutes + 7_seconds );
+    const auto target = u.pos_abs_omt() + tripoint( 10, 0, 0 );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain_before;
+    for( int y = -3; y <= 3; ++y ) {
+        for( int x = -6; x <= 3; ++x ) {
+            const auto p = target + tripoint( x, y, 0 );
+            terrain_before.emplace_back( p, overmap_buffer.ter( p ) );
+            overmap_buffer.ter_set( p, oter_str_id( "forest" ).id() );
+        }
+    }
+    on_out_of_scope restore_terrain( [&]() {
+        for( const auto &tile : terrain_before ) {
+            overmap_buffer.ter_set( tile.first, tile.second );
+        }
+    } );
+    bandit_live_world::site_record site;
+    site.site_id = "test:watch-performance-owner";
+    site.anchor = target + tripoint( -5, 0, 0 );
+    bandit_live_world::structural_outing_plan plan;
+    plan.lead_id = "structural_bounty:watch-performance";
+    plan.target_omt = target;
+    plan.job = branch == "nonwatch" ? bandit_dry_run::job_template::scavenge :
+               bandit_dry_run::job_template::scout;
+    bandit_live_world::camp_map_lead lead;
+    lead.lead_id = plan.lead_id;
+    lead.kind = bandit_live_world::camp_lead_kind::structural_bounty;
+    lead.omt = target;
+    site.intelligence_map.leads.push_back( lead );
+    const auto site_bytes = [&]() {
+        bandit_live_world::world_state fixture;
+        fixture.sites.push_back( site );
+        std::ostringstream out;
+        JsonOut json( out );
+        fixture.serialize( json );
+        return out.str();
+    };
+    const auto before_site = site_bytes();
+    int baseline_budget = 8;
+    const auto baseline = live_bandit_structural_route_read_for_test( site, plan, baseline_budget );
+
+    const std::string run = "watch-split-" + mode + "-" + branch;
+    const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".jsonl" );
+    const auto transitions = std::filesystem::path( PATH_INFO::user_dir() ) /
+                             ( run + ".transitions.jsonl" );
+    std::filesystem::remove( trace );
+    std::filesystem::remove( transitions );
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", std::nullopt },
+        { "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", branch == "watch_record" ?
+          std::optional<std::string>( transitions.string() ) : std::nullopt }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &setting : settings ) {
+        const char *old = std::getenv( setting.first.c_str() );
+        previous[setting.first] = old ? std::optional<std::string>( old ) : std::nullopt;
+        assign_test_environment( setting.first, setting.second );
+    }
+    on_out_of_scope restore_environment( [&]() {
+        for( const auto &setting : previous ) {
+            assign_test_environment( setting.first, setting.second );
+        }
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    // Saved reentry's first turn does not advance and has no diagnostic row.
+    // Arm the branch hook only after that ordinary first Pause has completed.
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+    auto &manager = openclaw_harness_semantic_surface_manager();
+    bool called = false;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind != "world" || called ) {
+            return;
+        }
+        called = true;
+        const auto time_before = calendar::turn;
+        const auto moves_before = u.get_moves();
+        const auto trace_bytes_before = std::filesystem::file_size( trace );
+        int budget = 8;
+        const auto read = live_bandit_structural_route_read_for_test( site, plan, budget );
+        // Timing/counters stay in the current row. Only the unchanged native
+        // transition recorder may write its separate, explicitly bound file.
+        CHECK( std::filesystem::file_size( trace ) == trace_bytes_before );
+        CHECK( read.summary == baseline.summary );
+        CHECK( read.reachable == baseline.reachable );
+        CHECK( read.complete_route_cost == baseline.complete_route_cost );
+        CHECK( read.watch_geography_supplied == baseline.watch_geography_supplied );
+        CHECK( read.watch_candidates.size() == baseline.watch_candidates.size() );
+        CHECK( read.watch_shared_route == baseline.watch_shared_route );
+        CHECK( budget == baseline_budget );
+        CHECK( calendar::turn == time_before );
+        CHECK( u.get_moves() == moves_before );
+        CHECK( u.pos_abs() == position );
+        CHECK( site_bytes() == before_site );
+        CHECK( plan.member_ids.empty() );
+    } );
+    on_out_of_scope clear_observer( [&]() { manager.set_descriptor_observer( {} ); } );
+    for( int i = 0; i < 3; ++i ) {
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        REQUIRE_FALSE( g->do_turn() );
+    }
+    REQUIRE( called );
+    // Discard the open final row via the same supported off transition.
+    {
+        override_option off( "RAID_PERFORMANCE_DIAGNOSTIC", "off" );
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        REQUIRE_FALSE( g->do_turn() );
+    }
+    int intervals = 0;
+    int preflights = 0;
+    int reads = 0;
+    int record_calls = 0;
+    int eligible_calls = 0;
+    int cached_views = 0;
+    std::ifstream input( trace );
+    std::string line;
+    while( std::getline( input, line ) ) {
+        if( line.find( "raid_performance_interval" ) == std::string::npos ) {
+            continue;
+        }
+        ++intervals;
+        const auto object = json_loader::from_string( line.substr( line.find( '{' ) ) ).get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_string( "mode" ) == mode );
+        CHECK( object.get_string( "stage_scope" ).find( "disjoint" ) != std::string::npos );
+        const auto names = object.get_string_array( "stage_names" );
+        const auto stage_index = [&]( const std::string &name ) {
+            REQUIRE( std::count( names.begin(), names.end(), name ) == 1 );
+            return std::distance( names.begin(), std::find( names.begin(), names.end(), name ) );
+        };
+        const auto parent = stage_index( "watch_preflight" );
+        const auto optical = stage_index( "watch_optical_read" );
+        const auto record = stage_index( "watch_record_view" );
+        for( const auto value : object.get_array( "rows" ) ) {
+            const auto row = value.get_object();
+            row.allow_omitted_members();
+            const auto stages = row.get_array( "stages_seconds" );
+            REQUIRE( stages.size() == names.size() );
+            CHECK( stages.get_float( parent ) >= stages.get_float( optical ) + stages.get_float( record ) );
+            if( row.get_int( "watch_preflights" ) > 0 ) {
+                CHECK( stages.get_float( parent ) > 0 );
+                CHECK( stages.get_float( optical ) > 0 );
+                CHECK( stages.get_float( record ) > 0 );
+            } else {
+                CHECK( stages.get_float( parent ) == 0 );
+                CHECK( stages.get_float( optical ) == 0 );
+                CHECK( stages.get_float( record ) == 0 );
+            }
+            preflights += row.get_int( "watch_preflights" );
+            reads += row.get_int( "watch_optical_read_calls" );
+            record_calls += row.get_int( "watch_record_view_calls" );
+            eligible_calls += row.get_int( "watch_record_view_eligible_calls" );
+            cached_views += row.get_int( "watch_cached_views" );
+        }
+    }
+    if( mode == "off" ) {
+        CHECK( intervals == 0 );
+    } else {
+        CHECK( intervals > 0 );
+        CHECK( preflights == ( branch == "nonwatch" ? 0 : 1 ) );
+        CHECK( reads == ( branch == "nonwatch" ? 0 : 96 ) );
+        CHECK( record_calls == reads );
+        CHECK( eligible_calls == ( branch == "watch_record" ? reads : 0 ) );
+        CHECK( ( cached_views > 0 ) == ( branch != "nonwatch" ) );
+    }
+    int written_events = 0;
+    std::ifstream transition_input( transitions );
+    while( std::getline( transition_input, line ) ) {
+        const auto event = json_loader::from_string( line ).get_object();
+        event.allow_omitted_members();
+        CHECK( event.get_string( "transition" ) == "watch_geometry_read" );
+        CHECK( event.get_string( "run_id" ) == run );
+        ++written_events;
+    }
+    CHECK( written_events == ( branch == "watch_record" ? 96 : 0 ) );
+    CHECK( u.pos_abs() == position );
+    CHECK( site_bytes() == before_site );
 }
 #endif
 

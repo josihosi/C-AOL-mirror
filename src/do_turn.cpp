@@ -269,7 +269,8 @@ enum class raid_perf_stage : std::size_t {
     operations, horde_movement, population, fields, items, map_cache,
     signal_total, signal_discovery, signal_hordes, creatures, overmap_npcs,
     pre_input_world, post_input_action,
-    npc_site_bootstrap, npc_signal_copy, npc_channel_audit, human_activation, count
+    npc_site_bootstrap, npc_signal_copy, npc_channel_audit, human_activation,
+    watch_preflight, watch_optical_read, watch_record_view, count
 };
 static constexpr std::size_t raid_perf_stage_count =
     static_cast<std::size_t>( raid_perf_stage::count );
@@ -290,6 +291,11 @@ struct raid_perf_row {
     std::size_t horde_attracted_entities = 0;
     std::size_t human_activation_queries = 0;
     std::size_t human_nearby_candidates = 0;
+    std::size_t watch_preflights = 0;
+    std::size_t watch_optical_read_calls = 0;
+    std::size_t watch_record_view_calls = 0;
+    std::size_t watch_record_view_eligible_calls = 0;
+    std::size_t watch_cached_views = 0;
     live_channel_output_statistics channel_output;
 };
 static raid_perf_row *raid_perf_current = nullptr;
@@ -335,7 +341,9 @@ static void raid_perf_flush_after_wait()
     js.member( "mode", raid_perf_mode );
     js.member( "run_id", std::string( std::getenv( "OPENCLAW_HARNESS_RUN_ID" ) ) );
     js.member( "stage_scope",
-               "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; do not add nested stages" );
+               "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; watch_preflight includes disjoint watch_optical_read and watch_record_view children; do not add nested stages" );
+    js.member( "watch_scope",
+               "Actual preflight/read/record_view calls; eligible record_view calls are not confirmed writes; cached views sum each preflight's retained geometry/lighting views, including failed lighting, not per-read allocations or unique world cells" );
     js.member( "debug_sink_scope",
                "logical file-sink bytes/flushes over the whole turn including input/save; not physical disk bytes" );
     js.member( "channel_output_scope",
@@ -344,7 +352,8 @@ static void raid_perf_flush_after_wait()
         "migo_operations", "horde_movement", "population", "fields", "items", "map_cache",
         "signal_total", "signal_discovery", "signal_hordes", "creatures", "overmap_npcs",
         "pre_input_world", "post_input_action",
-        "npc_site_bootstrap", "npc_signal_copy", "npc_channel_audit", "human_activation"
+        "npc_site_bootstrap", "npc_signal_copy", "npc_channel_audit", "human_activation",
+        "watch_preflight", "watch_optical_read", "watch_record_view"
     } );
     js.member( "rows" );
     js.start_array();
@@ -369,6 +378,11 @@ static void raid_perf_flush_after_wait()
         js.member( "horde_attracted_entities", row.horde_attracted_entities );
         js.member( "human_activation_queries", row.human_activation_queries );
         js.member( "human_nearby_candidates", row.human_nearby_candidates );
+        js.member( "watch_preflights", row.watch_preflights );
+        js.member( "watch_optical_read_calls", row.watch_optical_read_calls );
+        js.member( "watch_record_view_calls", row.watch_record_view_calls );
+        js.member( "watch_record_view_eligible_calls", row.watch_record_view_eligible_calls );
+        js.member( "watch_cached_views", row.watch_cached_views );
         js.member( "channel_records", row.channel_output.records );
         js.member( "channel_open_calls", row.channel_output.open_calls );
         js.member( "channel_flush_calls", row.channel_output.flush_calls );
@@ -12982,6 +12996,10 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
         }
         return read;
     }
+    raid_perf_scope watch_scope( raid_perf_stage::watch_preflight );
+    if( raid_perf_current ) {
+        ++raid_perf_current->watch_preflights;
+    }
     read.summary = "live structural route evaluated against watch endpoint";
 
     std::vector<tripoint_abs_omt> target_footprint = { *physical_watch_target };
@@ -13013,8 +13031,16 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
     optical_reference.normalize();
     optical_reference.recalc_sight_limits();
     scout_observation::site_reader optical_geometry;
-    const auto terrain_lookup = [&optical_reference, &site, &plan,
-                                                     &optical_geometry]( const tripoint_abs_omt & candidate,
+    const auto read_watch_view = [&]( const tripoint_abs_ms & origin,
+                                     const tripoint_abs_ms & observed,
+                                     const std::vector<tripoint_abs_omt> & footprint ) {
+        raid_perf_scope optical_scope( raid_perf_stage::watch_optical_read );
+        if( raid_perf_current ) {
+            ++raid_perf_current->watch_optical_read_calls;
+        }
+        return optical_geometry.read( optical_reference, origin, observed, footprint );
+    };
+    const auto terrain_lookup = [&read_watch_view, &site, &plan]( const tripoint_abs_omt & candidate,
     const std::vector<tripoint_abs_omt> &footprint ) {
         bandit_live_world::structural_watch_terrain_read terrain;
         terrain.concealed = overmap_buffer.ter( candidate )->get_see_cost() > 0;
@@ -13039,8 +13065,15 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
             const tripoint_abs_ms target = project_to<coords::ms>( *nearest );
             const auto record_view = [&]( const char *role, const tripoint_abs_ms & observed,
             const scout_observation::visibility_read & view ) {
+                raid_perf_scope record_scope( raid_perf_stage::watch_record_view );
+                if( raid_perf_current ) {
+                    ++raid_perf_current->watch_record_view_calls;
+                }
                 if( !terrain.concealed || !bandit_live_world_probe::transition_events_enabled() ) {
                     return;
+                }
+                if( raid_perf_current ) {
+                    ++raid_perf_current->watch_record_view_eligible_calls;
                 }
                 bandit_live_world_probe::transition_event event;
                 event.domain = "bandit_live_world";
@@ -13065,8 +13098,7 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                 bandit_live_world_probe::record_transition_event( std::move( event ) );
             };
             if( scout_observation::associated_with_site( get_avatar().pos_abs_omt(), footprint ) ) {
-                const auto view = optical_geometry.read( optical_reference, origin,
-                                  get_avatar().pos_abs(), footprint );
+                const auto view = read_watch_view( origin, get_avatar().pos_abs(), footprint );
                 record_view( "avatar", get_avatar().pos_abs(), view );
                 checked = view.known;
                 useful = view.visible;
@@ -13081,7 +13113,7 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                     continue;
                 }
                 ++actor_reads;
-                const auto view = optical_geometry.read( optical_reference, origin, actor.pos_abs(), footprint );
+                const auto view = read_watch_view( origin, actor.pos_abs(), footprint );
                 record_view( "npc", actor.pos_abs(), view );
                 checked = checked || view.known;
                 useful = useful || view.visible;
@@ -13092,8 +13124,8 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                 if( useful ) {
                     break;
                 }
-                const auto view = optical_geometry.read( optical_reference, origin,
-                                  target + tripoint_rel_ms( offset.x, offset.y, 0 ), footprint );
+                const auto view = read_watch_view( origin,
+                                                  target + tripoint_rel_ms( offset.x, offset.y, 0 ), footprint );
                 record_view( "corner", target + tripoint_rel_ms( offset.x, offset.y, 0 ), view );
                 checked = checked || view.known;
                 useful = useful || view.visible;
@@ -13157,6 +13189,9 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
     bandit_live_world::structural_watch_geography_read watch =
         bandit_live_world::read_structural_watch_geography(
             target_footprint, site.anchor, terrain_lookup, watch_route_lookup );
+    if( raid_perf_current ) {
+        raid_perf_current->watch_cached_views += optical_geometry.cached_view_count();
+    }
     watch.selection = member_route_check ?
                       bandit_live_world::select_alternate_watch_ring_candidate(
                           watch.target_footprint, watch.routed_candidates, site.active_outing.selected_watch_omt ) :
