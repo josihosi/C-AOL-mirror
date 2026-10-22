@@ -399,6 +399,8 @@ void editmap_ui::handle_action()
             { "trap_enabled", brush.drawing_trap ? "true" : "false" },
             { "field_enabled", brush.drawing_field ? "true" : "false" },
             { "radiation_enabled", brush.drawing_radiation ? "true" : "false" },
+            { "advanced_info", state.advanced_info_toggle ? "true" : "false" },
+            { "fast_scroll", state.fast_scroll ? "true" : "false" },
             { "target_has_fd_fire", get_map().get_field( brush.target, fire ) != nullptr ? "true" : "false" }
         };
     };

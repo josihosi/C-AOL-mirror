@@ -16,6 +16,7 @@
 
 #include "cata_catch.h"
 #include "cached_options.h"
+#include "calendar.h"
 #include "avatar.h"
 #include "bodygraph.h"
 #include "input.h"
@@ -33,6 +34,7 @@
 #include "options_helpers.h"
 #include "worldfactory.h"
 #include "effect.h"
+#include "editmap.h"
 #include "coordinates.h"
 #include "cata_scope_helpers.h"
 #include "character.h"
@@ -43,6 +45,7 @@
 #include "debug_menu.h"
 #include "debug_console.h"
 #include "game.h"
+#include "field_type.h"
 #include "imgui/imgui.h"
 #include "inventory_ui.h"
 #include "input_popup.h"
@@ -58,6 +61,7 @@
 #include "ui_iteminfo.h"
 #include "uilist.h"
 #include "ui_manager.h"
+#include "uistate.h"
 
 namespace
 {
@@ -1609,6 +1613,187 @@ TEST_CASE( "semantic surface transport observes exact descriptors and rejections
     REQUIRE( receipts.size() == 1 );
     CHECK( receipts.back().request_id == receipt.request_id );
     CHECK( receipts.back().consuming_frame_id == receipt.consuming_frame_id );
+}
+
+TEST_CASE( "actual map editor toggles publish and receipt without editing the map",
+           "[semantic_surface][editmap_native_toggle]" )
+{
+    const std::string action = GENERATE( std::string( "editmap.toggle_advanced_info" ),
+                                        std::string( "editmap.toggle_fast_scroll" ) );
+    const std::string payload_key = action == "editmap.toggle_advanced_info" ?
+                                    "advanced_info" : "fast_scroll";
+    CAPTURE( action );
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    restore_on_out_of_scope restore_view( u.view_offset );
+    u.view_offset = tripoint_rel_ms::zero;
+    restore_on_out_of_scope restore_editor( uistate.editmap_state );
+    editmap_uistate &state = uistate.editmap_state;
+    state = editmap_uistate{};
+    state.selected.fill( false );
+    // An unintended brush confirmation must be observable, even though these
+    // two native actions should only change editor display settings.
+    state.brush.drawing_terrain = true;
+    state.brush.selected_terrain = ter_str_id( "t_wall" ).id();
+    const tripoint_bub_ms target = u.pos_bub();
+    const field_type_id fire = field_type_str_id( "fd_fire" );
+    const field_type_id smoke = field_type_str_id( "fd_smoke" );
+    REQUIRE( here.add_field( target + point::north, fire, 1, 0_turns, false ) );
+    REQUIRE( here.add_field( target + point::east, smoke, 2, 0_turns, false ) );
+    here.furn_set( target + point::north, furn_str_id( "f_brazier" ) );
+    struct tile_snapshot {
+        tripoint_bub_ms position;
+        ter_id terrain;
+        furn_id furniture;
+        int fire_intensity;
+        int smoke_intensity;
+        time_duration fire_age;
+        time_duration smoke_age;
+    };
+    std::vector<tile_snapshot> before;
+    for( int y = -1; y <= 1; ++y ) {
+        for( int x = -1; x <= 1; ++x ) {
+            const auto p = target + point( x, y );
+            before.push_back( { p, here.ter( p ), here.furn( p ),
+                               here.get_field_intensity( p, fire ), here.get_field_intensity( p, smoke ),
+                               here.get_field_age( p, fire ), here.get_field_age( p, smoke ) } );
+        }
+    }
+    const auto turn_before = calendar::turn;
+    const auto position_before = u.pos_abs();
+    const char *transport_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous_path = transport_path ?
+            std::optional<std::string>( transport_path ) : std::nullopt;
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous_path );
+    } );
+    // The real loop dispatches queued semantic actions before reading keys.
+    // If a toggle fails to publish its successor, the existing test input
+    // guard throws on the next raw read instead of hanging or fabricating it.
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = true;
+    semantic_surface_manager manager( "editmap-native-toggle" );
+    semantic_surface_manager_session session( manager );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+    } );
+    semantic_surface_scope world( manager, "world", "World" );
+    std::vector<semantic_surface_descriptor> frames;
+    std::vector<semantic_action_request> submitted;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind != "map_editor" ) {
+            return;
+        }
+        const std::size_t step = frames.size();
+        REQUIRE( step < 3 );
+        if( !frames.empty() ) {
+            CHECK( owner.surface_id == frames.front().surface_id );
+            CHECK( owner.frame_id != frames.back().frame_id );
+        }
+        CHECK( owner.payload.at( "target" ) == target.to_string() );
+        CHECK( owner.payload.at( "origin" ) == target.to_string() );
+        CHECK( owner.payload.at( "terrain_enabled" ) == "true" );
+        // Check the actual setting as well as its published representation.
+        CHECK( state.advanced_info_toggle == ( payload_key == "advanced_info" && step == 1 ) );
+        CHECK( state.fast_scroll == ( payload_key == "fast_scroll" && step == 1 ) );
+        CHECK( owner.payload.count( payload_key ) == 1 );
+        if( owner.payload.count( payload_key ) ) {
+            CHECK( owner.payload.at( payload_key ) == ( step == 1 ? "true" : "false" ) );
+        }
+        const auto enabled = std::find_if( owner.valid_actions.begin(), owner.valid_actions.end(),
+        [&]( const semantic_action_descriptor &control ) {
+            return control.id == action && control.enabled;
+        } );
+        REQUIRE( enabled != owner.valid_actions.end() );
+        frames.push_back( owner );
+        if( step == 0 ) {
+            // Exercise the manager's existing guards against this actual
+            // editor owner before granting its first valid toggle.
+            for( const std::string &reason : std::vector<std::string> {
+                     "wrong_run", "wrong_surface", "stale_frame"
+                 } ) {
+                semantic_action_request rejected{ owner.run_id, owner.surface_id, owner.frame_id,
+                                                   reason, action, std::nullopt, {} };
+                if( reason == "wrong_run" ) {
+                    rejected.run_id = "foreign-run";
+                } else if( reason == "wrong_surface" ) {
+                    rejected.surface_id = "foreign-surface";
+                } else {
+                    rejected.frame_id = "stale-frame";
+                }
+                REQUIRE( manager.submit_request( rejected ) );
+                REQUIRE_FALSE( manager.consume_top_request() );
+                REQUIRE_FALSE( receipts.empty() );
+                CHECK_FALSE( receipts.back().accepted );
+                CHECK( receipts.back().rejection_reason == reason );
+                CHECK( manager.top()->frame_id == owner.frame_id );
+                CHECK_FALSE( state.advanced_info_toggle );
+                CHECK_FALSE( state.fast_scroll );
+            }
+        }
+        submitted.push_back( { owner.run_id, owner.surface_id, owner.frame_id,
+                               "editor-step-" + std::to_string( step ),
+                               step < 2 ? action : "editmap.close", std::nullopt, {} } );
+        REQUIRE( manager.submit_request( submitted.back() ) );
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    {
+        editmap_ui editor;
+        REQUIRE_NOTHROW( editor.handle_action() );
+    }
+    REQUIRE( frames.size() == 3 );
+    REQUIRE( submitted.size() == 3 );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->kind == "world" );
+    REQUIRE( receipts.size() == 6 );
+    for( std::size_t i = 0; i < submitted.size(); ++i ) {
+        const auto &receipt = receipts[i + 3];
+        CHECK( receipt.request_id == submitted[i].request_id );
+        CHECK( receipt.action_id == submitted[i].action_id );
+        CHECK( receipt.accepted );
+        CHECK( receipt.consuming_surface_id == frames[i].surface_id );
+        CHECK( receipt.consuming_frame_id == frames[i].frame_id );
+        CHECK( receipt.resulting_frame_id ==
+               ( i < 2 ? frames[i + 1].frame_id : manager.top()->frame_id ) );
+    }
+    // Identical request replay only re-emits its cached receipt. It must not
+    // enqueue or execute a second native toggle on the editor or its parent.
+    const auto world_frame = manager.top()->frame_id;
+    for( std::size_t i = 0; i < submitted.size(); ++i ) {
+        const auto expected = receipts[i + 3];
+        const auto count = receipts.size();
+        CHECK_FALSE( manager.submit_request( submitted[i] ) );
+        REQUIRE( receipts.size() == count + 1 );
+        CHECK( receipts.back().request_id == expected.request_id );
+        CHECK( receipts.back().accepted == expected.accepted );
+        CHECK( receipts.back().consuming_frame_id == expected.consuming_frame_id );
+        CHECK( receipts.back().resulting_frame_id == expected.resulting_frame_id );
+        CHECK_FALSE( manager.has_pending_request() );
+        CHECK( manager.top()->frame_id == world_frame );
+    }
+    CHECK_FALSE( state.advanced_info_toggle );
+    CHECK_FALSE( state.fast_scroll );
+    CHECK( calendar::turn == turn_before );
+    CHECK( u.pos_abs() == position_before );
+    for( const auto &tile : before ) {
+        CAPTURE( tile.position );
+        CHECK( here.ter( tile.position ) == tile.terrain );
+        CHECK( here.furn( tile.position ) == tile.furniture );
+        CHECK( here.get_field_intensity( tile.position, fire ) == tile.fire_intensity );
+        CHECK( here.get_field_intensity( tile.position, smoke ) == tile.smoke_intensity );
+        CHECK( here.get_field_age( tile.position, fire ) == tile.fire_age );
+        CHECK( here.get_field_age( tile.position, smoke ) == tile.smoke_age );
+    }
+    manager.set_descriptor_observer( {} );
+    manager.set_receipt_observer( {} );
 }
 
 TEST_CASE( "unchanged semantic surface publication preserves its frame", "[semantic_surface]" )
