@@ -467,7 +467,7 @@ def dispose_owned_game(run_dir, expected, *, wait_seconds=5.0, inspector=None):
     host = socket.gethostname()
     if (not run_id or directory.parent != root / 'harness_runs' or
             launch.get('host') != host or launch.get('mode') != 'terminal' or
-            launch.get('transport') != 'windows_conpty' or
+            owner.get('transport') != 'windows_conpty' or
             reservation.get('schema') != 'caol-writable-run-owner-v1' or
             reservation.get('host') != host or reservation.get('run_id') != run_id or
             Path(reservation.get('userdir', '')).resolve() != root or reservation.get('launch_state') != 'bound' or

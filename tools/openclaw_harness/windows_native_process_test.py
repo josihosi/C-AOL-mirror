@@ -182,12 +182,14 @@ class ExplicitGameDisposalTest(unittest.TestCase):
                                         self.expected['birth_identity'], 'owned game command')
         self.inspector = SimpleNamespace(inspect=lambda pid: self.snapshot)
         self.host = socket.gethostname()
-        self.write('process.json', {'pid': 123, 'run_id': 'owned-run', 'host': self.host,
-            'userdir': str(self.root), 'mode': 'terminal', 'transport': 'windows_conpty',
-            'process_generation': self.expected})
+        # Actual outer start() caller overwrites launch_game's earlier record;
+        # write_startup_process_record preserves mode/run/generation, not transport.
+        startup_harness.write_startup_process_record(self.run, SimpleNamespace(), {
+            'pid':123, 'run_id':'owned-run', 'host':self.host,
+            'userdir':str(self.root), 'mode':'terminal', 'process_generation':self.expected})
         self.write('terminal.owner.json', {'schema': 'caol-curses-terminal-owner-v1', 'run_id': 'owned-run',
             'host': self.host, 'game_pid': 123, 'game_process_generation': self.expected,
-            'run_owner_path': str(self.run / 'terminal.owner.json')})
+            'run_owner_path': str(self.run / 'terminal.owner.json'), 'transport':'windows_conpty'})
         (self.root / '.harness-owner.lock').write_text(json.dumps({'schema': 'caol-writable-run-owner-v1',
             'host': self.host, 'run_id': 'owned-run', 'userdir': str(self.root), 'launch_state': 'bound',
             'game_generation': self.expected}))
@@ -230,6 +232,7 @@ class ExplicitGameDisposalTest(unittest.TestCase):
         return startup_harness.cleanup_game_process(123, **arguments)
 
     def test_exact_explicit_abort_caller_uses_minimal_reverified_handle_without_save_credit(self):
+        self.assertNotIn('transport',json.loads((self.run/'process.json').read_text()))
         result = self.cleanup()
         self.assertEqual(result['status'], 'explicit_abort_terminated')
         self.assertEqual(self.opened, [(0x00101001, False, 123)])
@@ -260,6 +263,18 @@ class ExplicitGameDisposalTest(unittest.TestCase):
             path.write_bytes(raw)
         self.assertEqual(self.opened, [])
         self.assertEqual(self.terminated, [])
+
+    def test_authoritative_terminal_owner_transport_wrong_or_missing_is_retained(self):
+        path=self.run/'terminal.owner.json';original=json.loads(path.read_text())
+        for value in ('other_transport',None):
+            changed=dict(original)
+            if value is None:
+                changed.pop('transport')
+            else:
+                changed['transport']=value
+            self.write('terminal.owner.json',changed)
+            self.assertEqual(self.cleanup()['status'],'retained_explicit_abort_refused')
+        self.assertEqual(self.opened,[]);self.assertEqual(self.terminated,[])
 
     def test_birth_reuse_executable_and_command_hash_mismatch_cannot_dispose(self):
         original = self.snapshot
