@@ -13,6 +13,7 @@
 #include "catacharset.h"
 #include "color.h"
 #include "debug.h"
+#include "do_turn.h"
 #include "imgui/imgui.h"
 #include "input_context.h"
 #include "output.h"
@@ -488,7 +489,13 @@ query_popup::result query_popup::query_once()
             semantic_action.reset();
             semantic_option_selected = true;
         } else {
-            res.action = ctxt.handle_input( 50 );
+            {
+                // Automatic sound/sight distractions can reach this native
+                // owner outside World input. Exclude acquisition only, keeping
+                // redraw and choice processing measured; parent input nests.
+                openclaw_harness_native_input_scope input_phase;
+                res.action = ctxt.handle_input( 50 );
+            }
             res.evt = ctxt.get_raw_input();
             // The transport wake is consumed by input_context while it waits.
             // Its active prompt callback records the semantic choice, so read

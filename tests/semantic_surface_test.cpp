@@ -58,6 +58,7 @@
 #include "popup.h"
 #include "player_helpers.h"
 #include "semantic_surface.h"
+#include "sounds.h"
 #include "raid_decision_trace.h"
 #include "ranged.h"
 #include "string_input_popup.h"
@@ -4733,6 +4734,255 @@ TEST_CASE( "native targeting input stays outside simulation including resumed ai
         CHECK( input_begins == 1 );
     } else {
         CHECK( input_begins >= 2 );
+    }
+    CHECK( input_ends == input_begins );
+}
+#endif
+
+#if !defined(TILES)
+TEST_CASE( "native distraction popup acquisition excludes only blocked input",
+           "[semantic_surface][raid_performance_prompt_input]" )
+{
+    const bool nested = GENERATE( false, true );
+    CAPTURE( nested );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "quiet_signal" );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const std::string world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto position = u.pos_abs();
+    const auto run = std::string( "raid-popup-input-" ) + ( nested ? "nested" : "noise" );
+    const std::filesystem::path trace = std::filesystem::path( PATH_INFO::user_dir() ) /
+                                        ( run + ".jsonl" );
+    const std::filesystem::path requests = std::filesystem::path( PATH_INFO::user_dir() ) /
+                                           ( run + ".requests.jsonl" );
+    std::filesystem::remove( trace );
+    std::filesystem::remove( requests );
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", requests.string() }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &entry : settings ) {
+        const char *value = std::getenv( entry.first.c_str() );
+        previous[entry.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        assign_test_environment( entry.first, entry.second );
+    }
+    on_out_of_scope restore_environment( [&] {
+        for( const auto &entry : previous ) {
+            assign_test_environment( entry.first, entry.second );
+        }
+        std::filesystem::remove( requests );
+        sounds::reset_sounds();
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&] {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    std::thread input_writer;
+    std::atomic<bool> wrote_request{ false };
+    on_out_of_scope finish_writer( [&] {
+        if( input_writer.joinable() ) {
+            input_writer.join();
+        }
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        manager.set_transport_observer( {} );
+    } );
+    bool consumed_in_input = false;
+    manager.set_transport_observer( [&]( const semantic_request_transport_event &event ) {
+        if( event.event != "request_consumed" || event.request_id != "popup-ignore" ) {
+            return;
+        }
+        std::string phase;
+        std::ifstream events( trace );
+        std::string line;
+        while( std::getline( events, line ) ) {
+            const auto begin = line.find( '{' );
+            if( begin == std::string::npos ) {
+                continue;
+            }
+            std::istringstream text( line.substr( begin ) );
+            TextJsonIn jsin( text );
+            const TextJsonObject value = jsin.get_object();
+            value.allow_omitted_members();
+            const auto kind = value.get_string( "event" );
+            if( kind == "turn" && value.get_string( "stage" ) == "start" ) {
+                phase = "simulation";
+            } else if( kind == "turn_phase" ) {
+                phase = value.get_string( "phase" );
+            }
+        }
+        consumed_in_input = phase == "input";
+    } );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+    } );
+    bool prompt_seen = false;
+    bool parent_entered = false;
+    bool pause_queued = false;
+    double preparation_cpu = 0.0;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind == "prompt" && !prompt_seen ) {
+            prompt_seen = true;
+            REQUIRE( owner.payload.at( "distraction_type" ) == "noise" );
+            const auto selected = std::find_if( owner.valid_actions.begin(), owner.valid_actions.end(),
+            []( const semantic_action_descriptor &action ) {
+                return action.id == "prompt.choose" && action.label == "IGNORE";
+            } );
+            REQUIRE( selected != owner.valid_actions.end() );
+            REQUIRE_FALSE( selected->stable_id.empty() );
+            // Real preparation before acquisition must remain measured. This
+            // controlled CPU work is not a machine-speed benchmark.
+            const auto cpu_begin = std::clock();
+            volatile double calculation = 1.0;
+            while( static_cast<double>( std::clock() - cpu_begin ) / CLOCKS_PER_SEC < 0.025 ) {
+                calculation = calculation * 1.00000001 + 0.00000001;
+            }
+            preparation_cpu = static_cast<double>( std::clock() - cpu_begin ) / CLOCKS_PER_SEC;
+            const auto descriptor = owner;
+            const std::string stable_id = selected->stable_id;
+            input_writer = std::thread( [&, descriptor, stable_id] {
+                std::this_thread::sleep_for( std::chrono::milliseconds( 120 ) );
+                const std::string record = "{\"run_id\":\"" + run + "\",\"surface_id\":\"" +
+                                           descriptor.surface_id + "\",\"frame_id\":\"" + descriptor.frame_id +
+                                           "\",\"request_id\":\"popup-ignore\",\"action_id\":\"prompt.choose\",\"stable_id\":\"" +
+                                           stable_id + "\"}\n";
+                std::ofstream output( requests, std::ios::app );
+                output << record;
+                output.close();
+                wrote_request = static_cast<bool>( output );
+            } );
+        } else if( owner.kind == "world" && !pause_queued ) {
+            if( nested && !parent_entered ) {
+                parent_entered = true;
+                pause_queued = true;
+                u.assign_activity( wait_activity_actor( 30_minutes ) );
+                CHECK_FALSE( g->cancel_activity_or_ignore_query( distraction_type::noise,
+                             "Heard a test noise!" ) );
+                // The inner acquisition must not close native World input.
+                std::this_thread::sleep_for( std::chrono::milliseconds( 30 ) );
+                u.cancel_activity();
+            }
+            pause_queued = true;
+            REQUIRE( ungetch( pause->front() ) != -1 );
+        }
+    } );
+    restore_on_out_of_scope<bool> restore_noise( uistate.distraction_noise );
+    uistate.distraction_noise = true;
+    if( !nested ) {
+        here.ter_set( tripoint_bub_ms( 65, 60, 0 ), ter_id( "t_wall" ) );
+        here.build_map_cache( 0, true );
+        sounds::reset_sounds();
+        sounds::sound( tripoint_bub_ms( 70, 60, 0 ), 60, sounds::sound_t::combat,
+                       "test whump" );
+        u.assign_activity( wait_activity_actor( 30_minutes ) );
+        u.set_moves( 0 );
+    } else {
+        u.set_moves( 100 );
+    }
+    const auto before = calendar::turn;
+    REQUIRE_FALSE( g->do_turn() );
+    REQUIRE( input_writer.joinable() );
+    input_writer.join();
+    CHECK( wrote_request );
+    CHECK( prompt_seen );
+    CHECK( consumed_in_input );
+    CHECK( calendar::turn == before + 1_turns );
+    CHECK( u.pos_abs() == position );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto &receipt ) {
+        return receipt.request_id == "popup-ignore" && receipt.accepted;
+    } ) == 1 );
+    if( !nested ) {
+        CHECK( u.activity.id() == activity_id( "ACT_WAIT" ) );
+        CHECK( u.activity.is_distraction_ignored( distraction_type::noise ) );
+        u.cancel_activity();
+    }
+    pause_queued = false;
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+    int input_begins = 0;
+    int input_ends = 0;
+    bool measured_row = false;
+    std::ifstream input( trace );
+    std::string line;
+    const int measured_turn = to_turn<int>( before + 1_turns );
+    while( std::getline( input, line ) ) {
+        const auto begin = line.find( '{' );
+        if( begin == std::string::npos ) {
+            continue;
+        }
+        std::istringstream record( line.substr( begin ) );
+        TextJsonIn jsin( record );
+        const TextJsonObject object = jsin.get_object();
+        object.allow_omitted_members();
+        if( object.get_string( "event" ) == "turn_phase" &&
+            object.get_int( "game_turn" ) == measured_turn ) {
+            input_begins += object.get_string( "stage" ) == "begin" &&
+                            object.get_string( "phase" ) == "input";
+            input_ends += object.get_string( "stage" ) == "end";
+        }
+        if( object.get_string( "event" ) == "raid_performance_interval" ) {
+            for( const TextJsonValue value : object.get_array( "rows" ) ) {
+                const TextJsonObject row = value.get_object();
+                row.allow_omitted_members();
+                if( row.get_int( "turn" ) == measured_turn ) {
+                    measured_row = true;
+                    // Publication/redraw precedes acquisition and stays
+                    // measured. Only actual native waiting must be excluded.
+                    CHECK( row.get_float( "input_seconds" ) > 0.0 );
+                    if( nested ) {
+                        CHECK( row.get_float( "input_seconds" ) >= 0.12 );
+                    }
+                    if( !nested ) {
+                        CHECK( row.get_float( "process_cpu_seconds" ) >= preparation_cpu * 0.8 );
+                        CHECK( row.get_float( "simulation_seconds" ) >= preparation_cpu * 0.8 );
+                    }
+                }
+            }
+        }
+    }
+    CHECK( measured_row );
+    if( nested ) {
+        CHECK( input_begins == 1 );
+    } else {
+        CHECK( input_begins >= 1 );
     }
     CHECK( input_ends == input_begins );
 }
