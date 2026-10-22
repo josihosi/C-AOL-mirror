@@ -1796,6 +1796,146 @@ TEST_CASE( "actual map editor toggles publish and receipt without editing the ma
     manager.set_receipt_observer( {} );
 }
 
+TEST_CASE( "actual map editor receipts mutation and no-op completion before close",
+           "[semantic_surface][editmap_native_completion]" )
+{
+    const bool remove_fire_first = GENERATE( false, true );
+    CAPTURE( remove_fire_first );
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    restore_on_out_of_scope restore_view( u.view_offset );
+    u.view_offset = tripoint_rel_ms::zero;
+    restore_on_out_of_scope restore_editor( uistate.editmap_state );
+    editmap_uistate &state = uistate.editmap_state;
+    state = editmap_uistate{};
+    state.selected.fill( false );
+    state.brush.drawing_terrain = true;
+    state.brush.selected_terrain = ter_str_id( "t_wall" ).id();
+    const tripoint_bub_ms target = u.pos_bub();
+    const auto original_terrain = here.ter( target );
+    REQUIRE( original_terrain != state.brush.selected_terrain );
+    const field_type_id fire = field_type_str_id( "fd_fire" );
+    REQUIRE( here.add_field( target, fire, 1, 0_turns, false ) );
+    const auto neighbor = target + point::east;
+    const auto neighbor_terrain = here.ter( neighbor );
+    const auto furniture = here.furn( target );
+    const auto turn_before = calendar::turn;
+    const auto position_before = u.pos_abs();
+    const char *transport_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous_path = transport_path ?
+            std::optional<std::string>( transport_path ) : std::nullopt;
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous_path );
+    } );
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = true;
+    semantic_surface_manager manager( "editmap-native-completion" );
+    semantic_surface_manager_session session( manager );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+    } );
+    semantic_surface_scope world( manager, "world", "World" );
+    std::vector<std::string> actions;
+    if( remove_fire_first ) {
+        actions.emplace_back( "editmap.remove_field" );
+    }
+    // The first confirm changes real terrain. The second is a valid no-op on
+    // that same tile, which must still finish and leave close usable.
+    actions.insert( actions.end(), { "editmap.confirm", "editmap.confirm", "editmap.close" } );
+    const std::size_t confirms_begin = remove_fire_first ? 1 : 0;
+    std::vector<semantic_surface_descriptor> frames;
+    std::vector<semantic_action_request> submitted;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind != "map_editor" ) {
+            return;
+        }
+        const std::size_t step = frames.size();
+        REQUIRE( step < actions.size() );
+        CHECK( here.ter( target ) == ( step > confirms_begin ? state.brush.selected_terrain :
+                                      original_terrain ) );
+        CHECK( here.get_field_intensity( target, fire ) ==
+               ( remove_fire_first && step > 0 ? 0 : 1 ) );
+        CHECK( calendar::turn == turn_before );
+        CHECK( u.pos_abs() == position_before );
+        if( !frames.empty() ) {
+            CHECK( owner.surface_id == frames.front().surface_id );
+            CHECK( owner.frame_id != frames.back().frame_id );
+        }
+        // Re-observation alone must never manufacture fresh input authority.
+        const auto frame = owner.frame_id;
+        REQUIRE( manager.publish( owner.surface_id, owner.payload, owner.valid_actions ) );
+        CHECK( manager.top()->frame_id == frame );
+        frames.push_back( owner );
+        const auto stable_id = actions[step] == "editmap.remove_field" ?
+                               std::optional<std::string>( "fd_fire" ) : std::nullopt;
+        if( step == 0 ) {
+            for( const std::string &reason : std::vector<std::string> {
+                     "wrong_run", "wrong_surface", "stale_frame"
+                 } ) {
+                semantic_action_request rejected{ owner.run_id, owner.surface_id, owner.frame_id,
+                                                   reason, actions[step], stable_id, {} };
+                if( reason == "wrong_run" ) {
+                    rejected.run_id = "foreign-run";
+                } else if( reason == "wrong_surface" ) {
+                    rejected.surface_id = "foreign-surface";
+                } else {
+                    rejected.frame_id = "stale-frame";
+                }
+                REQUIRE( manager.submit_request( rejected ) );
+                REQUIRE_FALSE( manager.consume_top_request() );
+                REQUIRE_FALSE( receipts.empty() );
+                CHECK_FALSE( receipts.back().accepted );
+                CHECK( receipts.back().rejection_reason == reason );
+                CHECK( manager.top()->frame_id == owner.frame_id );
+                CHECK( here.ter( target ) == original_terrain );
+                CHECK( here.get_field_intensity( target, fire ) == 1 );
+            }
+        }
+        submitted.push_back( { owner.run_id, owner.surface_id, owner.frame_id,
+                               "editor-completion-" + std::to_string( step ), actions[step], stable_id, {} } );
+        REQUIRE( manager.submit_request( submitted.back() ) );
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    {
+        editmap_ui editor;
+        REQUIRE_NOTHROW( editor.handle_action() );
+    }
+    REQUIRE( frames.size() == actions.size() );
+    REQUIRE( submitted.size() == actions.size() );
+    REQUIRE( receipts.size() == actions.size() + 3 );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->kind == "world" );
+    const auto world_frame = manager.top()->frame_id;
+    for( std::size_t i = 0; i < submitted.size(); ++i ) {
+        const auto expected = receipts[i + 3];
+        CHECK( expected.accepted );
+        CHECK( expected.request_id == submitted[i].request_id );
+        CHECK( expected.consuming_frame_id == frames[i].frame_id );
+        CHECK( expected.resulting_frame_id ==
+               ( i + 1 < frames.size() ? frames[i + 1].frame_id : world_frame ) );
+        const auto count = receipts.size();
+        CHECK_FALSE( manager.submit_request( submitted[i] ) );
+        REQUIRE( receipts.size() == count + 1 );
+        CHECK( receipts.back().resulting_frame_id == expected.resulting_frame_id );
+        CHECK_FALSE( manager.has_pending_request() );
+        CHECK( manager.top()->frame_id == world_frame );
+    }
+    CHECK( here.ter( target ) == state.brush.selected_terrain );
+    CHECK( here.ter( neighbor ) == neighbor_terrain );
+    CHECK( here.furn( target ) == furniture );
+    CHECK( here.get_field_intensity( target, fire ) == ( remove_fire_first ? 0 : 1 ) );
+    CHECK( calendar::turn == turn_before );
+    CHECK( u.pos_abs() == position_before );
+}
+
 TEST_CASE( "unchanged semantic surface publication preserves its frame", "[semantic_surface]" )
 {
     semantic_surface_manager manager( "test-run" );

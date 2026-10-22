@@ -373,6 +373,7 @@ void editmap_ui::handle_action()
 
     std::string action;
     std::optional<std::string> semantic_native_action;
+    uint64_t completed_semantic_actions = 0;
 
     editmap_state.blink = true;
 
@@ -387,9 +388,10 @@ void editmap_ui::handle_action()
     bool invalidate_ui = false;
 
     semantic_surface_manager *const semantic_manager = active_semantic_surface_manager();
-    const auto semantic_payload = [&brush, &state = editmap_state]() {
+    const auto semantic_payload = [&brush, &state = editmap_state, &completed_semantic_actions]() {
         const field_type_id fire = field_type_str_id( "fd_fire" );
         return std::map<std::string, std::string> {
+            { "completed_actions", std::to_string( completed_semantic_actions ) },
             { "target", brush.target.to_string() },
             { "origin", brush.origin.to_string() },
             { "mode", state.mode == EMM_DRAWING ? "drawing" : "selecting" },
@@ -473,11 +475,7 @@ void editmap_ui::handle_action()
                 if( here.get_field( brush.target, fire ) == nullptr ) {
                     return semantic_action_dispatch_result{ false, "target_field_absent", "" };
                 }
-                // A field whose intensity is merely set to zero can remain in
-                // the loaded submap until regular field processing runs.  The
-                // map editor's explicit removal operation must erase it before
-                // the ordinary save boundary serializes this tile.
-                here.delete_field( brush.target, fire );
+                semantic_native_action = "EDITMAP_REMOVE_FIRE";
             } else if( request.action_id == "editmap.move_target" ) {
                 const std::string target = request.stable_id.value_or( "" );
                 if( target == "north" ) {
@@ -517,6 +515,7 @@ void editmap_ui::handle_action()
         }
         ui_manager::redraw();
 
+        const bool completing_semantic_action = semantic_native_action.has_value();
         if( semantic_native_action ) {
             action = std::move( *semantic_native_action );
             semantic_native_action.reset();
@@ -552,6 +551,10 @@ void editmap_ui::handle_action()
         }
         if( move_target( action, ictxt, editmap_state.mode == EMM_DRAWING ) ) {
             brush.update_brush_points();
+        } else if( action == "EDITMAP_REMOVE_FIRE" ) {
+            // Erase the field rather than leaving a zero-intensity entry for
+            // regular field processing or the next save to clean up.
+            get_map().delete_field( brush.target, field_type_str_id( "fd_fire" ) );
         } else if( action == "EDITMAP_ENABLE_TERRAIN" ) {
             brush.drawing_terrain = !brush.drawing_terrain;
         } else if( action == "EDITMAP_ENABLE_FURNITURE" ) {
@@ -644,6 +647,13 @@ void editmap_ui::handle_action()
             }
         } else {
             invalidate_ui = false;
+        }
+
+        if( completing_semantic_action ) {
+            // Receipt only after the real native handler returns, even when
+            // applying the brush or changing mode legitimately does nothing.
+            // Polling and transport wake-ups do not complete an action.
+            ++completed_semantic_actions;
         }
 
         blink_timeout--;
