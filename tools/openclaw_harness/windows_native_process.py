@@ -558,6 +558,7 @@ def adopt_native_lease(export, *, run_id):
     """Duplicate exact launcher-held file objects before any native child exists."""
     from dataclasses import asdict
     import socket
+    from certification_process_lease import process_command_identity
     if not isinstance(export, dict) or export.get('schema') != 'caol-native-writable-lease-v1':
         raise OSError('native writable lease export unavailable')
     if export.get('host') != socket.gethostname() or export.get('run_id') != run_id:
@@ -569,8 +570,11 @@ def adopt_native_lease(export, *, run_id):
     inspector = WindowsProcessInspector()
     def exact():
         current = asdict(inspector.inspect(int(expected['pid'])))
-        return current.get('alive') and all(expected.get(k) and current.get(k) == expected.get(k)
-            for k in ('pid', 'birth_identity', 'command', 'executable_path'))
+        return (current.get('alive')
+            and all(expected.get(k) and current.get(k) == expected.get(k)
+                for k in ('pid', 'birth_identity', 'executable_path'))
+            and process_command_identity(expected)
+            and process_command_identity(expected) == process_command_identity(current))
     if not exact():
         raise OSError('native writable lease launcher identity unavailable or changed')
     marker = json.loads((root / '.harness-owner.lock').read_text())
