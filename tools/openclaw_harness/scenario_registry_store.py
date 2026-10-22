@@ -44,6 +44,11 @@ from playtest_witness import (
     review_witness,
     validate_witness_statement,
 )
+from scenario_registry_performance import (
+    SCENARIO as PERFORMANCE_SCENARIO,
+    performance_contract,
+    validate_performance_witness,
+)
 
 
 SCHEMA_VERSION = 21
@@ -2665,6 +2670,11 @@ def cockpit_run_status(connection: sqlite3.Connection, *, run_id: str) -> Dict[s
 def _run_evidence_ceiling(connection: sqlite3.Connection, manifest_id: str,
                           declaration: Mapping[str, Any]) -> str:
     """Derive observation authority separately from later proof eligibility."""
+    if performance_contract(declaration):
+        # Focused collection is independent of gameplay certification. A fresh
+        # declared interval still has to cross native witness validation below.
+        effect = _cockpit_evidence_effect(connection, manifest_id)
+        return effect if effect in {"setup-only", "diagnostic"} else "focused"
     runtime = declaration.get("runtime_contract")
     if not isinstance(runtime, Mapping) or runtime.get("grants_gameplay_proof") is not True:
         return "zero-credit"
@@ -7986,6 +7996,15 @@ def _retirement_action_history(connection: sqlite3.Connection, action_id: str) -
     } for row in rows)
 
 
+def _performance_witness_scope(validation_json: str) -> Dict[str, Any]:
+    validation = _json_object(validation_json, "witness validation")
+    performance = validation.get("performance")
+    if not isinstance(performance, Mapping):
+        return {}
+    return {"performance": {"scope": performance.get("scope", "none"),
+                            "whole_sequence_proven": False, "gameplay_credit": False}}
+
+
 def registry_status(
     connection: sqlite3.Connection,
     *,
@@ -8041,9 +8060,10 @@ def registry_status(
                 "evidence_ceiling": str(row["evidence_ceiling"]),
                 "review_decision": str(row["decision"] or ""),
                 "recorded_at": str(row["recorded_at"]),
+                **_performance_witness_scope(str(row["validation_json"])),
             } for row in connection.execute(
                 "SELECT witness.witness_id, witness.verdict, witness.evidence_ceiling, "
-                "review.decision, witness.recorded_at FROM playtest_witness_history AS witness "
+                "review.decision, witness.recorded_at, witness.validation_json FROM playtest_witness_history AS witness "
                 "LEFT JOIN playtest_witness_review_history AS review ON review.witness_id = witness.witness_id "
                 "WHERE witness.manifest_id = ? ORDER BY witness.recorded_at, witness.witness_id", (manifest_id,),
             )),
@@ -8615,6 +8635,10 @@ def _playtest_witness_hard_proven_candidates(
     declaration = _json_object(
         str(declaration_row["declaration_json"]), "playtest witness declaration",
     ) if declaration_row is not None else {}
+    if declaration.get("name") == PERFORMANCE_SCENARIO:
+        # An accepted measured interval cannot prove every declared population
+        # target, overload comparison or inactive-history control in this plan.
+        return set()
     runtime_contract = declaration.get("runtime_contract")
     permitted_input = runtime_contract.get("permitted_input", []) \
         if isinstance(runtime_contract, Mapping) else []
@@ -9013,6 +9037,7 @@ def record_playtest_witness(
     if len(identities_value) != len(reports):
         raise ScenarioRegistryStoreError("playtest witness run/report identity count mismatched")
     expected_identities: set[tuple[str, str, str, str, str]] = set()
+    performance_contexts = []
     for report_id in reports:
         row = connection.execute(
             "SELECT report.report_path, report.report_sha256, verification.details_json "
@@ -9054,6 +9079,7 @@ def record_playtest_witness(
             str(finals[0].get("run_id", "")),
             str(finals[0].get("binding_id", "")),
         ))
+        performance_contexts.append((report_path, report_value, finals[0], details, observed))
     supplied_identities = {
         (
             str(identity.get("scenario_id", "")),
@@ -9073,9 +9099,50 @@ def record_playtest_witness(
     except WitnessError as exc:
         raise ScenarioRegistryStoreError(str(exc)) from exc
     normalized = validation["witness"]
+    declaration_row = connection.execute(
+        "SELECT declaration_json, current_sha256, source_path FROM manifest_current WHERE manifest_id = ?",
+        (manifest_id,),
+    ).fetchone()
+    declaration = _json_object(str(declaration_row["declaration_json"]), "witness declaration")
+    if declaration.get("name") == PERFORMANCE_SCENARIO or performance_contract(declaration) or \
+            "performance_evidence" in statement:
+        if len(performance_contexts) != 1:
+            raise ScenarioRegistryStoreError("performance_witness:one_native_run_required")
+        report_path, report_value, final, details, observed = performance_contexts[0]
+        if (details.get("manifest", {}).get("source_sha256") != declaration_row["current_sha256"] or
+                path_sha256(Path(str(declaration_row["source_path"]))) != declaration_row["current_sha256"]):
+            raise ScenarioRegistryStoreError("performance_witness:declaration_binding_drift")
+        if normalized.get("verdict") == "proved" and normalized.get("evidence_ceiling") == "focused":
+            if _run_evidence_ceiling(connection, manifest_id, declaration) != "focused":
+                raise ScenarioRegistryStoreError("performance_witness:collection_ceiling_rejects_proof")
+            # Positive evidence must come from the ordinary selected producer,
+            # after its report was ingested and linked. No bootstrap circularity:
+            # ingest an honest inconclusive journal first, then independently
+            # submit the scoped native-source interpretation over that report.
+            links = connection.execute(
+                "SELECT issued.token_id, issued.details_json FROM token_history AS terminal "
+                "JOIN token_history AS issued ON issued.token_id = terminal.token_id "
+                "AND issued.event_kind = 'issued' "
+                "JOIN verification_history AS verification ON verification.verification_id = terminal.verification_id "
+                "WHERE terminal.event_kind = 'verification_run' AND terminal.reason = 'report_ingested' "
+                "AND verification.report_id = ? AND verification.manifest_id = ?",
+                (reports[0], manifest_id),
+            ).fetchall()
+            if not any(str(link["token_id"]) == final.get("run_id") and
+                       _json_object(str(link["details_json"]), "performance selection").get("manifest_sha256") ==
+                       declaration_row["current_sha256"] for link in links):
+                raise ScenarioRegistryStoreError("performance_witness:fresh_selected_report_required")
+        try:
+            validation["performance"] = validate_performance_witness(
+                declaration=declaration, report=report_value, report_path=Path(report_path),
+                final=final, journal=journal, statement=statement, runtime=observed,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ScenarioRegistryStoreError(str(exc)) from exc
     witness_id = _identity(
         "caol-playtest-witness-v1", manifest_id, *reports,
         str(validation["journal_sha256"]), str(normalized["witness_sha256"]),
+        *([_json_text(validation["performance"])] if "performance" in validation else []),
     )
     def write_witness() -> None:
         connection.execute(

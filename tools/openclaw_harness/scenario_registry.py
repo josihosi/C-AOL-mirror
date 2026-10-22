@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping
 
+from scenario_registry_performance import performance_contract
+
 
 MANIFEST_VERSION = 1
 CHECKPOINT_CHAIN_MANIFEST_VERSION = 2
@@ -572,6 +574,13 @@ def _validate_checkpoint_chain_fields(manifest: Mapping[str, Any], *, path: Path
     _validate_checkpoint_proof_route(manifest["proof_route"], manifest, gate_ids, path=path)
 
 
+def _validate_performance_contract(manifest: Mapping[str, Any], *, path: Path) -> None:
+    try:
+        performance_contract(manifest)
+    except ValueError as exc:
+        raise _error(path, str(exc)) from exc
+
+
 def _validate_versioned_fields(manifest: Mapping[str, Any], *, path: Path) -> None:
     version = manifest.get("manifest_version")
     if type(version) is not int or version not in {MANIFEST_VERSION, CHECKPOINT_CHAIN_MANIFEST_VERSION}:
@@ -804,6 +813,7 @@ def validate_manifest(manifest: Any, *, path: Path) -> Dict[str, Any]:
 
     _validate_post_relaunch_reference(manifest, path=path)
     _validate_saved_world_start(manifest, path=path)
+    _validate_performance_contract(manifest, path=path)
 
     isolated = manifest.get("r027_isolated_launch")
     if isolated is not None:
@@ -941,6 +951,8 @@ def lint_manifest(path: Path) -> Dict[str, Any]:
     if versioned and not valid_version:
         add("manifest_version", "manifest_version",
             f"manifest_version must be integer {MANIFEST_VERSION} or {CHECKPOINT_CHAIN_MANIFEST_VERSION}")
+    collect("evidence_contract.performance_witness", "performance_witness",
+            lambda: _validate_performance_contract(manifest, path=path))
     if versioned and valid_version:
         required = ("capabilities", "runtime_contract", "proof_route") if version == MANIFEST_VERSION else (
             "capabilities", "runtime_contract", "run_class", "observer_character",
