@@ -80,6 +80,16 @@ std::string bandit_shakedown_communication_diagnostic( const npc &actor );
 // active simulation.  Observations are never persisted in this cache.
 void reset_live_light_sample_cache();
 void run_live_light_delivery_for_test();
+// Read-only counters for the existing run-bound channel audit. These describe
+// logical output and writer calls, never physical disk I/O or game authority.
+struct live_channel_output_statistics {
+    std::size_t records = 0;
+    std::size_t open_calls = 0;
+    std::size_t flush_calls = 0;
+    std::size_t logical_bytes = 0;
+    bool write_failed = false;
+};
+live_channel_output_statistics live_channel_output_statistics_for_test();
 int observe_live_hostile_signal_sources_for_test(
     const std::vector<live_bandit_signal_observation> &signals );
 void maintain_live_bandit_structural_bounty_for_test(

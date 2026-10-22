@@ -155,3 +155,7 @@ mutable save/profile, and coordinate any source/build replacement with the live 
 Start with available capacity, stagger setup/reloads if useful, and reduce concurrency if
 contention impairs the test. Five seeds are the coverage requirement, not a five-process quota.
 No Windows use or new host admission is implied.
+
+## Disk writes and diagnostic growth — week and month
+
+Alongside the existing performance milestones, capture compact process disk-write deltas when supported and diagnostic/log file growth over useful advancing-time intervals. Use existing observation surfaces, not a per-turn recorder. Separate logical logger bytes from physical disk I/O, and legitimate save/exploration growth from repetitive diagnostics. Check whether output grows with active work or merely accumulated history. If excessive output appears, identify its producer and compare a bounded targeted diagnostic reduction with equivalent simulation and timing; preserve required error/crash evidence. Missing physical-I/O counters are an explicit measurement limit, not proof of no writes. Retain concise interval totals, cause and corrective result in the existing task result. Both five-seed week runs and the single month continuation carry this check; counts/durations/reloads remain unchanged.

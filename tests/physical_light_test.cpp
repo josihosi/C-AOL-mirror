@@ -5,7 +5,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 
 #include "avatar.h"
@@ -13,6 +16,8 @@
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
 #include "do_turn.h"
+#include "debug.h"
+#include "effect.h"
 #include "field_type.h"
 #include "game.h"
 #include "item.h"
@@ -21,8 +26,12 @@
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
 #include "monster_helpers.h"
+#include "monster.h"
 #include "mtype.h"
 #include "overmapbuffer.h"
+#include "overmap.h"
+#include "path_info.h"
+#include "json_loader.h"
 #include "physical_light.h"
 #include "player_helpers.h"
 #include "pocket_type.h"
@@ -427,6 +436,232 @@ TEST_CASE( "physical_light_samples_once_per_real_advancing_turn",
     CHECK( gate.begin_advancing_turn( 42, true ) );
     CHECK_FALSE( gate.begin_advancing_turn( 42, true ) );
     CHECK( gate.begin_advancing_turn( 7, true ) );
+}
+
+TEST_CASE( "production light delivery preserves real attraction with compact diagnostics",
+           "[physical_light][hordes][diagnostic_writes]" )
+{
+    clear_avatar();
+    clear_map_without_vision();
+    reset_live_light_sample_cache();
+    restore_on_out_of_scope<time_point> restore_clock( calendar::turn );
+    const auto dark = night_time( calendar::turn ) + 2_hours;
+    const auto ticks = to_turns<int>( dark - calendar::turn_zero );
+    calendar::turn = calendar::turn_zero + time_duration::from_turns( ( ticks / 300 + 1 ) * 300 );
+    REQUIRE( is_night( calendar::turn ) );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    const tripoint_bub_ms source = get_avatar().pos_bub() + tripoint( 6, 0, 0 );
+    const tripoint_abs_ms source_abs = here.get_abs( source );
+    overmap &om = overmap_buffer.get( coords::project_to<coords::om>( source_abs ).xy() );
+    restore_on_out_of_scope<horde_map> restore_hordes( om.hordes );
+    om.hordes.clear();
+    for( int x = 0; x < 3; ++x ) {
+        here.add_field( source + tripoint( x * 2, 0, 0 ), field_type_id( "fd_fire" ), 3 );
+    }
+    // The production sampler always checks the carrier tile; all other tiles
+    // have a 900-phase discovery schedule. Establish these three real sources
+    // through that owner, not a fabricated packet or injected sampler cache.
+    for( int x = 0; x < 2; ++x ) {
+        get_avatar().setpos( here, source + tripoint( x * 2, 0, 0 ), false );
+        run_live_light_delivery_for_test();
+        calendar::turn += 1_turns;
+    }
+    get_avatar().setpos( here, source + tripoint( 4, 0, 0 ), false );
+    const auto near = source_abs + point_rel_ms( 24, 0 );
+    const auto blind = source_abs + point_rel_ms( 0, 24 );
+    const auto friendly = source_abs + point_rel_ms( 24, 12 );
+    for( const auto &pos : { source_abs, near, blind, friendly } ) {
+        overmap_buffer.ter_set( coords::project_to<coords::omt>( pos ), oter_id( "field" ) );
+    }
+    REQUIRE( om.hordes.spawn_entity( near, mtype_id( "mon_zombie" ) ) );
+    monster blind_body( mtype_id( "mon_zombie" ) );
+    blind_body.add_effect( efftype_id( "blind" ), 1_hours );
+    REQUIRE( om.hordes.spawn_entity( blind, blind_body ) );
+    monster friendly_body( mtype_id( "mon_zombie" ) );
+    friendly_body.friendly = 1;
+    REQUIRE( om.hordes.spawn_entity( friendly, friendly_body ) );
+
+    std::ostringstream captured;
+    std::ostream &log = DebugLog( D_INFO, DC_ALL );
+    auto *const original = log.rdbuf( captured.rdbuf() );
+    on_out_of_scope restore_log( [&] { log.rdbuf( original ); } );
+    run_live_light_delivery_for_test();
+    const auto &samples = live_light::samples_for_turn( calendar::turn );
+    const auto packets = std::count_if( samples.begin(), samples.end(), []( const auto & sample ) {
+        return sample.horde_signal_power > 0;
+    } );
+    REQUIRE( packets > 1 );
+    auto *attracted = overmap_buffer.entity_at( near );
+    REQUIRE( attracted );
+    CHECK_FALSE( attracted->light_sample_id.empty() );
+    CHECK( attracted->destination == attracted->light_source );
+    CHECK( attracted->light_expires > calendar::turn );
+    CHECK( std::any_of( samples.begin(), samples.end(), [&]( const auto & sample ) {
+        return sample.sample_id == attracted->light_sample_id && sample.source_ms &&
+               *sample.source_ms == attracted->light_source;
+    } ) );
+    REQUIRE( overmap_buffer.entity_at( blind ) );
+    CHECK( overmap_buffer.entity_at( blind )->light_sample_id.empty() );
+    REQUIRE( overmap_buffer.entity_at( friendly ) );
+    CHECK( overmap_buffer.entity_at( friendly )->light_sample_id.empty() );
+    const auto text = captured.str();
+    const std::string marker = "bandit_live_world horde light interest:";
+    std::size_t records = 0;
+    for( auto at = text.find( marker ); at != std::string::npos; at = text.find( marker, at + 1 ) ) {
+        ++records;
+    }
+    CHECK( records == 1 );
+    CHECK( text.find( "aggregate=yes packets=" + std::to_string( packets ) ) != std::string::npos );
+    CHECK( text.find( "current_light=yes light_interest=" ) != std::string::npos );
+    CHECK( text.find( "attracted_entities=0" ) == std::string::npos );
+    const auto sample_id = attracted->light_sample_id;
+    const auto expires = attracted->light_expires;
+    run_live_light_delivery_for_test();
+    CHECK( captured.str() == text );
+    CHECK( overmap_buffer.entity_at( near )->light_sample_id == sample_id );
+    CHECK( overmap_buffer.entity_at( near )->light_expires == expires );
+    for( int x = 0; x < 3; ++x ) {
+        here.remove_field( source + tripoint( x * 2, 0, 0 ), field_type_id( "fd_fire" ) );
+    }
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( overmap_buffer.entity_at( near )->light_sample_id == sample_id );
+    CHECK( overmap_buffer.entity_at( near )->light_expires == expires );
+    CHECK_FALSE( debug_has_error_been_observed() );
+}
+
+TEST_CASE( "production channel audit batches identical bound packet records",
+           "[physical_light][diagnostic_writes][channel_output]" )
+{
+    clear_avatar();
+    clear_map_without_vision();
+    reset_live_light_sample_cache();
+    restore_on_out_of_scope<time_point> restore_clock( calendar::turn );
+    const auto ticks = to_turns<int>( calendar::turn - calendar::turn_zero );
+    calendar::turn = calendar::turn_zero + time_duration::from_turns( ( ticks / 300 + 1 ) * 300 );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto source = get_avatar().pos_bub();
+    here.add_field( source, field_type_id( "fd_fire" ), 3 );
+    here.add_field( source, field_type_id( "fd_smoke" ), 2 );
+    run_live_light_delivery_for_test();
+    const auto &samples = live_light::samples_for_turn( calendar::turn );
+    REQUIRE_FALSE( samples.empty() );
+
+    const auto path = std::filesystem::path( PATH_INFO::user_dir() ) / "channel-output-control.jsonl";
+    std::filesystem::remove_all( path );
+    const std::map<std::string, std::string> settings = {
+        { "OPENCLAW_HARNESS_R008_CHANNEL_PATH", path.string() },
+        { "OPENCLAW_HARNESS_RUN_ID", "channel-output-control" },
+        { "OPENCLAW_HARNESS_SCENARIO", "physical-light-control" },
+        { "OPENCLAW_HARNESS_RUNTIME_SOURCE_SHA256", std::string( 64, '1' ) },
+        { "OPENCLAW_HARNESS_EXECUTABLE_SHA256", std::string( 64, '2' ) },
+        { "OPENCLAW_HARNESS_BINDING_ID", std::string( 64, '3' ) }
+    };
+    const auto assign = []( const std::string & key, const std::optional<std::string> &value ) {
+#if defined(_WIN32)
+        _putenv_s( key.c_str(), value ? value->c_str() : "" );
+#else
+        if( value ) {
+            setenv( key.c_str(), value->c_str(), 1 );
+        } else {
+            unsetenv( key.c_str() );
+        }
+#endif
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &[key, value] : settings ) {
+        const char *const old = std::getenv( key.c_str() );
+        previous[key] = old ? std::optional<std::string>( old ) : std::nullopt;
+        assign( key, value );
+    }
+    on_out_of_scope restore_environment( [&] {
+        for( const auto &[key, value] : previous ) {
+            assign( key, value );
+        }
+    } );
+    const auto before = live_channel_output_statistics_for_test();
+    process_overmap_npc_move_for_test();
+    const auto first = live_channel_output_statistics_for_test();
+    REQUIRE( first.records > before.records + 1 );
+    CHECK( first.open_calls == before.open_calls + 1 );
+    CHECK( first.flush_calls == before.flush_calls + 1 );
+    CHECK( first.logical_bytes == std::filesystem::file_size( path ) );
+    CHECK_FALSE( first.write_failed );
+    std::ifstream input( path );
+    std::string line;
+    std::size_t count = 0;
+    std::set<std::string> observed_samples;
+    while( std::getline( input, line ) ) {
+        const auto object = json_loader::from_string( line ).get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_int( "sequence" ) == static_cast<int>( ++count ) );
+        CHECK( object.get_string( "schema" ) == "caol-r008-production-channel-v1" );
+        CHECK( object.get_string( "run_id" ) == "channel-output-control" );
+        CHECK( object.get_string( "scan_id" ) == "channel-output-control:1" );
+        const auto binding = object.get_object( "binding" );
+        binding.allow_omitted_members();
+        CHECK( binding.get_string( "runtime_source_sha256" ) == std::string( 64, '1' ) );
+        CHECK( binding.get_string( "executable_sha256" ) == std::string( 64, '2' ) );
+        CHECK( binding.get_string( "binding_id" ) == std::string( 64, '3' ) );
+        CHECK( binding.get_string( "scenario_id" ) == "physical-light-control" );
+        if( object.get_bool( "observed" ) && object.get_string( "signal_origin" ) == "local_field" ) {
+            observed_samples.insert( object.get_string( "detail" ) );
+        }
+    }
+    CHECK( count == first.records - before.records );
+    for( const auto &sample : samples ) {
+        if( sample.mark.kind == "smoke" || sample.mark.kind == "light" || sample.mark.kind == "searchlight" ) {
+            CHECK( observed_samples.count( sample.mark.mark_id ) == 1 );
+        }
+    }
+    input.close();
+    process_overmap_npc_move_for_test();
+    const auto second = live_channel_output_statistics_for_test();
+    CHECK( second.records == first.records + count );
+    CHECK( second.open_calls == first.open_calls + 1 );
+    CHECK( second.flush_calls == first.flush_calls + 1 );
+    CHECK( second.logical_bytes == std::filesystem::file_size( path ) );
+    {
+        std::ifstream appended( path );
+        std::string last;
+        while( std::getline( appended, line ) ) {
+            last = line;
+        }
+        const auto object = json_loader::from_string( last ).get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_int( "sequence" ) == static_cast<int>( second.records ) );
+        CHECK( object.get_string( "scan_id" ) == "channel-output-control:2" );
+    }
+    const auto bytes = std::filesystem::file_size( path );
+    assign( "OPENCLAW_HARNESS_RUN_ID", "foreign-channel-run" );
+    process_overmap_npc_move_for_test();
+    CHECK( std::filesystem::file_size( path ) == bytes );
+    CHECK( live_channel_output_statistics_for_test().open_calls == second.open_calls );
+    assign( "OPENCLAW_HARNESS_RUN_ID", "channel-output-control" );
+    assign( "OPENCLAW_HARNESS_BINDING_ID", std::nullopt );
+    process_overmap_npc_move_for_test();
+    CHECK( std::filesystem::file_size( path ) == bytes );
+    CHECK( live_channel_output_statistics_for_test().open_calls == second.open_calls );
+    assign( "OPENCLAW_HARNESS_BINDING_ID", std::string( 64, '3' ) );
+    // A failed open disables this exact audit stream. Recovery must not append
+    // a partial or foreign successor behind a previously failed writer.
+    const auto retained = path.string() + ".consumed";
+    std::filesystem::rename( path, retained );
+    std::filesystem::create_directory( path );
+    process_overmap_npc_move_for_test();
+    const auto failed = live_channel_output_statistics_for_test();
+    CHECK( failed.write_failed );
+    CHECK( failed.records == second.records );
+    CHECK( failed.open_calls == second.open_calls + 1 );
+    CHECK( failed.flush_calls == second.flush_calls );
+    std::filesystem::remove( path );
+    process_overmap_npc_move_for_test();
+    CHECK_FALSE( std::filesystem::exists( path ) );
+    CHECK( live_channel_output_statistics_for_test().open_calls == failed.open_calls );
+    std::filesystem::rename( retained, path );
+    CHECK_FALSE( debug_has_error_been_observed() );
 }
 
 TEST_CASE( "physical_light_production_facade_records_real_delivery_order",

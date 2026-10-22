@@ -290,6 +290,7 @@ struct raid_perf_row {
     std::size_t horde_attracted_entities = 0;
     std::size_t human_activation_queries = 0;
     std::size_t human_nearby_candidates = 0;
+    live_channel_output_statistics channel_output;
 };
 static raid_perf_row *raid_perf_current = nullptr;
 static std::vector<raid_perf_row> raid_perf_rows;
@@ -337,6 +338,8 @@ static void raid_perf_flush_after_wait()
                "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; do not add nested stages" );
     js.member( "debug_sink_scope",
                "logical file-sink bytes/flushes over the whole turn including input/save; not physical disk bytes" );
+    js.member( "channel_output_scope",
+               "run-bound audit record/open/explicit-flush calls and completed logical bytes; not physical disk I/O" );
     js.member( "stage_names", std::array<std::string, raid_perf_stage_count> {
         "migo_operations", "horde_movement", "population", "fields", "items", "map_cache",
         "signal_total", "signal_discovery", "signal_hordes", "creatures", "overmap_npcs",
@@ -366,6 +369,11 @@ static void raid_perf_flush_after_wait()
         js.member( "horde_attracted_entities", row.horde_attracted_entities );
         js.member( "human_activation_queries", row.human_activation_queries );
         js.member( "human_nearby_candidates", row.human_nearby_candidates );
+        js.member( "channel_records", row.channel_output.records );
+        js.member( "channel_open_calls", row.channel_output.open_calls );
+        js.member( "channel_flush_calls", row.channel_output.flush_calls );
+        js.member( "channel_logical_bytes", row.channel_output.logical_bytes );
+        js.member( "channel_write_failed", row.channel_output.write_failed );
         js.end_object();
     }
     js.end_array();
@@ -7786,6 +7794,7 @@ struct r008_channel_stream {
     std::uint64_t scan_sequence = 0;
     bool initialized = false;
     bool writable = false;
+    live_channel_output_statistics statistics;
 };
 
 r008_channel_stream r008_channels;
@@ -7818,7 +7827,7 @@ bool r008_channel_stream_enabled()
     return r008_channels.writable;
 }
 
-void append_r008_channel_record( const std::string_view channel,
+void append_r008_channel_record( std::ostream &output, const std::string_view channel,
                                  const std::string_view signal_origin,
                                  const std::string_view consumer,
                                  const bool observed, const int game_minutes,
@@ -7826,7 +7835,7 @@ void append_r008_channel_record( const std::string_view channel,
                                  const std::string_view scan_id,
                                  const std::string_view detail )
 {
-    if( !r008_channel_stream_enabled() || game_minutes < 0 || channel.empty() ||
+    if( !output || !r008_channel_stream_enabled() || game_minutes < 0 || channel.empty() ||
         scan_id.empty() ||
         signal_origin.empty() || consumer.empty() ) {
         return;
@@ -7839,12 +7848,11 @@ void append_r008_channel_record( const std::string_view channel,
         r008_channels.sequence == std::numeric_limits<std::uint64_t>::max() ) {
         return;
     }
-    std::ofstream output( r008_channels.path, std::ios::app );
-    if( !output ) {
-        r008_channels.writable = false;
-        return;
-    }
     const std::uint64_t sequence = ++r008_channels.sequence;
+    ++r008_channels.statistics.records;
+    if( raid_perf_current ) {
+        ++raid_perf_current->channel_output.records;
+    }
     JsonOut json( output );
     json.start_object();
     json.member( "schema", "caol-r008-production-channel-v1" );
@@ -7887,11 +7895,31 @@ void record_r008_production_channel_scan(
         return;
     }
     const int now_minutes = live_bandit_current_minutes();
-    if( r008_channels.scan_sequence == std::numeric_limits<std::uint64_t>::max() ) {
+    if( now_minutes < 0 ||
+        r008_channels.scan_sequence == std::numeric_limits<std::uint64_t>::max() ) {
         return;
     }
     const std::string scan_id = r008_channels.run_id + ":" +
                                 std::to_string( ++r008_channels.scan_sequence );
+    // One bounded scan owns its append stream. Preserve every existing packet
+    // record and binding guard without opening/closing the file per packet.
+    const auto output_failed = []() {
+        r008_channels.writable = false;
+        r008_channels.statistics.write_failed = true;
+        if( raid_perf_current ) {
+            raid_perf_current->channel_output.write_failed = true;
+        }
+    };
+    ++r008_channels.statistics.open_calls;
+    if( raid_perf_current ) {
+        ++raid_perf_current->channel_output.open_calls;
+    }
+    std::ofstream output( r008_channels.path, std::ios::app );
+    if( !output ) {
+        output_failed();
+        return;
+    }
+    const auto before = output.tellp();
     bool smoke = false;
     bool light = false;
     bool sound_observed = false;
@@ -7899,38 +7927,53 @@ void record_r008_production_channel_scan(
         const std::string source = signal.source_omt.to_string();
         if( signal.mark.kind == "smoke" ) {
             smoke = true;
-            append_r008_channel_record( "smoke", "local_field", "bandit_live_world.signal_scan",
+            append_r008_channel_record( output, "smoke", "local_field", "bandit_live_world.signal_scan",
                                         true, now_minutes, source, scan_id, signal.mark.mark_id );
         } else if( signal.mark.kind == "light" || signal.mark.kind == "searchlight" ) {
             light = true;
-            append_r008_channel_record( "light", "local_field", "bandit_live_world.signal_scan",
+            append_r008_channel_record( output, "light", "local_field", "bandit_live_world.signal_scan",
                                         true, now_minutes, source, scan_id, signal.mark.mark_id );
         }
     }
     for( const live_bandit_sound_observation &sound : sounds ) {
         sound_observed = true;
-        append_r008_channel_record( "sound", "significant_sound", "bandit_live_world.sound_adapter",
+        append_r008_channel_record( output, "sound", "significant_sound", "bandit_live_world.sound_adapter",
                                     true, now_minutes, sound.source_omt.to_string(),
                                     scan_id, std::to_string( sound.volume ) );
     }
     if( !sound_observed ) {
-        append_r008_channel_record( "sound", "significant_sound", "bandit_live_world.sound_adapter",
+        append_r008_channel_record( output, "sound", "significant_sound", "bandit_live_world.sound_adapter",
                                     false, now_minutes, "", scan_id, "absent" );
     }
     if( !smoke ) {
-        append_r008_channel_record( "smoke", "local_field", "bandit_live_world.signal_scan",
+        append_r008_channel_record( output, "smoke", "local_field", "bandit_live_world.signal_scan",
                                     false, now_minutes, "", scan_id, "absent" );
     }
     if( !light ) {
-        append_r008_channel_record( "light", "local_field", "bandit_live_world.signal_scan",
+        append_r008_channel_record( output, "light", "local_field", "bandit_live_world.signal_scan",
                                     false, now_minutes, "", scan_id, "absent" );
     }
-    append_r008_channel_record( "scent", "none", "bandit_live_world.signal_scan", false,
+    append_r008_channel_record( output, "scent", "none", "bandit_live_world.signal_scan", false,
                                 now_minutes, "", scan_id, "not_consumed" );
-    append_r008_channel_record( "prior_knowledge", "none", "bandit_live_world.signal_scan", false,
+    append_r008_channel_record( output, "prior_knowledge", "none", "bandit_live_world.signal_scan", false,
                                 now_minutes, "", scan_id, "not_consumed" );
-    append_r008_channel_record( "incidental_contact", "none", "bandit_live_world.signal_scan", false,
+    append_r008_channel_record( output, "incidental_contact", "none", "bandit_live_world.signal_scan", false,
                                 now_minutes, "", scan_id, "not_consumed" );
+    ++r008_channels.statistics.flush_calls;
+    if( raid_perf_current ) {
+        ++raid_perf_current->channel_output.flush_calls;
+    }
+    output.flush();
+    const auto after = output.tellp();
+    if( !output ) {
+        output_failed();
+    } else if( before >= 0 && after >= before ) {
+        const auto bytes = static_cast<std::size_t>( after - before );
+        r008_channels.statistics.logical_bytes += bytes;
+        if( raid_perf_current ) {
+            raid_perf_current->channel_output.logical_bytes += bytes;
+        }
+    }
 }
 
 static constexpr int live_bandit_system_envelope_omt = 40;
@@ -11934,6 +11977,10 @@ int attract_live_hordes_from_light_observations(
     raid_perf_scope diagnostic_scope( raid_perf_stage::signal_hordes );
     const bool noisy_diagnostics = !raid_perf_current || raid_perf_mode != "quiet_signal";
     int signaled_sources = 0;
+    std::size_t packets = 0;
+    std::size_t candidate_visits = 0;
+    std::size_t attracted_visits = 0;
+    int strongest_interest = 0;
     for( const live_bandit_signal_observation &signal : signals ) {
         if( signal.horde_signal_power <= 0 ) {
             continue;
@@ -11948,25 +11995,29 @@ int attract_live_hordes_from_light_observations(
                               signal.range_cap_omt, source_exposed, signal.sample_id,
                               calendar::turn, &candidates );
         signaled_sources += attracted > 0 ? 1 : 0;
+        ++packets;
+        candidate_visits += candidates;
+        attracted_visits += attracted;
+        strongest_interest = std::max( strongest_interest, signal.horde_signal_power );
         if( raid_perf_current ) {
             ++raid_perf_current->horde_packets;
             raid_perf_current->horde_candidate_entities += candidates;
             raid_perf_current->horde_attracted_entities += attracted;
-            raid_perf_current->horde_diagnostic_records += noisy_diagnostics ? 1 : 0;
         }
-        if( noisy_diagnostics ) {
-            DebugLog( D_INFO, DC_ALL ) << "bandit_live_world horde light interest: packet="
-                                   << signal.mark.mark_id << " kind=" << signal.mark.kind
-                                   << " source_omt=" << signal.source_omt.to_string()
-                                   << " source_ms=" << source_ms.to_string()
-                                   << " current_light=yes"
-                                   << " light_interest=" << signal.horde_signal_power
-                                   << " source_envelope_sm=" << signal.horde_signal_power
-                                   << " candidate_entities=" << candidates
-                                   << " attracted_entities=" << attracted
-                                   << " range_cap_omt=" << signal.range_cap_omt
-                                   << " weather=" << signal.weather_summary << '\n';
+    }
+    // Keep the established diagnostic consumer's fields, but format only one
+    // delivery summary. Packet provenance belongs to the opt-in channel trace;
+    // informational logging must not perform synchronous writes per source.
+    if( noisy_diagnostics && packets > 0 ) {
+        if( raid_perf_current ) {
+            ++raid_perf_current->horde_diagnostic_records;
         }
+        DebugLog( D_INFO, DC_ALL ) << "bandit_live_world horde light interest: aggregate=yes"
+                                   << " packets=" << packets << " current_light=yes"
+                                   << " light_interest=" << strongest_interest
+                                   << " candidate_entities=" << candidate_visits
+                                   << " attracted_entities=" << attracted_visits
+                                   << " signaled_sources=" << signaled_sources << '\n';
     }
     return signaled_sources;
 }
@@ -20528,6 +20579,11 @@ void overmap_npc_move()
 void refresh_live_bandit_activation()
 {
     evaluate_live_bandit_activation();
+}
+
+live_channel_output_statistics live_channel_output_statistics_for_test()
+{
+    return r008_channels.statistics;
 }
 
 bandit_live_world::activation_clock *live_bandit_body_activation( const character_id id )
