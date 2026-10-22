@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from contextlib import redirect_stdout
+from dataclasses import asdict
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,7 +27,8 @@ import scenario_registry_ingestion_test as ingestion_fixtures
 import scenario_registry_store as store
 import startup_harness
 from evidence_display import retain
-from scenario_registry_performance import CONTRACT, CAPABILITY, SCENARIO, performance_contract, validate_performance_witness
+from scenario_registry_performance import (CONTRACT, CAPABILITY, SCENARIO, performance_contract,
+                                          prepare_saved_world_continuation, validate_performance_witness)
 
 
 CHARTER = {"claim": "Observe a native faction work interval", "material_proof": "Native work, resources, census and save/exit",
@@ -36,6 +39,7 @@ def manifest():
     return {
         "manifest_version": 1, "name": SCENARIO, "profile": "performance-test", "world": "",
         "harness_new_world": "PerformanceTest",
+        "harness_raw_seed": "830205385", "harness_new_world_scenario": "evacuee",
         "capabilities": {CAPABILITY: "baseline_then_adaptive_active_party_expansion",
                          "runtime.native_transport": "windows_conpty",
                          "capabilities.performance.target_population_sequence": {"active_parties": [1, 10, 20, 50, 100]}},
@@ -64,11 +68,11 @@ class PerformanceRouteTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.run = self.root / "run"
         self.session = self.root / "session"
-        self.userdir = self.root / "userdata"
-        self.world = self.userdir / "save" / "PerformanceTest"
-        for path in (self.run, self.session, self.world):
+        self.generator_run = self.root / "generator-run"
+        for path in (self.run, self.session, self.generator_run):
             path.mkdir(parents=True)
-        self.patch = mock.patch.object(startup_harness, "userdir_for_profile", return_value=self.userdir)
+        self.patch = mock.patch.object(startup_harness, "userdir_for_profile",
+                                       side_effect=lambda profile: self.root / "profiles" / profile)
         self.patch.start()
         self.addCleanup(self.patch.stop)
         evidence_store = mock.patch.object(evidence_events, "retain", side_effect=lambda value: retain(value, self.root / "evidence-display"))
@@ -76,28 +80,73 @@ class PerformanceRouteTest(unittest.TestCase):
         self.addCleanup(evidence_store.stop)
         self.connection = store.open_registry(str(self.root / "registry.sqlite3"))
         self.addCleanup(self.connection.close)
-        self.declaration = manifest()
+        (self.root / "game.exe").write_bytes(b"synthetic executable, never launched")
+        self.runtime = {"status": "matched", "runtime_source_sha256": "a" * 64,
+                        "executable_sha256": hashlib.sha256((self.root / "game.exe").read_bytes()).hexdigest(),
+                        "executable_path": str(self.root / "game.exe")}
+        self.generator_profile = "performance-test-run-" + "0" * 32
+        with mock.patch.object(startup_harness, "create_run_dir", return_value=self.generator_run):
+            self.generator_plan = startup_harness.build_plan(
+                self.generator_profile, "", "", "PerformanceTest", "830205385",
+                explicit_executable=self.runtime["executable_path"], harness_new_world_scenario="evacuee")
+        self.initial_world = startup_harness.save_dir_for_profile(self.generator_profile) / "PerformanceTest"
+        self.initial_world.mkdir(parents=True)
+        # A controlled native generator saved and exited before any live work.
+        (self.initial_world / "dimension_data.gsav").write_text("# version 1\n{}")
+        (self.initial_world / "player.sav").write_bytes(b"native initial save double")
+        marker = startup_harness.latest_world_save_marker(self.generator_profile, "PerformanceTest")
+        self.generator_startup = {
+            "ok": True, "reason": "harness_world_saved", "strategy": "harness_new_world", "exit_code": 0,
+            "feature_proof": False, "profile": self.generator_profile, "pid": 121,
+            "run_dir": str(self.generator_run), "harness_new_world": "PerformanceTest", "harness_raw_seed": "830205385",
+            "executable_path": self.runtime["executable_path"],
+            "readiness": {"kind": "harness_process_exit", "pid": 121, "returncode": 0,
+                "marker": marker, "save_marker_created": True, "world_owned_by_run": True,
+                "baseline_save_marker_mtime": 0, "debug_error_evidence_count": 0, "feasibility_artifact_ready": True},
+            "generation_identity": {"world": "PerformanceTest", "raw_seed": "830205385", "ordinary_scenario": "evacuee",
+                "profile": self.generator_profile, "run_dir": str(self.generator_run), "run_id": "setup-run"}}
+        self.write(self.generator_run / "startup.result.json", self.generator_startup)
+        self.write(self.generator_run / "runtime.binding.json", {**self.runtime, "runtime_source_sha256": "c" * 64})
+        self.write(self.generator_run / "terminal.owner.json", {
+            "run_id": "setup-run", "game_pid": 121, "game_process_generation": {"pid": 121,
+                "birth_identity": "windows-filetime:123", "executable_path": self.runtime["executable_path"]},
+            "launch_state": "exited", "child_exit_code": 0, "native_handles_closed": True, "native_lease_handles_closed": True})
+        self.declaration = prepare_saved_world_continuation(manifest(), self.generator_run / "startup.result.json")
         self.scenarios = self.root / "scenarios"
         self.scenarios.mkdir()
         self.path = self.scenarios / "performance.json"
         self.write(self.path, self.declaration)
         store.rebuild_manifest_projection(self.connection, self.scenarios)
         self.manifest_id = self.connection.execute("SELECT manifest_id FROM manifest_current").fetchone()[0]
-        (self.root / "game.exe").write_bytes(b"synthetic executable, never launched")
         self.execution = store.execute_registry_query(self.connection, store.parse_registry_query_request({"requirements": [
             {"key": CAPABILITY, "op": "eq", "value": "baseline_then_adaptive_active_party_expansion", "minimum_evidence": "declared"}], "preferences": []}),
             witness_charter=CHARTER, drafts_root=self.root / "drafts")
         self.run_id = self.execution.token_id
         self.assertIsNotNone(self.run_id)
         self.write(self.session / "bridge.manifest.json", {"authorization_token_id": self.run_id, "binding_id": "binding"})
-        self.runtime = {"status": "matched", "runtime_source_sha256": "a" * 64,
-                        "executable_sha256": hashlib.sha256((self.root / "game.exe").read_bytes()).hexdigest(),
-                        "executable_path": str(self.root / "game.exe")}
+        # Use the real selected saved-start producer, including its independent
+        # random profile UUID, parser, copy verification and normal game plan.
+        selection = store.RegistryLaunchToken(self.run_id, True, "selected", SCENARIO,
+            str(self.path), hashlib.sha256(self.path.read_bytes()).hexdigest())
+        args = SimpleNamespace(profile="", post_relaunch_continuation=False, saved_world_snapshot="")
+        scenario_registry_cli._preflight_selected_save_setup(selection, args)
+        self.launch = scenario_registry_cli._registry_launch_probe_namespace(selection,
+            cockpit_live_session=True, profile_override=args.profile,
+            post_relaunch_continuation=args.post_relaunch_continuation, saved_world_snapshot=args.saved_world_snapshot)
+        self.profile = self.launch.profile
+        self.userdir = startup_harness.userdir_for_profile(self.profile)
+        self.world = self.userdir / "save" / "PerformanceTest"
+        self.installed = startup_harness.install_saved_world_snapshot(
+            self.profile, "PerformanceTest", self.launch.saved_world_snapshot)
+        with mock.patch.object(startup_harness, "create_run_dir", return_value=self.run):
+            self.plan = startup_harness.build_plan(self.profile, "PerformanceTest", "",
+                                                  explicit_executable=self.runtime["executable_path"])
+        self.write(self.run / "plan.json", asdict(self.plan))
         self.write(self.run / "runtime.binding.json", self.runtime)
         self.generation = {"pid": 123, "birth_identity": "windows-filetime:456", "executable_path": self.runtime["executable_path"]}
         self.owner = {"run_id": self.run_id, "binding_id": "binding", "pid": 123,
                       "process_generation": self.generation, "userdir": str(self.userdir),
-                      "world": "", "playtest_mode": "terminal",
+                      "world": "PerformanceTest", "playtest_mode": "terminal",
                       "log_paths": {"transition_events": {"path": str(self.run / "transition.events.jsonl"), "scope": "run_bound"}}}
         self.write(self.session / "game-process.json", self.owner)
         self.write(self.session / "game-process-exit.json", {**self.owner, "exit_code": 0,
@@ -152,12 +201,13 @@ class PerformanceRouteTest(unittest.TestCase):
         self.assertTrue(final_result["ok"], final_result)
         self.final = channel._final_report
         self.report = ingestion_fixtures.ScenarioRegistryIngestionTest().report(self.path)
-        self.report.update(scenario=SCENARIO, contract={"profile": "performance-test-run-" + self.run_id,
-                                                     "config_profile": "performance-test", "world": ""},
+        self.report.update(scenario=SCENARIO, contract={"profile": self.profile,
+                                                     "config_profile": "performance-test", "world": "PerformanceTest"},
                            steps=[{"cockpit_live_session": {"final": self.final}}],
                            proof_classification={"status": "yellow", "feature_proof": False, "evidence_class": "startup/load-or-inconclusive"},
                            feature_proof=False, evidence_class="startup/load-or-inconclusive", verdict="yellow_interval", certification_lifecycle={})
         self.report["startup"]["screen"].update(runtime_binding_status="matched", runtime_binding_observed=self.runtime)
+        self.report["startup"].update(profile=self.profile, strategy=self.plan.strategy, saved_world_snapshot=self.installed)
         self.report["world_snapshot"] = {"status": "current_saved_world_reference", "source": str(self.world),
                                          "source_sha256": startup_harness.sha256_tree(self.world)[0]}
         self.report_path = self.run / "probe.report.json"
@@ -202,6 +252,99 @@ class PerformanceRouteTest(unittest.TestCase):
                          final=self.final, journal=self.journal, statement=self.statement, runtime=self.runtime)
         arguments.update(changes)
         return validate_performance_witness(**arguments)
+
+    def test_generator_exit_then_selected_saved_start_reaches_native_witness_consumer(self):
+        generator = manifest()
+        self.assertFalse(performance_contract(generator))
+        self.assertEqual(store._run_evidence_ceiling(self.connection, self.manifest_id, generator), "zero-credit")
+        generator["steps"] = [{"kind": "native_world_generation", "label": "generate"}]
+        generator["capabilities"]["runtime.entry_mode"] = "native_world_generation"
+        setup = startup_harness.generation_only_probe_report(generator, 0, self.generator_startup,
+            expected_profile=self.generator_profile, expected_run_id="setup-run")
+        self.assertTrue(setup["ok"], setup)
+        self.assertFalse(setup["feature_proof"])
+        self.assertFalse(setup["scenario_setup"]["interventions"][0]["gameplay_credit"])
+        self.assertTrue(self.launch.post_relaunch_continuation)
+        self.assertEqual(self.launch.fixture, "")
+        self.assertEqual(startup_harness.saved_world_continuation_steps(self.declaration["steps"], None),
+                         self.declaration["steps"])
+        self.assertEqual(self.plan.strategy, "autoload_world")
+        self.assertNotEqual(self.profile, "performance-test-run-" + self.run_id)
+        command = startup_harness.build_game_command(self.root / "game.exe", self.profile, "PerformanceTest",
+                                                      isolated_writable=True)
+        self.assertNotIn("--harness-new-world", command)
+        self.assertEqual(command[command.index("--world") + 1], "PerformanceTest")
+        self.ingest()
+        result = self.record()["performance"]
+        self.assertEqual(result["scope"], "observed_native_work_interval")
+        self.assertEqual(result["initial_world"]["run_id"], "setup-run")
+        self.assertFalse(result["whole_sequence_proven"])
+        self.assertFalse(result["gameplay_credit"])
+
+    def test_wrong_initial_save_source_or_hash_and_unrelated_history_rejected(self):
+        original = copy.deepcopy(self.declaration)
+        bad = copy.deepcopy(original)
+        bad["evidence_contract"]["performance_witness"]["initial_world"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "initial_save_hash_mismatch"):
+            self.validate_native(declaration=bad)
+        # Even byte-identical unrelated history cannot borrow the generator.
+        import shutil
+        historical = self.root / "historical" / "PerformanceTest"
+        shutil.copytree(self.initial_world, historical)
+        bad = copy.deepcopy(original)
+        bad["saved_world_snapshot"] = str(historical)
+        with self.assertRaisesRegex(ValueError, "generated_world_identity_mismatch"):
+            self.validate_native(declaration=bad)
+        for key in ("startup_sha256", "runtime_sha256"):
+            bad = copy.deepcopy(original)
+            bad["evidence_contract"]["performance_witness"]["initial_world"][key] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "generation_.*source_mismatch"):
+                self.validate_native(declaration=bad)
+        report = copy.deepcopy(self.report)
+        report["startup"]["saved_world_snapshot"]["installed_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "initial_save_installation_mismatch"):
+            self.validate_native(report=report)
+
+    def test_wrong_generation_world_run_or_native_completion_rejected(self):
+        path = self.generator_run / "startup.result.json"
+        for mutate, reason in (
+            (lambda value: value["generation_identity"].update(world="other-world"), "generated_world_identity_mismatch"),
+            (lambda value: value["generation_identity"].update(run_id="other-run"), "generation_native_owner_mismatch"),
+            (lambda value: value.update(exit_code=1), "native_generation_unproved"),
+            (lambda value: value["readiness"].update(debug_error_evidence_count=1), "native_generation_unproved")):
+            with self.subTest(reason=reason):
+                startup = copy.deepcopy(self.generator_startup)
+                mutate(startup)
+                self.write(path, startup)
+                declaration = copy.deepcopy(self.declaration)
+                declaration["evidence_contract"]["performance_witness"]["initial_world"]["startup_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.validate_native(declaration=declaration)
+        self.write(path, self.generator_startup)
+        report = copy.deepcopy(self.report)
+        report["startup"]["profile"] = "unrelated-profile"
+        with self.assertRaisesRegex(ValueError, "profile_owner_mismatch"):
+            self.validate_native(report=report)
+
+    def test_setup_run_or_other_product_cannot_supply_the_later_work_interval(self):
+        path = self.generator_run / "runtime.binding.json"
+        runtime = {**self.runtime, "executable_sha256": "0" * 64}
+        self.write(path, runtime)
+        declaration = copy.deepcopy(self.declaration)
+        declaration["evidence_contract"]["performance_witness"]["initial_world"]["runtime_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, "generation_source_or_run_mismatch"):
+            self.validate_native(declaration=declaration)
+        self.write(path, {**self.runtime, "runtime_source_sha256": "c" * 64})
+        startup = copy.deepcopy(self.generator_startup)
+        startup["generation_identity"]["run_id"] = self.run_id
+        self.write(self.generator_run / "startup.result.json", startup)
+        owner = json.loads((self.generator_run / "terminal.owner.json").read_text())
+        owner["run_id"] = self.run_id
+        self.write(self.generator_run / "terminal.owner.json", owner)
+        declaration = copy.deepcopy(self.declaration)
+        declaration["evidence_contract"]["performance_witness"]["initial_world"]["startup_sha256"] = hashlib.sha256((self.generator_run / "startup.result.json").read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, "generation_source_or_run_mismatch"):
+            self.validate_native(declaration=declaration)
 
     def test_selected_producer_consumer_and_cli_preserve_only_witnessed_interval(self):
         self.ingest()
