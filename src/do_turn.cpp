@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -261,6 +262,142 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
     write_native_semantic_event( stream.str() );
 }
 
+// Task-local diagnostic only: identical timing in both logging variants.  The
+// rows stay in memory while native waiting advances, and are published after
+// the interval, at an excluded input boundary.  Nothing here changes scheduling.
+enum class raid_perf_stage : std::size_t {
+    operations, horde_movement, population, fields, items, map_cache,
+    signal_total, signal_discovery, signal_hordes, creatures, overmap_npcs,
+    pre_input_world, count
+};
+static constexpr std::size_t raid_perf_stage_count =
+    static_cast<std::size_t>( raid_perf_stage::count );
+struct raid_perf_row {
+    int turn = 0;
+    std::size_t wait_begin = 0;
+    std::size_t wait_end = 0;
+    double simulation_seconds = 0;
+    double cpu_seconds = 0;
+    double input_seconds = 0;
+    double save_seconds = 0;
+    debug_sink_statistics sink;
+    std::array<double, raid_perf_stage_count> stages{};
+    std::size_t discovered_sources = 0;
+    std::size_t horde_packets = 0;
+    std::size_t horde_diagnostic_records = 0;
+    std::size_t horde_candidate_entities = 0;
+    std::size_t horde_attracted_entities = 0;
+};
+static raid_perf_row *raid_perf_current = nullptr;
+static std::vector<raid_perf_row> raid_perf_rows;
+static std::string raid_perf_mode = "off";
+
+static std::size_t raid_perf_wait_generation()
+{
+    const player_activity &activity = get_avatar().activity;
+    return activity.id().str().compare( 0, 8, "ACT_WAIT" ) == 0 ?
+           activity.input_generation() : 0;
+}
+
+class raid_perf_scope
+{
+    public:
+        explicit raid_perf_scope( raid_perf_stage stage ) : row( raid_perf_current ), stage( stage ) {
+            if( row ) {
+                started = std::chrono::steady_clock::now();
+            }
+        }
+        ~raid_perf_scope() {
+            if( row ) {
+                row->stages[static_cast<std::size_t>( stage )] +=
+                    std::chrono::duration<double>( std::chrono::steady_clock::now() - started ).count();
+            }
+        }
+    private:
+        raid_perf_row *row;
+        raid_perf_stage stage;
+        std::chrono::steady_clock::time_point started;
+};
+
+static void raid_perf_flush_after_wait()
+{
+    if( raid_perf_rows.empty() || raid_perf_wait_generation() != 0 ) {
+        return;
+    }
+    std::ostringstream stream;
+    JsonOut js( stream );
+    js.start_object();
+    js.member( "event", "raid_performance_interval" );
+    js.member( "mode", raid_perf_mode );
+    js.member( "run_id", std::string( std::getenv( "OPENCLAW_HARNESS_RUN_ID" ) ) );
+    js.member( "stage_scope", "signal_total includes discovery and horde delivery; do not add nested stages" );
+    js.member( "debug_sink_scope", "logical file-sink bytes/flushes over the whole turn including input/save; not physical disk bytes" );
+    js.member( "stage_names", std::array<std::string, raid_perf_stage_count> {
+        "migo_operations", "horde_movement", "population", "fields", "items", "map_cache",
+        "signal_total", "signal_discovery", "signal_hordes", "creatures", "overmap_npcs",
+        "pre_input_world"
+    } );
+    js.member( "rows" );
+    js.start_array();
+    for( const raid_perf_row &row : raid_perf_rows ) {
+        js.start_object();
+        js.member( "turn", row.turn );
+        js.member( "wait_begin", row.wait_begin );
+        js.member( "wait_end", row.wait_end );
+        js.member( "simulation_seconds", row.simulation_seconds );
+        js.member( "process_cpu_seconds", row.cpu_seconds );
+        js.member( "input_seconds", row.input_seconds );
+        js.member( "save_seconds", row.save_seconds );
+        js.member( "debug_log_bytes", row.sink.bytes );
+        js.member( "debug_log_flushes", row.sink.flushes );
+        js.member( "debug_log_replacements", row.sink.replacements );
+        js.member( "debug_log_replacement_seconds", row.sink.replacement_nanoseconds / 1e9 );
+        js.member( "stages_seconds", row.stages );
+        js.member( "discovered_sources", row.discovered_sources );
+        js.member( "horde_packets", row.horde_packets );
+        js.member( "horde_diagnostic_records", row.horde_diagnostic_records );
+        js.member( "horde_candidate_entities", row.horde_candidate_entities );
+        js.member( "horde_attracted_entities", row.horde_attracted_entities );
+        js.end_object();
+    }
+    js.end_array();
+    // Ground truth for the experiment, never supplied to an NPC's knowledge.
+    // Take it once, after timing, rather than walking actors on every turn.
+    js.member( "local_monsters" );
+    js.start_array();
+    for( const monster &body : g->all_monsters() ) {
+        js.start_object();
+        js.member( "type", body.type->id.str() );
+        js.member( "position", body.pos_abs().raw() );
+        js.member( "hp", body.get_hp() );
+        js.member( "morale", body.morale );
+        js.member( "member", body.population_identity().member_id );
+        if( const auto *intent = body.migo_intent() ) {
+            js.member( "generation", intent->generation );
+            js.member( "phase", static_cast<int>( intent->phase ) );
+        }
+        js.end_object();
+    }
+    js.end_array();
+    js.member( "migo_operations" );
+    js.start_array();
+    for( const auto &site : overmap_buffer.global_state.migo_towers.sites ) {
+        if( site.operation ) {
+            js.start_object();
+            js.member( "site", site.site_id );
+            js.member( "generation", site.operation->generation );
+            js.member( "resolved", site.operation->resolved );
+            js.member( "cursor", site.operation->sweep.cursor );
+            js.member( "active_elapsed", site.operation->sweep.active_elapsed );
+            js.end_object();
+        }
+    }
+    js.end_array();
+    js.end_object();
+    write_native_semantic_event( stream.str() );
+    raid_perf_rows.clear();
+}
+
 class openclaw_harness_turn_trace
 {
     public:
@@ -268,6 +405,14 @@ class openclaw_harness_turn_trace
             enabled_( advancing && openclaw_harness_turn_trace_enabled() ), game_turn_( game_turn ),
             game_minutes_( game_minutes ), started_( std::chrono::steady_clock::now() ) {
             if( enabled_ ) {
+                raid_perf_mode = get_option<std::string>( "RAID_PERFORMANCE_DIAGNOSTIC" );
+                if( raid_perf_mode != "off" ) {
+                    diagnostic_.turn = game_turn;
+                    diagnostic_.wait_begin = raid_perf_wait_generation();
+                    raid_perf_current = &diagnostic_;
+                    cpu_started_ = std::clock();
+                    sink_started_ = get_debug_sink_statistics();
+                }
                 static std::uint64_t next_turn_id = 0;
                 turn_id_ = std::to_string( ++next_turn_id );
                 openclaw_harness_write_turn_trace( "turn", "start", "simulation", turn_id_, game_turn_,
@@ -282,15 +427,40 @@ class openclaw_harness_turn_trace
                 const double open_outside_simulation = outside_simulation_started_ ?
                                                        std::chrono::duration_cast<std::chrono::duration<double>>(
                                                                std::chrono::steady_clock::now() - *outside_simulation_started_ ).count() : 0.0;
+                const double simulation = std::max( 0.0, elapsed - outside_simulation_seconds_ -
+                                                   open_outside_simulation );
+                if( raid_perf_current == &diagnostic_ ) {
+                    diagnostic_.simulation_seconds = simulation;
+                    if( outside_simulation_phase_ == "input" ) {
+                        diagnostic_.input_seconds += open_outside_simulation;
+                    } else if( outside_simulation_phase_ == "save" ) {
+                        diagnostic_.save_seconds += open_outside_simulation;
+                    }
+                    const double open_cpu = outside_cpu_started_ ?
+                                            static_cast<double>( std::clock() - *outside_cpu_started_ ) / CLOCKS_PER_SEC :
+                                            0.0;
+                    diagnostic_.cpu_seconds = std::max( 0.0,
+                                                      static_cast<double>( std::clock() - cpu_started_ ) / CLOCKS_PER_SEC -
+                                                      outside_cpu_seconds_ - open_cpu );
+                    diagnostic_.wait_end = raid_perf_wait_generation();
+                    const debug_sink_statistics sink_end = get_debug_sink_statistics();
+                    diagnostic_.sink = { sink_end.bytes - sink_started_.bytes,
+                                         sink_end.flushes - sink_started_.flushes,
+                                         sink_end.replacements - sink_started_.replacements,
+                                         sink_end.replacement_nanoseconds - sink_started_.replacement_nanoseconds };
+                    raid_perf_rows.push_back( diagnostic_ );
+                    raid_perf_current = nullptr;
+                }
                 openclaw_harness_write_turn_trace( "turn", "end", "simulation", turn_id_,
                                                    to_turns<int>( calendar::turn - calendar::turn_zero ),
                                                    to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ),
-                                                   std::max( 0.0, elapsed - outside_simulation_seconds_ - open_outside_simulation ) );
+                                                   simulation );
             }
         }
 
         void input_begin() {
             phase_begin( "input" );
+            raid_perf_flush_after_wait();
         }
 
         void input_end() {
@@ -300,6 +470,9 @@ class openclaw_harness_turn_trace
         void phase_begin( const char *phase ) {
             if( enabled_ && !outside_simulation_started_ ) {
                 outside_simulation_started_ = std::chrono::steady_clock::now();
+                if( raid_perf_current ) {
+                    outside_cpu_started_ = std::clock();
+                }
                 outside_simulation_phase_ = phase;
                 openclaw_harness_write_turn_trace( "turn_phase", "begin", phase, turn_id_, game_turn_,
                                                    game_minutes_, 0.0 );
@@ -308,8 +481,21 @@ class openclaw_harness_turn_trace
 
         void phase_end( const char *phase ) {
             if( enabled_ && outside_simulation_started_ && outside_simulation_phase_ == phase ) {
-                outside_simulation_seconds_ += std::chrono::duration_cast<std::chrono::duration<double>>(
-                                                   std::chrono::steady_clock::now() - *outside_simulation_started_ ).count();
+                const double seconds = std::chrono::duration<double>(
+                                           std::chrono::steady_clock::now() - *outside_simulation_started_ ).count();
+                outside_simulation_seconds_ += seconds;
+                if( raid_perf_current ) {
+                    if( outside_simulation_phase_ == "input" ) {
+                        diagnostic_.input_seconds += seconds;
+                    } else if( outside_simulation_phase_ == "save" ) {
+                        diagnostic_.save_seconds += seconds;
+                    }
+                }
+                if( outside_cpu_started_ ) {
+                    outside_cpu_seconds_ += static_cast<double>( std::clock() - *outside_cpu_started_ ) /
+                                            CLOCKS_PER_SEC;
+                    outside_cpu_started_.reset();
+                }
                 outside_simulation_started_.reset();
                 outside_simulation_phase_.clear();
                 openclaw_harness_write_turn_trace( "turn_phase", "end", "simulation", turn_id_, game_turn_,
@@ -326,6 +512,11 @@ class openclaw_harness_turn_trace
         std::optional<std::chrono::steady_clock::time_point> outside_simulation_started_;
         std::string outside_simulation_phase_;
         double outside_simulation_seconds_ = 0.0;
+        raid_perf_row diagnostic_;
+        std::clock_t cpu_started_ = 0;
+        std::optional<std::clock_t> outside_cpu_started_;
+        double outside_cpu_seconds_ = 0.0;
+        debug_sink_statistics sink_started_;
 };
 
 static void openclaw_harness_trace_post_hud_pre_input_boundary( const avatar &player,
@@ -11521,6 +11712,8 @@ std::set<std::string> bootstrap_live_bandit_abstract_sites_near_player()
 int attract_live_hordes_from_light_observations(
     const std::vector<live_bandit_signal_observation> &signals )
 {
+    raid_perf_scope diagnostic_scope( raid_perf_stage::signal_hordes );
+    const bool noisy_diagnostics = !raid_perf_current || raid_perf_mode != "quiet_signal";
     int signaled_sources = 0;
     for( const live_bandit_signal_observation &signal : signals ) {
         if( signal.horde_signal_power <= 0 ) {
@@ -11536,7 +11729,14 @@ int attract_live_hordes_from_light_observations(
                               signal.range_cap_omt, source_exposed, signal.sample_id,
                               calendar::turn, &candidates );
         signaled_sources += attracted > 0 ? 1 : 0;
-        DebugLog( D_INFO, DC_ALL ) << "bandit_live_world horde light interest: packet="
+        if( raid_perf_current ) {
+            ++raid_perf_current->horde_packets;
+            raid_perf_current->horde_candidate_entities += candidates;
+            raid_perf_current->horde_attracted_entities += attracted;
+            raid_perf_current->horde_diagnostic_records += noisy_diagnostics ? 1 : 0;
+        }
+        if( noisy_diagnostics ) {
+            DebugLog( D_INFO, DC_ALL ) << "bandit_live_world horde light interest: packet="
                                    << signal.mark.mark_id << " kind=" << signal.mark.kind
                                    << " source_omt=" << signal.source_omt.to_string()
                                    << " source_ms=" << source_ms.to_string()
@@ -11547,6 +11747,7 @@ int attract_live_hordes_from_light_observations(
                                    << " attracted_entities=" << attracted
                                    << " range_cap_omt=" << signal.range_cap_omt
                                    << " weather=" << signal.weather_summary << '\n';
+        }
     }
     return signaled_sources;
 }
@@ -13589,7 +13790,12 @@ void sample_and_deliver_live_light_for_advancing_turn()
         advance_zombie_rider_light_memories();
     };
     callbacks.discover = []() {
-        return observe_loaded_z_light_sources();
+        raid_perf_scope diagnostic_scope( raid_perf_stage::signal_discovery );
+        auto samples = observe_loaded_z_light_sources();
+        if( raid_perf_current ) {
+            raid_perf_current->discovered_sources = samples.size();
+        }
+        return samples;
     };
     callbacks.deliver_hordes = []( const std::vector<live_bandit_signal_observation> &samples ) {
         attract_live_hordes_from_light_observations( samples );
@@ -20719,9 +20925,18 @@ bool game::do_turn()
     }
 
     // Move hordes every turn, move_hordes has its own rate limiting
-    migo_tower::service_operations( to_turn<int>( calendar::turn ) );
-    overmap_buffer.move_hordes();
-    migo_population::service_loaded();
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::operations );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ) );
+    }
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::horde_movement );
+        overmap_buffer.move_hordes();
+    }
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::population );
+        migo_population::service_loaded();
+    }
     if( calendar::once_every( time_duration::from_minutes( 2.5 ) ) ) {
         if( u.has_trait( trait_HAS_NEMESIS ) ) {
             overmap_buffer.move_nemesis();
@@ -20779,34 +20994,36 @@ bool game::do_turn()
     if( !u.has_effect( effect_sleep ) || uquit == QUIT_WATCH ) {
         if( u.get_moves() > 0 || uquit == QUIT_WATCH ) {
             while( u.get_moves() > 0 || uquit == QUIT_WATCH ) {
+                {
+                    raid_perf_scope diagnostic_scope( raid_perf_stage::pre_input_world );
+                    // handle_action() may cause map updates, creatures to die
+                    m.process_falling();
+                    cleanup_dead();
 
-                // handle_action() may cause map updates, creatures to die
-                m.process_falling();
-                cleanup_dead();
-
-                mon_info_update();
-                // Process any new sounds the player caused during their turn.
-                for( npc &guy : all_npcs() ) {
-                    if( rl_dist( guy.pos_bub(), u.pos_bub() ) < MAX_VIEW_DISTANCE ) {
-                        sounds::process_sound_markers( &guy );
+                    mon_info_update();
+                    // Process any new sounds the player caused during their turn.
+                    for( npc &guy : all_npcs() ) {
+                        if( rl_dist( guy.pos_bub(), u.pos_bub() ) < MAX_VIEW_DISTANCE ) {
+                            sounds::process_sound_markers( &guy );
+                        }
                     }
-                }
-                explosion_handler::process_explosions();
-                sounds::process_sound_markers( &u );
-                if( !u.activity && uquit != QUIT_WATCH
-                    && ( !u.has_distant_destination() || calendar::once_every( 10_seconds ) ) ) {
-                    wait_popup_reset();
-                    ui_manager::redraw();
-                    // This trace observes the turn-loop boundary only.  The
-                    // initial semantic producer lives at the render boundary,
-                    // which can execute before this loop is entered.
-                    openclaw_harness_trace_post_hud_pre_input_boundary( u,
-                            uquit == QUIT_WATCH );
-                }
+                    explosion_handler::process_explosions();
+                    sounds::process_sound_markers( &u );
+                    if( !u.activity && uquit != QUIT_WATCH
+                        && ( !u.has_distant_destination() || calendar::once_every( 10_seconds ) ) ) {
+                        wait_popup_reset();
+                        ui_manager::redraw();
+                        // This trace observes the turn-loop boundary only.  The
+                        // initial semantic producer lives at the render boundary,
+                        // which can execute before this loop is entered.
+                        openclaw_harness_trace_post_hud_pre_input_boundary( u,
+                                uquit == QUIT_WATCH );
+                    }
 
-                if( queue_screenshot ) {
-                    take_screenshot();
-                    queue_screenshot = false;
+                    if( queue_screenshot ) {
+                        take_screenshot();
+                        queue_screenshot = false;
+                    }
                 }
 
                 openclaw_harness_trace_activity_driver( "handle_action_enter", u );
@@ -20895,8 +21112,14 @@ bool game::do_turn()
 
     m.process_falling();
     m.vehmove();
-    m.process_fields();
-    m.process_items();
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::fields );
+        m.process_fields();
+    }
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::items );
+        m.process_items();
+    }
     explosion_handler::process_explosions();
     m.creature_in_field( u );
 
@@ -20905,12 +21128,16 @@ bool game::do_turn()
     const int levz = m.get_abs_sub().z();
     // Update vision caches for monsters. If this turns out to be expensive,
     // consider a stripped down cache just for monsters.
-    m.build_map_cache( levz, true );
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::map_cache );
+        m.build_map_cache( levz, true );
+    }
 
     // Rider reconciliation, memory aging, loaded-z discovery, and immediate
     // recipients run once per distinct advancing turn.  Staffed observation
     // remains owned by its separate five-minute cadence.
     if( advancing_game_turn ) {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::signal_total );
         sample_and_deliver_live_light_for_advancing_turn();
     }
 
@@ -20920,11 +21147,15 @@ bool game::do_turn()
     note_live_bandit_aftermath();
 
     // process monster and npc turn
-    monmove();
+    {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::creatures );
+        monmove();
+    }
     note_live_bandit_local_turn_sight_avoid();
     // One-shot sounds are observed without waking the entire overmap update.
     // Their durable coarse memories survive until ordinary AI considers them.
     if( calendar::once_every( time_between_npc_OM_moves ) ) {
+        raid_perf_scope diagnostic_scope( raid_perf_stage::overmap_npcs );
         overmap_npc_move();
     } else if( sounds::has_significant_sounds() ) {
         observe_live_bandit_sounds();

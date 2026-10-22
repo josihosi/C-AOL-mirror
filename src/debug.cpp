@@ -6,6 +6,8 @@
 // IWYU pragma: no_include <sys/unistd.h>
 #include <clocale>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -798,6 +800,10 @@ namespace
 {
 // A debug log is a current diagnostic window, not an append-only archive.
 // The sink owns replacement so a bridge cannot truncate a concurrent write.
+std::atomic<std::uint64_t> sink_bytes{0};
+std::atomic<std::uint64_t> sink_flushes{0};
+std::atomic<std::uint64_t> sink_replacements{0};
+std::atomic<std::uint64_t> sink_replacement_nanoseconds{0};
 class bounded_debug_stream : public std::ostream
 {
     private:
@@ -811,6 +817,7 @@ class bounded_debug_stream : public std::ostream
                     output.open( this->path, std::ios::binary | std::ios::app );
                 }
                 int sync() override {
+                    sink_flushes.fetch_add( 1, std::memory_order_relaxed );
                     output.flush();
                     return output ? 0 : -1;
                 }
@@ -835,11 +842,13 @@ class bounded_debug_stream : public std::ostream
                         }
                         written += part;
                         bytes += static_cast<std::size_t>( part );
+                        sink_bytes.fetch_add( static_cast<std::uint64_t>( part ), std::memory_order_relaxed );
                     }
                     return written;
                 }
             private:
                 bool replace() {
+                    const auto started = std::chrono::steady_clock::now();
                     const std::string temporary = path + ".next";
                     std::ofstream replacement( temporary, std::ios::binary | std::ios::trunc );
                     const std::string marker = "[Earlier diagnostic log window discarded]\n";
@@ -857,6 +866,11 @@ class bounded_debug_stream : public std::ostream
                     }
                     output.open( path, std::ios::binary | std::ios::app );
                     bytes = marker.size();
+                    sink_bytes.fetch_add( marker.size(), std::memory_order_relaxed );
+                    sink_replacements.fetch_add( 1, std::memory_order_relaxed );
+                    sink_replacement_nanoseconds.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - started ).count(), std::memory_order_relaxed );
                     return bool( output );
                 }
                 static constexpr std::size_t limit = 8 * 1024 * 1024;
@@ -888,6 +902,14 @@ struct DebugFile {
     cata_path filename;
 };
 } // namespace
+
+debug_sink_statistics get_debug_sink_statistics()
+{
+    return { sink_bytes.load( std::memory_order_relaxed ),
+             sink_flushes.load( std::memory_order_relaxed ),
+             sink_replacements.load( std::memory_order_relaxed ),
+             sink_replacement_nanoseconds.load( std::memory_order_relaxed ) };
+}
 
 // DebugFile OStream Wrapper                                        {{{2
 // ---------------------------------------------------------------------

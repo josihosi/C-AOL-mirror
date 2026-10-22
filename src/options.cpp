@@ -2908,6 +2908,15 @@ void options_manager::add_options_world_default()
 
 void options_manager::add_options_debug()
 {
+    // Temporary, explicitly selected performance experiments.  The normal
+    // game keeps its existing diagnostics and performs no extra measurement.
+    add( "RAID_PERFORMANCE_DIAGNOSTIC", "debug", no_translation( "Raid performance diagnostic" ),
+         no_translation( "Task-local matched signal logging experiment." ), {
+        { "off", no_translation( "Off" ) },
+        { "normal", no_translation( "Measure with existing signal diagnostics" ) },
+        { "quiet_signal", no_translation( "Measure without per-source horde diagnostics" ) }
+    }, "off", COPT_ALWAYS_HIDE );
+
     const auto add_empty_line = [&]() {
         this->add_empty_line( "debug" );
     };

@@ -3,6 +3,7 @@
 #define CATA_SRC_DEBUG_H
 
 #include <cstdlib>
+#include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -243,6 +244,16 @@ void replay_buffered_debugmsg_prompts();
 
 // See documentation at the top.
 std::ostream &DebugLog( DebugLevel, DebugClass );
+
+// Read-only counters for the task-local diagnostic comparison.  Bytes are
+// logical bytes accepted by the bounded file sink, including rotation markers.
+struct debug_sink_statistics {
+    std::uint64_t bytes = 0;
+    std::uint64_t flushes = 0;
+    std::uint64_t replacements = 0;
+    std::uint64_t replacement_nanoseconds = 0;
+};
+debug_sink_statistics get_debug_sink_statistics();
 
 /**
  * Extended debugging mode, can be toggled during game.

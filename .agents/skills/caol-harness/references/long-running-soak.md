@@ -1,7 +1,7 @@
 # Long-running natural-play soak
 
 Owner-selected final batch under `R-REL-RELEASE-PLAYTESTS-S001`. Run after the planned
-mechanism/regression playtests. This is a broad crash and stuck-scout test, not another
+mechanism/regression playtests. This is a broad crash, stuck-dispatch and performance-spike test, not another
 full assertion suite or proof of unobserved faction behavior.
 
 ## Five worlds
@@ -79,9 +79,31 @@ not a stuck scout. Check local conditions and the production activation predicat
 calling a stall. Follow a suspicious actor across another useful interval or revisit; no
 per-turn transcript or exhaustive actor census is required.
 
+### Performance spikes and stalls — week and month
+
+Performance is a primary outcome alongside crashes and stuck dispatches in both durations.
+Use existing supported game-turn/wait timings and performance alarms for a compact ordinary
+throughput reference early in the run and at useful travel/reload milestones. Compare actual
+simulated time against wall time for comparable actions; interrupted waits, rendering, loading
+and external/model waits must not be mislabelled as overmap simulation cost. No invented fixed
+threshold or continuous profiling is required.
+
+When a pronounced slowdown appears, note game time, action/elapsed time, nearby creature
+load and relevant party/dispatch activity. Make a bounded useful comparison after leaving the
+dense local bubble or continuing through sparse terrain, keeping product and world continuity.
+If useful, compare a similar earlier quiet interval or save/reentry, explicitly noting changed
+conditions. Dense local creatures can explain work, but density alone does not excuse a stall.
+Look for cost that persists or grows with accumulated overmap AI/dispatch bookkeeping despite
+sparse local activity. Attribution requires evidence. Report uncertainty honestly while investigating, but keep the
+performance finding open until its cause is supported. Missing tooling/evidence is a concrete
+blocker to solve or escalate, not a completed unknown-cause result; never fabricate an explanation. Retrieve
+bounded existing timing/profile detail and involve the source owner only when it can distinguish
+causes or guide a demonstrated repair. Do not add per-turn dumps, an always-on profiler, a new
+benchmark campaign or extra worlds. Record compact before/after timings, conditions, recovery
+and first anomaly in the same per-seed/month result; manage log growth as below.
+
 At the end report one compact row per seed: product/seed/run, actual elapsed days, completed
-reload cycles, route/terrain coverage, activity actually observed, first crash/stall or other
-material anomaly, and cleanup state. For a defect retain the first divergence, actor/phase/time
+reload cycles, route/terrain coverage, activity actually observed, first crash/stuck-dispatch/performance anomaly, and cleanup state. For a defect retain the first divergence, actor/phase/time
 and concise reproduction steps in the existing task context; keep a necessary current save
 only while diagnosis/continuation needs it. A blocked or crashed world remains incomplete
 coverage, even if the other four finish. Investigate useful failures; do not restart healthy
@@ -106,7 +128,8 @@ One direct Luna continues a loose loop of travel to another region, a long nativ
 return by another route, then periodic full save/exit/reload and resumed play. Include quiet
 multi-day absences and revisits. Keep invisibility/life support and supported ignore handling;
 leave NPC simulation real. The main question is whether prolonged ordinary simulation and
-reentry crash, hang or stop making progress. Do not turn this into another detailed faction
+reentry crash, hang, stop making progress or develop pronounced performance degradation.
+Apply the shared performance observations above, including sparse-versus-dense comparisons. Do not turn this into another detailed faction
 assertion campaign or require daily reports.
 
 **Keep output small:** use existing supported quiet/default logging and compact observations;
@@ -117,7 +140,7 @@ the owning worker rather than deleting files under a live writer. A noisy harnes
 supported reduction, not suppressed crash/error reporting or invented logging switches.
 
 Record only the selected seed/product and selection reason, starting/final actual day,
-brief save/reentry milestones, and the result. On a crash/hang, preserve the first error,
+brief save/reentry milestones, and the result. On a crash/hang or performance spike, preserve the first error or timing anomaly,
 last known game time/action and a concise reproduction handle while diagnosis needs them.
 Normal progress needs no growing narrative. Thirty days with no observed crash is a bounded
 soak result, not proof of bug-free AI. Finish with native exit, process verification and removal
