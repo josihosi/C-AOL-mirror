@@ -427,6 +427,114 @@ class NativeConPTY:
         self._closed = True
 
 
+def dispose_owned_game(run_dir, expected, *, wait_seconds=5.0, inspector=None):
+    """Explicit disposal of one reserved native game; never an observer signal.
+
+    The native save/quit route remains the default. This separate operation
+    requires the owning caller's explicit-abort receipt, persisted reservation
+    and exact launch fingerprint, then rebinds birth/image on the termination
+    handle itself. It never closes HPCON to make a game disappear.
+    """
+    from dataclasses import asdict
+    from collections.abc import Mapping
+    from certification_process_lease import process_command_identity
+    from windows_curses_terminal_transport import _same_generation
+    from writable_run_owner import reject_aliases, WritableRootConflict
+    import socket
+    import math
+    if not 0 < wait_seconds <= 30 or not math.isfinite(wait_seconds):
+        raise ValueError('explicit disposal requires a bounded wait')
+    directory = Path(run_dir).absolute()
+    if directory.resolve() != directory:
+        raise OSError('explicit disposal run directory alias')
+    watched = {}
+    def read(path):
+        raw = path.read_bytes()
+        watched[path] = raw
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise OSError('explicit disposal ownership source malformed')
+        return value
+    launch = read(directory / 'process.json')
+    try:
+        root = reject_aliases(Path(launch.get('userdir', '')))
+    except WritableRootConflict as error:
+        raise OSError('explicit disposal userdir ownership alias/overlap') from error
+    reservation = read(root / '.harness-owner.lock')
+    owner = read(directory / 'terminal.owner.json')
+    quit_request = read(directory / 'cockpit.player_quit.json')
+    run_id = launch.get('run_id')
+    host = socket.gethostname()
+    if (not run_id or directory.parent != root / 'harness_runs' or
+            launch.get('host') != host or launch.get('mode') != 'terminal' or
+            launch.get('transport') != 'windows_conpty' or
+            reservation.get('schema') != 'caol-writable-run-owner-v1' or
+            reservation.get('host') != host or reservation.get('run_id') != run_id or
+            Path(reservation.get('userdir', '')).resolve() != root or reservation.get('launch_state') != 'bound' or
+            owner.get('schema') != 'caol-curses-terminal-owner-v1' or owner.get('host') != host or
+            owner.get('run_id') != run_id or owner.get('game_pid') != expected.get('pid') or
+            Path(owner.get('run_owner_path', '')).resolve() != directory / 'terminal.owner.json' or
+            quit_request.get('schema') != 'caol-cockpit-player-quit-v1' or
+            quit_request.get('run_id') != run_id or not quit_request.get('binding_id') or
+            quit_request.get('pid') != expected.get('pid') or
+            process_command_identity(quit_request) != process_command_identity(expected) or
+            not all(_same_generation(expected, record) for record in
+                (launch.get('process_generation', {}), reservation.get('game_generation', {}),
+                 owner.get('game_process_generation', {})))):
+        raise OSError('explicit disposal launch/run/reservation mismatch')
+    if quit_request.get('explicit_player_abort') is not True:
+        # A pre-fix public abort already persisted its immutable final report.
+        # Read that existing report; never rewrite it to authorize disposal.
+        from cockpit_report_reference import load_report
+        path = directory / 'probe.report.json'
+        _, _, report = load_report(path)
+        watched[path] = path.read_bytes()
+        finals = [step.get('cockpit_live_session', {}).get('final') for step in report.get('steps', [])
+                  if isinstance(step, Mapping) and isinstance(step.get('cockpit_live_session'), Mapping)
+                  and step['cockpit_live_session'].get('final')]
+        if len(finals) != 1:
+            raise OSError('explicit disposal abort receipt missing')
+        final = finals[0]
+        if (final.get('run_id') != run_id or final.get('binding_id') != quit_request['binding_id'] or
+                final.get('closure_kind') != 'explicit_abort' or final.get('termination_requested') is not True or
+                final.get('stop_detail', {}).get('explicit_player_abort') is not True):
+            raise OSError('explicit disposal abort receipt mismatch')
+    observer = inspector or WindowsProcessInspector()
+    def exact():
+        snapshot = observer.inspect(int(expected['pid']))
+        current = snapshot if isinstance(snapshot, dict) else asdict(snapshot)
+        return current.get('alive') is True and _same_generation(expected, current)
+    if not exact():
+        raise OSError('explicit disposal process fingerprint changed')
+    k = kernel()
+    # PROCESS_TERMINATE | SYNCHRONIZE | QUERY_LIMITED_INFORMATION only.
+    handle = k.OpenProcess(0x00101001, False, int(expected['pid']))
+    checked(handle)
+    try:
+        def handle_exact():
+            return ('windows-filetime:' + str(handle_birth(k, handle)) == expected['birth_identity'] and
+                    os.path.normcase(handle_image(k, handle)) == os.path.normcase(expected['executable_path']))
+        if not handle_exact() or not exact() or any(path.read_bytes() != raw for path, raw in watched.items()):
+            raise OSError('explicit disposal identity or reservation changed during handle bind')
+        if not handle_alive(k, handle):
+            return {'status': 'already_exited', 'operation': 'explicit_disposal', 'native_exit_credit': False}
+        # Recheck on this same handle immediately before the only mutation.
+        if not handle_exact():
+            raise OSError('explicit disposal termination handle identity changed')
+        checked(k.TerminateProcess(handle, 1))
+        result = {'status': 'explicit_abort_exit_unobserved_process_retained',
+                  'operation': 'explicit_disposal', 'pid': expected['pid'],
+                  'birth_identity': expected['birth_identity'], 'native_exit_credit': False,
+                  'native_save_credit': False, 'normal_exit_credit': False}
+        if k.WaitForSingleObject(handle, int(wait_seconds * 1000)) == 0:
+            code = w.DWORD()
+            checked(k.GetExitCodeProcess(handle, c.byref(code)))
+            result.update(status='explicit_abort_terminated', exit_code=int(code.value), os_exit_observed=True)
+        return result
+    finally:
+        k.CloseHandle(handle)
+
+
 class WindowsOwnedProcess:
     """Read-only Popen-shaped observation of the broker's exact native child."""
     def __init__(self, generation, args):

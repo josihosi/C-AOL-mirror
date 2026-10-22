@@ -6781,6 +6781,8 @@ def finalize_cockpit_live_session(
             "process_generation": owned,
             "run_id": report.get("run_id"),
             "binding_id": report.get("binding_id"), "stop_reason": report.get("stop_reason"),
+            "explicit_player_abort": report.get("closure_kind") == "explicit_abort" and
+                isinstance(report.get("stop_detail"), Mapping) and report["stop_detail"].get("explicit_player_abort") is True,
         })
     if not cleanup_process:
         cleanup = {
@@ -6792,6 +6794,9 @@ def finalize_cockpit_live_session(
         cleanup = cleanup_game_process(
             cleanup_pid,
             explicit_quit=explicit_quit,
+            explicit_abort=report.get("closure_kind") == "explicit_abort" and
+                isinstance(report.get("stop_detail"), Mapping) and report["stop_detail"].get("explicit_player_abort") is True,
+            run_dir=run_dir,
             expected_process_generation=owned["expected"],
         )
     elif owned.get("status") == "exited":
@@ -24756,6 +24761,8 @@ def cleanup_game_process(
     *,
     grace_seconds: float = 2.0,
     explicit_quit: bool = False,
+    explicit_abort: bool = False,
+    run_dir: Optional[Path] = None,
     expected_process_generation: Optional[Mapping[str, Any]] = None,
     inspector: Optional[Any] = None,
 ) -> Dict[str, Any]:
@@ -24833,6 +24840,16 @@ def cleanup_game_process(
         return info
 
     if os.name == "nt":
+        if explicit_abort is True and run_dir is not None:
+            from windows_native_process import dispose_owned_game
+            try:
+                disposal = dispose_owned_game(run_dir, expected, wait_seconds=max(0.1, min(float(grace_seconds), 30.0)),
+                                              inspector=inspector)
+                info.update(disposal)
+            except (OSError, ValueError, KeyError) as error:
+                info.update(status="retained_explicit_abort_refused", reason=str(error))
+            info["cleanup_finished_at"] = _utc_timestamp(time.time())
+            return info
         # Python's Windows SIGTERM terminates immediately.  Native save/quit
         # belongs to the current input owner; this fallback retains the child.
         info["status"] = "graceful_quit_unconfirmed_process_retained"
@@ -41305,6 +41322,7 @@ def finalize_probe_report(
             if owned.get("status") == "alive":
                 report["cleanup"] = cleanup_game_process(
                     current_pid, explicit_quit=explicit_quit,
+                    explicit_abort=quit_request.get("explicit_player_abort") is True, run_dir=run_dir,
                     expected_process_generation=owned["expected"],
                 )
             elif owned.get("status") == "exited":
