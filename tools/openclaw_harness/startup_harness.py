@@ -24329,6 +24329,8 @@ def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
     reason = ""
     try:
         generation = declared_generation_only(scenario)
+        from scenario_registry_performance import performance_contract
+        saved_reference_capture = performance_contract(scenario)
     except ValueError as error:
         row.update(status="unsupported_terminal_mode", reason=str(error))
         return row
@@ -24337,7 +24339,8 @@ def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
         allowed_steps = {"native_world_generation"}
     if sys.platform not in {"darwin", "win32"}:
         reason = "terminal adapter is available on native Mac and Windows only"
-    elif contract.get("require_screen_observability") is True or scenario.get("capture_world_after") is True:
+    elif contract.get("require_screen_observability") is True or (
+            scenario.get("capture_world_after") is True and not saved_reference_capture):
         reason = "selected scenario requires graphical observability; select Tiles for this claim"
     elif any(step.get("kind") not in allowed_steps
              for step in scenario.get("steps", []) if isinstance(step, Mapping)):
@@ -32421,11 +32424,20 @@ def scenario_manifest_binding(scenario: Dict[str, Any]) -> Dict[str, Any]:
     source = registry.get("source") if isinstance(registry.get("source"), dict) else {}
     normalized = registry.get("normalized") if isinstance(registry.get("normalized"), dict) else {}
     validation = registry.get("validation") if isinstance(registry.get("validation"), dict) else {}
-    return {
+    result = {
         "source": copy.deepcopy(source),
         "normalized": copy.deepcopy(normalized),
         "validation": copy.deepcopy(validation),
     }
+
+    # Retain only the selected performance input edge in the source-bound report.
+    # Later declarations may change; no copied declaration/history is needed.
+    declaration = registry.get("declaration")
+    if isinstance(declaration, dict):
+        from scenario_registry_performance import performance_contract, performance_report_lineage
+        if performance_contract(declaration):
+            result["performance_lineage"] = performance_report_lineage(declaration)
+    return result
 
 
 def normalize_string_list(raw_value: Any) -> List[str]:

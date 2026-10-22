@@ -123,6 +123,9 @@ class PerformanceRouteTest(unittest.TestCase):
         self.execution = store.execute_registry_query(self.connection, store.parse_registry_query_request({"requirements": [
             {"key": CAPABILITY, "op": "eq", "value": "baseline_then_adaptive_active_party_expansion", "minimum_evidence": "declared"}], "preferences": []}),
             witness_charter=CHARTER, drafts_root=self.root / "drafts")
+        self.produce_native_interval()
+
+    def produce_native_interval(self):
         self.run_id = self.execution.token_id
         self.assertIsNotNone(self.run_id)
         self.produce_selected_bridge()
@@ -178,7 +181,7 @@ class PerformanceRouteTest(unittest.TestCase):
         # Existing cockpit producer supplies its own save completion matching and exit observation.
         channel = cockpit.CockpitRunChannel(lambda: {}, lambda *args: {}, binding_id=self.binding_id,
             read_process_state=lambda: self.process, witness_charter=CHARTER,
-            witness_identity={"scenario_id": SCENARIO, "source_identity": "a" * 64,
+            witness_identity={"scenario_id": SCENARIO, "source_identity": self.runtime["runtime_source_sha256"],
                               "executable_identity": self.runtime["executable_sha256"]})
         channel._run_id = self.run_id
         world_receipt = {"accepted": True, "run_id": self.run_id, "request_id": "save-1", "action_id": "world.save_quit",
@@ -202,20 +205,67 @@ class PerformanceRouteTest(unittest.TestCase):
         final_result = channel.finish(observation_id=observation["observation_id"], stop_reason="interval ended", unused_authority="none", witness=initial)
         self.assertTrue(final_result["ok"], final_result)
         self.final = channel._final_report
+        self.write(self.run / startup_harness.TRANSITION_EVENT_BINDING_FILENAME, {"run_id": self.run_id})
+        with redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, {"OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": self.binding_id}), \
+                mock.patch.object(startup_harness, "semantic_step_trace_start_for_source", return_value=0), \
+                mock.patch.object(startup_harness, "active_playtest_witness_charter", return_value=CHARTER), \
+                mock.patch.object(startup_harness, "open_cockpit_game_service", return_value=cockpit.CockpitService(run_channel=channel)), \
+                mock.patch.object(startup_harness, "serve_cockpit_live", return_value=0), \
+                mock.patch.object(startup_harness, "read_completed_cockpit_final", return_value=self.final):
+            native_steps = startup_harness.execute_probe_steps(123, self.run,
+                [{"kind": "cockpit_live_session", "label": "work"}], profile=self.profile, world="PerformanceTest",
+                scenario_identity=SCENARIO, runtime_binding=self.runtime, grants_gameplay_proof=False, semantic_only=True)
         self.report = ingestion_fixtures.ScenarioRegistryIngestionTest().report(self.path)
         self.report.update(scenario=SCENARIO, contract={"profile": self.profile,
-                                                     "config_profile": "performance-test", "world": "PerformanceTest"},
-                           steps=[{"cockpit_live_session": {"final": self.final}}],
+                                                     "config_profile": "performance-test", "world": "PerformanceTest", "capture_world_after": True},
+                           steps=native_steps,
                            proof_classification={"status": "yellow", "feature_proof": False, "evidence_class": "startup/load-or-inconclusive"},
                            feature_proof=False, evidence_class="startup/load-or-inconclusive", verdict="yellow_interval", certification_lifecycle={})
         self.report["startup"]["screen"].update(runtime_binding_status="matched", runtime_binding_observed=self.runtime)
         self.report["startup"].update(profile=self.profile, strategy=self.plan.strategy, saved_world_snapshot=self.installed)
-        self.report["world_snapshot"] = {"status": "current_saved_world_reference", "source": str(self.world),
-                                         "source_sha256": startup_harness.sha256_tree(self.world)[0]}
+        self.report["world_snapshot"] = startup_harness.describe_saved_world_state(self.profile, "PerformanceTest", self.run)
         self.report_path = self.run / "probe.report.json"
-        self.write(self.report_path, self.report)
+        self.publish_report()
         self.statement["performance_evidence"] = {"behavior": [self.handle(self.run / "transition.events.jsonl")],
                                                     "measurements": [self.handle(self.session / "performance.jsonl")]}
+
+    def publish_report(self):
+        # Exercise the actual source-bound report producer, not synthesized
+        # metadata that could conceal an omitted field in production.
+        self.report.pop("scenario_manifest", None)
+        # Registry source/report identity and native bridge identity are
+        # independently produced bindings in the real launcher; do not equate.
+        report_binding = "registry-source-" + self.binding_id
+        self.report.update(run_id=self.run_id, binding_id=report_binding,
+            wec_authority=startup_harness.seal_wec_authority(evidence_class="setup support",
+                authority="registry", run_id=self.run_id, binding_id=report_binding,
+                source_sha256=hashlib.sha256(self.path.read_bytes()).hexdigest()))
+        loaded = json.loads(self.path.read_text())
+        loaded["_scenario_registry"] = scenario_registry.validate_manifest(loaded, path=self.path)
+        with redirect_stdout(io.StringIO()):
+            startup_harness.finalize_scenario_report(self.run, self.report, scenario=loaded, compact_stdout=True)
+        from cockpit_report_reference import load_report
+        _, _, self.report = load_report(self.report_path)
+
+    def reenter(self, *, change_product=False):
+        parent = self.report_path
+        self.declaration = prepare_saved_world_continuation(self.declaration,
+            self.generator_run / "startup.result.json", parent_report=parent)
+        index = len(list(self.root.glob("reentry-*"))) + 1
+        self.run = self.root / ("reentry-" + str(index))
+        self.run.mkdir()
+        self.session = self.root / ("session-" + str(index))
+        if change_product:
+            executable = self.root / ("successor-" + str(index) + ".exe")
+            executable.write_bytes(b"independently source-bound compatible successor")
+            self.runtime = {**self.runtime, "runtime_source_sha256": str(index) * 64,
+                "executable_path": str(executable), "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+        self.write(self.path, self.declaration)
+        store.rebuild_manifest_projection(self.connection, self.scenarios)
+        self.execution = store.execute_registry_query(self.connection, store.parse_registry_query_request({"requirements": [
+            {"key": CAPABILITY, "op": "eq", "value": "baseline_then_adaptive_active_party_expansion", "minimum_evidence": "declared"}], "preferences": []}),
+            witness_charter=CHARTER, drafts_root=self.root / "drafts")
+        self.produce_native_interval()
 
     def produce_selected_bridge(self):
         """Keep the actual selected command, both bridge parsers and manifest."""
@@ -245,7 +295,7 @@ class PerformanceRouteTest(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, output.getvalue(), "")
 
         with mock.patch.object(scenario_registry_cli, "reload_selection_token_for_launch", return_value=selection), \
-                mock.patch.object(scenario_registry_cli, "_selected_executable", return_value=self.root / "game.exe"), \
+                mock.patch.object(scenario_registry_cli, "_selected_executable", return_value=Path(self.runtime["executable_path"])), \
                 mock.patch.object(scenario_registry_cli, "_selected_runtime_binding", return_value=self.runtime), \
                 mock.patch.object(scenario_registry_cli, "_current_source_executable_readiness", return_value={"status": "ready"}), \
                 mock.patch.object(scenario_registry_cli.subprocess, "run", side_effect=launch_bridge), \
@@ -319,6 +369,187 @@ class PerformanceRouteTest(unittest.TestCase):
         self.assertFalse(result["whole_sequence_proven"])
         self.assertFalse(result["gameplay_credit"])
 
+    def test_two_native_reentries_keep_origin_parent_and_successor_product_distinct(self):
+        from cockpit_report_reference import load_report
+        origin = copy.deepcopy(self.declaration["evidence_contract"]["performance_witness"]["initial_world"])
+        first_run, first_report = self.run_id, self.report_path
+        first_product = copy.deepcopy(self.runtime)
+        self.reenter(change_product=True)
+        self.assertNotEqual(self.runtime["executable_sha256"], first_product["executable_sha256"])
+        self.assertNotEqual(self.runtime["runtime_source_sha256"], first_product["runtime_source_sha256"])
+        self.assertNotEqual(self.run_id, first_run)
+        self.ingest()
+        result = self.record()["performance"]
+        self.assertEqual(result["continuation"]["validated_parent_edges"], 1)
+        self.assertFalse(result["continuation"]["prior_interval_hash_missing"])
+        self.assertEqual(result["continuation"]["parent_report"]["path"], str(first_report.resolve()))
+        self.assertEqual(self.declaration["evidence_contract"]["performance_witness"]["initial_world"], origin)
+        # Consume ancestor world bytes and product after installation: the
+        # already captured report edge stays authoritative, not a proof copy.
+        import shutil
+        _, _, parent = load_report(first_report)
+        shutil.rmtree(parent["world_snapshot"]["source"])
+        Path(first_product["executable_path"]).unlink()
+        self.reenter()
+        self.ingest()
+        result = self.record()["performance"]
+        self.assertEqual(result["continuation"]["validated_parent_edges"], 2)
+        self.assertEqual(result["behavior"][0]["operation_id"], "outing-a")
+        self.assertEqual(len(result["measurements"]), 1)
+        self.assertFalse(result["gameplay_credit"])
+        self.assertFalse(result["population_sequence_credit"])
+        # Parent observations cannot substitute for the new interval's work.
+        old_statement = copy.deepcopy(self.statement)
+        old_statement["performance_evidence"]["behavior"] = [self.handle(first_report.parent / "transition.events.jsonl")]
+        with self.assertRaisesRegex(ValueError, "source_path_or_range_mismatch"):
+            self.validate_native(statement=old_statement)
+
+    def test_retained_world_missing_prior_hash_requires_fresh_noncredit_report(self):
+        # The first report has a native save/exit, but no trustworthy capture.
+        # It cannot be retroactively promoted or synthesized into a parent.
+        old_report, old_run = self.report_path, self.run_id
+        self.report.pop("world_snapshot")
+        self.publish_report()
+        with self.assertRaisesRegex(ValueError, "saved_world_producer_mismatch"):
+            prepare_saved_world_continuation(self.declaration, self.generator_run / "startup.result.json",
+                                            parent_report=old_report)
+        retained = self.world
+        bootstrap = prepare_saved_world_continuation(self.declaration,
+            self.generator_run / "startup.result.json", saved_world_snapshot=retained)
+        self.assertNotIn("parent_report", bootstrap["evidence_contract"]["performance_witness"])
+        self.assertNotEqual(bootstrap["evidence_contract"]["performance_witness"]["input_sha256"],
+                            bootstrap["evidence_contract"]["performance_witness"]["initial_world"]["sha256"])
+        self.declaration = bootstrap
+        self.write(self.path, bootstrap)
+        store.rebuild_manifest_projection(self.connection, self.scenarios)
+        # New supported selection and report establish only present custody.
+        self.run = self.root / "bootstrap"
+        self.run.mkdir()
+        self.session = self.root / "bootstrap-session"
+        self.execution = store.execute_registry_query(self.connection, store.parse_registry_query_request({"requirements": [
+            {"key": CAPABILITY, "op": "eq", "value": "baseline_then_adaptive_active_party_expansion", "minimum_evidence": "declared"}], "preferences": []}),
+            witness_charter=CHARTER, drafts_root=self.root / "drafts")
+        self.produce_native_interval()
+        self.assertNotEqual(self.run_id, old_run)
+        with self.assertRaisesRegex(ValueError, "unattested_input_requires_bootstrap"):
+            self.validate_native()
+        negative = {key: value for key, value in self.statement.items() if key != "performance_evidence"}
+        negative.update(evidence_ceiling="setup-only", verdict="inconclusive")
+        self.assertEqual(self.validate_native(statement=negative)["scope"], "none")
+        self.reenter(change_product=True)
+        result = self.validate_native()
+        self.assertEqual(result["continuation"]["validated_parent_edges"], 1)
+        self.assertTrue(result["continuation"]["prior_interval_hash_missing"])
+        self.assertEqual(result["scope"], "observed_native_work_interval")
+        self.assertEqual(len(result["measurements"]), 1)
+
+    def test_parent_report_mutation_missing_sources_world_hash_and_exit_rejected(self):
+        parent = self.report_path
+        self.reenter()
+        good = copy.deepcopy(self.declaration)
+        self.assertEqual(self.validate_native()["continuation"]["validated_parent_edges"], 1)
+        for mutate, reason in (
+            (lambda d: d["evidence_contract"]["performance_witness"]["parent_report"].update(sha256="0" * 64), "parent_report_source_mismatch"),
+            (lambda d: d["evidence_contract"]["performance_witness"].update(input_sha256="0" * 64), "input_save_hash_mismatch"),
+            (lambda d: d.update(world="wrong-world"), "generated_world_identity_mismatch")):
+            bad = copy.deepcopy(good)
+            mutate(bad)
+            with self.assertRaisesRegex(ValueError, reason):
+                self.validate_native(declaration=bad)
+        raw = parent.read_bytes()
+        parent.write_bytes(raw + b"\n")
+        with self.assertRaisesRegex(ValueError, "parent_report_source_mismatch"):
+            self.validate_native()
+        parent.write_bytes(raw)
+        # A hash-updated changed report still must satisfy every source/native
+        # guard, including exact output hash, source authority and OS exit.
+        original = json.loads(raw)
+        for mutate, reason in (
+            (lambda r: r["world_snapshot"].update(source_sha256="0" * 64), "saved_world_producer_mismatch"),
+            (lambda r: r["scenario_manifest"].pop("performance_lineage"), "parent_lineage_missing"),
+            (lambda r: r["scenario_manifest"]["source"].update(sha256="0" * 64), "report_lineage_source_mismatch"),
+            (lambda r: r.update(diagnostic_replay=True), "non_native_terminal"),
+            (lambda r: r.update(run_id="foreign-parent-run"), "report_lineage_source_mismatch"),
+            (lambda r: r["contract"].update(world="same-name-history"), "world_or_transport_owner_mismatch"),
+            (lambda r: r["contract"].update(post_relaunch={"steps": [{"kind": "wait"}]}), "extra_native_relaunch_unbound"),
+            (lambda r: r["startup"]["screen"]["runtime_binding_observed"].update(executable_sha256="0" * 64), "native_runtime_binding_mismatch"),
+            (lambda r: r["startup"]["screen"].update(runtime_binding_status="mismatch"), "native_product_binding_unmatched"),
+            (lambda r: r["startup"]["screen"]["runtime_binding_observed"].update(status="mismatch"), "native_product_binding_unmatched"),
+            (lambda r: r["scenario_manifest"]["normalized"]["runtime_contract"]["value"].update(fixture="unrelated"), "report_contract_incompatible"),
+            (lambda r: r["scenario_manifest"]["normalized"]["capabilities"]["value"].update({CAPABILITY: "counts_only"}), "report_contract_incompatible"),
+            (lambda r: r["scenario_manifest"]["normalized"]["proof_route"]["value"].update(production_behavior=["start"]), "report_contract_incompatible"),
+            (lambda r: r["scenario_manifest"]["source"].update(path=str(self.root / "other-scenario.json")), "parent_source_path_mismatch"),
+            (lambda r: r["steps"][0]["cockpit_live_session"]["descriptor"].update(binding_id="foreign-native-binding"), "native_descriptor_binding_mismatch"),
+            (lambda r: r["steps"][0]["cockpit_live_session"]["final"]["stop_detail"].pop("evidence_journal"), "one_native_run_required"),
+            (lambda r: r["steps"][0]["cockpit_live_session"]["final"].update(native_save_completion={}), "native_persistence_unproved")):
+            changed = copy.deepcopy(original)
+            mutate(changed)
+            if reason == "report_contract_incompatible":
+                changed["scenario_manifest"]["source"]["sha256"] = "d" * 64
+                authority = changed["wec_authority"]
+                changed["wec_authority"] = startup_harness.seal_wec_authority(**{key: authority[key] for key in
+                    ("evidence_class", "authority", "run_id", "binding_id", "owner")}, source_sha256="d" * 64)
+            self.write(parent, changed)
+            bad = copy.deepcopy(good)
+            bad["evidence_contract"]["performance_witness"]["parent_report"]["sha256"] = hashlib.sha256(parent.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, reason):
+                self.validate_native(declaration=bad)
+        parent.write_bytes(raw)
+        runtime_path = parent.parent / "runtime.binding.json"
+        runtime_bytes = runtime_path.read_bytes()
+        runtime_path.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.validate_native()
+        runtime_path.write_bytes(runtime_bytes)
+        saved = parent.parent / "saved_world.json"
+        saved_bytes = saved.read_bytes()
+        saved.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.validate_native()
+        saved.write_bytes(saved_bytes)
+        # Change the actual producer's exit, not only its report summary.
+        exit_path = self.root / "session" / "game-process-exit.json"
+        exit_record = json.loads(exit_path.read_text())
+        self.write(exit_path, {**exit_record, "exit_code": 1})
+        with self.assertRaisesRegex(ValueError, "abnormal_exit"):
+            self.validate_native()
+        self.write(exit_path, exit_record)
+
+    def test_byte_identical_unrelated_snapshot_cannot_borrow_a_parent(self):
+        import shutil
+        unrelated = startup_harness.userdir_for_profile("performance-test-run-" + "f" * 32) / "save" / "PerformanceTest"
+        shutil.copytree(self.world, unrelated)
+        self.assertEqual(startup_harness.sha256_tree(unrelated), startup_harness.sha256_tree(self.world))
+        with self.assertRaisesRegex(ValueError, "parent_snapshot_path_mismatch"):
+            prepare_saved_world_continuation(self.declaration, self.generator_run / "startup.result.json",
+                saved_world_snapshot=unrelated, parent_report=self.report_path)
+        bootstrap = prepare_saved_world_continuation(self.declaration, self.generator_run / "startup.result.json",
+                                                     saved_world_snapshot=unrelated)
+        with self.assertRaisesRegex(ValueError, "unattested_input_requires_bootstrap"):
+            self.validate_native(declaration=bootstrap)
+
+    def test_parent_path_and_run_cycles_are_rejected_before_any_work_credit(self):
+        import scenario_registry_performance as performance_module
+        from cockpit_report_reference import load_report
+        self.reenter()
+        self.reenter()
+        good_load = load_report
+        immediate = self.declaration["evidence_contract"]["performance_witness"]["parent_report"]
+        calls = []
+        def cycle_load(path):
+            canonical, digest, report = good_load(path)
+            calls.append(canonical)
+            # Model a resolver returning a cyclic graph. Ordinary on-disk
+            # mutations fail the stronger SHA check before this can occur.
+            if len(calls) == 2:
+                report = copy.deepcopy(report)
+                report["scenario_manifest"]["performance_lineage"]["performance_witness"]["parent_report"] = copy.deepcopy(immediate)
+            return canonical, digest, report
+        with mock.patch("cockpit_report_reference.load_report", side_effect=cycle_load):
+            with self.assertRaisesRegex(ValueError, "parent_report_cycle"):
+                performance_module._validate_lineage(self.declaration)
+        self.assertEqual(len(calls), 2)
+
     def test_wrong_initial_save_source_or_hash_and_unrelated_history_rejected(self):
         original = copy.deepcopy(self.declaration)
         bad = copy.deepcopy(original)
@@ -366,12 +597,14 @@ class PerformanceRouteTest(unittest.TestCase):
 
     def test_setup_run_or_other_product_cannot_supply_the_later_work_interval(self):
         path = self.generator_run / "runtime.binding.json"
+        # A different origin product is valid; its identity is independent.
         runtime = {**self.runtime, "executable_sha256": "0" * 64}
         self.write(path, runtime)
         declaration = copy.deepcopy(self.declaration)
         declaration["evidence_contract"]["performance_witness"]["initial_world"]["runtime_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-        with self.assertRaisesRegex(ValueError, "generation_source_or_run_mismatch"):
-            self.validate_native(declaration=declaration)
+        report = copy.deepcopy(self.report)
+        report["scenario_manifest"]["performance_lineage"]["performance_witness"] = copy.deepcopy(declaration["evidence_contract"]["performance_witness"])
+        self.assertEqual(self.validate_native(declaration=declaration, report=report)["scope"], "observed_native_work_interval")
         self.write(path, {**self.runtime, "runtime_source_sha256": "c" * 64})
         startup = copy.deepcopy(self.generator_startup)
         startup["generation_identity"]["run_id"] = self.run_id
@@ -511,7 +744,9 @@ class PerformanceRouteTest(unittest.TestCase):
     def test_bridge_authority_and_save_lifetime_are_checked_without_graphical_snapshot(self):
         report = copy.deepcopy(self.report)
         report.pop("world_snapshot")
-        self.assertEqual(self.validate_native(report=report)["scope"], "observed_native_work_interval")
+        with self.assertRaisesRegex(ValueError, "saved_world_producer_mismatch"):
+            self.validate_native(report=report)
+        report = copy.deepcopy(self.report)
         for index, (token, binding) in enumerate(((None, self.binding_id),
                 ("another-selection", self.binding_id), (self.run_id, "other"))):
             # Parse the real serve command and prepare its manifest, including
@@ -549,6 +784,17 @@ class PerformanceRouteTest(unittest.TestCase):
                 "renderer": "curses", "make_variables": ["SOUND=0"]}}, "")):
             readiness = startup_harness.terminal_mode_readiness(self.declaration, self.root / "game.exe")
         self.assertEqual(readiness["status"], "ready", readiness)
+        self.assertTrue(self.declaration["capture_world_after"])
+        self.assertEqual(self.report["world_snapshot"]["status"], "current_saved_world_reference")
+        self.assertFalse(self.report["world_snapshot"]["retained_copy"])
+        self.assertEqual(self.report["world_snapshot"]["source_sha256"], startup_harness.sha256_tree(self.world)[0])
+        graphical = copy.deepcopy(self.declaration)
+        graphical["runtime_contract"]["require_screen_observability"] = True
+        with mock.patch.object(startup_harness.sys, "platform", "win32"):
+            self.assertEqual(startup_harness.terminal_mode_readiness(graphical, self.root / "game.exe")["status"], "unsupported_terminal_mode")
+            unrelated = copy.deepcopy(self.declaration)
+            unrelated["evidence_contract"].pop("performance_witness")
+            self.assertIn("graphical observability", startup_harness.terminal_mode_readiness(unrelated, self.root / "game.exe")["reason"])
 
     def lower_ceiling_through_live_producer(self, charter):
         """Exercise execute_probe_steps' actual ceiling choice, then the real journal producer."""
@@ -657,7 +903,7 @@ class PerformanceRouteTest(unittest.TestCase):
         old = copy.deepcopy(self.declaration)
         old["evidence_contract"].pop("performance_witness")
         self.assertEqual(store._run_evidence_ceiling(self.connection, self.manifest_id, old), "zero-credit")
-        for key, value in (("name", "other.scenario"), ("capture_world_after", True), ("saved_world_snapshot", "old-save")):
+        for key, value in (("name", "other.scenario"), ("capture_world_after", False), ("post_relaunch", [{"kind": "wait"}]), ("saved_world_snapshot", "old-save")):
             bad = copy.deepcopy(self.declaration)
             bad[key] = value
             self.write(self.path, bad)
