@@ -441,7 +441,9 @@ class CockpitRunChannel:
         self._run_id = run_id
         evidence = dict(self._read_evidence()) if self._read_evidence is not None else {}
         raw_receipt = issuing_raw.get("native_receipt")
+        from process_performance import compact_status
         compact_log = {
+            "performance": compact_status(evidence.get("performance"), run_id, self._binding_id),
             "receipt_count": int(evidence.get("receipt_count", 0) or 0),
             "latest_receipt": raw_receipt if isinstance(raw_receipt, Mapping) else evidence.get("latest_receipt"),
             "first_divergence": evidence.get("first_divergence"),
@@ -1171,7 +1173,9 @@ class CockpitRunChannel:
                 })
         evidence = dict(self._read_evidence()) if self._read_evidence is not None else {}
         scheduler_trace = list(evidence.get("scheduler_trace", []))
+        from process_performance import compact_status
         compact_log = {
+            "performance": compact_status(evidence.get("performance"), run_id, self._binding_id),
             "receipt_count": int(evidence.get("receipt_count", 0) or 0),
             "latest_receipt": evidence.get("latest_receipt"),
             "first_divergence": evidence.get("first_divergence"),

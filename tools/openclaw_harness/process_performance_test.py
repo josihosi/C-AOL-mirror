@@ -1,4 +1,5 @@
 import copy
+import errno
 import json
 import os
 from pathlib import Path
@@ -163,6 +164,15 @@ class PerformanceTest(unittest.TestCase):
         self.assertEqual(recorder.context["phase"], "unknown")
         self.assertIn("identity unavailable", recorder.failure)
         self.assertIsNone(recorder.latest)
+        self.assertEqual(perf.compact_status(recorder.brief(), "run-a", "binding-a")
+                         ["collection_failure"]["reason"], "owned_process_identity_unavailable_or_changed")
+
+    def test_sampler_foreign_pid_cannot_record_under_existing_birth(self):
+        recorder = self.recorder([sample(1, 0), {**sample(2, 1), "pid": 74}])
+        recorder.begin_action({"kind": "world"}, "world.pause")
+        self.assertTrue(recorder.stopped)
+        self.assertIsNone(recorder.latest)
+        self.assertFalse((self.directory / "performance.jsonl").exists())
 
     def test_failed_telemetry_write_preserves_native_outcome(self):
         recorder = self.recorder([sample(1, 0), sample(2, 1), sample(3, 2)])
@@ -174,11 +184,166 @@ class PerformanceTest(unittest.TestCase):
         self.assertTrue(recorder.stopped)
 
     def test_paging_keeps_exact_records_and_next_offset(self):
+        recorder = self.recorder([sample(1, 0)])
         for index in range(12):
-            perf.append_record(self.directory, {"index": index})
+            perf.append_record(self.directory, {"index": index, "owner": recorder.owner})
         page = perf.read_records(self.directory, 5, 5)
         self.assertEqual([item["index"] for item in page["records"]], list(range(5, 10)))
         self.assertEqual(page["next_offset"], 10)
+
+    def test_latest_replace_failure_keeps_committed_advancing_records_and_recovers(self):
+        recorder = self.recorder([sample(t, t) for t in range(1, 12)])
+        recorder.observe({"kind": "world", "game_minutes": 100})
+        original = perf.read_json(self.directory / "performance.latest.json")
+        replace = os.replace
+        def blocked(source, destination):
+            if Path(destination).name == "performance.latest.json":
+                raise PermissionError(errno.EACCES, "controlled latest sharing refusal")
+            return replace(source, destination)
+        with patch("process_performance.os.replace", side_effect=blocked):
+            for minute in (100, 101, 102):
+                frame = {"kind": "world", "game_minutes": minute}
+                recorder.begin_action(frame, "world.pause")
+                recorder.end_action(frame, {"accepted": True, "next_frame": {
+                    "kind": "world", "game_minutes": minute + 1}})
+                self.assertFalse(recorder.stopped)
+                self.assertEqual(recorder.latest_publication["status"], "unavailable")
+                self.assertEqual(recorder.latest["game_time"]["delta_minutes"], 1)
+        rows = perf.read_records(self.directory, 0, 20)["records"]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len({r["record_id"] for r in rows}), 4)
+        self.assertEqual(perf.read_json(self.directory / "performance.latest.json"), original)
+        self.assertEqual(list(self.directory.glob("*.tmp")), [])
+        recorder.observe({"kind": "world", "game_minutes": 103})
+        self.assertEqual(recorder.latest_publication["status"], "published")
+        self.assertEqual(perf.read_json(self.directory / "performance.latest.json"), recorder.latest)
+        self.assertEqual(len(perf.read_records(self.directory, 0, 20)["records"]), 5)
+        self.assertIsNone(recorder.latest["game_time"]["delta_minutes"])
+
+    def test_context_replace_failure_does_not_erase_native_action_and_is_disclosed(self):
+        recorder = self.recorder([sample(t, t) for t in range(1, 7)])
+        replace = os.replace
+        def blocked(source, destination):
+            if Path(destination).name == "performance-context.json":
+                raise PermissionError(errno.EACCES, "controlled context sharing refusal")
+            return replace(source, destination)
+        frame = {"kind": "world", "game_minutes": 100}
+        with patch("process_performance.os.replace", side_effect=blocked):
+            recorder.begin_action(frame, "world.pause")
+            recorder.end_action(frame, {"accepted": True, "next_frame": {"game_minutes": 101}})
+            status = perf.compact_status(recorder.brief(), "run-a", "binding-a")
+            self.assertEqual(status["context_publication"]["status"], "unavailable")
+            self.assertEqual(status["latest_publication"]["status"], "published")
+            self.assertEqual(status["latest_game_time"]["delta_minutes"], 1)
+            self.assertFalse(recorder.stopped)
+        recorder.observe({"kind": "world", "game_minutes": 101})
+        self.assertEqual(recorder.context_publication["status"], "published")
+        self.assertEqual(list(self.directory.glob("*.tmp")), [])
+
+    def test_append_failure_still_stops_without_replaying_uncertain_write(self):
+        recorder = self.recorder([sample(1, 0), sample(2, 1), sample(3, 2)])
+        frame = {"kind": "world", "game_minutes": 100}
+        recorder.begin_action(frame, "world.pause")
+        with patch("process_performance.os.write", return_value=0):
+            recorder.end_action(frame, {"accepted": True, "next_frame": {"game_minutes": 101}})
+        self.assertTrue(recorder.stopped)
+        self.assertIsNone(recorder.latest)
+        self.assertEqual(recorder.failure_details["operation"], "end_action")
+        self.assertEqual((self.directory / "performance.jsonl").read_bytes(), b"")
+        recorder.observe(frame)
+        self.assertEqual((self.directory / "performance.jsonl").read_bytes(), b"")
+
+    def test_foreign_persisted_owner_cannot_append_or_publish(self):
+        for key, value in (("pid", 74), ("process_identity", "reused"), ("run_id", "foreign"),
+                           ("binding_id", "foreign"), ("source_binding", {"runtime_binding_sha256": "other"})):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                recorder = perf.ProcessPerformance(directory, pid=73, run_id="run-a", binding_id="binding-a",
+                    source_binding={"runtime_binding_sha256": "binary-a"}, sampler=lambda _: sample(1, 0))
+                foreign = {**recorder.owner, key: value}
+                perf.write_json(directory / "performance-owner.json", foreign)
+                with self.assertRaisesRegex(ValueError, "owner_missing_or_changed"):
+                    perf.append_record(directory, {"record_id": "not-authorized", "owner": recorder.owner})
+                self.assertFalse((directory / "performance.jsonl").exists())
+                self.assertFalse((directory / "performance.latest.json").exists())
+
+    def test_owner_change_during_latest_preparation_cannot_replace(self):
+        recorder = self.recorder([sample(1, 0)])
+        record = perf.resource_record(recorder.owner, sample(2, 1), sample(3, 2), {}, 100, 101, 1)
+        write = Path.write_text
+        def change_owner(path, *args, **kwargs):
+            result = write(path, *args, **kwargs)
+            if path.name.startswith("performance.latest.json."):
+                write(self.directory / "performance-owner.json", json.dumps({**recorder.owner, "binding_id": "foreign"}))
+            return result
+        with patch.object(Path, "write_text", new=change_owner):
+            with self.assertRaisesRegex(ValueError, "owner_missing_or_changed"):
+                perf.append_record(self.directory, record)
+        self.assertEqual(len(perf.read_records(self.directory, 0, 5)["records"]), 1)
+        self.assertFalse((self.directory / "performance.latest.json").exists())
+        self.assertEqual(list(self.directory.glob("*.tmp")), [])
+
+    def test_failed_publication_removes_only_its_own_temporary(self):
+        foreign = self.directory / "performance.latest.json.foreign.tmp"
+        foreign.write_bytes(b"unrelated")
+        with patch("process_performance.os.replace", side_effect=PermissionError(errno.EACCES, "held")):
+            with self.assertRaises(PermissionError):
+                perf.write_json(self.directory / "performance.latest.json", {"fixture": True})
+        self.assertEqual(list(self.directory.glob("*.tmp")), [foreign])
+        self.assertEqual(foreign.read_bytes(), b"unrelated")
+
+    def test_compact_status_rejects_foreign_or_missing_identity_and_omits_raw_error(self):
+        recorder = self.recorder([sample(1, 0), sample(2, 1)])
+        recorder.observe({"kind": "world"})
+        brief = recorder.brief()
+        brief["collection_error"] = "raw command must never be projected" * 100
+        status = perf.compact_status(brief, "run-a", "binding-a")
+        self.assertNotIn("raw command", json.dumps(status))
+        self.assertLess(len(json.dumps(status)), 1500)
+        for malformed in (None, [], "not a clock"):
+            changed = copy.deepcopy(brief); changed["latest"]["game_time"] = malformed
+            self.assertIsNone(perf.compact_status(changed, "run-a", "binding-a")["latest_game_time"])
+        for key, value in (("run_id", "foreign"), ("binding_id", "foreign"),
+                           ("pid", None), ("process_identity", None), ("source_binding", None)):
+            changed = copy.deepcopy(brief); changed["owner"][key] = value
+            self.assertEqual(perf.compact_status(changed, "run-a", "binding-a")["status"], "unavailable")
+        changed = copy.deepcopy(brief)
+        changed["latest"]["owner"] = {**changed["latest"]["owner"], "process_identity": "reused"}
+        self.assertEqual(perf.compact_status(changed, "run-a", "binding-a")["reason"], "performance_record_owner_mismatch")
+
+    @unittest.skipUnless(os.name == "nt", "real Windows non-delete-sharing handle")
+    def test_windows_real_sharing_refusal_keeps_journal_then_recovers(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]; kernel.CloseHandle.restype = wintypes.BOOL
+        recorder = self.recorder([sample(t, t) for t in range(1, 12)])
+        recorder.observe({"kind": "world", "game_minutes": 100})
+        latest = self.directory / "performance.latest.json"
+        prior = perf.read_json(latest)
+        handle = kernel.CreateFileW(str(latest), 0x80000000, 0x1 | 0x2, None, 3, 0x80, None)
+        self.assertNotIn(handle, (None, wintypes.HANDLE(-1).value))
+        try:
+            for minute in (100, 101, 102):
+                frame = {"kind": "world", "game_minutes": minute}
+                recorder.begin_action(frame, "world.pause")
+                recorder.end_action(frame, {"accepted": True, "next_frame": {"game_minutes": minute + 1}})
+                self.assertFalse(recorder.stopped)
+                self.assertEqual(recorder.latest_publication["winerror"], 5)
+                self.assertEqual(perf.read_json(latest), prior)
+        finally:
+            self.assertTrue(kernel.CloseHandle(handle))
+        rows = perf.read_records(self.directory, 0, 20)["records"]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(sum(r["game_time"]["delta_minutes"] == 1 for r in rows), 3)
+        recorder.observe({"kind": "world", "game_minutes": 103})
+        self.assertEqual(perf.read_json(latest), recorder.latest)
+        self.assertEqual(recorder.latest_publication["status"], "published")
+        self.assertEqual(len(perf.read_records(self.directory, 0, 20)["records"]), 5)
+        self.assertEqual(list(self.directory.glob("*.tmp")), [])
 
     def test_real_host_counter_measures_this_test_process_without_game(self):
         before = sample_child_resources(os.getpid())
@@ -266,7 +431,8 @@ class PerformanceTest(unittest.TestCase):
         self.assertEqual(repeat["alarms"], [])
 
     def test_native_turn_producer_emits_parseable_precise_json(self):
-        source = (Path(__file__).resolve().parents[2] / "src" / "do_turn.cpp").read_text(encoding="utf-8")
+        from startup_harness import repo_root
+        source = (repo_root() / "src" / "do_turn.cpp").read_text(encoding="utf-8")
         start = source.index('stream << "{\\"event\\":')
         end = source.index(";\n    }", start)
         chain = source[start + len("stream << "):end]
@@ -291,7 +457,8 @@ class PerformanceTest(unittest.TestCase):
         self.assertIn("std::setprecision( std::numeric_limits<double>::max_digits10 )", source)
 
     def test_activity_distraction_query_is_inside_the_input_phase(self):
-        source = (Path(__file__).resolve().parents[2] / "src" / "do_turn.cpp").read_text(encoding="utf-8")
+        from startup_harness import repo_root
+        source = (repo_root() / "src" / "do_turn.cpp").read_text(encoding="utf-8")
         start = source.index("if( u.activity ) {\n                for( std::pair<const distraction_type")
         end = source.index("\n            }\n        }\n    }", start)
         owner = source[start:end]
@@ -754,6 +921,52 @@ class PerformanceTest(unittest.TestCase):
             recorder.end_action.assert_called_once_with(frame, outcome)
             service.live_channel._finalize_session({})
             recorder.stop.assert_called_once()
+
+    def test_startup_advancing_dispatch_append_latest_failure_and_compact_observation(self):
+        import startup_harness as startup
+        recorder = self.recorder([sample(t, t) for t in range(1, 20)])
+        frame = {"event": "surface_descriptor", "schema_version": 1, "run_id": "run-a",
+            "frame_id": "frame-a", "surface_id": "world-a", "kind": "world", "game_minutes": 100, "breadcrumbs": ["World"],
+            "payload": {}, "valid_actions": [{"id": "world.pause", "label": "Pause", "enabled": True}]}
+        successor = {**frame, "frame_id": "frame-b", "surface_id": "world-b", "game_minutes": 101}
+        outcome = {"accepted": True, "next_frame": successor}
+        replace = os.replace
+        def blocked(source, destination):
+            if Path(destination).name == "performance.latest.json":
+                raise PermissionError(errno.EACCES, "controlled filesystem publication refusal")
+            return replace(source, destination)
+        with patch.dict(os.environ, {"OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": "binding-a",
+                                     "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(self.directory)}), \
+                patch.object(startup, "pid_is_alive", return_value=True), \
+                patch.object(startup, "pid_command", return_value="owned-game"), \
+                patch.object(startup, "current_owned_process_generation", return_value={
+                    "status": "alive", "pid": 73, "expected": {
+                        "pid": 73, "birth_identity": "birth-a", "command": "owned-game"}}), \
+                patch("process_performance.ProcessPerformance", return_value=recorder), \
+                patch.object(startup, "compact_cockpit_live_evidence", return_value={}), \
+                patch.object(startup, "execute_semantic_act", return_value=outcome):
+            service = startup.open_cockpit_game_service(profile="test", run_dir=self.directory,
+                run_id="run-a", trace_start_offset=0, pid=73, session_id="test", live_session=True)
+            self.addCleanup(service.live_channel.archive.close)
+            with patch("process_performance.os.replace", side_effect=blocked):
+                self.assertEqual(service.live_channel._dispatch_advertised_action(frame, "world.pause"), outcome)
+                service.live_channel._read_native_frame = lambda: successor
+                observed = service.live_channel.observe()
+            status = observed["compact_log"]["performance"]
+            self.assertEqual(status["owner"]["run_id"], "run-a")
+            self.assertEqual(status["latest_publication"]["status"], "unavailable")
+            self.assertEqual(status["status"], "recording")
+            rows = perf.read_records(self.directory, 0, 20)["records"]
+            advancing = [r for r in rows if r["game_time"]["delta_minutes"] == 1]
+            self.assertEqual(len(advancing), 1)
+            self.assertEqual(advancing[0]["owner"], recorder.owner)
+            self.assertEqual(advancing[0]["context"]["action_id"], "world.pause")
+            self.assertFalse((self.directory / "performance.latest.json").exists())
+            recovered = service.live_channel.observe()["compact_log"]["performance"]
+            self.assertEqual(recovered["latest_publication"]["status"], "published")
+            self.assertEqual(perf.read_json(self.directory / "performance.latest.json"), recorder.latest)
+            self.assertEqual(sum(r["game_time"]["delta_minutes"] == 1 for r in
+                perf.read_records(self.directory, 0, 20)["records"]), 1)
 
 
 if __name__ == "__main__":

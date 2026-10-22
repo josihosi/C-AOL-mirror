@@ -61,15 +61,39 @@ def update_waiting_performance(state: dict, measurement: dict) -> tuple[dict, di
 
 def read_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def write_json(path: Path, value: dict):
+def write_json(path: Path, value: dict, *, guard=None):
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    temporary.write_text(json.dumps(value))
-    os.replace(temporary, path)
+    try:
+        if guard is not None:
+            guard()
+        temporary.write_text(json.dumps(value), encoding="utf-8")
+        if guard is not None:
+            guard()
+        os.replace(temporary, path)
+    finally:
+        # Only this attempted publication's temporary file is ours to remove.
+        temporary.unlink(missing_ok=True)
+
+
+def _publication_error(error: OSError, operation: str) -> dict:
+    # Exceptions may contain command text or arbitrarily long paths. Publish
+    # the operation and OS codes, never their raw message, in compact evidence.
+    return {"status": "unavailable", "operation": operation,
+            "error_type": type(error).__name__, "errno": error.errno,
+            "winerror": getattr(error, "winerror", None)}
+
+
+def _require_record_owner(directory: Path, owner: dict):
+    if (not isinstance(owner, dict) or not owner.get("run_id") or not owner.get("binding_id")
+            or not owner.get("process_identity") or not owner.get("source_binding")
+            or not isinstance(owner.get("pid"), int) or isinstance(owner["pid"], bool)
+            or owner["pid"] <= 0 or read_json(directory / "performance-owner.json") != owner):
+        raise ValueError("performance_record_owner_missing_or_changed")
 
 
 def _finite_number(value: Any, *, positive: bool = False) -> bool:
@@ -722,6 +746,8 @@ def resource_record(owner: dict, before: dict, after: dict, context: dict,
 def append_record(directory: Path, record: dict):
     # Each writer appends one complete short record with one O_APPEND write.
     # No in-memory history and no rewriting the growing journal.
+    owner = record.get("owner")
+    _require_record_owner(directory, owner)
     raw = (json.dumps(record, separators=(",", ":")) + "\n").encode()
     fd = os.open(directory / "performance.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
@@ -729,7 +755,17 @@ def append_record(directory: Path, record: dict):
             raise OSError("incomplete performance journal append")
     finally:
         os.close(fd)
-    write_json(directory / "performance.latest.json", record)
+    # A committed journal line is the measurement. A Windows reader can deny
+    # replacement of the optional latest projection; that must not stop future
+    # measurements or replay the already appended record. The next ordinary
+    # record publishes its own fresh projection after the reader releases it.
+    try:
+        write_json(directory / "performance.latest.json", record,
+                   guard=lambda: _require_record_owner(directory, owner))
+    except OSError as error:
+        return {**_publication_error(error, "latest_publication"),
+                "record_id": record.get("record_id")}
+    return {"status": "published", "record_id": record.get("record_id")}
 
 
 def telemetry_only(operation):
@@ -739,6 +775,10 @@ def telemetry_only(operation):
             return operation(self, *args, **kwargs)
         except (OSError, ValueError, KeyError, TypeError) as error:
             self.failure = str(error)
+            self.failure_details = {"status": "unavailable", "operation": operation.__name__,
+                                    "error_type": type(error).__name__,
+                                    "errno": getattr(error, "errno", None),
+                                    "winerror": getattr(error, "winerror", None)}
             self.stopped = True
             return None
     return measured
@@ -757,6 +797,9 @@ class ProcessPerformance:
                       "source_binding": source_binding}
         self.stopped = False
         self.failure = None
+        self.failure_details = None
+        self.latest_publication = {"status": "not_recorded"}
+        self.context_publication = {"status": "not_published"}
         self.latest = None
         self.before = None
         self.started = None
@@ -766,16 +809,25 @@ class ProcessPerformance:
 
     def set_context(self, context: dict):
         self.context = dict(context)
-        write_json(self.directory / "performance-context.json", {
-            "owner": self.owner, "context": self.context,
-            "context_id": uuid.uuid4().hex, "session_ended": self.stopped})
+        try:
+            write_json(self.directory / "performance-context.json", {
+                "owner": self.owner, "context": self.context,
+                "context_id": uuid.uuid4().hex, "session_ended": self.stopped},
+                guard=lambda: _require_record_owner(self.directory, self.owner))
+        except OSError as error:
+            self.context_publication = _publication_error(error, "context_publication")
+        else:
+            self.context_publication = {"status": "published"}
 
     def sample(self):
         if self.stopped:
             return None
         sample = self.sampler(self.owner["pid"])
-        if not self.owner.get("process_identity") or sample.get("process_identity") != self.owner["process_identity"]:
+        if (sample.get("pid") != self.owner["pid"] or not self.owner.get("process_identity")
+                or sample.get("process_identity") != self.owner["process_identity"]):
             self.failure = "owned process identity unavailable or changed"
+            self.failure_details = {"status": "unavailable", "operation": "sample",
+                                    "reason": "owned_process_identity_unavailable_or_changed"}
             self.stopped = True
             self.set_context({"phase": "unknown", "source": "process_identity_unavailable_or_changed"})
             return None
@@ -799,7 +851,7 @@ class ProcessPerformance:
                                      {**self.context, "accepted": outcome.get("accepted"),
                                       "outcome": outcome.get("outcome", outcome.get("error"))},
                                      frame.get("game_minutes"), successor.get("game_minutes"), latency)
-            append_record(self.directory, record)
+            self.latest_publication = append_record(self.directory, record)
             self.latest = record
             self.previous = after
         self.before = None
@@ -818,7 +870,7 @@ class ProcessPerformance:
                        "end_context": native_context(frame),
                        "source": "observation_endpoints", "note": "Interval may include unobserved simulation; not certified idle."}
             record = resource_record(self.owner, self.previous, after, context)
-            append_record(self.directory, record)
+            self.latest_publication = append_record(self.directory, record)
             self.latest = record
             self.previous = after
             self.set_context(native_context(frame))
@@ -830,9 +882,54 @@ class ProcessPerformance:
             self.set_context({"phase": "session_or_process_ended", "source": "lifecycle"})
 
     def brief(self):
-        return {"latest": self.latest, "collection_error": self.failure, "stopped": self.stopped,
+        return {"owner": self.owner, "latest": self.latest,
+                "collection_error": self.failure, "collection_failure": self.failure_details,
+                "latest_publication": self.latest_publication,
+                "context_publication": self.context_publication, "stopped": self.stopped,
                 "records_path": str(self.directory / "performance.jsonl"),
                 "next": "play_cli performance; use --sample-seconds 1 during pending work"}
+
+
+def compact_status(brief: Mapping[str, Any] | None, run_id: str, binding_id: str) -> dict:
+    """Bound recorder health for cockpit observations, without raw errors/history."""
+    if not isinstance(brief, Mapping):
+        return {"status": "unavailable", "reason": "performance_not_initialized"}
+    owner = brief.get("owner")
+    if (not isinstance(owner, Mapping) or owner.get("run_id") != run_id
+            or owner.get("binding_id") != binding_id or not run_id or not binding_id
+            or not owner.get("process_identity") or not owner.get("source_binding")
+            or not isinstance(owner.get("pid"), int) or isinstance(owner["pid"], bool)
+            or owner["pid"] <= 0):
+        return {"status": "unavailable", "reason": "performance_owner_mismatch"}
+    source = owner.get("source_binding")
+    digest = source.get("runtime_binding_sha256") if isinstance(source, Mapping) else None
+    if (not isinstance(digest, str) or not 0 < len(digest) <= 128
+            or any(not isinstance(owner.get(key), str) or len(owner[key]) > 128
+                   for key in ("run_id", "binding_id", "process_identity"))):
+        return {"status": "unavailable", "reason": "performance_owner_mismatch"}
+    latest = brief.get("latest")
+    if latest is not None and (not isinstance(latest, Mapping) or latest.get("owner") != owner):
+        return {"status": "unavailable", "reason": "performance_record_owner_mismatch"}
+    game_time = latest.get("game_time") if latest else None
+    def publication(value):
+        return {key: value[key][:128] if isinstance(value[key], str) else value[key] for key in
+                ("status", "operation", "reason", "error_type", "errno", "winerror", "record_id")
+                if key in value and (value[key] is None or isinstance(value[key], (str, int, bool)))} \
+            if isinstance(value, Mapping) else {"status": "unavailable"}
+    return {"status": "stopped" if brief.get("stopped") else "recording",
+            "owner": {**{key: owner[key] for key in
+                         ("pid", "process_identity", "run_id", "binding_id")},
+                      "source_binding": {"runtime_binding_sha256": digest}},
+            "latest_record_id": str(latest.get("record_id", ""))[:128] if latest else None,
+            "latest_game_time": {key: value for key, value in game_time.items()
+                                 if key in {"before_minutes", "after_minutes", "delta_minutes", "source"}
+                                 and (value is None or _finite_number(value)
+                                      or key == "source" and value == "native_frame")} if isinstance(game_time, Mapping) else None,
+            "collection_failure": publication(brief.get("collection_failure"))
+            if brief.get("collection_failure") else None,
+            "latest_publication": publication(brief.get("latest_publication")),
+            "context_publication": publication(brief.get("context_publication")),
+            "records_path": str(brief.get("records_path", ""))[:1024]}
 
 
 def sample_owned_session(directory: Path, binding_id: str, seconds: float,

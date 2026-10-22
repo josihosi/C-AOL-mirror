@@ -267,6 +267,33 @@ class CockpitObservationTest(unittest.TestCase):
             observed["compact_log"]["production_channel_observation"], channel_observation,
         )
 
+    def test_bound_recorder_status_reaches_surface_and_legacy_observations(self) -> None:
+        import process_performance as perf
+        owner = {"pid": 73, "process_identity": "birth-a", "run_id": "r012-proof",
+                 "binding_id": "binding-a", "source_binding": {"runtime_binding_sha256": "a" * 64}}
+        brief = {"owner": owner, "latest": {"owner": owner, "record_id": "committed-record",
+                 "game_time": {"before_minutes": 100, "after_minutes": 101,
+                               "delta_minutes": 1, "source": "native_frame"}},
+                 "collection_error": "must not expose raw command or secret", "stopped": False,
+                 "latest_publication": {"status": "unavailable", "operation": "latest_publication",
+                     "error_type": "PermissionError", "errno": 13, "winerror": 5}}
+        descriptor = {"event": "surface_descriptor", "schema_version": 1, "run_id": "r012-proof",
+            "surface_id": "world-a", "frame_id": "frame-a", "kind": "world", "breadcrumbs": ["World"],
+            "payload": {}, "valid_actions": []}
+        for frame in (descriptor, native_frame(1)):
+            with self.subTest(surface=frame.get("event", "legacy")):
+                channel = cockpit.CockpitRunChannel(lambda: frame,
+                    read_evidence=lambda: {"performance": brief}, binding_id="binding-a")
+                status = channel.observe()["compact_log"]["performance"]
+                self.assertEqual(status, perf.compact_status(brief, "r012-proof", "binding-a"))
+                self.assertEqual(status["latest_game_time"]["delta_minutes"], 1)
+                self.assertEqual(status["latest_publication"]["winerror"], 5)
+                self.assertNotIn("secret", json.dumps(status))
+                foreign = cockpit.CockpitRunChannel(lambda: frame,
+                    read_evidence=lambda: {"performance": brief}, binding_id="foreign")
+                self.assertEqual(foreign.observe()["compact_log"]["performance"],
+                    {"status": "unavailable", "reason": "performance_owner_mismatch"})
+
     def test_unsupported_descriptor_with_an_action_fails_closed(self) -> None:
         frame = {
             "event": "surface_descriptor", "schema_version": 1, "run_id": "surface-proof",
