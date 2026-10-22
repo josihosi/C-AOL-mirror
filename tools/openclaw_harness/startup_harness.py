@@ -3462,21 +3462,23 @@ def install_saved_world_snapshot(profile: str, target_world: str,
             raise SystemExit(f"saved-world profile already contains different data: {destination}; "
                              "use a fresh profile or explicit replacement")
     ensure_dir(save_root)
-    staging = save_root / f".{target_world}.replacement-{uuid.uuid4().hex}.tmp"
-    if staging.exists():
+    # Repeating the world name here can push otherwise usable Windows save
+    # paths beyond MAX_PATH. Reserve one short sibling owned by this copy.
+    staging = Path(tempfile.mkdtemp(prefix=".snapshot-", dir=save_root))
+    try:
+        shutil.copytree(source_world, staging, dirs_exist_ok=True)
         _make_profile_tree_owner_writable(staging)
-        shutil.rmtree(staging)
-    shutil.copytree(source_world, staging)
-    _make_profile_tree_owner_writable(staging)
-    staged_hash, staged_error = sha256_tree(staging)
-    if staged_error or staged_hash != source_hash:
-        _make_profile_tree_owner_writable(staging)
-        shutil.rmtree(staging, ignore_errors=True)
-        raise SystemExit(f"saved-world snapshot copy verification failed: {staged_error or 'hash mismatch'}")
-    if destination.exists():
-        _make_profile_tree_owner_writable(destination)
-        shutil.rmtree(destination)
-    os.replace(staging, destination)
+        staged_hash, staged_error = sha256_tree(staging)
+        if staged_error or staged_hash != source_hash:
+            raise SystemExit(f"saved-world snapshot copy verification failed: {staged_error or 'hash mismatch'}")
+        if destination.exists():
+            _make_profile_tree_owner_writable(destination)
+            shutil.rmtree(destination)
+        os.replace(staging, destination)
+    finally:
+        if staging.exists():
+            _make_profile_tree_owner_writable(staging)
+            shutil.rmtree(staging)
     installed_hash, installed_error = sha256_tree(destination)
     return {
         "status": "green_saved_world_snapshot_installed" if not installed_error and installed_hash == source_hash else "red_saved_world_snapshot_changed",
