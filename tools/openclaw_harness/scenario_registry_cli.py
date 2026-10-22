@@ -2202,6 +2202,7 @@ def _launch_selection_file_bridge(args: argparse.Namespace, registry_path: Path)
     bridge_command = [
         sys.executable, str(Path(__file__).with_name("cockpit_file_bridge.py")), "start",
         "--session-dir", str(session_dir), "--binding-id", bridge_binding_id,
+        "--authorization-token-id", selection.token_id,
         "--require-session-ready",
         "--session-reentries", str(session_reentries),
         "--reentry-command-json", json.dumps(reentry_command, separators=(",", ":")),

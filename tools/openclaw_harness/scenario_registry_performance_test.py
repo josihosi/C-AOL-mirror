@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cockpit
+import cockpit_file_bridge
 import evidence_events
 import process_performance
 import scenario_registry
@@ -69,7 +71,7 @@ class PerformanceRouteTest(unittest.TestCase):
         self.run = self.root / "run"
         self.session = self.root / "session"
         self.generator_run = self.root / "generator-run"
-        for path in (self.run, self.session, self.generator_run):
+        for path in (self.run, self.generator_run):
             path.mkdir(parents=True)
         self.patch = mock.patch.object(startup_harness, "userdir_for_profile",
                                        side_effect=lambda profile: self.root / "profiles" / profile)
@@ -123,13 +125,13 @@ class PerformanceRouteTest(unittest.TestCase):
             witness_charter=CHARTER, drafts_root=self.root / "drafts")
         self.run_id = self.execution.token_id
         self.assertIsNotNone(self.run_id)
-        self.write(self.session / "bridge.manifest.json", {"authorization_token_id": self.run_id, "binding_id": "binding"})
+        self.produce_selected_bridge()
+        self.binding_id = json.loads((self.session / "bridge.manifest.json").read_text())["binding_id"]
         # Use the real selected saved-start producer, including its independent
         # random profile UUID, parser, copy verification and normal game plan.
         selection = store.RegistryLaunchToken(self.run_id, True, "selected", SCENARIO,
             str(self.path), hashlib.sha256(self.path.read_bytes()).hexdigest())
-        args = SimpleNamespace(profile="", post_relaunch_continuation=False, saved_world_snapshot="")
-        scenario_registry_cli._preflight_selected_save_setup(selection, args)
+        args = self.selected_args
         self.launch = scenario_registry_cli._registry_launch_probe_namespace(selection,
             cockpit_live_session=True, profile_override=args.profile,
             post_relaunch_continuation=args.post_relaunch_continuation, saved_world_snapshot=args.saved_world_snapshot)
@@ -144,7 +146,7 @@ class PerformanceRouteTest(unittest.TestCase):
         self.write(self.run / "plan.json", asdict(self.plan))
         self.write(self.run / "runtime.binding.json", self.runtime)
         self.generation = {"pid": 123, "birth_identity": "windows-filetime:456", "executable_path": self.runtime["executable_path"]}
-        self.owner = {"run_id": self.run_id, "binding_id": "binding", "pid": 123,
+        self.owner = {"run_id": self.run_id, "binding_id": self.binding_id, "pid": 123,
                       "process_generation": self.generation, "userdir": str(self.userdir),
                       "world": "PerformanceTest", "playtest_mode": "terminal",
                       "log_paths": {"transition_events": {"path": str(self.run / "transition.events.jsonl"), "scope": "run_bound"}}}
@@ -165,7 +167,7 @@ class PerformanceRouteTest(unittest.TestCase):
         # Exercise the real ProcessPerformance producer with controlled process samples.
         samples = iter([self.sample(1), self.sample(2), self.sample(3)])
         performance = process_performance.ProcessPerformance(
-            self.session, pid=123, run_id=self.run_id, binding_id="binding",
+            self.session, pid=123, run_id=self.run_id, binding_id=self.binding_id,
             source_binding={"runtime_binding_sha256": hashlib.sha256((self.run / "runtime.binding.json").read_bytes()).hexdigest()},
             sampler=lambda pid: next(samples))
         frame = {"kind": "world", "game_minutes": 100}
@@ -174,7 +176,7 @@ class PerformanceRouteTest(unittest.TestCase):
         self.assertIsNotNone(performance.latest)
         self.measurement = performance.latest
         # Existing cockpit producer supplies its own save completion matching and exit observation.
-        channel = cockpit.CockpitRunChannel(lambda: {}, lambda *args: {}, binding_id="binding",
+        channel = cockpit.CockpitRunChannel(lambda: {}, lambda *args: {}, binding_id=self.binding_id,
             read_process_state=lambda: self.process, witness_charter=CHARTER,
             witness_identity={"scenario_id": SCENARIO, "source_identity": "a" * 64,
                               "executable_identity": self.runtime["executable_sha256"]})
@@ -214,6 +216,42 @@ class PerformanceRouteTest(unittest.TestCase):
         self.write(self.report_path, self.report)
         self.statement["performance_evidence"] = {"behavior": [self.handle(self.run / "transition.events.jsonl")],
                                                     "measurements": [self.handle(self.session / "performance.jsonl")]}
+
+    def produce_selected_bridge(self):
+        """Keep the actual selected command, both bridge parsers and manifest."""
+        charter = self.root / "charter.json"
+        self.write(charter, CHARTER)
+        self.selected_args = SimpleNamespace(command="registry-detached-launch",
+            selection_token=self.run_id, session_dir=str(self.session), witness_charter=str(charter),
+            profile="", post_relaunch_continuation=False, saved_world_snapshot="")
+        selection = store.RegistryLaunchToken(self.run_id, True, "selected", SCENARIO,
+            str(self.path), source_sha256=hashlib.sha256(self.path.read_bytes()).hexdigest(), runtime_binding=self.runtime)
+
+        def launch_serve(command, **kwargs):
+            self.assertEqual(command[2], "serve")
+            self.assertEqual(cockpit_file_bridge.main(command[2:]), 0)
+            return SimpleNamespace(pid=999)
+
+        def launch_bridge(command, **kwargs):
+            self.assertEqual(command[2], "start")
+            self.selected_bridge_command = command
+            output = io.StringIO()
+            with redirect_stdout(output), \
+                    mock.patch.object(cockpit_file_bridge.subprocess, "Popen", side_effect=launch_serve), \
+                    mock.patch.object(cockpit_file_bridge.FileBackedCockpitBridge, "serve",
+                                      new=lambda bridge: bridge.prepare() or 0), \
+                    mock.patch.object(startup_harness, "process_generation_snapshot", return_value={"pid": 999}):
+                self.assertEqual(cockpit_file_bridge.main(command[2:]), 0)
+            return subprocess.CompletedProcess(command, 0, output.getvalue(), "")
+
+        with mock.patch.object(scenario_registry_cli, "reload_selection_token_for_launch", return_value=selection), \
+                mock.patch.object(scenario_registry_cli, "_selected_executable", return_value=self.root / "game.exe"), \
+                mock.patch.object(scenario_registry_cli, "_selected_runtime_binding", return_value=self.runtime), \
+                mock.patch.object(scenario_registry_cli, "_current_source_executable_readiness", return_value={"status": "ready"}), \
+                mock.patch.object(scenario_registry_cli.subprocess, "run", side_effect=launch_bridge), \
+                mock.patch.object(scenario_registry_cli, "_write_result"):
+            self.assertEqual(scenario_registry_cli._launch_selection_file_bridge(
+                self.selected_args, self.root / "registry.sqlite3"), 0)
 
     def save_dimension(self):
         (self.world / "dimension_data.gsav").write_text("# version 1\n" + json.dumps(self.dimension), encoding="utf-8")
@@ -347,6 +385,9 @@ class PerformanceRouteTest(unittest.TestCase):
             self.validate_native(declaration=declaration)
 
     def test_selected_producer_consumer_and_cli_preserve_only_witnessed_interval(self):
+        bridge = json.loads((self.session / "bridge.manifest.json").read_text())
+        self.assertEqual(bridge["authorization_token_id"], self.run_id)
+        self.assertEqual(bridge["binding_id"], self.binding_id)
         self.ingest()
         result = self.record()
         self.assertEqual(result["performance"]["scope"], "observed_native_work_interval")
@@ -393,6 +434,12 @@ class PerformanceRouteTest(unittest.TestCase):
         self.write_record(self.session / "performance.jsonl", {**self.measurement, "game_time": {"source": "native_frame", "before_minutes": 100, "after_minutes": 100}})
         self.statement["performance_evidence"]["measurements"] = [self.handle(self.session / "performance.jsonl")]
         with self.assertRaisesRegex(store.ScenarioRegistryStoreError, "measurement_not_native_work"):
+            self.record()
+
+    def test_changed_selected_source_cannot_borrow_bound_bridge_authority(self):
+        self.ingest()
+        self.write(self.path, {**self.declaration, "description": "changed after selection"})
+        with self.assertRaisesRegex(store.ScenarioRegistryStoreError, "declaration_binding_drift"):
             self.record()
 
     def test_unselected_and_historical_reports_cannot_borrow_fresh_authority(self):
@@ -465,12 +512,27 @@ class PerformanceRouteTest(unittest.TestCase):
         report = copy.deepcopy(self.report)
         report.pop("world_snapshot")
         self.assertEqual(self.validate_native(report=report)["scope"], "observed_native_work_interval")
-        for delta in ({"authorization_token_id": "another-selection", "binding_id": "binding"},
-                      {"authorization_token_id": self.run_id, "binding_id": "other"}):
-            self.write(self.session / "bridge.manifest.json", delta)
+        for index, (token, binding) in enumerate(((None, self.binding_id),
+                ("another-selection", self.binding_id), (self.run_id, "other"))):
+            # Parse the real serve command and prepare its manifest, including
+            # the absent-token case that the old synthetic fixture concealed.
+            command = list(self.selected_bridge_command[2:])
+            command[0] = "serve"
+            session = self.root / ("negative-bridge-" + str(index))
+            command[command.index("--session-dir") + 1] = str(session)
+            command[command.index("--binding-id") + 1] = binding
+            auth = command.index("--authorization-token-id")
+            if token is None:
+                del command[auth:auth + 2]
+            else:
+                command[auth + 1] = token
+            with mock.patch.object(cockpit_file_bridge.FileBackedCockpitBridge, "serve",
+                                   new=lambda bridge: bridge.prepare() or 0):
+                self.assertEqual(cockpit_file_bridge.main(command), 0)
+            self.write(self.session / "bridge.manifest.json", json.loads((session / "bridge.manifest.json").read_text()))
             with self.assertRaisesRegex(ValueError, "selected_bridge_authority_mismatch"):
                 self.validate_native(report=report)
-        self.write(self.session / "bridge.manifest.json", {"authorization_token_id": self.run_id, "binding_id": "binding"})
+        self.write(self.session / "bridge.manifest.json", {"authorization_token_id": self.run_id, "binding_id": self.binding_id})
         for delta in ({"world": "other-world"}, {"playtest_mode": "tiles"}):
             self.write(self.session / "game-process.json", {**self.owner, **delta})
             with self.assertRaisesRegex(ValueError, "world_or_transport_owner_mismatch"):
@@ -494,7 +556,7 @@ class PerformanceRouteTest(unittest.TestCase):
         channels = []
 
         def factory(**kwargs):
-            channel = cockpit.CockpitRunChannel(lambda: {}, lambda *args: {}, binding_id="binding",
+            channel = cockpit.CockpitRunChannel(lambda: {}, lambda *args: {}, binding_id=self.binding_id,
                 read_process_state=lambda: self.process, witness_charter=kwargs["witness_charter"],
                 witness_identity=kwargs["witness_identity"], witness_evidence_ceiling=kwargs["witness_evidence_ceiling"])
             channel._run_id = self.run_id
