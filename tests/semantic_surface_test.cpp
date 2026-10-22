@@ -35,15 +35,20 @@
 #include "npc.h"
 #include "monster.h"
 #include "options_helpers.h"
+#include "overmap.h"
+#include "overmap_ui.h"
+#include "overmapbuffer.h"
 #include "worldfactory.h"
 #include "effect.h"
 #include "editmap.h"
 #include "coordinates.h"
+#include "color.h"
 #include "cata_scope_helpers.h"
 #include "character.h"
 #include "cursesdef.h"
 #include "debug.h"
 #include "json.h"
+#include "json_loader.h"
 #include "path_info.h"
 #include "debug_menu.h"
 #include "debug_console.h"
@@ -1941,6 +1946,322 @@ TEST_CASE( "actual map editor receipts mutation and no-op completion before clos
     CHECK( here.get_field_intensity( target, fire ) == ( remove_fire_first ? 0 : 1 ) );
     CHECK( calendar::turn == turn_before );
     CHECK( u.pos_abs() == position_before );
+}
+
+TEST_CASE( "native overmap editor owns catalog placement cancellation and receipts",
+           "[semantic_surface][overmap_native_placement]" )
+{
+    // The real catalog and placement loops must both remain operable. No
+    // direct placement helper stands in for either native modal owner.
+    const int scenario = GENERATE( 0, 1, 2, 3, 4 );
+    CAPTURE( scenario );
+    const bool debug_editor = scenario != 4;
+    const bool special = scenario == 3;
+    const bool cancel_menu = scenario == 0;
+    const bool cancel_child = scenario == 1;
+    restore_on_out_of_scope restore_debug_mode( debug_mode );
+    debug_mode = false;
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    const auto origin = u.pos_abs_omt();
+    const auto turn_before = calendar::turn;
+    const auto position_before = u.pos_abs();
+    const auto moves_before = u.get_moves();
+    overmap &om = *overmap_buffer.get_om_global( origin ).om;
+    std::ostringstream saved_map;
+    std::ostringstream saved_view;
+    om.serialize( saved_map );
+    om.serialize_view( saved_view );
+    const auto saved_global = overmap_buffer.global_state;
+    on_out_of_scope restore_map( [&]() {
+        std::istringstream map_input( saved_map.str() );
+        om.unserialize( map_input );
+        const auto view = saved_view.str();
+        om.unserialize_view( json_loader::from_string( view.substr( view.find( '\n' ) +
+                1 ) ).get_object() );
+        overmap_buffer.global_state = saved_global;
+    } );
+    restore_on_out_of_scope restore_overmap_data( g->overmap_data );
+    restore_on_out_of_scope restore_blink( uistate.overmap_blinking );
+    uistate.overmap_blinking = false;
+    const char *request_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> old_request_path = request_path ?
+        std::optional<std::string>( request_path ) : std::nullopt;
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", old_request_path );
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        ui::omap::force_quit();
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor fixture_root;
+    fixture_root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    semantic_surface_manager manager( "native-overmap-placement" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    std::vector<semantic_action_request> submitted;
+    std::vector<semantic_surface_descriptor> successors;
+    int serial = 0;
+    const auto request = [&]( const semantic_surface_descriptor & owner, const std::string & action,
+                              const std::string & target,
+    const std::map<std::string, std::string> &parameters = {} ) {
+        return semantic_action_request{ owner.run_id, owner.surface_id, owner.frame_id,
+                                        "placement-" + std::to_string( ++serial ), action, target, parameters };
+    };
+    const auto send = [&]( const semantic_surface_descriptor & owner, const std::string & action,
+                           const std::string & target,
+    const std::map<std::string, std::string> &parameters = {} ) {
+        REQUIRE( std::any_of( owner.valid_actions.begin(), owner.valid_actions.end(),
+        [&]( const semantic_action_descriptor & control ) {
+            return control.id == action && control.stable_id == target && control.enabled;
+        } ) );
+        submitted.push_back( request( owner, action, target, parameters ) );
+        REQUIRE( manager.submit_request( submitted.back() ) );
+    };
+    const auto reject = [&]( semantic_action_request invalid, const std::string & reason ) {
+        REQUIRE( manager.top() );
+        const auto frame = manager.top()->frame_id;
+        const auto terrain = overmap_buffer.ter( g->overmap_data.cursor_pos );
+        const auto metadata = overmap_buffer.overmap_special_at_existing( g->overmap_data.cursor_pos );
+        REQUIRE( manager.submit_request( invalid ) );
+        REQUIRE_FALSE( manager.consume_top_request() );
+        REQUIRE_FALSE( receipts.empty() );
+        CHECK_FALSE( receipts.back().accepted );
+        CHECK( receipts.back().rejection_reason == reason );
+        CHECK( manager.top()->frame_id == frame );
+        CHECK( overmap_buffer.ter( g->overmap_data.cursor_pos ) == terrain );
+        CHECK( overmap_buffer.overmap_special_at_existing( g->overmap_data.cursor_pos ) == metadata );
+        CHECK( calendar::turn == turn_before );
+    };
+    int outer_frames = 0;
+    int menu_frames = 0;
+    std::size_t child_frames = 0;
+    bool entry_available = false;
+    struct overmap_tile_before {
+        tripoint_abs_omt position;
+        oter_id terrain;
+        om_vision_level seen;
+        std::optional<overmap_special_id> special;
+    };
+    std::vector<overmap_tile_before> unchanged;
+    const auto record_region = [&]() {
+        for( int z = 0; z <= 1; ++z ) {
+            for( int y = -2; y <= 3; ++y ) {
+                for( int x = -2; x <= 3; ++x ) {
+                    const auto p = origin + tripoint( x, y, z );
+                    unchanged.push_back( { p, overmap_buffer.ter( p ), overmap_buffer.seen( p ),
+                                           overmap_buffer.overmap_special_at_existing( p ) } );
+                }
+            }
+        }
+    };
+    const std::vector<std::string> child_actions = cancel_child ?
+        std::vector<std::string> { "overmap.close" } :
+        special ?
+        std::vector<std::string> { "overmap.rotate", "overmap.move_cursor", "overmap.change_level",
+                                   "overmap.change_level", "overmap.place_and_close"
+                                 } :
+        std::vector<std::string> { "overmap.move_cursor", "overmap.change_level",
+                                   "overmap.change_level", "overmap.place", "overmap.place", "overmap.close"
+                                 };
+    std::vector<semantic_surface_descriptor> child_owners;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
+        if( owner.kind == "world" ) {
+            successors.push_back( owner );
+            return;
+        }
+        CHECK( calendar::turn == turn_before );
+        CHECK( u.pos_abs() == position_before );
+        CHECK( u.get_moves() == moves_before );
+        if( owner.kind == "overmap" && owner.payload.count( "editor_mode" ) == 0 ) {
+            successors.push_back( owner );
+            if( outer_frames++ == 0 ) {
+                const std::string entry = special ? "overmap.place_special" : "overmap.place_terrain";
+                const auto found = std::find_if( owner.valid_actions.begin(), owner.valid_actions.end(),
+                [&]( const semantic_action_descriptor & control ) {
+                    return control.id == entry;
+                } );
+                entry_available = found != owner.valid_actions.end();
+                CHECK( entry_available == debug_editor );
+                record_region();
+                if( !debug_editor ) {
+                    reject( request( owner, entry, "omt:" + origin.to_string() ), "unadvertised_action" );
+                } else if( entry_available ) {
+                    reject( request( owner, entry, found->stable_id, { { "type", "foreign" } } ),
+                    "invalid_parameters" );
+                    send( owner, entry, found->stable_id );
+                    return;
+                }
+            } else {
+                CHECK( owner.payload.at( "completed_editor_actions" ) == "1" );
+            }
+            send( owner, "overmap.close", "" );
+        } else if( owner.kind == "menu" ) {
+            ++menu_frames;
+            successors.push_back( owner );
+            if( cancel_menu ) {
+                send( owner, "menu.cancel", "" );
+            } else {
+                const std::string id = special ? "special:bandit_camp" : "terrain:forest";
+                const bool offered = std::any_of( owner.valid_actions.begin(), owner.valid_actions.end(),
+                [&]( const semantic_action_descriptor & control ) {
+                    return control.id == "menu.choose" && control.stable_id == id;
+                } );
+                if( !offered ) {
+                    REQUIRE( menu_frames == 1 );
+                    // Native terrain labels colorize the ID. Filter the
+                    // actual catalog text, then choose its advertised ID.
+                    send( owner, "menu.filter", "", { { "text", special ? "bandit_camp" :
+                                                         "id: [ " + colorize( "forest", c_white ) + " ]" } } );
+                } else {
+                    reject( request( owner, "menu.choose", "special:nonexistent" ), "invalid_stable_id" );
+                    send( owner, "menu.choose", id );
+                }
+            }
+        } else if( owner.kind == "overmap" ) {
+            successors.push_back( owner );
+            const std::size_t step = child_frames++;
+            REQUIRE( step < child_actions.size() );
+            CHECK( owner.payload.at( "editor_mode" ) == "placement" );
+            CHECK( owner.payload.at( "placement_id" ) == ( special ? "bandit_camp" : "forest" ) );
+            CHECK( owner.payload.at( "completed_actions" ) == std::to_string( step ) );
+            const auto cursor = g->overmap_data.cursor_pos;
+            CHECK( owner.payload.at( "cursor_position" ) == cursor.to_string() );
+            CHECK( owner.payload.at( "level" ) == std::to_string( cursor.z() ) );
+            CHECK( cursor == origin + tripoint( step >= ( special ? 2 : 1 ) ? 1 : 0,
+                                                0, step == ( special ? 3 : 2 ) ? 1 : 0 ) );
+            if( !child_owners.empty() ) {
+                CHECK( owner.surface_id == child_owners.front().surface_id );
+                CHECK( owner.frame_id != child_owners.back().frame_id );
+            }
+            if( step == 0 ) {
+                for( const std::string &reason : {
+                         "wrong_run", "wrong_surface", "stale_frame"
+                     } ) {
+                    auto invalid = request( owner, "overmap.place", owner.payload.at( "selected_stable_id" ) );
+                    if( reason == "wrong_run" ) {
+                        invalid.run_id = "foreign";
+                    } else if( reason == "wrong_surface" ) {
+                        invalid.surface_id = "foreign";
+                    } else {
+                        invalid.frame_id = "stale";
+                    }
+                    reject( invalid, reason );
+                }
+                reject( request( owner, "overmap.place", "foreign:type@coordinate" ), "invalid_target" );
+                reject( request( owner, "overmap.place", owner.payload.at( "selected_stable_id" ),
+                { { "x", "9999" } } ), "invalid_parameters" );
+                if( !special ) {
+                    reject( request( owner, "overmap.rotate", owner.payload.at( "selected_stable_id" ) ),
+                            "unadvertised_action" );
+                }
+            } else if( owner.payload.at( "selected_stable_id" ) !=
+                       child_owners.front().payload.at( "selected_stable_id" ) ) {
+                reject( request( owner, "overmap.place", child_owners.front().payload.at( "selected_stable_id" ) ),
+                        "invalid_target" );
+            }
+            if( !special && step >= 4 ) {
+                CHECK( overmap_buffer.ter( cursor ) == oter_str_id( "forest" ).id() );
+                CHECK( owner.payload.at( "last_placement_result" ) == "applied" );
+            }
+            child_owners.push_back( owner );
+            const auto &action = child_actions[step];
+            const std::string target = action == "overmap.move_cursor" ? "east" :
+                                       action == "overmap.change_level" ? ( step == ( special ? 2 : 1 ) ? "up" : "down" ) :
+                                       action == "overmap.close" ? "" : owner.payload.at( "selected_stable_id" );
+            send( owner, action, target );
+        } else {
+            FAIL( "unexpected native editor child: " + owner.kind );
+        }
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    if( debug_editor ) {
+        ui::omap::display_editor();
+    } else {
+        ui::omap::display();
+    }
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->kind == "world" );
+    CHECK( outer_frames == ( debug_editor && entry_available ? 2 : 1 ) );
+    CHECK( child_frames == ( debug_editor && !cancel_menu &&
+                             entry_available ? child_actions.size() : 0 ) );
+    if( scenario <= 1 || !debug_editor ) {
+        for( const auto &tile : unchanged ) {
+            CHECK( overmap_buffer.ter( tile.position ) == tile.terrain );
+            CHECK( overmap_buffer.seen( tile.position ) == tile.seen );
+            CHECK( overmap_buffer.overmap_special_at_existing( tile.position ) == tile.special );
+        }
+    } else if( entry_available ) {
+        const auto placed = origin + point::east;
+        if( special ) {
+            CHECK( overmap_buffer.overmap_special_at_existing( placed ) ==
+                   overmap_special_id( "bandit_camp" ) );
+            CHECK( overmap_buffer.ter( placed ) == oter_str_id( "bandit_camp_1_east" ).id() );
+        } else {
+            CHECK( overmap_buffer.ter( placed ) == oter_str_id( "forest" ).id() );
+        }
+    }
+    std::ostringstream map_before_replay;
+    om.serialize( map_before_replay );
+    const auto final_world_frame = manager.top()->frame_id;
+    for( const auto &sent : submitted ) {
+        const auto receipt = std::find_if( receipts.begin(), receipts.end(), [&]( const auto & candidate ) {
+            return candidate.request_id == sent.request_id;
+        } );
+        REQUIRE( receipt != receipts.end() );
+        CHECK( receipt->accepted );
+        CHECK( receipt->consuming_frame_id == sent.frame_id );
+        CHECK( receipt->resulting_frame_id != sent.frame_id );
+        const auto successor = std::find_if( successors.begin(), successors.end(), [&]( const auto & successor ) {
+            return successor.frame_id == receipt->resulting_frame_id;
+        } );
+        REQUIRE( successor != successors.end() );
+        if( sent.action_id == "overmap.place_terrain" || sent.action_id == "overmap.place_special" ) {
+            CHECK( successor->kind == "menu" );
+        } else if( sent.action_id == "menu.choose" ) {
+            CHECK( successor->kind == "overmap" );
+            CHECK( successor->payload.at( "editor_mode" ) == "placement" );
+        } else if( sent.action_id == "menu.cancel" || sent.action_id == "overmap.place_and_close" ) {
+            CHECK( successor->kind == "overmap" );
+            CHECK( successor->payload.count( "editor_mode" ) == 0 );
+        }
+        const auto count = receipts.size();
+        const auto expected = *receipt;
+        CHECK_FALSE( manager.submit_request( sent ) );
+        REQUIRE( receipts.size() == count + 1 );
+        CHECK( receipts.back().resulting_frame_id == expected.resulting_frame_id );
+        CHECK_FALSE( manager.has_pending_request() );
+        CHECK( manager.top()->kind == "world" );
+        CHECK( manager.top()->frame_id == final_world_frame );
+    }
+    std::ostringstream map_after_replay;
+    om.serialize( map_after_replay );
+    CHECK( map_after_replay.str() == map_before_replay.str() );
+    CHECK( uistate.place_terrain == nullptr );
+    CHECK( uistate.place_special == nullptr );
+    CHECK( calendar::turn == turn_before );
+    CHECK( u.pos_abs() == position_before );
+    CHECK( u.get_moves() == moves_before );
 }
 
 TEST_CASE( "unchanged semantic surface publication preserves its frame", "[semantic_surface]" )

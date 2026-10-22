@@ -2508,6 +2508,7 @@ static void place_ter_or_special( const ui_adaptor &om_ui, tripoint_abs_omt &cur
                                   const std::string &om_action )
 {
     uilist pmenu;
+    pmenu.semantic_await_child_successor = true;
     // This simplifies overmap_special selection using uilist
     std::vector<const overmap_special *> oslist;
     const bool terrain = om_action == "PLACE_TERRAIN";
@@ -2530,6 +2531,7 @@ static void place_ter_or_special( const ui_adaptor &om_ui, tripoint_abs_omt &cur
                               oter.get_color( om_vision_level::full ) ),
                     colorize( oter.id.str(), c_white ) );
             pmenu.addentry( oter.id.id().to_i(), true, 0, entry_text );
+            pmenu.entries.back().semantic_stable_id = "terrain:" + oter.id.str();
         }
     } else {
         pmenu.title = _( "Select special to place:" );
@@ -2537,6 +2539,7 @@ static void place_ter_or_special( const ui_adaptor &om_ui, tripoint_abs_omt &cur
             oslist.push_back( &elem );
             const std::string entry_text = elem.id.str();
             pmenu.addentry( oslist.size() - 1, true, 0, entry_text );
+            pmenu.entries.back().semantic_stable_id = "special:" + elem.id.str();
         }
     }
     pmenu.query();
@@ -2620,11 +2623,107 @@ static void place_ter_or_special( const ui_adaptor &om_ui, tripoint_abs_omt &cur
         } );
 
         std::string action;
+        std::optional<std::string> semantic_native_action;
+        uint64_t completed_semantic_actions = 0;
+        std::string last_placement_result = "not_attempted";
+        const auto placement_id = [terrain]() {
+            return terrain ? uistate.place_terrain->id.str() : uistate.place_special->id.str();
+        };
+        const auto placement_target = [&]() {
+            return ( terrain ? "terrain:" : "special:" ) + placement_id() +
+                   "@" + curs.to_string() + ":" + om_direction::name( uistate.omedit_rotation );
+        };
+        const auto semantic_payload = [&]() {
+            return std::map<std::string, std::string> {
+                { "editor_mode", "placement" },
+                { "placement_kind", terrain ? "terrain" : "special" },
+                { "placement_id", placement_id() },
+                { "cursor_position", curs.to_string() },
+                { "level", std::to_string( curs.z() ) },
+                { "rotation", om_direction::name( uistate.omedit_rotation ) },
+                { "selected_stable_id", placement_target() },
+                { "completed_actions", std::to_string( completed_semantic_actions ) },
+                { "last_placement_result", last_placement_result }
+            };
+        };
+        const auto semantic_actions = [&]() {
+            std::vector<semantic_action_descriptor> actions = {
+                { "overmap.move_cursor", "north", "Move cursor north", true },
+                { "overmap.move_cursor", "south", "Move cursor south", true },
+                { "overmap.move_cursor", "west", "Move cursor west", true },
+                { "overmap.move_cursor", "east", "Move cursor east", true },
+                { "overmap.change_level", "up", "Move cursor up a level", curs.z() < OVERMAP_HEIGHT },
+                { "overmap.change_level", "down", "Move cursor down a level", curs.z() > -OVERMAP_DEPTH },
+                { "overmap.place", placement_target(), "Place and continue", true },
+                { "overmap.place_and_close", placement_target(), "Place and close", true },
+                { "overmap.close", "", "Cancel placement", true }
+            };
+            if( can_rotate ) {
+                actions.push_back( { "overmap.rotate", placement_target(), "Rotate placement", true } );
+            }
+            return actions;
+        };
+        semantic_surface_manager *const semantic_manager = active_semantic_surface_manager();
+        std::optional<semantic_surface_scope> semantic_scope;
+        if( semantic_manager != nullptr ) {
+            semantic_scope.emplace( *semantic_manager, "overmap", "Overmap placement", semantic_payload(),
+            semantic_actions(), [&]( const semantic_action_request & request ) {
+                if( !request.parameters.empty() ) {
+                    return semantic_action_dispatch_result{ false, "invalid_parameters", "" };
+                }
+                const std::string target = request.stable_id.value_or( "" );
+                if( request.action_id == "overmap.move_cursor" ) {
+                    static const std::map<std::string, std::string> directions = {
+                        { "north", "UP" }, { "south", "DOWN" }, { "west", "LEFT" }, { "east", "RIGHT" }
+                    };
+                    const auto direction = directions.find( target );
+                    if( direction == directions.end() ) {
+                        return semantic_action_dispatch_result{ false, "invalid_target", "" };
+                    }
+                    semantic_native_action = direction->second;
+                } else if( request.action_id == "overmap.change_level" && target == "up" &&
+                           curs.z() < OVERMAP_HEIGHT ) {
+                    semantic_native_action = "LEVEL_UP";
+                } else if( request.action_id == "overmap.change_level" && target == "down" &&
+                           curs.z() > -OVERMAP_DEPTH ) {
+                    semantic_native_action = "LEVEL_DOWN";
+                } else if( request.action_id == "overmap.close" && target.empty() ) {
+                    semantic_native_action = "QUIT";
+                } else if( target == placement_target() ) {
+                    if( request.action_id == "overmap.place" ) {
+                        semantic_native_action = "CONFIRM_MULTIPLE";
+                    } else if( request.action_id == "overmap.place_and_close" ) {
+                        semantic_native_action = "CONFIRM";
+                    } else if( request.action_id == "overmap.rotate" && can_rotate ) {
+                        semantic_native_action = "ROTATE";
+                    } else {
+                        return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+                    }
+                } else {
+                    return semantic_action_dispatch_result{ false, "invalid_target", "" };
+                }
+                // Closing returns through the editor's native completion
+                // below. Do not receipt a transient, pre-completion parent.
+                const bool closing = *semantic_native_action == "QUIT" ||
+                                     *semantic_native_action == "CONFIRM";
+                return semantic_action_dispatch_result{ true, "", "", closing };
+            } );
+        }
         do {
+            if( semantic_scope ) {
+                semantic_scope->publish( semantic_payload(), semantic_actions() );
+                semantic_scope->consume_request();
+            }
             om_ui.invalidate_ui();
             ui_manager::redraw();
 
-            action = ctxt.handle_input( get_option<int>( "BLINK_SPEED" ) );
+            const bool completing_semantic_action = semantic_native_action.has_value();
+            if( semantic_native_action ) {
+                action = std::move( *semantic_native_action );
+                semantic_native_action.reset();
+            } else {
+                action = ctxt.handle_input( get_option<int>( "BLINK_SPEED" ) );
+            }
 
             if( const std::optional<tripoint_rel_omt> vec = ctxt.get_direction_rel_omt( action ) ) {
                 curs += *vec;
@@ -2647,10 +2746,13 @@ static void place_ter_or_special( const ui_adaptor &om_ui, tripoint_abs_omt &cur
                 if( terrain ) {
                     overmap_buffer.ter_set( curs, uistate.place_terrain->id.id() );
                     overmap_buffer.set_seen( curs, om_vision_level::full );
+                    last_placement_result = "applied";
                 } else {
+                    last_placement_result = "refused";
                     if( std::optional<std::vector<tripoint_abs_omt>> used_points =
                             overmap_buffer.place_special( *uistate.place_special, curs,
                                                           uistate.omedit_rotation, false, true ) ) {
+                        last_placement_result = used_points->empty() ? "no_tiles_placed" : "applied";
                         for( const tripoint_abs_omt &pos : *used_points ) {
                             overmap_buffer.set_seen( pos, om_vision_level::full );
                         }
@@ -2661,6 +2763,11 @@ static void place_ter_or_special( const ui_adaptor &om_ui, tripoint_abs_omt &cur
                 if( terrain ) {
                     uistate.place_terrain = &uistate.place_terrain->get_rotated( uistate.omedit_rotation ).obj();
                 }
+            }
+            if( completing_semantic_action ) {
+                // A native placement can legitimately be a no-op. Complete
+                // only after its handler runs, never on polling or a wake.
+                ++completed_semantic_actions;
             }
             if( uistate.overmap_blinking ) {
                 uistate.overmap_show_overlays = !uistate.overmap_show_overlays;
@@ -3338,6 +3445,7 @@ static tripoint_abs_omt display()
     ictxt.register_action( "QUIT" );
     std::string action;
     std::optional<std::string> semantic_native_action;
+    uint64_t completed_editor_actions = 0;
     data.show_explored = true;
     int fast_scroll_offset = get_option<int>( "FAST_SCROLL_OFFSET" );
     std::optional<tripoint_rel_omt> mouse_pos;
@@ -3351,12 +3459,14 @@ static tripoint_abs_omt display()
     const auto cursor_stable_id = [&curs]() {
         return "omt:" + curs.to_string();
     };
-    const auto semantic_payload = [&curs, &cursor_stable_id]() {
+    const auto semantic_payload = [&curs, &cursor_stable_id, &data, &completed_editor_actions]() {
         std::map<std::string, std::string> payload;
         const avatar &player_character = get_avatar();
         payload.emplace( "player_position", player_character.pos_abs_omt().to_string() );
         payload.emplace( "cursor_position", curs.to_string() );
         payload.emplace( "level", std::to_string( curs.z() ) );
+        payload.emplace( "debug_editor", data.debug_editor ? "true" : "false" );
+        payload.emplace( "completed_editor_actions", std::to_string( completed_editor_actions ) );
         payload.emplace( "cursor_discovered",
                          overmap_buffer.seen( curs ) == om_vision_level::unseen ? "false" : "true" );
         if( overmap_buffer.seen( curs ) != om_vision_level::unseen ) {
@@ -3369,7 +3479,7 @@ static tripoint_abs_omt display()
         }
         return payload;
     };
-    const auto semantic_actions = [&curs, &cursor_stable_id]() {
+    const auto semantic_actions = [&curs, &cursor_stable_id, &data]() {
         std::vector<semantic_action_descriptor> actions = {
             { "overmap.move_cursor", "north", "Move cursor north", true },
             { "overmap.move_cursor", "south", "Move cursor south", true },
@@ -3380,6 +3490,10 @@ static tripoint_abs_omt display()
             { "overmap.add_note", cursor_stable_id(), "Add note", true },
             { "overmap.close", "", "Close overmap", true }
         };
+        if( data.debug_editor && !curs.is_invalid() ) {
+            actions.push_back( { "overmap.place_terrain", cursor_stable_id(), "Place overmap terrain", true } );
+            actions.push_back( { "overmap.place_special", cursor_stable_id(), "Place overmap special", true } );
+        }
         if( overmap_buffer.seen( curs ) != om_vision_level::unseen ) {
             actions.emplace_back( semantic_action_descriptor{
                 "overmap.select", cursor_stable_id(), "Select location", true
@@ -3394,7 +3508,7 @@ static tripoint_abs_omt display()
     if( semantic_manager != nullptr ) {
         semantic_scope.emplace( *semantic_manager, "overmap", "Overmap", semantic_payload(),
                                 semantic_actions(), [&semantic_native_action,
-        &cursor_stable_id]( const semantic_action_request & request ) {
+        &cursor_stable_id, &data]( const semantic_action_request & request ) {
             const std::string stable_id = request.stable_id.value_or( "" );
             if( request.action_id == "overmap.move_cursor" ) {
                 if( stable_id == "north" ) {
@@ -3419,7 +3533,15 @@ static tripoint_abs_omt display()
             } else if( request.action_id == "overmap.close" && stable_id.empty() ) {
                 semantic_native_action = "QUIT";
             } else if( stable_id == cursor_stable_id() ) {
-                if( request.action_id == "overmap.select" ) {
+                if( data.debug_editor && !request.parameters.empty() &&
+                    ( request.action_id == "overmap.place_terrain" || request.action_id == "overmap.place_special" ) ) {
+                    return semantic_action_dispatch_result{ false, "invalid_parameters", "" };
+                }
+                if( request.action_id == "overmap.place_terrain" && data.debug_editor ) {
+                    semantic_native_action = "PLACE_TERRAIN";
+                } else if( request.action_id == "overmap.place_special" && data.debug_editor ) {
+                    semantic_native_action = "PLACE_SPECIAL";
+                } else if( request.action_id == "overmap.select" ) {
                     semantic_native_action = "CONFIRM";
                 } else if( request.action_id == "overmap.choose_destination" ) {
                     semantic_native_action = "CHOOSE_DESTINATION";
@@ -3719,8 +3841,11 @@ static tripoint_abs_omt display()
             if( !search( *ui, curs, orig ) ) {
                 continue;
             }
-        } else if( action == "PLACE_TERRAIN" || action == "PLACE_SPECIAL" ) {
+        } else if( ( action == "PLACE_TERRAIN" || action == "PLACE_SPECIAL" ) && data.debug_editor ) {
             place_ter_or_special( *ui, curs, action );
+            // The picker can cancel without creating a placement child. Its
+            // receipt still needs this completed native return to the editor.
+            ++completed_editor_actions;
         } else if( action == "SET_SPECIAL_ARGS" ) {
             set_special_args( curs );
         } else if( action == "LONG_TELEPORT" && !curs.is_invalid() ) {
