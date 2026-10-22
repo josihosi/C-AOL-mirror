@@ -225,6 +225,8 @@ class ScenarioRegistryCliTest(unittest.TestCase):
             self.assertIn("registry-launch", command)
             self.assertIn("selected-token", command)
             self.assertIn("--cockpit-live-session", command)
+            authorization_index = command.index("--authorization-token-id")
+            self.assertEqual(command[authorization_index + 1], selection.token_id)
             self.assertNotIn("--post-relaunch-continuation", command)
             self.assertNotIn("Josef", command)
             registry_index = command.index("--registry")
