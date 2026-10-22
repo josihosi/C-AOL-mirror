@@ -74,6 +74,8 @@ void set_test_environment( const char *name, const char *value, int overwrite = 
 #else
     setenv( name, value, overwrite );
 #endif
+
+
 }
 
 void unset_test_environment( const char *name )
@@ -4370,5 +4372,114 @@ TEST_CASE( "bodygraph Close owns the concrete modal across timeout and nested re
             CHECK( closed->accepted );
         }
     }
+}
+#endif
+
+#if !defined(TILES)
+TEST_CASE( "performance interval output preserves the real World successor",
+           "[semantic_surface][raid_performance_output_route]" )
+{
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "normal" );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const auto world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto position = u.pos_abs();
+
+    // This actual native output is consumed by the Python strict-reader control
+    // before its disposable test userdir is removed. No live-game input is used.
+    const std::filesystem::path trace = std::filesystem::path( PATH_INFO::user_dir() ) /
+                                        "raid-performance-route-control.jsonl";
+    std::filesystem::remove( trace );
+    const std::string run = "raid-performance-output-control";
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", std::nullopt }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &entry : settings ) {
+        const char *value = std::getenv( entry.first.c_str() );
+        previous[entry.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        assign_test_environment( entry.first, entry.second );
+    }
+    on_out_of_scope restore_environment( [&] {
+        for( const auto &entry : previous ) {
+            assign_test_environment( entry.first, entry.second );
+        }
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&] {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    // Keep the production descriptor/receipt writers installed. Native input
+    // uses its currently configured Pause key, never a synthesized descriptor.
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    for( int turn = 0; turn < 3; ++turn ) {
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        const auto before = calendar::turn;
+        CHECK_FALSE( g->do_turn() );
+        // Reentry exposes the saved turn; later turns advance normally.
+        CHECK( calendar::turn == before + ( turn == 0 ? 0_turns : 1_turns ) );
+        CHECK( u.pos_abs() == position );
+    }
+    // Disabling a temporary diagnostic discards its still-open final row,
+    // rather than publishing old data under mode off or leaking into later tests.
+    {
+        override_option disabled( "RAID_PERFORMANCE_DIAGNOSTIC", "off" );
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        const auto before = calendar::turn;
+        CHECK_FALSE( g->do_turn() );
+        CHECK( calendar::turn == before + 1_turns );
+        CHECK( u.pos_abs() == position );
+    }
+
+    int intervals = 0;
+    std::ifstream input( trace );
+    std::string line;
+    while( std::getline( input, line ) ) {
+        if( line.find( "raid_performance_interval" ) == std::string::npos ) {
+            continue;
+        }
+        ++intervals;
+        CHECK( line.rfind( "openclaw_harness_semantic_step: ", 0 ) != 0 );
+        std::istringstream record( line.substr( line.find( '{' ) ) );
+        TextJsonIn jsin( record );
+        const TextJsonObject object = jsin.get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_string( "mode" ) == "normal" );
+        CHECK( object.get_string( "run_id" ) == run );
+        CHECK_FALSE( object.get_array( "rows" ).empty() );
+    }
+    CHECK( intervals >= 1 );
 }
 #endif

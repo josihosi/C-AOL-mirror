@@ -268,7 +268,7 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
 enum class raid_perf_stage : std::size_t {
     operations, horde_movement, population, fields, items, map_cache,
     signal_total, signal_discovery, signal_hordes, creatures, overmap_npcs,
-    pre_input_world, count
+    pre_input_world, post_input_action, count
 };
 static constexpr std::size_t raid_perf_stage_count =
     static_cast<std::size_t>( raid_perf_stage::count );
@@ -335,7 +335,7 @@ static void raid_perf_flush_after_wait()
     js.member( "stage_names", std::array<std::string, raid_perf_stage_count> {
         "migo_operations", "horde_movement", "population", "fields", "items", "map_cache",
         "signal_total", "signal_discovery", "signal_hordes", "creatures", "overmap_npcs",
-        "pre_input_world"
+        "pre_input_world", "post_input_action"
     } );
     js.member( "rows" );
     js.start_array();
@@ -394,7 +394,7 @@ static void raid_perf_flush_after_wait()
     }
     js.end_array();
     js.end_object();
-    write_native_semantic_event( stream.str() );
+    write_native_diagnostic_event( stream.str() );
     raid_perf_rows.clear();
 }
 
@@ -417,6 +417,9 @@ class openclaw_harness_turn_trace
                 turn_id_ = std::to_string( ++next_turn_id );
                 openclaw_harness_write_turn_trace( "turn", "start", "simulation", turn_id_, game_turn_,
                                                    game_minutes_, 0.0 );
+            }
+            if( !enabled_ || raid_perf_mode == "off" ) {
+                raid_perf_rows.clear();
             }
         }
 
@@ -21031,27 +21034,30 @@ bool game::do_turn()
                 const bool handle_action_returned = handle_action();
                 turn_trace.input_end();
                 openclaw_harness_trace_activity_driver( "handle_action_exit", u, handle_action_returned );
-                if( handle_action_returned ) {
-                    ++moves_since_last_save;
-                    u.action_taken();
-                }
-
-                if( is_game_over() ) {
-                    if( !turn_handler::cleanup_at_end() ) {
-                        popup( _( "The game ended, but death retirement failed. The living fallback will not be restored." ) );
+                {
+                    raid_perf_scope diagnostic_scope( raid_perf_stage::post_input_action );
+                    if( handle_action_returned ) {
+                        ++moves_since_last_save;
+                        u.action_taken();
                     }
-                    return true;
-                }
 
-                if( uquit == QUIT_WATCH ) {
-                    break;
-                }
+                    if( is_game_over() ) {
+                        if( !turn_handler::cleanup_at_end() ) {
+                            popup( _( "The game ended, but death retirement failed. The living fallback will not be restored." ) );
+                        }
+                        return true;
+                    }
 
-                // avatar processes moves for activities started by handle_action()
-                while( u.get_moves() > 0 && u.activity ) {
-                    openclaw_harness_trace_activity_driver( "post_handle_action_activity_do_turn_enter", u );
-                    process_avatar_activity_turn( u );
-                    openclaw_harness_trace_activity_driver( "post_handle_action_activity_do_turn_exit", u );
+                    if( uquit == QUIT_WATCH ) {
+                        break;
+                    }
+
+                    // avatar processes moves for activities started by handle_action()
+                    while( u.get_moves() > 0 && u.activity ) {
+                        openclaw_harness_trace_activity_driver( "post_handle_action_activity_do_turn_enter", u );
+                        process_avatar_activity_turn( u );
+                        openclaw_harness_trace_activity_driver( "post_handle_action_activity_do_turn_exit", u );
+                    }
                 }
             }
             // Reset displayed sound markers now that the turn is over.
