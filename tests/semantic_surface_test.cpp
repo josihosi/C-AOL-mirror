@@ -60,6 +60,8 @@
 #include "debug_menu.h"
 #include "debug_console.h"
 #include "game.h"
+#include "game_inventory.h"
+#include "map_selector.h"
 #include "field_type.h"
 #include "field.h"
 #include "imgui/imgui.h"
@@ -6171,4 +6173,323 @@ TEST_CASE( "native distraction popup acquisition excludes only blocked input",
     }
     CHECK( input_ends == input_begins );
 }
+TEST_CASE( "native disposal and selector acquisition excludes only blocked input",
+           "[semantic_surface][raid_performance_menu_input]" )
+{
+    const bool selector = GENERATE( false, true );
+    const bool nested = GENERATE( false, true );
+    const bool cancel = GENERATE( false, true );
+    CAPTURE( selector, nested, cancel );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "quiet_signal" );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const std::string world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto position = u.pos_abs();
+    const auto run = std::string( "raid-menu-input-" ) + ( selector ? "selector-" : "dispose-" ) +
+                     ( nested ? "nested-" : "activity-" ) + ( cancel ? "cancel" : "commit" );
+    const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".jsonl" );
+    const auto requests = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".requests.jsonl" );
+    std::filesystem::remove( trace );
+    std::filesystem::remove( requests );
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run }, { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", requests.string() }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &entry : settings ) {
+        const char *value = std::getenv( entry.first.c_str() );
+        previous[entry.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        assign_test_environment( entry.first, entry.second );
+    }
+    on_out_of_scope restore_environment( [&] {
+for( const auto &entry : previous )
+    {
+        assign_test_environment( entry.first, entry.second );
+        }
+        std::filesystem::remove( requests );
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&] {
+        if( owns_terminal )
+    {
+        catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+
+    u.set_wielded_item( item( itype_id( "machete" ) ) );
+    const int64_t old_uid = u.get_wielded_item()->uid().get_value();
+    item &rock = here.add_item_or_charges( u.pos_bub(), item( itype_id( "rock" ) ) );
+    const int64_t rock_uid = rock.uid().get_value();
+    item_location target( map_cursor( u.pos_bub() ), &rock );
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    std::thread input_writer;
+    std::atomic<bool> wrote_request{ false };
+    on_out_of_scope finish_writer( [&] {
+        if( input_writer.joinable() )
+    {
+        input_writer.join();
+        }
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        manager.set_transport_observer( {} );
+        u.cancel_activity();
+    } );
+    bool consumed_in_input = false;
+    manager.set_transport_observer( [&]( const semantic_request_transport_event & event ) {
+        if( event.event != "request_consumed" || event.request_id != "menu-delayed" ) {
+            return;
+        }
+        std::string phase;
+        std::ifstream events( trace );
+        std::string line;
+        while( std::getline( events, line ) ) {
+            const auto begin = line.find( '{' );
+            if( begin == std::string::npos ) {
+                continue;
+            }
+            std::istringstream text( line.substr( begin ) );
+            TextJsonIn jsin( text );
+            const TextJsonObject value = jsin.get_object();
+            value.allow_omitted_members();
+            const auto kind = value.get_string( "event" );
+            if( kind == "turn" && value.get_string( "stage" ) == "start" ) {
+                phase = "simulation";
+            } else if( kind == "turn_phase" ) {
+                phase = value.get_string( "phase" );
+            }
+        }
+        consumed_in_input = phase == "input";
+    } );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    bool menu_seen = false;
+    bool selector_seen = false;
+    bool parent_entered = false;
+    bool pause_queued = false;
+    bool commit_queued = false;
+    drop_locations selected;
+    double preparation_cpu = 0.0;
+    const auto actual_work = [&] {
+        const auto begin = std::clock();
+        volatile double calculation = 1.0;
+        while( static_cast<double>( std::clock() - begin ) / CLOCKS_PER_SEC < 0.025 )
+        {
+            calculation = calculation * 1.00000001 + 0.00000001;
+        }
+        preparation_cpu += static_cast<double>( std::clock() - begin ) / CLOCKS_PER_SEC;
+    };
+    const auto delayed = [&]( const semantic_surface_descriptor & owner, const std::string & action,
+    const std::string & stable_id ) {
+        REQUIRE_FALSE( input_writer.joinable() );
+        actual_work(); // Outside the acquisition scope; must stay measured.
+        input_writer = std::thread( [ &, owner, action, stable_id] {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 120 ) );
+            std::ofstream out( requests, std::ios::app );
+            out << "{\"run_id\":\"" << run << "\",\"surface_id\":\"" << owner.surface_id <<
+                "\",\"frame_id\":\"" << owner.frame_id <<
+                "\",\"request_id\":\"menu-delayed\",\"action_id\":\"" << action <<
+                "\",\"stable_id\":\"" << stable_id << "\"}\n";
+            out.close();
+            wrote_request = static_cast<bool>( out );
+        } );
+    };
+    const auto run_wield = [&] {
+        u.assign_activity( wield_activity_actor( target, 0 ) );
+        process_avatar_activity_turn( u );
+    };
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
+        if( owner.kind == "menu" && !menu_seen ) {
+            menu_seen = true;
+            REQUIRE( owner.payload.at( "text" ).find( "Stop wielding" ) != std::string::npos );
+            if( selector ) {
+                // Real selector owner reached while ACT_WIELD owns the turn,
+                // before disposal begins acquisition. This is a caller control,
+                // not a claim that ordinary world.drop lacks its parent scope.
+                selected = game_menus::inv::multidrop( u );
+                actual_work(); // Post-selector processing also stays measured.
+                REQUIRE( manager.top() );
+                const auto resumed = *manager.top();
+                REQUIRE( resumed.kind == "menu" );
+                REQUIRE( manager.submit_request( { run, resumed.surface_id, resumed.frame_id,
+                                                   "cancel-disposal", "menu.cancel", std::nullopt, {} } ) );
+            } else {
+                const auto drop = std::find_if( owner.valid_actions.begin(), owner.valid_actions.end(),
+                []( const auto & a ) {
+                    return a.id == "menu.choose" && a.label.find( "Drop item" ) == 0;
+                } );
+                REQUIRE( drop != owner.valid_actions.end() );
+                delayed( owner, cancel ? "menu.cancel" : "menu.choose", cancel ? "" : drop->stable_id );
+            }
+        } else if( owner.kind == "inventory" && selector && !selector_seen ) {
+            selector_seen = true;
+            const std::string id = std::to_string( old_uid );
+            REQUIRE( std::any_of( owner.valid_actions.begin(),
+            owner.valid_actions.end(), [&]( const auto & a ) {
+                return a.id == "inventory.toggle" && a.stable_id == id && a.enabled;
+            } ) );
+            delayed( owner, cancel ? "inventory.cancel" : "inventory.toggle", cancel ? "" : id );
+        } else if( owner.kind == "inventory" && selector_seen && !cancel && !commit_queued ) {
+            commit_queued = true;
+            REQUIRE( manager.submit_request( { run, owner.surface_id, owner.frame_id,
+                                               "selector-commit", "inventory.commit", std::nullopt, {} } ) );
+        } else if( owner.kind == "world" && !pause_queued ) {
+            pause_queued = true;
+            if( nested && !parent_entered ) {
+                parent_entered = true;
+                run_wield();
+                // A nested child must never close its enclosing World wait.
+                std::this_thread::sleep_for( std::chrono::milliseconds( 30 ) );
+            }
+            REQUIRE( ungetch( pause->front() ) != -1 );
+        }
+    } );
+    u.set_moves( 100 );
+    if( !nested ) {
+        u.assign_activity( wield_activity_actor( target, 0 ) );
+    }
+    const auto before = calendar::turn;
+    REQUIRE_FALSE( g->do_turn() );
+    const bool measured_world_wait = pause_queued;
+    REQUIRE( input_writer.joinable() );
+    input_writer.join();
+    CHECK( wrote_request );
+    CHECK( menu_seen );
+    CHECK( selector_seen == selector );
+    CHECK( consumed_in_input );
+    CHECK( u.pos_abs() == position );
+    CHECK( calendar::turn == before + 1_turns );
+    CHECK_FALSE( u.activity );
+    if( selector || cancel ) {
+        REQUIRE( u.get_wielded_item() );
+        CHECK( u.get_wielded_item()->uid().get_value() == old_uid );
+        REQUIRE( target );
+        CHECK( target->uid().get_value() == rock_uid );
+    } else {
+        REQUIRE( u.get_wielded_item() );
+        CHECK( u.get_wielded_item()->typeId() == itype_id( "rock" ) );
+        CHECK_FALSE( target );
+        // Native dispose Drop copies into the ground stack before removing
+        // the original body item. Its copy acquires a fresh UID; this metric
+        // correction must preserve that existing quantity/type behavior.
+        CHECK( std::count_if( here.i_at( u.pos_bub() ).begin(), here.i_at( u.pos_bub() ).end(),
+        []( const item & it ) {
+            return it.typeId() == itype_id( "machete" );
+        } ) == 1 );
+    }
+    if( selector && !cancel ) {
+        REQUIRE( selected.size() == 1 );
+        CHECK( selected.front().first == u.get_wielded_item() );
+        CHECK( selected.front().second == 1 );
+    } else {
+        CHECK( selected.empty() );
+    }
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return r.request_id == "menu-delayed" && r.accepted;
+    } ) == 1 );
+    pause_queued = false;
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+    int input_begins = 0;
+    int input_ends = 0;
+    std::optional<double> input_started;
+    double acquired_wall = 0.0;
+    bool overlapping_input = false;
+    bool unmatched_end = false;
+    bool measured_row = false;
+    std::ifstream input( trace );
+    std::string line;
+    const int measured_turn = to_turn<int>( before + 1_turns );
+    while( std::getline( input, line ) ) {
+        const auto begin = line.find( '{' );
+        if( begin == std::string::npos ) {
+            continue;
+        }
+        std::istringstream text( line.substr( begin ) );
+        TextJsonIn jsin( text );
+        const auto object = jsin.get_object();
+        object.allow_omitted_members();
+        if( object.get_string( "event" ) == "turn_phase" &&
+            object.get_int( "game_turn" ) == measured_turn ) {
+            if( object.get_string( "stage" ) == "begin" && object.get_string( "phase" ) == "input" ) {
+                ++input_begins;
+                overlapping_input |= input_started.has_value();
+                input_started = object.get_float( "wall_time_seconds" );
+            } else if( object.get_string( "stage" ) == "end" ) {
+                ++input_ends;
+                unmatched_end |= !input_started.has_value();
+                if( input_started ) {
+                    acquired_wall += object.get_float( "wall_time_seconds" ) - *input_started;
+                    input_started.reset();
+                }
+            }
+        }
+        if( object.get_string( "event" ) == "raid_performance_interval" ) {
+            for( const TextJsonValue value : object.get_array( "rows" ) ) {
+                const auto row = value.get_object();
+                row.allow_omitted_members();
+                if( row.get_int( "turn" ) == measured_turn ) {
+                    measured_row = true;
+                    // Publication delay includes redraw/poll work between
+                    // timed acquisitions. Reconcile the actual spans, not the
+                    // entire 120ms response delay. Trace WALL timestamps and
+                    // steady-clock accounting are taken at adjacent boundaries.
+                    CHECK( row.get_float( "input_seconds" ) > 0.0 );
+                    CHECK( row.get_float( "input_seconds" ) ==
+                           Approx( acquired_wall ).margin( 0.001 + input_begins * 0.000002 ) );
+                    if( !nested ) {
+                        CHECK( row.get_float( "simulation_seconds" ) >= preparation_cpu * 0.8 );
+                        CHECK( row.get_float( "process_cpu_seconds" ) >= preparation_cpu * 0.8 );
+                    }
+                }
+            }
+        }
+    }
+    CHECK( measured_row );
+    // A native menu may poll more than once. A child outside World input
+    // must add an acquisition; a nested child must not split its parent.
+    if( nested ) {
+        CHECK( input_begins == 1 );
+    } else {
+        CHECK( input_begins >= 1 + static_cast<int>( measured_world_wait ) );
+    }
+    CHECK( input_ends == input_begins );
+    CHECK_FALSE( overlapping_input );
+    CHECK_FALSE( unmatched_end );
+    CHECK_FALSE( input_started );
+}
+
+
 #endif

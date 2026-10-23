@@ -15,6 +15,7 @@
 #include "cata_utility.h"
 #include "catacharset.h"
 #include "game.h"
+#include "do_turn.h"
 #include "input.h"
 #include "memory_fast.h"
 #include "output.h"
@@ -1161,7 +1162,12 @@ bool uilist::query_setup()
 void uilist::query_once( input_context &ctxt, int timeout,
                          bool allow_unfiltered_hotkeys )
 {
-    ret_act = ctxt.handle_input( timeout );
+    {
+        // Activity-owned menus can acquire input outside World input. Keep
+        // native selection/callback processing below outside this boundary.
+        openclaw_harness_native_input_scope input_phase;
+        ret_act = ctxt.handle_input( timeout );
+    }
     // A semantic transport wake returns ERROR after its callback has already
     // set the native result.  It is not an unbound key: allow_anykey must not
     // overwrite a chosen value or cancellation with UILIST_UNBOUND.

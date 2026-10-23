@@ -18,6 +18,7 @@
 #include "character_attire.h"
 #include "cuboid_rectangle.h"
 #include "debug.h"
+#include "do_turn.h"
 #include "enum_conversions.h"
 #include "enums.h"
 #include "flag.h"
@@ -3716,7 +3717,12 @@ drop_location inventory_selector::get_only_choice() const
 
 inventory_input inventory_selector::get_input()
 {
-    std::string const &action = ctxt.handle_input();
+    std::string const &action = [&]() -> const std::string & {
+        // Preserve the native context-owned action reference while ending
+        // acquisition before raw-event and selector processing.
+        openclaw_harness_native_input_scope input_phase;
+        return ctxt.handle_input();
+    }();
     int const ch = ctxt.get_raw_input().get_first_input();
     return process_input( action, ch );
 }
