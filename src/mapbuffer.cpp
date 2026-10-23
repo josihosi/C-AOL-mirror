@@ -21,6 +21,7 @@
 #include "calendar.h"
 #include "cata_utility.h"
 #include "debug.h"
+#include "do_turn.h"
 #include "filesystem.h"
 #include "flexbuffer_json.h"
 #include "game.h"
@@ -213,13 +214,19 @@ submap *mapbuffer::lookup_submap( const tripoint_abs_sm &p )
 
 submap *mapbuffer::lookup_submap_existing( const tripoint_abs_sm &p )
 {
+    raid_perf_scope lookup_scope( raid_perf_stage::nav_view_lookup, raid_perf_nav_build_active() );
     const auto iter = submaps.find( p );
     if( iter != submaps.end() ) {
+        raid_perf_note_nav( iter->second ? raid_perf_nav_event::resident_hit :
+                            raid_perf_nav_event::resident_null );
         return iter->second.get();
     }
+    raid_perf_note_nav( raid_perf_nav_event::buffer_miss );
     try {
+        raid_perf_scope load_scope( raid_perf_stage::nav_view_miss_load, raid_perf_nav_lookup_active() );
         return unserialize_submaps( p, false );
     } catch( const std::exception &err ) {
+        raid_perf_note_nav( raid_perf_nav_event::load_failures );
         debugmsg( "Failed to load existing submap %s: %s", p.to_string(), err.what() );
     }
     return nullptr;
@@ -484,9 +491,11 @@ submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool gen
             cata_path zzip_name = dirname;
             zzip_name += zzip_suffix;
             if( !file_exist( zzip_name ) ) {
+                raid_perf_note_nav( raid_perf_nav_event::missing_archive );
                 return false;
             }
 
+            raid_perf_note_nav( raid_perf_nav_event::archive_load_calls );
             std::optional<zzip> z = zzip::load( zzip_name.get_unrelative_path(),
                                                 ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
             if( !z ) {
@@ -494,6 +503,7 @@ submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool gen
                 return false;
             }
             if( !z->has_file( file_name_path ) ) {
+                raid_perf_note_nav( raid_perf_nav_event::missing_quad );
                 return false;
             }
             std::vector<std::byte> contents = z->get_file( file_name_path );
@@ -509,6 +519,7 @@ submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool gen
             return true;
         } else
         {
+            raid_perf_note_nav( raid_perf_nav_event::plain_read_calls );
             return read_from_file_optional_json( quad_path, [this]( const JsonValue & jsin ) {
                 deserialize( jsin, true );
             } );
@@ -516,11 +527,14 @@ submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool gen
     }();
 
     if( !read ) {
+        raid_perf_note_nav( raid_perf_nav_event::load_failures );
         return nullptr;
     }
 
     if( !generate_uniform ) {
         const auto iter = submaps.find( p );
+        raid_perf_note_nav( iter != submaps.end() && iter->second ?
+                            raid_perf_nav_event::loaded_submap : raid_perf_nav_event::omitted_submap );
         return iter == submaps.end() ? nullptr : iter->second.get();
     }
 

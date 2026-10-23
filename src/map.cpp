@@ -342,12 +342,23 @@ std::list<std::unique_ptr<level_cache>> map::free_cache_pool;
 
 std::unique_ptr<level_cache, map::level_cache_free> map::alloc_cache()
 {
+    const bool view_setup = raid_perf_nav_build_active() && !raid_perf_nav_lookup_active();
+    raid_perf_scope setup_scope( raid_perf_stage::nav_view_level_setup, view_setup );
+    if( raid_perf_nav_lookup_active() ) {
+        raid_perf_note_nav( raid_perf_nav_event::level_inside_lookup );
+    }
     std::unique_ptr<level_cache, level_cache_free> cache;
     if( !free_cache_pool.empty() ) {
+        if( view_setup ) {
+            raid_perf_note_nav( raid_perf_nav_event::level_reused );
+        }
         cache.reset( free_cache_pool.front().release() );
         free_cache_pool.pop_front();
         cache->clear();
     } else {
+        if( view_setup ) {
+            raid_perf_note_nav( raid_perf_nav_event::level_fresh );
+        }
         cache.reset( new level_cache{} );
     }
     return cache;

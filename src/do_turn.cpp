@@ -267,6 +267,14 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
 // the interval, at an excluded input boundary.  Nothing here changes scheduling.
 static constexpr std::size_t raid_perf_stage_count =
     static_cast<std::size_t>( raid_perf_stage::count );
+static constexpr std::size_t raid_perf_nav_event_count =
+    static_cast<std::size_t>( raid_perf_nav_event::count );
+static constexpr std::array<const char *, raid_perf_nav_event_count> raid_perf_nav_names = {
+    "resident_hit", "resident_null", "buffer_miss", "archive_load_calls",
+    "archive_open_attempts", "archive_open_failures", "missing_archive", "missing_quad",
+    "omitted_submap", "loaded_submap", "load_failures", "plain_read_calls",
+    "level_fresh", "level_reused", "level_inside_lookup"
+};
 struct raid_perf_row {
     int turn = 0;
     std::size_t wait_begin = 0;
@@ -278,6 +286,9 @@ struct raid_perf_row {
     debug_sink_statistics sink;
     std::array<double, raid_perf_stage_count> stages{};
     std::array<std::size_t, raid_perf_stage_count> stage_calls{};
+    std::array<std::size_t, raid_perf_nav_event_count> nav_counts{};
+    std::size_t nav_build_depth = 0;
+    std::size_t nav_lookup_depth = 0;
     std::size_t discovered_sources = 0;
     std::size_t horde_packets = 0;
     std::size_t horde_diagnostic_records = 0;
@@ -303,10 +314,16 @@ static std::size_t raid_perf_wait_generation()
            activity.input_generation() : 0;
 }
 
-raid_perf_scope::raid_perf_scope( raid_perf_stage target ) : row( raid_perf_current ), stage( target )
+raid_perf_scope::raid_perf_scope( raid_perf_stage target, bool enabled ) :
+    row( enabled ? raid_perf_current : nullptr ), stage( target )
 {
     if( row ) {
         ++row->stage_calls[static_cast<std::size_t>( stage )];
+        if( stage == raid_perf_stage::physical_navigation_view_build ) {
+            ++row->nav_build_depth;
+        } else if( stage == raid_perf_stage::nav_view_lookup ) {
+            ++row->nav_lookup_depth;
+        }
         started = std::chrono::steady_clock::now();
     }
 }
@@ -316,6 +333,31 @@ raid_perf_scope::~raid_perf_scope()
     if( row ) {
         row->stages[static_cast<std::size_t>( stage )] +=
             std::chrono::duration<double>( std::chrono::steady_clock::now() - started ).count();
+        if( stage == raid_perf_stage::physical_navigation_view_build ) {
+            --row->nav_build_depth;
+        } else if( stage == raid_perf_stage::nav_view_lookup ) {
+            --row->nav_lookup_depth;
+        }
+    }
+}
+
+bool raid_perf_nav_build_active()
+{
+    return raid_perf_current && raid_perf_current->nav_build_depth != 0;
+}
+
+bool raid_perf_nav_lookup_active()
+{
+    return raid_perf_nav_build_active() && raid_perf_current->nav_lookup_depth != 0;
+}
+
+void raid_perf_note_nav( raid_perf_nav_event event )
+{
+    const bool level_event = event == raid_perf_nav_event::level_fresh ||
+                             event == raid_perf_nav_event::level_reused ||
+                             event == raid_perf_nav_event::level_inside_lookup;
+    if( raid_perf_nav_build_active() && ( level_event || raid_perf_nav_lookup_active() ) ) {
+        ++raid_perf_current->nav_counts[static_cast<std::size_t>( event )];
     }
 }
 
@@ -336,6 +378,8 @@ static void raid_perf_flush_after_wait()
                "Actual preflight/read/record_view calls; eligible record_view calls are not confirmed writes; cached views sum each preflight's retained geometry/lighting views, including failed lighting, not per-read allocations or unique world cells" );
     js.member( "debug_sink_scope",
                "logical file-sink bytes/flushes over the whole turn including input/save; not physical disk bytes" );
+    js.member( "nav_view_scope",
+               "WALL: view_build includes nav_view_lookup and disjoint nav_view_level_setup outside lookup; lookup includes nav_view_miss_load, not pure disk time. LEVEL setup includes pool bookkeeping/clear or fresh allocation/construction/clear. The remaining constructor time groups base map, unknown SoA and binding work. Counts are actual branch observations, not distinct queries or physical I/O; missing_quad means an absent compressed archive entry; plain read failures are not classified by an extra stat. Archive open attempts are existing file-map calls including retries. LEVEL work inside lookup stays in lookup and is counted separately. Do not add nested stages." );
     js.member( "channel_output_scope",
                "run-bound audit record/open/explicit-flush calls and completed logical bytes; not physical disk I/O" );
     js.member( "stage_names", std::array<std::string, raid_perf_stage_count> {
@@ -347,7 +391,8 @@ static void raid_perf_flush_after_wait()
         "migo_service_local_navigation", "migo_service_abstract_navigation",
         "migo_local_plan", "migo_local_move",
         "migo_local_prepare_navigation", "migo_abstract_prepare_navigation",
-        "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route"
+        "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route",
+        "nav_view_lookup", "nav_view_miss_load", "nav_view_level_setup"
     } );
     js.member( "rows" );
     js.start_array();
@@ -366,6 +411,12 @@ static void raid_perf_flush_after_wait()
         js.member( "debug_log_replacement_seconds", row.sink.replacement_nanoseconds / 1e9 );
         js.member( "stages_seconds", row.stages );
         js.member( "stage_calls", row.stage_calls );
+        js.member( "nav_view_counts" );
+        js.start_object();
+        for( std::size_t i = 0; i < raid_perf_nav_event_count; ++i ) {
+            js.member( raid_perf_nav_names[i], row.nav_counts[i] );
+        }
+        js.end_object();
         js.member( "discovered_sources", row.discovered_sources );
         js.member( "horde_packets", row.horde_packets );
         js.member( "horde_diagnostic_records", row.horde_diagnostic_records );

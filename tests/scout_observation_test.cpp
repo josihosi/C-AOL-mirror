@@ -5,7 +5,10 @@
 #include "level_cache.h"
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <map>
 #include <sstream>
+#include <stdexcept>
 #include "cata_catch.h"
 #include "cata_path.h"
 #include "json.h"
@@ -25,6 +28,8 @@
 #include "calendar.h"
 #include "cata_scope_helpers.h"
 #include "effect.h"
+#include "debug.h"
+#include "do_turn.h"
 #include "game.h"
 #include "map.h"
 #include "line.h"
@@ -968,6 +973,123 @@ TEST_CASE( "existing-only submap retrieval never fills omitted serialized geomet
         CHECK( original->get_ter( point_sm_ms( 0, 0 ) ) == ter_str_id( "t_wall" ).id() );
         CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == count_before + 4 );
     }
+}
+
+// Called under the real turn-row lifetime by the semantic output control.
+// The explicit build/lookup contexts below test attribution and error unwind;
+// they do not claim a native NAV journey or a performance measurement.
+std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test();
+std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test()
+{
+    const tripoint_abs_sm stored( 100, 100, 0 );
+    const auto omt = project_to<coords::omt>( stored );
+    const auto segment = project_to<coords::seg>( omt );
+    const auto directory = PATH_INFO::current_dimension_save_path() / "maps" /
+                           string_format( "%d.%d.%d", segment.x(), segment.y(), segment.z() );
+    const auto archive = directory + ".zzip";
+    REQUIRE_FALSE( std::filesystem::exists( directory.get_unrelative_path() ) );
+    REQUIRE_FALSE( std::filesystem::exists( archive.get_unrelative_path() ) );
+    std::filesystem::create_directories( directory.get_unrelative_path() );
+    on_out_of_scope remove_fixture( [&]() {
+        std::filesystem::remove_all( directory.get_unrelative_path() );
+        std::filesystem::remove( archive.get_unrelative_path() );
+    } );
+    const auto quad_path = [&]( const tripoint_abs_sm &p ) {
+        const auto position = project_to<coords::omt>( p );
+        return directory / string_format( "%d.%d.%d.map", position.x(), position.y(), position.z() );
+    };
+    submap sample;
+    sample.set_all_ter( ter_str_id( "t_wall" ) );
+    std::ostringstream bytes;
+    JsonOut writer( bytes );
+    writer.start_array();
+    writer.start_object();
+    writer.member( "version", savegame_version );
+    writer.member( "coordinates", stored.raw() );
+    sample.store( writer );
+    writer.end_object();
+    writer.end_array();
+    { std::ofstream out( quad_path( stored ).get_unrelative_path() ); out << bytes.str(); }
+    const auto corrupt = stored + point( 4, 0 );
+    { std::ofstream out( quad_path( corrupt ).get_unrelative_path() ); out << "invalid-json"; }
+    const bool compressed = world_generator->active_world->has_compression_enabled();
+    const auto dictionary = ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path();
+    if( compressed ) {
+        REQUIRE( zzip::create_from_folder( archive.get_unrelative_path(),
+                                          directory.get_unrelative_path(), dictionary ) );
+    }
+    const auto unchanged_path = compressed ? archive : quad_path( stored );
+    const auto contents = [&]() {
+        std::ifstream input( unchanged_path.get_unrelative_path(), std::ios::binary );
+        return std::string( std::istreambuf_iterator<char>( input ), {} );
+    };
+    const auto before_file = contents();
+    const auto global_count = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    // An unrelated real loader, even in a diagnostic row, earns no NAV count.
+    mapbuffer outside;
+    REQUIRE( outside.lookup_submap_existing( stored ) );
+    CHECK_FALSE( raid_perf_nav_lookup_active() );
+    mapbuffer existing;
+    {
+        raid_perf_scope build( raid_perf_stage::physical_navigation_view_build );
+        const bool active = raid_perf_nav_build_active();
+        {
+            raid_perf_scope nested( raid_perf_stage::physical_navigation_view_build );
+            CHECK( raid_perf_nav_build_active() == active );
+            REQUIRE( existing.lookup_submap_existing( stored ) );
+        }
+        CHECK( raid_perf_nav_build_active() == active );
+        CHECK_FALSE( raid_perf_nav_lookup_active() );
+        const auto *original = existing.lookup_submap_cached( stored );
+        CHECK( existing.lookup_submap_existing( stored ) == original );
+        CHECK( original->get_ter( point_sm_ms( 0, 0 ) ) == ter_str_id( "t_wall" ).id() );
+        const auto omitted = stored + point( 1, 0 );
+        CHECK_FALSE( existing.lookup_submap_existing( omitted ) );
+        CHECK_FALSE( existing.lookup_submap_existing( omitted ) );
+        CHECK_FALSE( existing.lookup_submap_cached( omitted ) );
+        CHECK_FALSE( existing.lookup_submap_existing( stored + point( 2, 0 ) ) );
+        CHECK_FALSE( existing.lookup_submap_existing( stored + point( 64, 0 ) ) );
+        std::string warning;
+        {
+            restore_on_out_of_scope restore_mode( test_mode );
+            test_mode = true; // capture the deliberate loader error without a native modal
+            warning = capture_debugmsg_during( [&]() {
+                CHECK_FALSE( existing.lookup_submap_existing( corrupt ) );
+            } );
+        }
+        CHECK_FALSE( warning.empty() );
+        CHECK_FALSE( raid_perf_nav_lookup_active() ); // actual exception/catch restores lookup depth
+        // Force the existing archive open failure without changing permissions:
+        // this owned parent is a regular file. Explicit context is a counter
+        // unit control, not an extra production lookup or an AI observation.
+        const auto blocker = directory / "open-blocker";
+        { std::ofstream out( blocker.get_unrelative_path() ); out << "blocker"; }
+        {
+            raid_perf_scope lookup( raid_perf_stage::nav_view_lookup, active );
+            CHECK_FALSE( zzip::load( ( blocker / "child.zzip" ).get_unrelative_path(), dictionary ) );
+        }
+        CHECK_FALSE( raid_perf_nav_lookup_active() );
+    }
+    CHECK_FALSE( raid_perf_nav_build_active() );
+    try {
+        raid_perf_scope build( raid_perf_stage::physical_navigation_view_build );
+        throw std::runtime_error( "diagnostic depth unwind" );
+    } catch( const std::runtime_error & ) {
+    }
+    CHECK_FALSE( raid_perf_nav_build_active() );
+    CHECK_FALSE( raid_perf_nav_lookup_active() );
+    CHECK( std::distance( existing.begin(), existing.end() ) == 1 );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == global_count );
+    CHECK( contents() == before_file );
+    return {
+        { "resident_hit", 1 }, { "resident_null", 0 }, { "buffer_miss", 6 },
+        { "archive_load_calls", compressed ? 5 : 0 },
+        { "archive_open_attempts", compressed ? 8 : 3 }, { "archive_open_failures", 3 },
+        { "missing_archive", compressed ? 1 : 0 }, { "missing_quad", compressed ? 1 : 0 },
+        { "omitted_submap", 2 }, { "loaded_submap", 1 }, { "load_failures", 3 },
+        { "plain_read_calls", compressed ? 0 : 6 },
+        { "level_fresh", 0 }, { "level_reused", 0 }, { "level_inside_lookup", 0 }
+    };
 }
 
 TEST_CASE( "target vehicle queries ignore unrelated resident submaps and vehicles",

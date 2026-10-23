@@ -25,6 +25,7 @@
 #include <zstd/common/xxhash.h>
 
 #include "filesystem.h"
+#include "do_turn.h"
 #include "save_continuity.h"
 #include "flexbuffer_cache.h"
 #include "flexbuffer_json.h"
@@ -362,14 +363,22 @@ std::optional<zzip> zzip::load( std::filesystem::path const &path,
     if( !std::filesystem::exists( path ) ) {
         save_continuity::before_file_write( path );
     }
+    raid_perf_note_nav( raid_perf_nav_event::archive_open_attempts );
     std::shared_ptr<mmap_file> file = mmap_file::map_writeable_file( path );
+    if( !file ) {
+        raid_perf_note_nav( raid_perf_nav_event::archive_open_failures );
+    }
     int retries = 0;
 
     while( !file && ++retries < 3 ) {
         // It's the caller's responsibility to ensure this is a writeable path, but maybe
         // OneDrive or antivirus is interfering. Wait a couple time slices to see if it resolves.
         std::this_thread::sleep_for( std::chrono::milliseconds( 32 ) );
+        raid_perf_note_nav( raid_perf_nav_event::archive_open_attempts );
         file = mmap_file::map_writeable_file( path );
+        if( !file ) {
+            raid_perf_note_nav( raid_perf_nav_event::archive_open_failures );
+        }
     }
     if( !file ) {
         return {};

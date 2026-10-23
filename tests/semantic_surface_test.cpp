@@ -5446,6 +5446,8 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
                                       std::vector<int>( stages.size(), 0 );
     std::vector<int> totals( stages.size(), 0 );
     int intervals = 0;
+    int lookup_calls = 0;
+    int level_calls = 0;
     std::ifstream input( trace );
     for( std::string line; std::getline( input, line ); ) {
         if( line.find( "raid_performance_interval" ) == std::string::npos ) {
@@ -5465,6 +5467,21 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             row.allow_omitted_members();
             const auto times = row.get_array( "stages_seconds" );
             const auto calls = row.get_array( "stage_calls" );
+            const auto counts = row.get_object( "nav_view_counts" );
+            counts.allow_omitted_members();
+            const int lookups = calls.get_int( index( "nav_view_lookup" ) );
+            const int setups = calls.get_int( index( "nav_view_level_setup" ) );
+            lookup_calls += lookups;
+            level_calls += setups;
+            CHECK( lookups == counts.get_int( "resident_hit" ) + counts.get_int( "resident_null" ) +
+                   counts.get_int( "buffer_miss" ) );
+            CHECK( calls.get_int( index( "nav_view_miss_load" ) ) == counts.get_int( "buffer_miss" ) );
+            CHECK( setups == counts.get_int( "level_fresh" ) + counts.get_int( "level_reused" ) );
+            CHECK( times.get_float( index( "nav_view_lookup" ) ) >=
+                   times.get_float( index( "nav_view_miss_load" ) ) );
+            CHECK( times.get_float( index( "physical_navigation_view_build" ) ) >=
+                   times.get_float( index( "nav_view_lookup" ) ) +
+                   times.get_float( index( "nav_view_level_setup" ) ) );
             REQUIRE( times.size() == names.size() );
             REQUIRE( calls.size() == names.size() );
             for( std::size_t i = 0; i < stages.size(); ++i ) {
@@ -5491,6 +5508,177 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
     // The supported off transition discards the still-open final row.
     CHECK( ( intervals > 0 ) == ( mode != "off" ) );
     CHECK( totals == ( mode == "off" ? std::vector<int>( stages.size(), 0 ) : expected ) );
+    CHECK( lookup_calls == ( mode == "off" ? 0 : branch == "remote" ? 333 :
+                            branch == "remote_unknown" ? 108 : 0 ) );
+    CHECK( level_calls == ( mode != "off" && branch == "remote" ? 5 : 0 ) );
+}
+
+std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test();
+TEST_CASE( "NAV lookup rows classify real serialized loader branches and restore attribution",
+           "[semantic_surface][raid_performance_nav_lookup]" )
+{
+    const auto scenario = GENERATE( std::make_pair( std::string( "normal" ), true ),
+                                   std::make_pair( std::string( "normal" ), false ),
+                                   std::make_pair( std::string( "quiet_signal" ), true ),
+                                   std::make_pair( std::string( "off" ), true ),
+                                   std::make_pair( std::string( "unbound" ), true ) );
+    const auto &mode = scenario.first;
+    CAPTURE( mode, scenario.second );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", mode == "unbound" ? "normal" : mode );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const auto world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    clear_creatures();
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    overmap_buffer.global_state.migo_populations = {};
+    overmap_buffer.global_state.migo_towers = {};
+    overmap_buffer.global_state.bandit_live_world = {};
+    on_out_of_scope restore_world( [&]() {
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+    } );
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto saved_turn = calendar::turn;
+    on_out_of_scope restore_turn( [&]() { set_time( saved_turn ); } );
+    set_time( calendar::start_of_cataclysm + 1000_minutes + 7_seconds );
+    const std::string run = "nav-lookup-" + mode + ( scenario.second ? "-compressed" : "-plain" );
+    const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".jsonl" );
+    std::filesystem::remove( trace );
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", mode == "unbound" ? std::nullopt : std::optional<std::string>( run ) },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", std::nullopt },
+        { "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", std::nullopt }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &setting : settings ) {
+        const char *value = std::getenv( setting.first.c_str() );
+        previous[setting.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        assign_test_environment( setting.first, setting.second );
+    }
+    on_out_of_scope restore_environment( [&]() {
+        for( const auto &setting : previous ) {
+            assign_test_environment( setting.first, setting.second );
+        }
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() { if( owns_terminal ) { catacurses::endwin(); } } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    // Native compression conversion pumps and discards input. Complete this
+    // setup before queuing a key, and restore before the UI owner is destroyed.
+    const bool previous_compression = world_generator->active_world->has_compression_enabled();
+    REQUIRE( world_generator->active_world->set_compression_enabled( scenario.second ) );
+    on_out_of_scope restore_compression( [&]() {
+        CHECK( world_generator->active_world->set_compression_enabled( previous_compression ) );
+    } );
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    const auto tick = [&]() {
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        REQUIRE_FALSE( g->do_turn() );
+    };
+    tick(); // ordinary post-load first turn has no advancing diagnostic row
+    bool called = false;
+    std::map<std::string, int> expected_counts;
+    auto &manager = openclaw_harness_semantic_surface_manager();
+    const auto exercise = [&]() {
+        const auto time = calendar::turn;
+        const auto position = u.pos_abs();
+        const auto moves = u.get_moves();
+        const auto bytes = std::filesystem::exists( trace ) ? std::filesystem::file_size( trace ) : 0;
+        expected_counts = exercise_nav_lookup_diagnostics_for_test();
+        CHECK( calendar::turn == time );
+        CHECK( u.pos_abs() == position );
+        CHECK( u.get_moves() == moves );
+        CHECK( ( std::filesystem::exists( trace ) ? std::filesystem::file_size( trace ) : 0 ) == bytes );
+    };
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &surface ) {
+        if( surface.kind == "world" && !called ) {
+            called = true;
+            exercise();
+        }
+    } );
+    on_out_of_scope clear_observer( [&]() { manager.set_descriptor_observer( {} ); } );
+    if( mode == "unbound" ) {
+        // No run authority means no World descriptor callback. Exercise the
+        // same actual owners directly with no row instead of inventing one.
+        CHECK_FALSE( raid_perf_nav_build_active() );
+        exercise();
+        called = true;
+    }
+    for( int i = 0; i < 3; ++i ) {
+        tick();
+    }
+    REQUIRE( called );
+    { override_option off( "RAID_PERFORMANCE_DIAGNOSTIC", "off" ); tick(); }
+    std::map<std::string, int> actual_counts;
+    int lookups = 0;
+    int misses = 0;
+    int intervals = 0;
+    std::ifstream input( trace );
+    for( std::string line; std::getline( input, line ); ) {
+        if( line.find( "raid_performance_interval" ) == std::string::npos ) {
+            continue;
+        }
+        ++intervals;
+        const auto object = json_loader::from_string( line.substr( line.find( '{' ) ) ).get_object();
+        object.allow_omitted_members();
+        const auto names = object.get_string_array( "stage_names" );
+        const auto index = [&]( const std::string &name ) {
+            REQUIRE( std::count( names.begin(), names.end(), name ) == 1 );
+            return std::distance( names.begin(), std::find( names.begin(), names.end(), name ) );
+        };
+        for( const auto value : object.get_array( "rows" ) ) {
+            const auto row = value.get_object();
+            row.allow_omitted_members();
+            const auto counts = row.get_object( "nav_view_counts" );
+            counts.allow_omitted_members();
+            for( const auto &entry : expected_counts ) {
+                actual_counts[entry.first] += counts.get_int( entry.first );
+            }
+            const auto calls = row.get_array( "stage_calls" );
+            lookups += calls.get_int( index( "nav_view_lookup" ) );
+            misses += calls.get_int( index( "nav_view_miss_load" ) );
+        }
+    }
+    const bool enabled = mode != "off" && mode != "unbound";
+    CHECK( ( intervals > 0 ) == enabled );
+    if( enabled ) {
+        CHECK( actual_counts == expected_counts );
+    } else {
+        CHECK( actual_counts.empty() );
+    }
+    // Seven actual lookup calls plus one explicitly labelled open-failure
+    // context probe above; only the real miss owner contributes six loads.
+    CHECK( lookups == ( enabled ? 8 : 0 ) );
+    CHECK( misses == ( enabled ? 6 : 0 ) );
 }
 
 #endif

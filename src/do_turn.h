@@ -33,13 +33,25 @@ enum class raid_perf_stage : std::size_t {
     migo_service_local_navigation, migo_service_abstract_navigation,
     migo_local_plan, migo_local_move,
     migo_local_prepare_navigation, migo_abstract_prepare_navigation,
-    physical_navigation_read, physical_navigation_view_build, physical_navigation_native_route, count
+    physical_navigation_read, physical_navigation_view_build, physical_navigation_native_route,
+    nav_view_lookup, nav_view_miss_load, nav_view_level_setup, count
 };
+enum class raid_perf_nav_event : std::size_t {
+    resident_hit, resident_null, buffer_miss, archive_load_calls,
+    archive_open_attempts, archive_open_failures, missing_archive, missing_quad,
+    omitted_submap, loaded_submap, load_failures, plain_read_calls,
+    level_fresh, level_reused, level_inside_lookup, count
+};
+// Attribution context belongs only to the current synchronous diagnostic row.
+// These reads/counters never load geometry or establish game knowledge.
+bool raid_perf_nav_build_active();
+bool raid_perf_nav_lookup_active();
+void raid_perf_note_nav( raid_perf_nav_event event );
 struct raid_perf_row;
 class raid_perf_scope
 {
     public:
-        explicit raid_perf_scope( raid_perf_stage stage );
+        explicit raid_perf_scope( raid_perf_stage stage, bool enabled = true );
         ~raid_perf_scope();
         raid_perf_scope( const raid_perf_scope & ) = delete;
         raid_perf_scope &operator=( const raid_perf_scope & ) = delete;
