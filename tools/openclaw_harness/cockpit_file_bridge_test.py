@@ -16,6 +16,7 @@ import unittest
 from types import MappingProxyType
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cockpit_file_bridge import (FileBackedCockpitBridge, FileBackedCockpitClient,
@@ -102,6 +103,102 @@ ACTION_SUCCESSOR_OBSERVATION_CHILD = (
     "  result={'ok':True,'observation':{'observation_id':'frame:2'},'receipt':{'accepted':True}}\n"
     " print(json.dumps(result),flush=True)\n"
 )
+
+
+class AtomicJsonTest(unittest.TestCase):
+    def test_long_cancel_path_preserves_content_and_same_directory_atomic_replace(self):
+        import cockpit_file_bridge as module
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp) / ("s" * (173 - len(str(Path(temp))) - 1))
+            parent.mkdir()
+            destination = parent / ("cancel-" + "a" * 64 + ".json")
+            self.assertEqual(len(str(destination)), 250)
+            destination.write_text("old", encoding="utf-8")
+            sibling = parent / "unrelated.tmp"
+            sibling.write_text("keep", encoding="utf-8")
+            original = tempfile.mkstemp
+            staged = []
+            def reserve(**kwargs):
+                fd, name = original(**kwargs)
+                staged.append(Path(name))
+                self.assertEqual(Path(name).parent, parent)
+                self.assertLess(len(name), len(str(destination)))
+                self.assertEqual(destination.read_text(encoding="utf-8"), "old")
+                return fd, name
+            with patch.object(module.tempfile, "mkstemp", side_effect=reserve):
+                module._atomic_json(destination, {"z": "日→", "a": 1})
+            self.assertEqual(destination.read_bytes(), ('{"a": 1, "z": "日→"}' + os.linesep).encode("utf-8"))
+            self.assertEqual(len(staged), 1)
+            self.assertFalse(staged[0].exists())
+            self.assertEqual(sibling.read_text(), "keep")
+
+    def test_replace_failure_preserves_destination_and_cleans_owned_temp(self):
+        import cockpit_file_bridge as module
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "state.json"
+            destination.write_bytes(b"old")
+            with patch.object(module.os, "replace", side_effect=OSError("replace refused")):
+                with self.assertRaisesRegex(OSError, "replace refused"):
+                    module._atomic_json(destination, {"new": True})
+            self.assertEqual(destination.read_bytes(), b"old")
+            self.assertEqual(list(Path(temp).iterdir()), [destination])
+
+    def test_serialization_failure_cleans_temp_and_preserves_destination(self):
+        import cockpit_file_bridge as module
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "state.json"
+            destination.write_bytes(b"old")
+            with self.assertRaises(TypeError):
+                module._atomic_json(destination, {"unsupported": object()})
+            self.assertEqual(destination.read_bytes(), b"old")
+            self.assertEqual(list(Path(temp).iterdir()), [destination])
+
+    def test_missing_parent_is_not_created(self):
+        import cockpit_file_bridge as module
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "missing" / "state.json"
+            with self.assertRaises(FileNotFoundError):
+                module._atomic_json(destination, {})
+            self.assertEqual(list(Path(temp).iterdir()), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing semantics")
+    def test_actual_windows_reader_retry_and_permanent_failure_cleanup(self):
+        import ctypes
+        import cockpit_file_bridge as module
+        from windows_native_process import replace_with_readers
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                      ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                      ctypes.c_void_p]
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "state.json"
+            destination.write_bytes(b"old")
+            def reader():
+                handle = kernel.CreateFileW(str(destination), 0x80000000, 1 | 2,
+                                            None, 3, 0, None)
+                self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+                return handle
+            handle = reader()
+            timer = threading.Timer(.1, kernel.CloseHandle, args=(handle,))
+            timer.start()
+            try:
+                module._atomic_json(destination, {"after_reader": True})
+            finally:
+                timer.join()
+            self.assertEqual(json.loads(destination.read_text()), {"after_reader": True})
+            handle = reader()
+            try:
+                with patch("windows_native_process.replace_with_readers",
+                           side_effect=lambda source, target: replace_with_readers(source, target, timeout=.05)):
+                    with self.assertRaises(PermissionError):
+                        module._atomic_json(destination, {"must_not_publish": True})
+            finally:
+                kernel.CloseHandle(handle)
+            self.assertEqual(json.loads(destination.read_text()), {"after_reader": True})
+            self.assertEqual(list(Path(temp).iterdir()), [destination])
 
 
 class CockpitFileBridgeTest(unittest.TestCase):
@@ -414,7 +511,9 @@ class CockpitFileBridgeTest(unittest.TestCase):
 
     def test_out_of_band_cancel_preserves_bridge_and_next_request(self):
         with tempfile.TemporaryDirectory() as temp:
-            directory = Path(temp) / "session"
+            # Actual cancellation publishes a 76-character basename under controls.
+            # Keep that target at 250 characters: the old derived temp name was 264.
+            directory = Path(temp) / ("s" * (164 - len(str(Path(temp))) - 1))
             child = "exec(" + repr("""import json, os, sys, time
 print(json.dumps({"cockpit_live_session":{"schema":"caol-cockpit-live-session-v1","entry_mode":"cockpit_live_session","run_id":"run-a","binding_id":"native-a","bridge_binding_id":"bound-a"}}), flush=True)
 for line in sys.stdin:

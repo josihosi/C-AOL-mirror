@@ -85,7 +85,7 @@ def _tree_digest(root: Path) -> str:
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, name = tempfile.mkstemp(prefix=".caol-", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
