@@ -9,6 +9,7 @@
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
 #include "do_turn.h"
+#include "debug.h"
 #include "field_type.h"
 #include "game.h"
 #include "horde_entity.h"
@@ -26,6 +27,7 @@
 #include "scout_observation.h"
 #include "mtype.h"
 #include "item.h"
+#include "item_group.h"
 #include "migo_tower_native.h"
 #include "monster.h"
 #include "npc.h"
@@ -769,6 +771,113 @@ TEST_CASE( "migo_native_capabilities_require_perception_and_ignore_hidden_human_
     CHECK( scout_profile.ranged.total_damage() > 0 );
     CHECK( scout_profile.ranged_range == 30 );
     CHECK( scout_profile.ranged_cost >= 5 * scout.get_speed() );
+}
+
+TEST_CASE( "migo_observed_modular_gun_does_not_invent_hidden_ammunition",
+           "[migo_tower][migo_modular_weapon][native]" )
+{
+    const bool npc_target = GENERATE( false, true );
+    CAPTURE( npc_target );
+    clear_avatar();
+    clear_map_with_vision( -1, 4, false );
+    const auto old_turn = calendar::turn;
+    on_out_of_scope restore_scene( [&]() {
+        clear_avatar();
+        clear_map_without_vision( -1, 4 );
+        set_time( old_turn );
+    } );
+    set_time_to_day();
+    map &here = get_map();
+    monster observer( mtype_id( "mon_mi_go" ) );
+    observer.set_pos_abs_only( here.get_abs( tripoint_bub_ms( 12, 66, 0 ) ) );
+    npc resident;
+    resident.normalize();
+    Character &human = npc_target ? static_cast<Character &>( resident ) : get_avatar();
+    human.setpos( here, tripoint_bub_ms( 30, 66, 0 ), false );
+    here.build_map_cache( 0 );
+    const auto bytes = []( const item &value ) {
+        std::ostringstream output;
+        JsonOut json( output );
+        value.serialize( json );
+        return output.str();
+    };
+    const auto turn = calendar::turn;
+    const auto human_position = human.pos_abs();
+    const auto observer_position = observer.pos_abs();
+    const int human_hp = human.get_part_hp_cur( bodypart_id( "torso" ) );
+    const int observer_hp = observer.get_hp();
+    const auto ground = here.ter( here.get_bub( human_position ) );
+    std::vector<migo_tower::candidate> available;
+    for( int i = 0; i < 7; ++i ) {
+        available.push_back( {"resident-" + std::to_string( i ), "mon_mi_go",
+                              migo_tower::own_capability( observer )} );
+    }
+    // Production item groups supply real receivers. Neither a changed hidden
+    // caliber nor the magazine's actual load may become observed knowledge.
+    for( const std::string group : {"modular_ar15", "ar15_300"} ) {
+        for( const int rounds : {0, 28} ) {
+            CAPTURE( group, rounds );
+            item rifle = item_group::item_from( item_group_id( group ) );
+            REQUIRE( rifle.typeId() == itype_id( "modular_ar15" ) );
+            REQUIRE_FALSE( rifle.ammo_default().is_null() );
+            rifle.ammo_set( rifle.ammo_default(), rounds );
+            REQUIRE( rifle.ammo_remaining() == rounds );
+            item bare_type( rifle.typeId() );
+            REQUIRE( bare_type.ammo_default().is_null() );
+            human.set_wielded_item( rifle );
+            const std::string original = bytes( *human.get_wielded_item() );
+            // Real item save/load retains the functional receiver and ammo.
+            item restored;
+            restored.deserialize( json_loader::from_string( original ) );
+            REQUIRE( bytes( restored ) == original );
+            human.set_wielded_item( restored );
+            // The setup setter copies items; bind conservation after that copy.
+            const std::string observed_before = bytes( *human.get_wielded_item() );
+            for( int repeat = 0; repeat < 2; ++repeat ) {
+                std::optional<migo_tower::combat_profile> observed;
+                scout_observation::site_reader reader;
+                const std::string diagnostic = capture_debugmsg_during( [&]() {
+                    observed = migo_tower::observe_enemy( observer, human, reader );
+                } );
+                REQUIRE( observed );
+                INFO( diagnostic );
+                CHECK( diagnostic.empty() );
+                CHECK_FALSE( observed->known );
+                const auto admission = migo_tower::select_party( available, {*observed}, 18, false );
+                CHECK( admission.members.empty() );
+                CHECK( admission.reason == "observed_capability_unknown" );
+                CHECK( bytes( *human.get_wielded_item() ) == observed_before );
+            }
+        }
+    }
+    // A fixed-caliber definition remains a useful, known armed estimate even
+    // when the actual magazine is empty. No hidden ammo peek is needed.
+    human.set_wielded_item( item( itype_id( "glock_19" ) ) );
+    const std::string fixed_before = bytes( *human.get_wielded_item() );
+    scout_observation::site_reader fixed_reader;
+    std::optional<migo_tower::combat_profile> fixed;
+    CHECK( capture_debugmsg_during( [&]() {
+        fixed = migo_tower::observe_enemy( observer, human, fixed_reader );
+    } ).empty() );
+    REQUIRE( fixed );
+    CHECK( fixed->known );
+    CHECK( fixed->ranged.total_damage() > 0 );
+    CHECK( fixed->ranged_range > 0 );
+    CHECK( bytes( *human.get_wielded_item() ) == fixed_before );
+    CHECK( calendar::turn == turn );
+    CHECK( human.pos_abs() == human_position );
+    CHECK( observer.pos_abs() == observer_position );
+    CHECK( human.get_part_hp_cur( bodypart_id( "torso" ) ) == human_hp );
+    CHECK( observer.get_hp() == observer_hp );
+    CHECK( here.ter( here.get_bub( human_position ) ) == ground );
+    // Invalid API input still diagnoses rather than silently accepting NULL.
+    item bare_type( itype_id( "modular_ar15" ) );
+    const std::string bare_before = bytes( bare_type );
+    const std::string invalid = capture_debugmsg_during( [&]() {
+        bare_type.ammo_set( itype_id::NULL_ID() );
+    } );
+    CHECK_THAT( invalid, Catch::Matchers::Contains( "can't set ammo null in AR-15 as it is not an ammo" ) );
+    CHECK( bytes( bare_type ) == bare_before );
 }
 
 TEST_CASE( "migo_extended_melee_is_exposure_and_saved_threat_memory_is_conservative",

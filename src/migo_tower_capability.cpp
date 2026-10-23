@@ -120,12 +120,19 @@ combat_profile visible_human_profile( const Character &enemy )
         out.melee_cost = std::max( 1, static_cast<int>( 65 +
             ( weapon.volume() / 62.5_ml + weapon.weight() / 60_gram ) / weapon.count() ) );
         if( weapon.is_gun() ) {
-            // Assume usable ammunition and the native fastest trained firing
-            // interval. Never inspect the observed actor's magazine/inventory.
-            weapon.ammo_set( weapon.ammo_default() );
-            out.ranged = weapon.gun_damage();
-            out.ranged_range = weapon.gun_range();
-            out.ranged_cost = weapon.type->gun->skill_used->time_to_attack().min_time;
+            // A modular gun's visible type may not determine its ammunition.
+            // Missing a model is unknown capability, never a harmless gun or a
+            // reason to inspect the actor's concealed receiver/magazine.
+            const itype_id ammunition = weapon.ammo_default();
+            if( ammunition.is_null() ) {
+                out.known = false;
+            } else {
+                // Assume usable ammunition and the fastest trained interval.
+                weapon.ammo_set( ammunition );
+                out.ranged = weapon.gun_damage();
+                out.ranged_range = weapon.gun_range();
+                out.ranged_cost = weapon.type->gun->skill_used->time_to_attack().min_time;
+            }
         }
     }
     return out;
