@@ -836,6 +836,13 @@ class map
          */
         std::vector<tripoint_bub_ms> route( const Creature &who, const pathfinding_target &target ) const;
 
+        // Revalidate a retained adjacent, same-level path using native costs.
+        // Vertical/ledge special cases require the ordinary route solver.
+        // Returns current per-edge costs, or no value when it is not reusable.
+        std::optional<std::vector<int>> validate_route( const tripoint_bub_ms &from,
+                const std::vector<tripoint_bub_ms> &path, const pathfinding_settings &settings,
+                const std::function<bool( const tripoint_bub_ms & )> &avoid ) const;
+
         // Get a straight route from f to t, only along non-rough terrain. Returns an empty vector
         // if that is not possible.
         std::vector<tripoint_bub_ms> straight_route( const tripoint_bub_ms &f,

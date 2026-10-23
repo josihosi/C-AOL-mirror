@@ -652,6 +652,7 @@ void member_intent::retreat()
         phase = member_phase::returning;
         // A previous approach/search segment cannot own a later withdrawal.
         waypoint.reset();
+        navigation.clear();
     }
 }
 

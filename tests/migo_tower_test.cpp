@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <chrono>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -3286,4 +3289,379 @@ TEST_CASE( "service_preparation_rejects_vehicle_metadata_from_an_existing_only_l
     const auto original = physical_navigation::read_step( body, goal );
     CHECK( refused.reason == original.reason );
     CHECK( refused.position == original.position );
+}
+
+TEST_CASE( "positive remote segments revalidate current paths without spending motion",
+           "[migo_tower][navigation_segment]" )
+{
+    clear_avatar();
+    clear_map();
+    const auto saved_turn = calendar::turn;
+    const tripoint_abs_sm cell( 4600, 4600, 0 );
+    REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( cell ) );
+    on_out_of_scope cleanup( [&]() {
+        MAPBUFFER.clear_outside_reality_bubble();
+        CHECK( calendar::turn == saved_turn );
+    } );
+    auto floor = std::make_unique<submap>();
+    floor->set_all_ter( ter_str_id( "t_floor" ) );
+    submap *terrain = floor.get();
+    REQUIRE( MAPBUFFER.add_submap( cell, floor ) );
+    const auto origin = project_to<coords::ms>( cell ) + point( 2, 6 );
+    const auto goal = origin + point::east * 7;
+    monster body( mtype_id( "mon_mi_go" ) );
+    body.set_pos_abs_only( origin );
+    body.set_moves( 100 );
+    const auto serialize = [&]( const monster &actor ) {
+        std::ostringstream out;
+        JsonOut json( out );
+        actor.serialize( json );
+        return out.str();
+    };
+    const auto unchanged = serialize( body );
+    physical_navigation::segment retained;
+    const auto read = [&]( const tripoint_abs_ms &destination,
+                          const std::function<bool( const tripoint_abs_ms & )> &occupied = {} ) {
+        return physical_navigation::read_step( body, destination, occupied, nullptr, &retained );
+    };
+    const auto first = read( goal );
+    REQUIRE( first.next == physical_navigation::action::walk );
+    CHECK( retained.size() == 7 );
+    CHECK( read( goal ).position == first.position );
+    CHECK( retained.size() == 7 );
+    CHECK( serialize( body ) == unchanged );
+    monster failed_candidate( body );
+    failed_candidate.set_pos_abs_only( first.position );
+    physical_navigation::segment failed_copy( retained );
+    CHECK( physical_navigation::read_step( failed_candidate, goal, {}, nullptr,
+                                         &failed_copy ).next == physical_navigation::action::walk );
+    CHECK( retained.size() == 7 );
+    CHECK( read( goal ).position == first.position );
+    // Current committed position, not a read result, consumes exactly one point.
+    body.set_pos_abs_only( first.position );
+    CHECK( read( goal ).position == origin + point::east * 2 );
+    CHECK( retained.size() == 6 );
+    const auto block = [&]( const tripoint_abs_ms &p ) { return p == goal; };
+    CHECK( read( goal, block ).next == physical_navigation::action::none );
+    CHECK( retained.size() == 0 ); // no retained refusal
+    CHECK( read( goal ).next == physical_navigation::action::walk );
+    CHECK( retained.size() > 0 );
+    const auto alternate = origin + point::north * 2;
+    CHECK( read( alternate ).next == physical_navigation::action::walk );
+    CHECK( read( goal ).next == physical_navigation::action::walk );
+    body.set_pos_abs_only( origin + point::south ); // off-segment => cold route
+    const auto cold = physical_navigation::read_step( body, goal );
+    CHECK( read( goal ).position == cold.position );
+    CHECK( body.get_moves() == 100 );
+    // No service view survives these real field/door/terrain mutations.
+    body.set_pos_abs_only( origin );
+    retained.clear();
+    terrain->set_all_ter( ter_str_id( "t_wall" ) );
+    for( int x = 0; x < SEEX; ++x ) {
+        terrain->set_ter( point_sm_ms( x, 6 ), ter_str_id( "t_floor" ) );
+    }
+    terrain->set_ter( point_sm_ms( 5, 6 ), ter_str_id( "t_door_c" ) );
+    const auto closed = read( goal );
+    REQUIRE( closed.next == physical_navigation::action::walk );
+    monster no_doors( mtype_id( "mon_bear_mutant_3headed" ) );
+    no_doors.set_pos_abs_only( origin );
+    const auto incapable = physical_navigation::read_step( no_doors, goal, {}, nullptr, &retained );
+    CHECK( incapable.next == physical_navigation::action::none );
+    CHECK( retained.size() == 0 );
+    REQUIRE( read( goal ).next == physical_navigation::action::walk );
+    monster opener( body );
+    opener.set_pos_abs_only( origin + point::east * 2 );
+    REQUIRE( physical_navigation::commit_door( opener, origin + point::east * 3 ) );
+    CHECK( read( goal ).next == physical_navigation::action::walk );
+    const point_sm_ms burning( 5, 6 );
+    terrain->get_field( burning ).add_field( fd_fire, 1, 0_turns );
+    ++terrain->field_count;
+    const auto fire = read( goal );
+    CHECK( fire.next == physical_navigation::action::none );
+    CHECK( fire.reason == "approach_fire_hazard" );
+    CHECK( retained.size() == 0 );
+    terrain->get_field( burning ).remove_field( fd_fire );
+    --terrain->field_count;
+    CHECK( read( goal ).next == physical_navigation::action::walk );
+    CHECK( body.pos_abs() == origin );
+    CHECK( body.get_moves() == 100 );
+}
+
+TEST_CASE( "retained positive segments complete actual outward and home journeys",
+           "[migo_tower][navigation_segment][native]" )
+{
+    const std::string layout = GENERATE( "open", "wall", "reopened", "same_turn_reopened",
+                                         "alternate_shortcut", "adverse" );
+    const int repetition = GENERATE( 0, 1, 2 );
+    const bool detour = layout != "open";
+    const bool reload = GENERATE( false, true );
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    const auto old_turn = calendar::turn;
+    const bool old_trigdist = trigdist;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+        set_time( old_turn );
+        trigdist = old_trigdist;
+        clear_map();
+    } );
+    struct journey_result {
+        int cost = 0;
+        int steps = 0;
+        int outward_cost = 0;
+        int outward_steps = 0;
+        int peak_segment_points = 0;
+        int revisited_squares = 0;
+        int native_speed = 0;
+        double cpu_seconds = 0;
+        double wall_seconds = 0;
+    };
+    const auto journey = [&]( bool warm ) {
+        CAPTURE( layout, reload, warm, repetition );
+        clear_avatar();
+        clear_map();
+        clear_creatures();
+        set_time_to_day();
+        // Exercise circular native bounds; compare actual charged movement.
+        trigdist = true;
+        overmap_buffer.global_state.migo_populations = {};
+        overmap_buffer.global_state.migo_towers = {};
+        overmap_buffer.global_state.bandit_live_world = {};
+        get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        map &here = get_map();
+        get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+        const tripoint_bub_ms start( 30, 50, 0 );
+        const tripoint_bub_ms destination( 88, 50, 0 );
+        for( const auto &p : here.points_in_rectangle( tripoint_bub_ms( 15, 15, 0 ),
+                tripoint_bub_ms( 110, 90, 0 ) ) ) {
+            here.ter_set( p, ter_str_id( "t_floor" ) );
+            here.furn_set( p, furn_str_id::NULL_ID() );
+        }
+        if( detour ) {
+            for( int y = 25; y <= 65; ++y ) {
+                here.ter_set( tripoint_bub_ms( 35, y, 0 ), ter_str_id( "t_wall" ) );
+            }
+        }
+        if( layout == "adverse" ) {
+            for( int x = 20; x < 90; ++x ) {
+                for( int y = 45; y <= 55; ++y ) {
+                    if( x != 35 ) {
+                        here.ter_set( tripoint_bub_ms( x, y, 0 ), ter_str_id( "t_dirtmound" ) );
+                    }
+                }
+            }
+        }
+        monster *body = g->place_critter_at( mtype_id( "mon_mi_go" ), start );
+        REQUIRE( body );
+        const auto home = body->pos_abs();
+        const auto goal = here.get_abs( destination );
+        const auto anchor = project_to<coords::omt>( home );
+        migo_population::member_record member;
+        member.token = {"segment-journey", "member", 1, anchor};
+        member.type = body->type->id;
+        member.home = home;
+        member.owner = migo_population::representation::local;
+        member.assignment = migo_population::duty::dispatched;
+        member.hp = body->get_hp();
+        migo_population::site_record population;
+        population.id = member.token.site_id;
+        population.anchor = anchor;
+        REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+        overmap_buffer.global_state.migo_populations.sites.push_back( population );
+        migo_tower::site_state site;
+        site.site_id = population.id;
+        site.anchor = anchor;
+        migo_tower::operation_record operation;
+        operation.generation = 1;
+        operation.source.source_omt = project_to<coords::omt>( goal );
+        operation.members = {{member.token.member_id, false, false, home}};
+        operation.sweep.source = operation.source.source_omt;
+        operation.sweep.generation = 1;
+        operation.sweep.candidates = {{goal}};
+        operation.overdue_after_active = 100000;
+        operation.advance( to_turn<int>( calendar::turn ), 0 );
+        site.operation = operation;
+        overmap_buffer.global_state.migo_towers.sites.push_back( site );
+        body->population_identity() = member.token;
+        migo_tower::member_intent intent;
+        intent.generation = 1;
+        intent.home = home;
+        body->set_migo_intent( intent );
+        journey_result result;
+        result.native_speed = body->get_speed();
+        bool reached = false;
+        bool loaded = false;
+        bool tested_positive = false;
+        std::set<std::pair<int, tripoint_abs_ms>> visited;
+        // Component planning + execution + settlement, excluding world setup,
+        // output and input. Process CPU is not a native owner-stage timer.
+        const auto wall_started = std::chrono::steady_clock::now();
+        const auto cpu_started = std::clock();
+        for( int turn = 0; turn < 240; ++turn ) {
+            calendar::turn += 1_turns;
+            if( ( layout == "reopened" || layout == "alternate_shortcut" ) && turn == 5 ) {
+                // A new off-path shortcut must be assessed as a journey-cost
+                // tradeoff; validating the old path does not discover it.
+                here.ter_set( tripoint_bub_ms( 35, 50, 0 ), ter_str_id( "t_floor" ) );
+                visited.clear();
+            }
+            if( layout == "alternate_shortcut" && turn == 12 ) {
+                // A different off-path opening must not build unbounded route
+                // history or mask the actual target after the first change.
+                here.ter_set( tripoint_bub_ms( 35, 40, 0 ), ter_str_id( "t_floor" ) );
+                visited.clear();
+            }
+            if( !warm ) {
+                body->migo_intent()->navigation.clear();
+            }
+            const auto before = body->pos_abs();
+            body->set_moves( 1000 );
+            const auto prepared = migo_tower::prepare_step( *body,
+                                  migo_population::representation::local );
+            if( !tested_positive ) {
+                REQUIRE( prepared.next == physical_navigation::action::walk );
+                if( warm ) {
+                    CHECK( body->migo_intent()->navigation.size() > 0 );
+                    CHECK( body->migo_intent()->navigation.size() <= 60 );
+                }
+                tested_positive = true;
+            }
+            CHECK( body->pos_abs() == before );
+            CHECK( body->get_moves() == 1000 );
+            result.peak_segment_points = std::max( result.peak_segment_points,
+                                         static_cast<int>( body->migo_intent()->navigation.size() ) );
+            CHECK( body->migo_intent()->navigation.size() <= 60 );
+            if( layout == "same_turn_reopened" && turn == 5 ) {
+                // Real geometry owner changes an off-path connection after
+                // preparation, with no clock advance before the next read.
+                here.ter_set( tripoint_bub_ms( 35, 50, 0 ), ter_str_id( "t_floor" ) );
+                visited.clear();
+            }
+            if( body->migo_intent()->phase == migo_tower::member_phase::settled ) {
+                break;
+            }
+            if( !warm ) {
+                body->migo_intent()->navigation.clear();
+            }
+            REQUIRE( migo_tower::plan_local( *body, false, nullptr ) );
+            if( !warm ) {
+                body->migo_intent()->navigation.clear();
+            }
+            const int phase = static_cast<int>( body->migo_intent()->phase );
+            REQUIRE( migo_tower::move_local( *body ) );
+            REQUIRE( body->pos_abs() != before );
+            // Count backtracking rather than equating any revisit with an
+            // endless loop. Opening a shortcut or a cold reload can select a
+            // different finite path. The full journey must still settle in
+            // the unchanged bounded loop below, including all charged steps.
+            if( !visited.emplace( phase, body->pos_abs() ).second ) {
+                ++result.revisited_squares;
+            }
+            const auto physical = here.get_bub( body->pos_abs() );
+            CHECK( here.ter( physical ) != ter_str_id( "t_wall" ) );
+            if( detour && physical.x() == 35 ) {
+                CHECK( ( physical.y() < 25 || physical.y() > 65 ||
+                         ( ( layout == "reopened" || layout == "same_turn_reopened" ||
+                             layout == "alternate_shortcut" ) && turn >= 5 && physical.y() == 50 ) ||
+                         ( layout == "alternate_shortcut" && turn >= 12 && physical.y() == 40 ) ) );
+            }
+            CHECK( body->get_hp() == member.hp );
+            CHECK( body->population_identity().epoch == member.token.epoch );
+            result.cost += 1000 - body->get_moves();
+            ++result.steps;
+            if( reload && turn == 8 ) {
+                std::ostringstream saved;
+                { JsonOut json( saved ); body->serialize( json ); }
+                monster restored;
+                restored.deserialize( json_loader::from_string( saved.str() ) );
+                CHECK( restored.migo_intent()->navigation.size() == 0 );
+                CHECK( restored.pos_abs() == body->pos_abs() );
+                *body = restored;
+                loaded = true;
+            }
+            if( !reached && body->pos_abs() == goal ) {
+                reached = true;
+                result.outward_cost = result.cost;
+                result.outward_steps = result.steps;
+            }
+            if( reached ) {
+                migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+            }
+        }
+        REQUIRE( reached );
+        CHECK( loaded == reload );
+        CHECK( body->migo_intent()->phase == migo_tower::member_phase::settled );
+        CHECK( body->migo_intent()->navigation.size() == 0 );
+        CHECK( project_to<coords::omt>( body->pos_abs() ) == anchor );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 0 );
+        const auto *settled = overmap_buffer.global_state.migo_populations.find( population.id );
+        REQUIRE( settled );
+        CHECK( settled->find( member.token.member_id )->owner == migo_population::representation::local );
+        CHECK( settled->find( member.token.member_id )->assignment == migo_population::duty::available );
+        CHECK( overmap_buffer.global_state.migo_towers.find( population.id )->operation->members.front().returned );
+        result.cpu_seconds = static_cast<double>( std::clock() - cpu_started ) / CLOCKS_PER_SEC;
+        result.wall_seconds = std::chrono::duration<double>( std::chrono::steady_clock::now() -
+                              wall_started ).count();
+        return result;
+    };
+    journey_result cold;
+    journey_result warm;
+    bool paired = false;
+    SECTION( "cold_only" ) {
+        cold = journey( false );
+    }
+    SECTION( "paired" ) {
+        paired = true;
+        if( repetition % 2 == 0 ) {
+            cold = journey( false );
+            warm = journey( true );
+        } else {
+            warm = journey( true );
+            cold = journey( false );
+        }
+    }
+    std::ofstream output( std::filesystem::path( PATH_INFO::user_dir() ) / "segment-journeys.jsonl",
+                          std::ios::app );
+    JsonOut json( output );
+    json.start_object();
+    json.member( "layout", layout );
+    json.member( "reload", reload );
+    json.member( "repetition", repetition );
+    json.member( "paired", paired );
+    json.member( "cold_cost", cold.cost );
+    json.member( "warm_cost", warm.cost );
+    json.member( "cold_steps", cold.steps );
+    json.member( "warm_steps", warm.steps );
+    json.member( "cold_outward_cost", cold.outward_cost );
+    json.member( "warm_outward_cost", warm.outward_cost );
+    json.member( "cold_outward_steps", cold.outward_steps );
+    json.member( "warm_outward_steps", warm.outward_steps );
+    json.member( "cold_cpu_seconds", cold.cpu_seconds );
+    json.member( "warm_cpu_seconds", warm.cpu_seconds );
+    json.member( "cold_wall_seconds", cold.wall_seconds );
+    json.member( "warm_wall_seconds", warm.wall_seconds );
+    json.member( "peak_segment_points", warm.peak_segment_points );
+    json.member( "cold_native_speed", cold.native_speed );
+    json.member( "warm_native_speed", warm.native_speed );
+    json.member( "cold_revisited_squares", cold.revisited_squares );
+    json.member( "warm_revisited_squares", warm.revisited_squares );
+    json.member( "segment_value_bytes", sizeof( physical_navigation::segment ) );
+    json.member( "logical_point_cost_payload_ceiling_bytes", 60 *
+                 ( sizeof( tripoint_abs_ms ) + sizeof( int ) ) );
+    json.end_object();
+    output << '\n';
+    CAPTURE( layout, reload, cold.cost, warm.cost, cold.steps, warm.steps );
+    // Route-quality deltas are measured above, not an invented universal
+    // exact-shortest-cost contract. Hard reachability, safety, bounded state,
+    // actual settlement and loop negatives remain inside both real journeys.
+    CHECK( cold.cost > 0 );
+    CHECK( cold.steps < 240 );
+    if( paired ) {
+        CHECK( warm.cost > 0 );
+        CHECK( warm.steps < 240 );
+    }
 }

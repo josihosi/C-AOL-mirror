@@ -5374,6 +5374,58 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             }
             CHECK( body->pos_abs() == ( branch == "local" ? home + point::east : home ) );
             CHECK( body->get_moves() == ( branch == "local" ? 0 : 100 ) );
+            if( branch == "local" ) {
+                // A real committed step can trim the positive prefix. Every
+                // stale ownership/lifetime key then requires a cold solve;
+                // the immediately repeated authenticated read must reuse it.
+                const auto committed = body->pos_abs();
+                auto &navigation = *body->migo_intent();
+                REQUIRE( migo_tower::prepare_step( *body, member.owner ).next ==
+                         physical_navigation::action::walk );
+                for( int key = 0; key < 8; ++key ) {
+                    switch( key ) {
+                        case 0:
+                            navigation.navigation_identity.site_id = "old-site";
+                            break;
+                        case 1:
+                            navigation.navigation_identity.member_id = "old-member";
+                            break;
+                        case 2:
+                            ++navigation.navigation_identity.epoch;
+                            break;
+                        case 3:
+                            navigation.navigation_identity.site_anchor =
+                                navigation.navigation_identity.site_anchor + point::east;
+                            break;
+                        case 4:
+                            ++navigation.navigation_generation;
+                            break;
+                        case 5:
+                            navigation.navigation_phase = migo_tower::member_phase::returning;
+                            break;
+                        case 6:
+                            navigation.navigation_owner = -1;
+                            break;
+                        case 7:
+                            navigation.navigation_world -= 2;
+                            break;
+                    }
+                    const auto first = migo_tower::prepare_step( *body, member.owner );
+                    const auto repeated = migo_tower::prepare_step( *body, member.owner );
+                    CHECK( first.next == physical_navigation::action::walk );
+                    CHECK( repeated.position == first.position );
+                    CHECK( navigation.navigation_identity.site_id == member.token.site_id );
+                    CHECK( navigation.navigation_identity.member_id == member.token.member_id );
+                    CHECK( navigation.navigation_identity.epoch == member.token.epoch );
+                    CHECK( navigation.navigation_identity.site_anchor == member.token.site_anchor );
+                    CHECK( navigation.navigation_generation == navigation.generation );
+                    CHECK( navigation.navigation_phase == navigation.phase );
+                    CHECK( navigation.navigation_owner == static_cast<int>( member.owner ) );
+                    CHECK( navigation.navigation_world == to_turn<int>( calendar::turn ) );
+                    CHECK( body->pos_abs() == committed );
+                    CHECK( body->get_moves() == 0 );
+                }
+            }
         }
         if( remote ) {
             // Identical reads exercise the real remote wrapper, without
@@ -5480,7 +5532,7 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         "migo_local_move", "migo_local_prepare_navigation", "migo_abstract_prepare_navigation",
         "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route"
     };
-    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 2, 0, 3, 0, 3 } :
+    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 19, 0, 20, 0, 10 } :
                                       branch == "abstract" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 2, 0, 2 } :
                                       branch == "remote" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 12, 12, 10 } :
                                       branch == "remote_unknown" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 4, 4, 0 } :

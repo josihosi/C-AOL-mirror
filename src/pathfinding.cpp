@@ -411,6 +411,41 @@ int map::extra_cost( const tripoint_bub_ms &cur, const tripoint_bub_ms &p,
     return pass_cost + avoid_cost;
 }
 
+std::optional<std::vector<int>> map::validate_route( const tripoint_bub_ms &from,
+        const std::vector<tripoint_bub_ms> &path, const pathfinding_settings &settings,
+        const std::function<bool( const tripoint_bub_ms & )> &avoid ) const
+{
+    if( path.empty() || !inbounds( from ) || settings.max_dist <= 0 ||
+        rl_dist( from, path.back() ) > settings.max_dist ) {
+        return std::nullopt;
+    }
+    std::vector<int> costs;
+    costs.reserve( path.size() );
+    int total = 0;
+    auto current = from;
+    for( const auto &next : path ) {
+        if( !inbounds( next ) || next.z() != from.z() ||
+            rl_dist( current, next ) != 1 || avoid( next ) ||
+            has_flag( ter_furn_flag::TFLAG_NO_FLOOR, current ) ||
+            has_flag( ter_furn_flag::TFLAG_NO_FLOOR, next ) ) {
+            return std::nullopt;
+        }
+        const auto &cache = get_pathfinding_cache_ref( next.z() );
+        const int cost = extra_cost( current, next, settings, cache.special[next.xy()] );
+        if( cost < 0 ) {
+            return std::nullopt;
+        }
+        const int edge = cost + ( current.x() != next.x() && current.y() != next.y() ? 1 : 0 );
+        total += edge;
+        if( total > settings.max_length ) {
+            return std::nullopt;
+        }
+        costs.push_back( edge );
+        current = next;
+    }
+    return costs;
+}
+
 std::vector<tripoint_bub_ms> map::route( const Creature &who,
         const pathfinding_target &target ) const
 {

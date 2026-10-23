@@ -6,7 +6,10 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 #include "coordinates.h"
+#include "pathfinding.h"
+#include "type_id.h"
 
 class monster;
 
@@ -23,6 +26,23 @@ struct step_read {
     std::string reason;
     std::uint64_t hazard_revision = 0;
 };
+class preparation;
+// Disposable positive path value. No map/actor pointers, failures or history.
+// The caller owns identity/lifetime; reads consume only actual position changes.
+class segment
+{
+        tripoint_abs_ms origin;
+        tripoint_abs_ms goal;
+        mtype_id type;
+        pathfinding_settings settings;
+        std::vector<tripoint_abs_ms> points;
+        std::vector<int> costs;
+        friend step_read read_step( const monster &, const tripoint_abs_ms &,
+                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation *, segment * );
+    public:
+        void clear() { *this = segment(); }
+        std::size_t size() const { return points.size(); }
+};
 // One operation's synchronous, read-only service span. No native action,
 // terrain/field edit, world/file mutation, save, unload or transport may occur.
 // Owns one compatible view, never a route/result or borrowed actor pointer.
@@ -31,7 +51,7 @@ class preparation
         struct implementation;
         std::unique_ptr<implementation> impl;
         friend step_read read_step( const monster &, const tripoint_abs_ms &,
-                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation * );
+                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation *, segment * );
     public:
         preparation();
         ~preparation();
@@ -42,7 +62,7 @@ class preparation
 // short physical route only, never perception or the destination's identity.
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                      const std::function<bool( const tripoint_abs_ms & )> &occupied = {},
-                     preparation *prepared = nullptr );
+                     preparation *prepared = nullptr, segment *retained = nullptr );
 // Caller must first authenticate the current physical owner and spend this
 // action once. This opens one adjacent native door, and never moves the body.
 bool commit_door( const monster &body, const tripoint_abs_ms &door );

@@ -789,3 +789,59 @@ TEST_CASE( "map_route_mon_around_danger", "[map][pathfinding]" )
     }
     clear_map_without_vision();
 }
+
+TEST_CASE( "retained paths use current native costs and refuse nonlocal edges",
+           "[map][pathfinding][navigation_segment]" )
+{
+    small_fake_map storage( ter_str_id( "t_floor" ) );
+    map &here = *storage.cast_to_map();
+    const tripoint_bub_ms from( 4, 4, 0 );
+    const tripoint_bub_ms goal( 10, 4, 0 );
+    const tripoint_bub_ms changed( 7, 4, 0 );
+    pathfinding_settings settings;
+    settings.max_dist = 20;
+    settings.max_length = 2000;
+    const auto turn = calendar::turn;
+    const auto clear = []( const tripoint_bub_ms & ) { return false; };
+    const auto path = here.route( from, pathfinding_target::point( goal ), settings );
+    REQUIRE( path.size() == 6 );
+    const auto flat = here.validate_route( from, path, settings, clear );
+    REQUIRE( flat );
+    CHECK( *flat == std::vector<int>( 6, 2 ) );
+    CHECK_FALSE( here.validate_route( from, {}, settings, clear ) );
+    CHECK_FALSE( here.validate_route( from, {from}, settings, clear ) );
+    CHECK_FALSE( here.validate_route( from, {from + point::east * 2}, settings, clear ) );
+    CHECK_FALSE( here.validate_route( from, {from + tripoint::above}, settings, clear ) );
+    CHECK_FALSE( here.validate_route( from, path, settings,
+    [&]( const tripoint_bub_ms &p ) { return p == changed; } ) );
+    auto limited = settings;
+    limited.max_dist = 2;
+    CHECK_FALSE( here.validate_route( from, path, limited, clear ) );
+    limited = settings;
+    limited.max_length = 3;
+    CHECK_FALSE( here.validate_route( from, path, limited, clear ) );
+    here.ter_set( changed, ter_str_id( "t_wall" ) );
+    CHECK_FALSE( here.validate_route( from, path, settings, clear ) );
+    const auto detour = here.route( from, pathfinding_target::point( goal ), settings );
+    REQUIRE_FALSE( detour.empty() );
+    CHECK( here.validate_route( from, detour, settings, clear ) );
+    here.ter_set( changed, ter_str_id( "t_door_c" ) );
+    CHECK_FALSE( here.validate_route( from, path, settings, clear ) );
+    settings.allow_open_doors = true;
+    const auto door = here.validate_route( from, path, settings, clear );
+    REQUIRE( door );
+    CHECK( ( *door )[2] == 4 );
+    here.ter_set( changed, ter_str_id( "t_door_o" ) );
+    const auto opened = here.validate_route( from, path, settings, clear );
+    REQUIRE( opened );
+    CHECK( *opened != *door );
+    here.ter_set( changed, ter_str_id( "t_floor" ) );
+    here.trap_set( changed, trap_id( "tr_beartrap" ) );
+    settings.avoid_traps = true;
+    const auto trap = here.validate_route( from, path, settings, clear );
+    REQUIRE( trap );
+    CHECK( ( *trap )[2] >= 500 );
+    here.ter_set( changed, ter_str_id( "t_open_air" ) );
+    CHECK_FALSE( here.validate_route( from, path, settings, clear ) );
+    CHECK( calendar::turn == turn );
+}

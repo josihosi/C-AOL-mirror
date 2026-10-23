@@ -12,6 +12,8 @@
 #include "coordinates.h"
 #include "damage.h"
 #include "raid_sweep.h"
+#include "physical_navigation.h"
+#include "migo_population_identity.h"
 
 class JsonObject;
 class JsonOut;
@@ -152,6 +154,14 @@ struct member_intent {
     int last_combat_world = -1;
     int last_observed_enemy_world = -1;
     int last_refused_world = -1;
+    // Disposable routing knowledge follows the actual prepared payload copy.
+    // Never serialized; no movement/clock credit or second body owner.
+    physical_navigation::segment navigation;
+    migo_population::identity navigation_identity;
+    std::uint64_t navigation_generation = 0;
+    member_phase navigation_phase = member_phase::outbound;
+    int navigation_owner = -1;
+    int navigation_world = -1;
     bool active() const {
         return generation > 0 && phase != member_phase::settled;
     }

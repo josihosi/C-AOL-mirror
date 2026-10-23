@@ -4,6 +4,7 @@
 #include <cmath>
 #include <memory>
 #include <set>
+#include <tuple>
 #include <vector>
 
 #include "do_turn.h"
@@ -22,6 +23,16 @@ namespace physical_navigation
 {
 namespace
 {
+bool same_settings( const pathfinding_settings &a, const pathfinding_settings &b )
+{
+    return std::tie( a.bash_strength, a.max_dist, a.max_length, a.climb_cost,
+                     a.allow_open_doors, a.allow_unlock_doors, a.avoid_traps, a.allow_climb_stairs,
+                     a.avoid_rough_terrain, a.avoid_sharp, a.avoid_dangerous_fields, a.size ) ==
+           std::tie( b.bash_strength, b.max_dist, b.max_length, b.climb_cost,
+                     b.allow_open_doors, b.allow_unlock_doors, b.avoid_traps, b.allow_climb_stairs,
+                     b.avoid_rough_terrain, b.avoid_sharp, b.avoid_dangerous_fields, b.size );
+}
+
 struct view_bounds {
     tripoint_abs_sm first;
     int size;
@@ -127,7 +138,8 @@ preparation::preparation() = default;
 preparation::~preparation() = default;
 
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
-                     const std::function<bool( const tripoint_abs_ms & )> &occupied, preparation *prepared )
+                     const std::function<bool( const tripoint_abs_ms & )> &occupied, preparation *prepared,
+                     segment *retained )
 {
     // Includes every refusal and locally owned view destruction. A retained
     // service workspace tears down under its inclusive operation parent.
@@ -137,6 +149,9 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     out.position = origin;
     const auto &native = body.get_pathfinding_settings();
     if( native.max_dist <= 0 ) {
+        if( retained ) {
+            retained->clear();
+        }
         out.reason = "no_native_pathfinding";
         return out;
     }
@@ -185,10 +200,16 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     };
     const auto from = here->get_bub( origin );
     if( !known( from ) ) {
+        if( retained ) {
+            retained->clear();
+        }
         out.reason = "origin_geometry_unknown";
         return out;
     }
     if( goal == origin && raid_sweep::fire_approach( *here, from ) ) {
+        if( retained ) {
+            retained->clear();
+        }
         out.known = true;
         out.reason = "approach_fire_hazard";
         out.hazard_revision = raid_sweep::fire_revision( *here, {from} );
@@ -222,7 +243,37 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         return here->route( from, pathfinding_target::point( to ), settings, exclude );
     };
     std::vector<tripoint_bub_ms> route;
-    if( origin.z() != goal.z() ) {
+    bool reused = false;
+    if( retained && retained->size() ) {
+        if( retained->goal != goal || retained->type != body.type->id ||
+            origin.z() != goal.z() || !same_settings( retained->settings, settings ) ) {
+            retained->clear();
+        } else {
+            // A speculative read/failed commit never consumes a point. Only
+            // the actual body's next physical position establishes progress.
+            if( origin != retained->origin && origin == retained->points.front() ) {
+                retained->points.erase( retained->points.begin() );
+                retained->costs.erase( retained->costs.begin() );
+                retained->origin = origin;
+            }
+            if( origin == retained->origin && retained->size() ) {
+                std::vector<tripoint_bub_ms> candidate;
+                candidate.reserve( retained->size() );
+                for( const auto &point : retained->points ) {
+                    candidate.push_back( here->get_bub( point ) );
+                }
+                const auto costs = here->validate_route( from, candidate, settings, avoid );
+                if( costs && *costs == retained->costs ) {
+                    route = std::move( candidate );
+                    reused = true;
+                }
+            }
+            if( !reused ) {
+                retained->clear();
+            }
+        }
+    }
+    if( route.empty() && origin.z() != goal.z() ) {
         const int dz = goal.z() > origin.z() ? 1 : -1;
         for( const auto &stair : here->points_in_rectangle(
                  tripoint_bub_ms( 0, 0, origin.z() ),
@@ -246,6 +297,9 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     }
     if( route.empty() ) {
         if( aim == origin ) {
+            if( retained ) {
+                retained->clear();
+            }
             out.known = true;
             out.reason = origin == goal ? "goal_reached" : "no_existing_safe_native_route";
             return out;
@@ -316,6 +370,28 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     if( out.move_cost <= 0 ) {
         out.next = action::none;
         out.reason = "native_step_not_executable";
+    }
+    if( retained ) {
+        if( out.next == action::none ) {
+            retained->clear();
+        } else if( !reused && origin.z() == goal.z() ) {
+            // Retain only a bounded positive prefix. Its endpoint never owns
+            // full-goal arrival, and vertical/ledge special cases remain cold.
+            route.resize( std::min<std::size_t>( route.size(), 60 ) );
+            const auto costs = here->validate_route( from, route, settings, avoid );
+            if( costs ) {
+                retained->origin = origin;
+                retained->goal = goal;
+                retained->type = body.type->id;
+                retained->settings = settings;
+                retained->costs = *costs;
+                retained->points.clear();
+                retained->points.reserve( route.size() );
+                for( const auto &point : route ) {
+                    retained->points.push_back( here->get_abs( point ) );
+                }
+            }
+        }
     }
     return out;
 }
