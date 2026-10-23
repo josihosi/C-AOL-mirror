@@ -557,12 +557,14 @@ std::vector<tripoint_bub_ms> map::route( const tripoint_bub_ms &f,
                 continue;
             }
 
-            if( !target.contains( p ) && avoid( p ) ) {
-                layer.closed[index] = true;
+            // A finalized or rejected cell cannot be entered again in this
+            // search. Do not repeat its potentially expensive exclusion read.
+            if( layer.closed[index] ) {
                 continue;
             }
 
-            if( layer.closed[index] ) {
+            if( !target.contains( p ) && avoid( p ) ) {
+                layer.closed[index] = true;
                 continue;
             }
 

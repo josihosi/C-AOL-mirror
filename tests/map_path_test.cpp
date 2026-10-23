@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -473,6 +474,85 @@ TEST_CASE( "map_route_astar_reaches_the_inclusive_loaded_map_edge", "[map][pathf
     CHECK( std::find( penultimate_route.begin(), penultimate_route.end(), avoided_intermediate ) ==
            penultimate_route.end() );
     clear_map_without_vision();
+}
+
+TEST_CASE( "native route does not repeat exclusion reads for closed cells",
+           "[map][pathfinding][route_closed_exclusion]" )
+{
+    const bool reachable = GENERATE( true, false );
+    CAPTURE( reachable );
+    small_fake_map storage( ter_str_id( "t_wall" ) );
+    map &here = *storage.cast_to_map();
+    const tripoint_bub_ms from( 4, 8, 0 );
+    const tripoint_bub_ms goal( 16, 8, 0 );
+    const tripoint_bub_ms excluded( 7, 8, 0 );
+    for( const auto &p : here.points_in_rectangle( {3, 3, 0}, {17, 13, 0} ) ) {
+        here.ter_set( p, ter_str_id( "t_floor" ) );
+    }
+    // Block the first straight-line cell so all callback observations below
+    // belong to native graph search, rather than its separate line shortcut.
+    here.ter_set( tripoint_bub_ms( 5, 8, 0 ), ter_str_id( "t_wall" ) );
+    if( !reachable ) {
+        for( int y = 3; y <= 13; ++y ) {
+            here.ter_set( tripoint_bub_ms( 12, y, 0 ), ter_str_id( "t_wall" ) );
+        }
+    }
+    pathfinding_settings settings;
+    settings.max_dist = 30;
+    settings.max_length = 2000;
+    const auto unchanged_turn = calendar::turn;
+    const auto unchanged_position = get_player_character().pos_abs();
+    const int unchanged_moves = get_player_character().get_moves();
+    std::map<tripoint_bub_ms, int> visits;
+    const auto observed = here.route( from, pathfinding_target::point( goal ), settings,
+    [&]( const tripoint_bub_ms &p ) {
+        ++visits[p];
+        return p == excluded;
+    } );
+    const auto ordinary = here.route( from, pathfinding_target::point( goal ), settings,
+    [&]( const tripoint_bub_ms &p ) {
+        return p == excluded;
+    } );
+    CHECK( observed == ordinary );
+    CHECK( observed.empty() != reachable );
+    CHECK( std::find( observed.begin(), observed.end(), excluded ) == observed.end() );
+    REQUIRE( visits.count( excluded ) == 1 );
+    int callbacks = 0;
+    int greatest = 0;
+    for( const auto &entry : visits ) {
+        callbacks += entry.second;
+        greatest = std::max( greatest, entry.second );
+    }
+    CAPTURE( callbacks, visits.size(), greatest, visits.at( excluded ) );
+    // Rejected cells are closed immediately. Open frontier cells may still
+    // be considered from several parents before the solver finalizes them.
+    CHECK( visits.at( excluded ) == 1 );
+    CHECK( visits.count( from ) == 0 ); // The expanded origin is already closed.
+    // Target acceptance remains the native owner's exception to exclusion.
+    CHECK( visits.count( goal ) == 0 );
+    if( reachable ) {
+        REQUIRE_FALSE( observed.empty() );
+        CHECK( observed.back() == goal );
+        const auto target_exception = here.route( from, pathfinding_target::point( goal ), settings,
+        [&]( const tripoint_bub_ms &p ) {
+            return p == excluded || p == goal;
+        } );
+        CHECK( target_exception == observed );
+        auto limited = settings;
+        limited.max_dist = 2;
+        CHECK( here.route( from, pathfinding_target::point( goal ), limited,
+        [&]( const tripoint_bub_ms &p ) { return p == excluded; } ).empty() );
+        limited = settings;
+        limited.max_length = 1;
+        CHECK( here.route( from, pathfinding_target::point( goal ), limited,
+        [&]( const tripoint_bub_ms &p ) { return p == excluded; } ).empty() );
+    }
+    CHECK( here.ter( excluded ) == ter_str_id( "t_floor" ) );
+    CHECK( here.ter( tripoint_bub_ms( 5, 8, 0 ) ) == ter_str_id( "t_wall" ) );
+    CHECK( here.get_field_intensity( excluded, fd_fire ) == 0 );
+    CHECK( calendar::turn == unchanged_turn );
+    CHECK( get_player_character().pos_abs() == unchanged_position );
+    CHECK( get_player_character().get_moves() == unchanged_moves );
 }
 
 TEST_CASE( "map_route_player_around_obstacles", "[map][pathfinding]" )
