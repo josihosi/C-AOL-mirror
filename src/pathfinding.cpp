@@ -11,6 +11,7 @@
 #include <queue>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -446,6 +447,100 @@ std::optional<std::vector<int>> map::validate_route( const tripoint_bub_ms &from
     return costs;
 }
 
+bool map::region_disconnected( const tripoint_bub_ms &from,
+                               const pathfinding_target &target,
+                               const pathfinding_settings &settings,
+                               pathfinding_region &region ) const
+{
+    if( from.z() != target.center.z() || target.r != 0 ) {
+        return false;
+    }
+    const auto key = []( const pathfinding_settings &s ) {
+        return std::tie( s.bash_strength, s.max_dist, s.max_length, s.climb_cost,
+                         s.allow_open_doors, s.allow_unlock_doors, s.avoid_traps,
+                         s.allow_climb_stairs, s.avoid_rough_terrain, s.avoid_sharp,
+                         s.avoid_dangerous_fields, s.size );
+    };
+    const int width = getmapsize() * SEEX;
+    const int height = getmapsize() * SEEY;
+    const auto index = [height]( int x, int y ) { return x * height + y; };
+    if( region.owner != this || region.level != from.z() ||
+        key( region.settings ) != key( settings ) ) {
+        region = pathfinding_region();
+        region.owner = this;
+        region.settings = settings;
+        region.level = from.z();
+        const auto &cache = get_pathfinding_cache_ref( from.z() );
+        // A route may leave this level and return. Do not certify ANY pair
+        // when a connection not modelled by this planar graph exists anywhere
+        // in the view. Vehicle direction/inside state is likewise left native.
+        constexpr auto unsupported = PathfindingFlag::GoesUp | PathfindingFlag::GoesDown |
+                                     PathfindingFlag::RampUp | PathfindingFlag::RampDown |
+                                     PathfindingFlag::Air | PathfindingFlag::Climbable |
+                                     PathfindingFlag::DangerousTrap | PathfindingFlag::Pit |
+                                     PathfindingFlag::Vehicle;
+        for( int x = 0; x < width; ++x ) {
+            for( int y = 0; y < height; ++y ) {
+                if( cache.special[x][y] & unsupported ) {
+                    region.unsupported = true;
+                    return false;
+                }
+            }
+        }
+        region.labels.resize( width * height, -1 );
+        for( int x = 0; x < width; ++x ) {
+            for( int y = 0; y < height; ++y ) {
+                const tripoint_bub_ms p( x, y, from.z() );
+                // cost_to_pass alone ignores danger and cost ceilings. Its
+                // only remaining from-dependent rejection (inside-only doors)
+                // is explicitly may-connect. No avoidance callback is used.
+                const int cost = cost_to_pass( p, p, settings, cache.special[x][y] );
+                if( cost != PF_IMPASSABLE ) {
+                    region.labels[index( x, y )] = 0;
+                }
+            }
+        }
+        std::vector<int> frontier;
+        frontier.reserve( region.labels.size() );
+        int component = 0;
+        for( int x = 0; x < width; ++x ) {
+            for( int y = 0; y < height; ++y ) {
+                const int start = index( x, y );
+                if( region.labels[start] != 0 ) {
+                    continue;
+                }
+                frontier.clear();
+                frontier.push_back( start );
+                region.labels[start] = ++component;
+                for( std::size_t i = 0; i < frontier.size(); ++i ) {
+                    const int cx = frontier[i] / height;
+                    const int cy = frontier[i] % height;
+                    for( int dx = -1; dx <= 1; ++dx ) {
+                        for( int dy = -1; dy <= 1; ++dy ) {
+                            const int nx = cx + dx;
+                            const int ny = cy + dy;
+                            if( nx < 0 || ny < 0 || nx >= width || ny >= height ) {
+                                continue;
+                            }
+                            const int next = index( nx, ny );
+                            if( region.labels[next] == 0 ) {
+                                region.labels[next] = component;
+                                frontier.push_back( next );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if( region.unsupported ) {
+        return false;
+    }
+    const int origin = region.labels[index( from.x(), from.y() )];
+    // Native routing can escape an impassable origin. Leave that case native.
+    return origin > 0 && origin != region.labels[index( target.center.x(), target.center.y() )];
+}
+
 std::vector<tripoint_bub_ms> map::route( const Creature &who,
         const pathfinding_target &target ) const
 {
@@ -455,7 +550,8 @@ std::vector<tripoint_bub_ms> map::route( const Creature &who,
 std::vector<tripoint_bub_ms> map::route( const tripoint_bub_ms &f,
         const pathfinding_target &target,
         const pathfinding_settings &settings,
-        const std::function<bool( const tripoint_bub_ms & )> &avoid ) const
+        const std::function<bool( const tripoint_bub_ms & )> &avoid,
+        pathfinding_region *region ) const
 {
     /* TODO: If the origin or destination is out of bound, figure out the closest
      * in-bounds point and go to that, then to the real origin/destination.
@@ -471,7 +567,7 @@ std::vector<tripoint_bub_ms> map::route( const tripoint_bub_ms &f,
         tripoint_bub_ms clipped = t;
         clip_to_bounds( clipped );
         const pathfinding_target clipped_target = { clipped, target.r };
-        return route( f, clipped_target, settings, avoid );
+        return route( f, clipped_target, settings, avoid, region );
     }
     // First, check for a simple straight line on flat ground
     // Except when the line contains a pre-closed tile - we need to do regular pathing then
@@ -498,6 +594,10 @@ std::vector<tripoint_bub_ms> map::route( const tripoint_bub_ms &f,
 
     // If expected path length is greater than max distance, allow only line path, like above
     if( rl_dist( f, t ) > settings.max_dist ) {
+        return ret;
+    }
+
+    if( region && region_disconnected( f, target, settings, *region ) ) {
         return ret;
     }
 

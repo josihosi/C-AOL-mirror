@@ -100,6 +100,7 @@ class weather_generator;
 
 enum class ter_furn_flag : int;
 struct pathfinding_cache;
+class pathfinding_region;
 struct pathfinding_settings;
 struct pathfinding_target;
 template<typename T>
@@ -826,7 +827,7 @@ class map
                                             const pathfinding_settings &settings,
         const std::function<bool( const tripoint_bub_ms & )> &avoid = []( const tripoint_bub_ms & ) {
             return false;
-        } ) const;
+        }, pathfinding_region *region = nullptr ) const;
 
         /**
          * Calculate the best path using A*
@@ -848,6 +849,13 @@ class map
         std::vector<tripoint_bub_ms> straight_route( const tripoint_bub_ms &f,
                 const tripoint_bub_ms &t ) const;
     private:
+        // True only when the permissive same-level graph proves disconnection.
+        // Unsupported connections and directed uncertainties never prove refusal.
+        bool region_disconnected( const tripoint_bub_ms &from,
+                                  const pathfinding_target &target,
+                                  const pathfinding_settings &settings,
+                                  pathfinding_region &region ) const;
+
         // Pathfinding cost helper that computes the cost of moving into |p| from |cur|.
         // Includes climbing, bashing and opening doors.
         int cost_to_pass( const tripoint_bub_ms &cur, const tripoint_bub_ms &p,

@@ -173,6 +173,23 @@ struct pathfinding_settings {
     pathfinding_settings &operator=( const pathfinding_settings & ) = default;
 };
 
+// A one-sided terrain connectivity proof for an exact read-only map/settings
+// lifetime. Connected or unsupported means the ordinary solver must still run.
+// Contains only derived values; discard before any geometry/action boundary.
+class pathfinding_region
+{
+        friend class map;
+        const map *owner = nullptr;
+        pathfinding_settings settings;
+        int level = 0;
+        bool unsupported = false;
+        std::vector<int> labels;
+    public:
+        bool built() const { return owner != nullptr; }
+        bool inconclusive() const { return unsupported; }
+        std::size_t storage_bytes() const { return labels.capacity() * sizeof( int ); }
+};
+
 struct pathfinding_target {
     const tripoint_bub_ms center;
     const int r;

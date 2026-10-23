@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <string>
@@ -19,6 +20,7 @@
 #include "pathfinding.h"
 #include "point.h"
 #include "type_id.h"
+#include "units.h"
 
 static void clear_map_caches( map &m )
 {
@@ -553,6 +555,177 @@ TEST_CASE( "native route does not repeat exclusion reads for closed cells",
     CHECK( calendar::turn == unchanged_turn );
     CHECK( get_player_character().pos_abs() == unchanged_position );
     CHECK( get_player_character().get_moves() == unchanged_moves );
+}
+
+TEST_CASE( "native region proves only conservative read-only disconnections",
+           "[map][pathfinding][navigation_region]" )
+{
+    small_fake_map storage( ter_str_id( "t_wall" ) );
+    map &here = *storage.cast_to_map();
+    const tripoint_bub_ms from( 4, 8, 0 );
+    const tripoint_bub_ms goal( 16, 8, 0 );
+    for( const auto &p : here.points_in_rectangle( {3, 3, 0}, {17, 13, 0} ) ) {
+        here.ter_set( p, ter_str_id( "t_floor" ) );
+    }
+    here.ter_set( tripoint_bub_ms( 5, 8, 0 ), ter_str_id( "t_wall" ) );
+    for( int y = 3; y <= 13; ++y ) {
+        here.ter_set( tripoint_bub_ms( 12, y, 0 ), ter_str_id( "t_wall" ) );
+    }
+    pathfinding_settings settings;
+    settings.max_dist = 40;
+    settings.max_length = 2000;
+    pathfinding_region region;
+    int cold_callbacks = 0;
+    const auto target = pathfinding_target::point( goal );
+    CHECK( here.route( from, target, settings, [&]( const auto & ) {
+        ++cold_callbacks;
+        return false;
+    } ).empty() );
+    REQUIRE( cold_callbacks > 0 );
+    int certified_callbacks = 0;
+    const auto exclude = [&]( const auto & ) { ++certified_callbacks; return false; };
+    CHECK( here.route( from, target, settings, exclude, &region ).empty() );
+    CHECK( certified_callbacks == 0 );
+    CHECK( region.built() );
+    CHECK_FALSE( region.inconclusive() );
+    const auto capacity = region.storage_bytes();
+    CHECK( capacity > 0 );
+    CHECK( capacity <= sizeof( int ) * here.getmapsize() * SEEX * here.getmapsize() * SEEY );
+    // Same finite map/settings and no edits: another origin reuses the labels.
+    CHECK( here.route( from + point::south, target, settings, exclude, &region ).empty() );
+    CHECK( certified_callbacks == 0 );
+    CHECK( region.storage_bytes() == capacity );
+    // A blocked origin can escape natively; it must never be a certificate.
+    const tripoint_bub_ms blocked( 5, 8, 0 );
+    CHECK( here.route( blocked, target, settings, exclude, &region ) ==
+           here.route( blocked, target, settings, exclude ) );
+
+    SECTION( "cold warm and teardown work is bounded without a latency threshold" ) {
+        using clock = std::chrono::steady_clock;
+        const auto ns = []( auto start ) {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>( clock::now() - start ).count();
+        };
+        const auto cold_start = clock::now();
+        std::unique_ptr<pathfinding_region> measured = std::make_unique<pathfinding_region>();
+        const auto cold = here.route( from, target, settings, exclude, measured.get() );
+        const auto cold_ns = ns( cold_start );
+        CHECK( cold.empty() );
+        const auto bytes = measured->storage_bytes();
+        const auto warm_start = clock::now();
+        bool warm_empty = true;
+        for( int i = 0; i < 100; ++i ) {
+            warm_empty &= here.route( from, target, settings, exclude, measured.get() ).empty();
+        }
+        const auto warm_ns = ns( warm_start );
+        CHECK( warm_empty );
+        const auto ordinary_start = clock::now();
+        int ordinary_callbacks = 0;
+        bool ordinary_empty = true;
+        for( int i = 0; i < 100; ++i ) {
+            ordinary_empty &= here.route( from, target, settings, [&]( const auto & ) {
+                ++ordinary_callbacks;
+                return false;
+            } ).empty();
+        }
+        const auto ordinary_ns = ns( ordinary_start );
+        CHECK( ordinary_empty );
+        const auto destroy_start = clock::now();
+        measured.reset();
+        const auto destroy_ns = ns( destroy_start );
+        INFO( "Mac component only; WALL ns, no Windows attribution: cold=" << cold_ns <<
+              " warm100=" << warm_ns << " ordinary100=" << ordinary_ns <<
+              " destruction=" << destroy_ns << " retained_label_bytes=" << bytes <<
+              " ordinary_callbacks=" << ordinary_callbacks );
+        CHECK( ordinary_callbacks > 0 );
+        CHECK( bytes == capacity );
+    }
+    SECTION( "native bounds and straight shortcut precede lazy construction" ) {
+        pathfinding_region untouched;
+        CHECK_FALSE( here.route( from, pathfinding_target::point( from + point::south ),
+                                settings, exclude, &untouched ).empty() );
+        CHECK_FALSE( untouched.built() );
+        auto short_range = settings;
+        short_range.max_dist = 1;
+        CHECK( here.route( from, target, short_range, exclude, &untouched ).empty() );
+        CHECK_FALSE( untouched.built() );
+    }
+    SECTION( "same-z endpoints do not hide off-path vertical or climb connections" ) {
+        const auto connection = GENERATE( "t_stairs_up", "t_stairs_down", "t_open_air",
+                                         "t_chainfence", "t_ramp_up_high", "t_ramp_down_low" );
+        const int climb = GENERATE( 0, 100 );
+        settings.climb_cost = climb;
+        CAPTURE( connection, climb );
+        // Outside the endpoint line and the failed route's explored component.
+        here.ter_set( tripoint_bub_ms( 17, 13, 0 ), ter_str_id( connection ) );
+        pathfinding_region fresh;
+        const auto ordinary = here.route( from, target, settings, exclude );
+        certified_callbacks = 0;
+        CHECK( here.route( from, target, settings, exclude, &fresh ) == ordinary );
+        CHECK( fresh.inconclusive() );
+        CHECK( fresh.storage_bytes() == 0 );
+        CHECK( certified_callbacks > 0 );
+    }
+    SECTION( "off-path vehicle state makes the entire certificate inconclusive" ) {
+        REQUIRE( here.add_vehicle( vproto_id( "bicycle" ), tripoint_bub_ms( 16, 12, 0 ),
+                                   0_degrees, 0, veh_spawn_status::UNDAMAGED ) );
+        const auto vehicles = here.get_vehicles().size();
+        pathfinding_region fresh;
+        CHECK( here.route( from, target, settings, exclude, &fresh ) ==
+               here.route( from, target, settings, exclude ) );
+        CHECK( fresh.inconclusive() );
+        CHECK( fresh.storage_bytes() == 0 );
+        CHECK( here.get_vehicles().size() == vehicles );
+    }
+    SECTION( "door bash and directional capabilities are native may-connect" ) {
+        const auto door = GENERATE( "t_door_c", "t_door_locked", "t_door_metal_c" );
+        const bool opens = GENERATE( false, true );
+        const int bash = GENERATE( 0, 100 );
+        CAPTURE( door, opens, bash );
+        here.ter_set( tripoint_bub_ms( 12, 8, 0 ), ter_str_id( door ) );
+        settings.allow_open_doors = opens;
+        if( bash ) {
+            settings.bash_strength[damage_type_id( "bash" )] = bash;
+        }
+        // Changed geometry starts a new scope; different settings also rebuild.
+        pathfinding_region fresh;
+        for( const auto &start : {from, goal} ) {
+            const auto end = start == from ? goal : from;
+            const auto destination = pathfinding_target::point( end );
+            const auto avoid_target = [&]( const auto &p ) { return p == end; };
+            CHECK( here.route( start, destination, settings, avoid_target, &fresh ) ==
+                   here.route( start, destination, settings, avoid_target ) );
+        }
+        settings.allow_open_doors = !opens;
+        CHECK( here.route( from, target, settings, exclude, &fresh ) ==
+               here.route( from, target, settings, exclude ) );
+    }
+    SECTION( "hazards occupancy costs and target exception remain solver-owned" ) {
+        here.ter_set( tripoint_bub_ms( 12, 8, 0 ), ter_str_id( "t_floor" ) );
+        here.add_field( tripoint_bub_ms( 10, 8, 0 ), fd_fire, 1, 0_turns );
+        pathfinding_region fresh;
+        for( const bool avoid_all : {false, true} ) {
+            const auto avoid = [&]( const auto &p ) { return avoid_all || p == goal; };
+            const auto ordinary = here.route( from, target, settings, avoid );
+            CHECK( here.route( from, target, settings, avoid, &fresh ) == ordinary );
+            CHECK( ordinary.empty() == avoid_all );
+        }
+        settings.max_length = 1;
+        CHECK( here.route( from, target, settings, exclude, &fresh ) ==
+               here.route( from, target, settings, exclude ) );
+        CHECK( here.route( from, pathfinding_target::adjacent( goal ), settings, exclude, &fresh ) ==
+               here.route( from, pathfinding_target::adjacent( goal ), settings, exclude ) );
+        // remove_field marks an entry dead but keeps its clamped intensity
+        // until native deletion. This fixture needs the fully removed field.
+        here.remove_field( tripoint_bub_ms( 10, 8, 0 ), fd_fire );
+        here.delete_field( tripoint_bub_ms( 10, 8, 0 ), fd_fire );
+        here.set_pathfinding_cache_dirty( 0 );
+        // Real edit/reload/action boundaries discard derived labels.
+        here.ter_set( tripoint_bub_ms( 5, 8, 0 ), ter_str_id( "t_floor" ) );
+        pathfinding_region after_edit;
+        settings.max_length = 2000;
+        CHECK_FALSE( here.route( from, target, settings, exclude, &after_edit ).empty() );
+        CHECK_FALSE( after_edit.built() ); // Native straight line still wins.
+    }
 }
 
 TEST_CASE( "map_route_player_around_obstacles", "[map][pathfinding]" )

@@ -133,6 +133,7 @@ class navigation_view : public map
 struct preparation::implementation {
     tripoint_abs_ms goal;
     std::unique_ptr<navigation_view> view;
+    pathfinding_region region;
 };
 preparation::preparation() = default;
 preparation::~preparation() = default;
@@ -187,6 +188,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             auto &slot = *prepared->impl;
             if( slot.view && ( slot.goal != goal || !slot.view->compatible( window ) ) ) {
                 slot.view.reset();
+                slot.region = pathfinding_region();
             }
             if( !slot.view ) {
                 raid_perf_scope build_scope( raid_perf_stage::physical_navigation_view_build );
@@ -360,7 +362,15 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             // executed. A fire-excluded route is a hazard, not a searched
             // candidate or an invented impassable wall. Other geometry and
             // native door/floor constraints remain in force.
-            const auto approach = native_route( here->get_bub( aim ), geometry_only );
+            pathfinding_region local_region;
+            // Only a retained remote view has the proven read-only service
+            // lifetime. Loaded/action reads always get a fresh certificate.
+            pathfinding_region &region = remote && prepared ? prepared->impl->region : local_region;
+            const auto approach = [&]() {
+                raid_perf_scope route_scope( raid_perf_stage::physical_navigation_native_route );
+                return here->route( from, pathfinding_target::point( here->get_bub( aim ) ),
+                                    settings, geometry_only, &region );
+            }();
             const bool fire_blocked = std::any_of( approach.begin(), approach.end(),
             [&]( const auto & cell ) {
                 return raid_sweep::fire_approach( *here, cell );

@@ -3228,6 +3228,104 @@ TEST_CASE( "service_preparation_keeps_current_reads_and_rejects_changed_bindings
     CHECK( body_bytes() == before );
 }
 
+TEST_CASE( "remote region service keeps physical refusal and reopening owners",
+           "[migo_tower][navigation_service_preparation][navigation_region]" )
+{
+    clear_avatar();
+    clear_map();
+    const auto saved_turn = calendar::turn;
+    const tripoint_abs_sm cell( 4400, 4400, 0 );
+    REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( cell ) );
+    on_out_of_scope cleanup( [&]() {
+        MAPBUFFER.clear_outside_reality_bubble();
+        CHECK( calendar::turn == saved_turn );
+    } );
+    auto terrain = std::make_unique<submap>();
+    terrain->set_all_ter( ter_str_id( "t_floor" ) );
+    for( int y = 0; y < SEEY; ++y ) {
+        terrain->set_ter( point_sm_ms( 5, y ), ter_str_id( "t_wall_metal" ) );
+    }
+    REQUIRE( MAPBUFFER.add_submap( cell, terrain ) );
+    submap *resident = MAPBUFFER.lookup_submap_cached( cell );
+    REQUIRE( resident );
+    const auto count = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto base = project_to<coords::ms>( cell );
+    const auto origin = base + point( 2, 6 );
+    const auto goal = base + point( 8, 6 );
+    monster body( mtype_id( "mon_mi_go" ) );
+    body.set_pos_abs_only( origin );
+    body.set_moves( 100 );
+    const auto serialize = [&]() {
+        std::ostringstream out;
+        JsonOut json( out );
+        body.serialize( json );
+        return out.str();
+    };
+    const auto before = serialize();
+    const auto same = [&]( const physical_navigation::step_read &actual,
+                           const physical_navigation::step_read &expected ) {
+        CHECK( actual.next == expected.next );
+        CHECK( actual.position == expected.position );
+        CHECK( actual.reason == expected.reason );
+        CHECK( actual.known == expected.known );
+        CHECK( actual.move_cost == expected.move_cost );
+        CHECK( actual.hazard_revision == expected.hazard_revision );
+    };
+    {
+        physical_navigation::preparation service;
+        for( int y : {6, 7, 6} ) {
+            monster member( body );
+            member.set_pos_abs_only( base + point( 2, y ) );
+            const auto read = physical_navigation::read_step( member, goal, {}, &service );
+            CHECK( read.next == physical_navigation::action::none );
+            CHECK( read.known );
+            CHECK( read.reason == "no_existing_safe_native_route" );
+            same( read, physical_navigation::read_step( member, goal ) );
+        }
+        const auto unknown = physical_navigation::read_step( body, goal + point::east * SEEX,
+                             {}, &service );
+        CHECK_FALSE( unknown.known );
+        CHECK( unknown.next == physical_navigation::action::none );
+    }
+    CHECK( serialize() == before );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == count );
+    // Geometry edits end the old service lifetime. The certificate never owns
+    // a retry clock or a failed result, so a new scope immediately reopens it.
+    resident->set_ter( point_sm_ms( 5, 6 ), ter_str_id( "t_floor" ) );
+    {
+        physical_navigation::preparation reopened;
+        const auto read = physical_navigation::read_step( body, goal, {}, &reopened );
+        REQUIRE( read.next == physical_navigation::action::walk );
+        const auto occupied = [&]( const auto &p ) { return p == goal; };
+        CHECK( physical_navigation::read_step( body, goal, occupied, &reopened ).next ==
+               physical_navigation::action::none );
+        same( physical_navigation::read_step( body, goal, {}, &reopened ), read );
+    }
+    resident->get_field( point_sm_ms( 5, 6 ) ).add_field( field_type_id( "fd_fire" ), 1, 0_turns );
+    resident->field_count = 1;
+    {
+        physical_navigation::preparation fire;
+        const auto read = physical_navigation::read_step( body, goal, {}, &fire );
+        CHECK( read.next == physical_navigation::action::none );
+        CHECK( read.reason == "approach_fire_hazard" );
+        CHECK( read.hazard_revision != 0 );
+        same( read, physical_navigation::read_step( body, goal ) );
+    }
+    resident->get_field( point_sm_ms( 5, 6 ) ).clear();
+    resident->field_count = 0;
+    monster reloaded;
+    reloaded.deserialize( json_loader::from_string( before ) );
+    {
+        physical_navigation::preparation reload;
+        const auto read = physical_navigation::read_step( reloaded, goal, {}, &reload );
+        CHECK( read.next == physical_navigation::action::walk );
+        same( read, physical_navigation::read_step( body, goal ) );
+    }
+    CHECK( serialize() == before );
+    CHECK( calendar::turn == saved_turn );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == count );
+}
+
 TEST_CASE( "service_preparation_rejects_vehicle_metadata_from_an_existing_only_load",
            "[migo_tower][navigation_service_preparation]" )
 {
