@@ -11310,6 +11310,19 @@ game::monster_range game::all_monsters()
     return monster_range( *this );
 }
 
+bool game::has_loaded_handoff_actor( const std::string &actor_id )
+{
+    if( actor_id.empty() ) {
+        return false;
+    }
+    for( const monster &existing : all_monsters() ) {
+        if( existing.has_handoff_identity() && existing.handoff_actor_id() == actor_id ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 game::npc_range game::all_npcs()
 {
     return npc_range( *this );

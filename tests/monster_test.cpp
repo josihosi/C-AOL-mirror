@@ -890,6 +890,8 @@ TEST_CASE( "predator occupied exact handoff retains abstract owner", "[monster][
 
         monster *blocker = g->place_critter_at( mon_test_zombie, local_destination );
         REQUIRE( blocker != nullptr );
+        CHECK_FALSE( g->has_loaded_handoff_actor( "" ) );
+        CHECK_FALSE( g->has_loaded_handoff_actor( actor_id ) );
         overmap_buffer.move_hordes();
 
         retained = overmap_buffer.entity_at( source );
@@ -909,8 +911,11 @@ TEST_CASE( "predator occupied exact handoff retains abstract owner", "[monster][
         calendar::turn += 1_turns;
         monster duplicate( *retained->monster_data );
         monster *live_owner = g->place_critter_at( make_shared_fast<monster>( duplicate ),
-                              local_destination );
+                              local_destination + point( 3, 0 ) );
         REQUIRE( live_owner != nullptr );
+        REQUIRE( g->is_empty( local_destination ) );
+        CHECK( g->has_loaded_handoff_actor( actor_id ) );
+        CHECK_FALSE( g->has_loaded_handoff_actor( actor_id + ":other" ) );
         overmap_buffer.move_hordes();
 
         retained = overmap_buffer.entity_at( source );
@@ -923,6 +928,16 @@ TEST_CASE( "predator occupied exact handoff retains abstract owner", "[monster][
         CHECK( retained->monster_data->predator_state().handoff_epoch == epoch );
         CHECK( live_owner->predator_state().actor_id == actor_id );
         g->remove_zombie( *live_owner );
+        CHECK_FALSE( g->has_loaded_handoff_actor( actor_id ) );
+
+        calendar::turn += 1_turns;
+        overmap_buffer.move_hordes();
+        CHECK( overmap_buffer.entity_at( source ) == nullptr );
+        monster *placed = get_creature_tracker().creature_at<monster>( local_destination );
+        REQUIRE( placed != nullptr );
+        CHECK( placed->handoff_actor_id() == actor_id );
+        CHECK( placed->predator_state().handoff_epoch == epoch + 1 );
+        g->remove_zombie( *placed );
     }
 }
 
@@ -1226,9 +1241,11 @@ TEST_CASE( "predator submap-load handoff rejects an existing local owner",
         const std::uint64_t epoch = retained->monster_data->predator_state().handoff_epoch;
 
         monster *live_owner = g->place_critter_at(
-                                  make_shared_fast<monster>( *retained->monster_data ), local );
+                                  make_shared_fast<monster>( *retained->monster_data ), local + point( 3, 0 ) );
         REQUIRE( live_owner != nullptr );
         REQUIRE( live_owner->predator_state().actor_id == actor_id );
+        REQUIRE( g->is_empty( local ) );
+        CHECK( g->has_loaded_handoff_actor( actor_id ) );
 
         // This is the independent submap-load abstract->local entrypoint.
         // It extracts the horde node first, so a duplicate local owner must
@@ -1246,6 +1263,18 @@ TEST_CASE( "predator submap-load handoff rejects an existing local owner",
         CHECK( retained->monster_data->predator_state().handoff_epoch == epoch );
         CHECK( live_owner->predator_state().actor_id == actor_id );
         g->remove_zombie( *live_owner );
+        CHECK_FALSE( g->has_loaded_handoff_actor( actor_id ) );
+
+        // Releasing that loaded identity permits the same retained source to
+        // take the existing native placement/epoch transaction exactly once.
+        overmap_buffer.spawn_monster( project_to<coords::sm>( position ), false );
+        CHECK( overmap_buffer.entity_at( position ) == nullptr );
+        monster *placed = get_creature_tracker().creature_at<monster>( local );
+        REQUIRE( placed != nullptr );
+        CHECK( placed->handoff_actor_id() == actor_id );
+        CHECK( placed->predator_state().handoff_epoch == epoch + 1 );
+        CHECK( g->has_loaded_handoff_actor( actor_id ) );
+        g->remove_zombie( *placed );
     }
 }
 

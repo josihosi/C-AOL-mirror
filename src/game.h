@@ -585,6 +585,9 @@ class game
         Creature_range all_creatures();
         /// Same as @ref all_creatures but iterators only over monsters.
         monster_range all_monsters();
+        /// Whether a living loaded monster already owns this native handoff identity.
+        /// Query only; placement and rollback remain with their respective callers.
+        bool has_loaded_handoff_actor( const std::string &actor_id );
         /// Same as @ref all_creatures but iterators only over npcs.
         npc_range all_npcs();
 

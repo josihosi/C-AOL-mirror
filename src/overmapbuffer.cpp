@@ -67,19 +67,6 @@ static const oter_type_str_id oter_type_sub_ramp_below( "sub_ramp_below" );
 
 static const int default_search_range = OMAPX * 5;
 
-static bool loaded_actor_owns( const std::string &actor_id )
-{
-    if( actor_id.empty() ) {
-        return false;
-    }
-    for( const monster &existing : g->all_monsters() ) {
-        if( existing.has_handoff_identity() && existing.handoff_actor_id() == actor_id ) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Moved from obsolete coordinate_conversions.h to its only remaining user.
 static int omt_to_sm_copy( int a )
 {
@@ -2591,7 +2578,7 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             // place-around fallback may cross a sealed or too-narrow route;
             // failure instead leaves this same abstract node in place.
             if( handoff->monster_data->has_handoff_identity() &&
-                loaded_actor_owns( handoff->monster_data->handoff_actor_id() ) ) {
+                g->has_loaded_handoff_actor( handoff->monster_data->handoff_actor_id() ) ) {
                 DebugLog( D_WARNING, D_GAME ) << "Refused duplicate local actor ownership.";
             } else {
                 placed = handoff->monster_data->has_handoff_identity() ?

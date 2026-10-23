@@ -77,19 +77,6 @@ static const mongroup_id GROUP_SUBWAY_CITY( "GROUP_SUBWAY_CITY" );
 static const mongroup_id GROUP_SWAMP( "GROUP_SWAMP" );
 static const mongroup_id GROUP_ZOMBIE_HORDE( "GROUP_ZOMBIE_HORDE" );
 
-static bool loaded_actor_owns( const std::string &actor_id )
-{
-    if( actor_id.empty() ) {
-        return false;
-    }
-    for( const monster &existing : g->all_monsters() ) {
-        if( existing.has_handoff_identity() && existing.handoff_actor_id() == actor_id ) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static const oter_str_id oter_empty_rock( "empty_rock" );
 static const oter_str_id oter_field( "field" );
 static const oter_str_id oter_forest( "forest" );
@@ -1867,7 +1854,7 @@ void overmap::move_hordes( bool migo_operations_only )
                     // placement.  Retain it abstract if its exact step is
                     // occupied or invalid.
                     if( acting->monster_data->has_handoff_identity() &&
-                        loaded_actor_owns( acting->monster_data->handoff_actor_id() ) ) {
+                        g->has_loaded_handoff_actor( acting->monster_data->handoff_actor_id() ) ) {
                         DebugLog( D_WARNING, D_GAME ) << "Refused duplicate local actor ownership.";
                     } else {
                         placed_monster = acting->monster_data->has_handoff_identity() ?
