@@ -42,6 +42,18 @@ enum class raid_perf_nav_event : std::size_t {
     omitted_submap, loaded_submap, load_failures, plain_read_calls,
     level_fresh, level_reused, level_inside_lookup, count
 };
+// Branch counts only: no query identity/history, timing or cached refusal.
+// Like the existing NAV loader counters, these belong to the current row.
+enum class raid_perf_query_event : std::size_t {
+    no_segment, segment_empty, segment_present, context_empty_reset, context_positive_reset,
+    goal_changed, capability_or_level_changed, origin_changed, segment_exhausted, validation_failed, cost_changed,
+    segment_reused, segment_stored, store_rejected, cross_z,
+    deferred_probe, deferred_member_ineligible,
+    walk, open_door, goal_reached, unknown_geometry, fire_refused, no_route, other_refusal, count
+};
+bool raid_perf_query_active();
+void raid_perf_note_query( raid_perf_query_event event );
+
 // Attribution context belongs only to the current synchronous diagnostic row.
 // These reads/counters never load geometry or establish game knowledge.
 bool raid_perf_nav_build_active();

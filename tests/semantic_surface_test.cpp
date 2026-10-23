@@ -5068,7 +5068,8 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
 {
     const std::string mode = GENERATE( "normal", "quiet_signal", "off" );
     const std::string branch = GENERATE( "local", "abstract", "unowned", "remote", "remote_unknown",
-                                         "remote_shared", "remote_unknown_shared" );
+                                         "remote_shared", "remote_unknown_shared", "deferred_old_member",
+                                         "deferred_new_member" );
     CAPTURE( mode, branch );
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
@@ -5149,6 +5150,16 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
     const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
     REQUIRE( pause );
     REQUIRE( pause->size() == 1 );
+    // A real unbound reader must not leak counters into a later bound row.
+    CHECK_FALSE( raid_perf_query_active() );
+    monster unbound( mtype_id( "mon_mi_go" ) );
+    unbound.set_pos_abs_only( position );
+    const auto unbound_moves = unbound.get_moves();
+    const auto unbound_turn = calendar::turn;
+    physical_navigation::read_step( unbound, position + point::east );
+    CHECK( unbound.pos_abs() == position );
+    CHECK( unbound.get_moves() == unbound_moves );
+    CHECK( calendar::turn == unbound_turn );
     // Saved reentry's first turn does not advance and has no diagnostic row.
     // Arm the branch hook only after that ordinary first Pause has completed.
     REQUIRE( ungetch( pause->front() ) != -1 );
@@ -5167,7 +5178,8 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         const bool shared = branch == "remote_shared" || branch == "remote_unknown_shared";
         const bool unknown = branch == "remote_unknown" || branch == "remote_unknown_shared";
         const bool remote = branch == "remote" || branch == "remote_unknown" || shared;
-        const bool abstract = branch == "abstract" || remote;
+        const bool deferred = branch == "deferred_old_member" || branch == "deferred_new_member";
+        const bool abstract = branch == "abstract" || remote || deferred;
         const auto anchor = project_to<coords::omt>( here.get_abs( start ) ) +
                             ( remote ? point( 12, unknown ? 12 : 0 ) : point::zero );
         const auto home = remote ? project_to<coords::ms>( anchor ) + point( 12, 12 ) :
@@ -5250,6 +5262,16 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         operation.sweep.source = anchor;
         operation.sweep.generation = 1;
         operation.sweep.candidates = {{goal}};
+        if( deferred ) {
+            raid_sweep::candidate excluded;
+            excluded.position = home + point::east * 2;
+            excluded.state = raid_sweep::disposition::unreachable;
+            if( branch == "deferred_old_member" ) {
+                excluded.available_members_at_exclusion.push_back( member.token.member_id );
+            }
+            operation.sweep.candidates.insert( operation.sweep.candidates.begin(), excluded );
+            operation.sweep.cursor = 1;
+        }
         operation.overdue_after_active = 100000;
         operation.advance( to_turn<int>( calendar::turn ) - 1, 0 );
         site.operation = operation;
@@ -5324,6 +5346,11 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         }
         CHECK( body->pos_abs() == home );
         CHECK( body->get_moves() == 100 );
+        if( deferred ) {
+            const auto &sweep = overmap_buffer.global_state.migo_towers.find( id )->operation->sweep;
+            CHECK( sweep.candidates.front().reconsidered == ( branch == "deferred_new_member" ) );
+            CHECK( sweep.cursor == ( branch == "deferred_new_member" ? 0 : 1 ) );
+        }
         if( shared ) {
             REQUIRE( second_body );
             CHECK( second_body->pos_abs() == peer.home );
@@ -5425,6 +5452,48 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
                     CHECK( body->pos_abs() == committed );
                     CHECK( body->get_moves() == 0 );
                 }
+                // Real reader qualification, with each read conserving body
+                // and clock. Setup changes affect a copy, never the owner.
+                physical_navigation::segment hint;
+                monster probe( *body );
+                const auto check_read = [&]( monster &actor, const tripoint_abs_ms &target,
+                                             const std::function<bool( const tripoint_abs_ms & )> &occupied = {} ) {
+                    const auto pos = actor.pos_abs();
+                    const auto moves = actor.get_moves();
+                    const auto health = actor.get_hp();
+                    const auto turn = calendar::turn;
+                    const auto result = physical_navigation::read_step( actor, target, occupied, nullptr, &hint );
+                    CHECK( actor.pos_abs() == pos );
+                    CHECK( actor.get_moves() == moves );
+                    CHECK( actor.get_hp() == health );
+                    CHECK( calendar::turn == turn );
+                    return result;
+                };
+                REQUIRE( check_read( probe, goal ).next == physical_navigation::action::walk );
+                CHECK( check_read( probe, goal ).next == physical_navigation::action::walk );
+                const auto alternate = goal + point::west;
+                REQUIRE( check_read( probe, alternate ).next == physical_navigation::action::walk );
+                CHECK( check_read( probe, alternate, [&]( const tripoint_abs_ms &p ) {
+                    return p == alternate;
+                } ).next == physical_navigation::action::none );
+                REQUIRE( check_read( probe, alternate ).next == physical_navigation::action::walk );
+                monster different( mtype_id( "mon_bear_mutant_3headed" ) );
+                different.set_pos_abs_only( probe.pos_abs() );
+                different.set_moves( 100 );
+                REQUIRE( check_read( different, alternate ).next == physical_navigation::action::walk );
+                different.set_pos_abs_only( home ); // neither cached origin nor its first point
+                const auto relocated = check_read( different, alternate );
+                REQUIRE( relocated.next == physical_navigation::action::walk );
+                const auto changed = here.get_bub( relocated.position );
+                const auto old = here.ter( changed );
+                on_out_of_scope restore_terrain( [&]() { here.ter_set( changed, old ); } );
+                here.ter_set( changed, ter_str_id( "t_dirtmound" ) );
+                CHECK( check_read( different, alternate ).next == physical_navigation::action::walk );
+                monster arrived( different );
+                arrived.set_pos_abs_only( alternate );
+                CHECK( physical_navigation::read_step( arrived, alternate ).reason == "goal_reached" );
+                CHECK( arrived.pos_abs() == alternate );
+                CHECK( arrived.get_moves() == 100 );
             }
         }
         if( remote ) {
@@ -5532,14 +5601,17 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         "migo_local_move", "migo_local_prepare_navigation", "migo_abstract_prepare_navigation",
         "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route"
     };
-    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 19, 0, 20, 0, 10 } :
+    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 19, 0, 29, 0, 17 } :
                                       branch == "abstract" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 2, 0, 2 } :
+                                      branch == "deferred_old_member" ? std::vector<int>{ 0, 2, 0, 0, 0, 1, 3, 0, 3 } :
+                                      branch == "deferred_new_member" ? std::vector<int>{ 0, 2, 0, 0, 0, 1, 3, 0, 2 } :
                                       branch == "remote" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 12, 12, 10 } :
                                       branch == "remote_unknown" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 4, 4, 0 } :
                                       branch == "remote_shared" ? std::vector<int>{ 0, 2, 0, 0, 0, 1, 13, 12, 11 } :
                                       branch == "remote_unknown_shared" ? std::vector<int>{ 0, 2, 0, 0, 0, 1, 5, 4, 0 } :
                                       std::vector<int>( stages.size(), 0 );
     std::vector<int> totals( stages.size(), 0 );
+    std::map<std::string, int> query_totals;
     int intervals = 0;
     int lookup_calls = 0;
     int level_calls = 0;
@@ -5567,6 +5639,24 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             const auto calls = row.get_array( "stage_calls" );
             const auto counts = row.get_object( "nav_view_counts" );
             counts.allow_omitted_members();
+            const auto queries = row.get_object( "nav_query_counts" );
+            const std::vector<std::string> inputs = {"no_segment", "segment_empty", "segment_present"};
+            const std::vector<std::string> outcomes = {"walk", "open_door", "goal_reached", "unknown_geometry",
+                    "fire_refused", "no_route", "other_refusal"};
+            int input_count = 0;
+            int outcome_count = 0;
+            for( const auto &name : inputs ) {
+                input_count += queries.get_int( name );
+            }
+            for( const auto &name : outcomes ) {
+                outcome_count += queries.get_int( name );
+            }
+            CHECK( input_count == calls.get_int( index( "physical_navigation_read" ) ) );
+            CHECK( outcome_count == input_count );
+            for( const JsonMember &member : queries ) {
+                query_totals[member.name()] += member.get_int();
+            }
+            queries.allow_omitted_members();
             const int lookups = calls.get_int( index( "nav_view_lookup" ) );
             const int setups = calls.get_int( index( "nav_view_level_setup" ) );
             lookup_calls += lookups;
@@ -5615,6 +5705,34 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
     // The supported off transition discards the still-open final row.
     CHECK( ( intervals > 0 ) == ( mode != "off" ) );
     CHECK( totals == ( mode == "off" ? std::vector<int>( stages.size(), 0 ) : expected ) );
+    if( mode == "off" ) {
+        CHECK( query_totals.empty() );
+    } else if( branch == "local" ) {
+        CHECK( query_totals["no_segment"] == 1 );
+        CHECK( query_totals["segment_empty"] == 12 );
+        CHECK( query_totals["segment_present"] == 16 );
+        CHECK( query_totals["context_empty_reset"] == 1 );
+        CHECK( query_totals["context_positive_reset"] == 9 );
+        CHECK( query_totals["segment_reused"] == 11 );
+        CHECK( query_totals["segment_stored"] == 16 );
+        CHECK( query_totals["goal_changed"] == 1 );
+        CHECK( query_totals["capability_or_level_changed"] == 1 );
+        CHECK( query_totals["origin_changed"] == 1 );
+        CHECK( query_totals["cost_changed"] == 1 );
+        CHECK( query_totals["validation_failed"] == 1 );
+        CHECK( query_totals["walk"] == 27 );
+        CHECK( query_totals["goal_reached"] == 1 );
+        CHECK( query_totals["no_route"] == 1 );
+        CHECK( query_totals["deferred_probe"] == 0 );
+    } else if( branch == "deferred_old_member" || branch == "deferred_new_member" ) {
+        CHECK( query_totals["deferred_probe"] == 1 );
+        CHECK( query_totals["deferred_member_ineligible"] == ( branch == "deferred_old_member" ? 1 : 0 ) );
+        CHECK( query_totals["goal_changed"] == ( branch == "deferred_old_member" ? 1 : 0 ) );
+        CHECK( query_totals["segment_reused"] == ( branch == "deferred_new_member" ? 1 : 0 ) );
+        CHECK( query_totals["walk"] == 3 );
+        CHECK( query_totals["context_positive_reset"] == 1 );
+    }
+
     CHECK( lookup_calls == ( mode == "off" ? 0 : ( branch == "remote" || branch == "remote_shared" ) ? 333 :
                             ( branch == "remote_unknown" || branch == "remote_unknown_shared" ) ? 108 : 0 ) );
     CHECK( level_calls == ( mode != "off" && ( branch == "remote" || branch == "remote_shared" ) ? 5 : 0 ) );

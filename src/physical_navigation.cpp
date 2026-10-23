@@ -144,7 +144,12 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     // Includes every refusal and locally owned view destruction. A retained
     // service workspace tears down under its inclusive operation parent.
     raid_perf_scope read_scope( raid_perf_stage::physical_navigation_read );
+    raid_perf_note_query( !retained ? raid_perf_query_event::no_segment : retained->size() ?
+                          raid_perf_query_event::segment_present : raid_perf_query_event::segment_empty );
     const auto origin = body.pos_abs();
+    if( origin.z() != goal.z() ) {
+        raid_perf_note_query( raid_perf_query_event::cross_z );
+    }
     step_read out;
     out.position = origin;
     const auto &native = body.get_pathfinding_settings();
@@ -153,6 +158,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             retained->clear();
         }
         out.reason = "no_native_pathfinding";
+        raid_perf_note_query( raid_perf_query_event::other_refusal );
         return out;
     }
     const auto delta = goal - origin;
@@ -204,6 +210,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             retained->clear();
         }
         out.reason = "origin_geometry_unknown";
+        raid_perf_note_query( raid_perf_query_event::unknown_geometry );
         return out;
     }
     if( goal == origin && raid_sweep::fire_approach( *here, from ) ) {
@@ -213,6 +220,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         out.known = true;
         out.reason = "approach_fire_hazard";
         out.hazard_revision = raid_sweep::fire_revision( *here, {from} );
+        raid_perf_note_query( raid_perf_query_event::fire_refused );
         return out;
     }
     const bool can_open = body.has_flag( mon_flag_CAN_OPEN_DOORS );
@@ -247,6 +255,8 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     if( retained && retained->size() ) {
         if( retained->goal != goal || retained->type != body.type->id ||
             origin.z() != goal.z() || !same_settings( retained->settings, settings ) ) {
+            raid_perf_note_query( retained->goal != goal ? raid_perf_query_event::goal_changed :
+                                  raid_perf_query_event::capability_or_level_changed );
             retained->clear();
         } else {
             // A speculative read/failed commit never consumes a point. Only
@@ -266,7 +276,14 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                 if( costs && *costs == retained->costs ) {
                     route = std::move( candidate );
                     reused = true;
+                    raid_perf_note_query( raid_perf_query_event::segment_reused );
+                } else {
+                    raid_perf_note_query( costs ? raid_perf_query_event::cost_changed :
+                                          raid_perf_query_event::validation_failed );
                 }
+            } else {
+                raid_perf_note_query( origin == retained->origin ? raid_perf_query_event::segment_exhausted :
+                                      raid_perf_query_event::origin_changed );
             }
             if( !reused ) {
                 retained->clear();
@@ -302,6 +319,8 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             }
             out.known = true;
             out.reason = origin == goal ? "goal_reached" : "no_existing_safe_native_route";
+            raid_perf_note_query( origin == goal ? raid_perf_query_event::goal_reached :
+                                  raid_perf_query_event::no_route );
             return out;
         }
         // A shortened endpoint is an approach preference, not a required
@@ -330,6 +349,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         }
         if( !out.known ) {
             out.reason = "segment_geometry_unknown";
+            raid_perf_note_query( raid_perf_query_event::unknown_geometry );
             return out;
         }
     }
@@ -351,11 +371,14 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                 out.known = true;
             }
         }
+        raid_perf_note_query( out.reason == "approach_fire_hazard" ? raid_perf_query_event::fire_refused :
+                              raid_perf_query_event::no_route );
         return out;
     }
     const auto next = route.front();
     if( !known( next ) || avoid( next ) ) {
         out.reason = "next_step_refused";
+        raid_perf_note_query( raid_perf_query_event::other_refusal );
         return out;
     }
     out.position = here->get_abs( next );
@@ -390,9 +413,15 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                 for( const auto &point : route ) {
                     retained->points.push_back( here->get_abs( point ) );
                 }
+                raid_perf_note_query( raid_perf_query_event::segment_stored );
+            } else {
+                raid_perf_note_query( raid_perf_query_event::store_rejected );
             }
         }
     }
+    raid_perf_note_query( out.next == action::walk ? raid_perf_query_event::walk :
+                          out.next == action::open_door ? raid_perf_query_event::open_door :
+                          raid_perf_query_event::other_refusal );
     return out;
 }
 

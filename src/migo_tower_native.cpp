@@ -50,6 +50,8 @@ physical_navigation::step_read read_owned_step( monster &body,
         intent.navigation_generation != intent.generation || intent.navigation_phase != intent.phase ||
         intent.navigation_owner != static_cast<int>( owner ) ||
         ( intent.navigation_world != now && intent.navigation_world != now - 1 ) ) {
+        raid_perf_note_query( intent.navigation.size() ? raid_perf_query_event::context_positive_reset :
+                              raid_perf_query_event::context_empty_reset );
         intent.navigation.clear();
     }
     intent.navigation_identity = identity;
@@ -937,6 +939,15 @@ void service_operations( int now_turn, int active_elapsed )
                         candidate.position.z() != body.pos_abs().z() ||
                         rl_dist( candidate.position, body.pos_abs() ) > local_bound ) {
                         continue;
+                    }
+                    if( raid_perf_query_active() ) {
+                        raid_perf_note_query( raid_perf_query_event::deferred_probe );
+                        if( candidate.state == raid_sweep::disposition::unreachable &&
+                            std::find( candidate.available_members_at_exclusion.begin(),
+                                       candidate.available_members_at_exclusion.end(), token.member_id ) !=
+                            candidate.available_members_at_exclusion.end() ) {
+                            raid_perf_note_query( raid_perf_query_event::deferred_member_ineligible );
+                        }
                     }
                     const auto reopened = read_service_step( body, candidate.position, owner );
                     if( reopened.known && reopened.next != physical_navigation::action::none &&

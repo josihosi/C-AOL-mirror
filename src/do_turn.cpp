@@ -275,6 +275,15 @@ static constexpr std::array<const char *, raid_perf_nav_event_count> raid_perf_n
     "omitted_submap", "loaded_submap", "load_failures", "plain_read_calls",
     "level_fresh", "level_reused", "level_inside_lookup"
 };
+static constexpr std::size_t raid_perf_query_event_count =
+    static_cast<std::size_t>( raid_perf_query_event::count );
+static constexpr std::array<const char *, raid_perf_query_event_count> raid_perf_query_names = {
+    "no_segment", "segment_empty", "segment_present", "context_empty_reset", "context_positive_reset",
+    "goal_changed", "capability_or_level_changed", "origin_changed", "segment_exhausted", "validation_failed", "cost_changed",
+    "segment_reused", "segment_stored", "store_rejected", "cross_z",
+    "deferred_probe", "deferred_member_ineligible",
+    "walk", "open_door", "goal_reached", "unknown_geometry", "fire_refused", "no_route", "other_refusal"
+};
 struct raid_perf_row {
     int turn = 0;
     std::size_t wait_begin = 0;
@@ -287,6 +296,7 @@ struct raid_perf_row {
     std::array<double, raid_perf_stage_count> stages{};
     std::array<std::size_t, raid_perf_stage_count> stage_calls{};
     std::array<std::size_t, raid_perf_nav_event_count> nav_counts{};
+    std::array<std::size_t, raid_perf_query_event_count> query_counts{};
     std::size_t nav_build_depth = 0;
     std::size_t nav_lookup_depth = 0;
     std::size_t discovered_sources = 0;
@@ -361,6 +371,18 @@ void raid_perf_note_nav( raid_perf_nav_event event )
     }
 }
 
+bool raid_perf_query_active()
+{
+    return raid_perf_current != nullptr;
+}
+
+void raid_perf_note_query( raid_perf_query_event event )
+{
+    if( raid_perf_current ) {
+        ++raid_perf_current->query_counts[static_cast<std::size_t>( event )];
+    }
+}
+
 static void raid_perf_flush_after_wait()
 {
     if( raid_perf_rows.empty() || raid_perf_wait_generation() != 0 ) {
@@ -380,6 +402,8 @@ static void raid_perf_flush_after_wait()
                "logical file-sink bytes/flushes over the whole turn including input/save; not physical disk bytes" );
     js.member( "nav_view_scope",
                "WALL: view_build includes nav_view_lookup and disjoint nav_view_level_setup outside lookup; lookup includes nav_view_miss_load, not pure disk time. LEVEL setup includes pool bookkeeping/clear or fresh allocation/construction/clear. The remaining constructor time groups base map, unknown SoA and binding work. Counts are actual branch observations, not distinct queries or physical I/O; missing_quad means an absent compressed archive entry; plain read failures are not classified by an extra stat. Archive open attempts are existing file-map calls including retries. LEVEL work inside lookup stays in lookup and is counted separately. Do not add nested stages." );
+    js.member( "nav_query_scope",
+               "Scalar branch visits, not distinct query/goal identities or timing. Inputs no_segment/segment_empty/segment_present and terminal walk/open_door/goal_reached/unknown_geometry/fire_refused/no_route/other_refusal each partition physical_navigation_read calls. Context resets precede the read; only positive resets discard an existing prefix. Qualification rejections and store/reuse counts overlap input/outcome groups. cross_z counts actual input level differences. deferred_member_ineligible is a deferred unreachable probe for a member already listed at exclusion, which cannot satisfy reconsider's new-member condition; no behavior is suppressed. No failed-result cache or per-query output." );
     js.member( "channel_output_scope",
                "run-bound audit record/open/explicit-flush calls and completed logical bytes; not physical disk I/O" );
     js.member( "stage_names", std::array<std::string, raid_perf_stage_count> {
@@ -415,6 +439,12 @@ static void raid_perf_flush_after_wait()
         js.start_object();
         for( std::size_t i = 0; i < raid_perf_nav_event_count; ++i ) {
             js.member( raid_perf_nav_names[i], row.nav_counts[i] );
+        }
+        js.end_object();
+        js.member( "nav_query_counts" );
+        js.start_object();
+        for( std::size_t i = 0; i < raid_perf_query_event_count; ++i ) {
+            js.member( raid_perf_query_names[i], row.query_counts[i] );
         }
         js.end_object();
         js.member( "discovered_sources", row.discovered_sources );
