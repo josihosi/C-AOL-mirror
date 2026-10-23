@@ -5067,7 +5067,8 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
            "[semantic_surface][raid_performance_migo_split][raid_performance_navigation_inner]" )
 {
     const std::string mode = GENERATE( "normal", "quiet_signal", "off" );
-    const std::string branch = GENERATE( "local", "abstract", "unowned", "remote", "remote_unknown" );
+    const std::string branch = GENERATE( "local", "abstract", "unowned", "remote", "remote_unknown",
+                                         "remote_shared", "remote_unknown_shared" );
     CAPTURE( mode, branch );
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
@@ -5163,10 +5164,12 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         called = true;
         map &here = get_map();
         const tripoint_bub_ms start( 64, 64, 0 );
-        const bool remote = branch == "remote" || branch == "remote_unknown";
+        const bool shared = branch == "remote_shared" || branch == "remote_unknown_shared";
+        const bool unknown = branch == "remote_unknown" || branch == "remote_unknown_shared";
+        const bool remote = branch == "remote" || branch == "remote_unknown" || shared;
         const bool abstract = branch == "abstract" || remote;
         const auto anchor = project_to<coords::omt>( here.get_abs( start ) ) +
-                            ( remote ? point( 12, branch == "remote_unknown" ? 12 : 0 ) : point::zero );
+                            ( remote ? point( 12, unknown ? 12 : 0 ) : point::zero );
         const auto home = remote ? project_to<coords::ms>( anchor ) + point( 12, 12 ) :
                           here.get_abs( start );
         const auto goal = home + point::east * 4;
@@ -5178,7 +5181,7 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         if( remote ) {
             REQUIRE_FALSE( here.inbounds( home ) );
             REQUIRE_FALSE( here.inbounds( goal ) );
-            if( branch == "remote_unknown" ) {
+            if( unknown ) {
                 REQUIRE_FALSE( MAPBUFFER.lookup_submap_existing( project_to<coords::sm>( home ) ) );
             } else {
                 overmap_buffer.ter_set( anchor, oter_str_id( "field" ) );
@@ -5223,7 +5226,16 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         migo_population::site_record population;
         population.id = id;
         population.anchor = anchor;
-        REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+        auto peer = member;
+        peer.token.member_id = "peer";
+        peer.type = mtype_id( "mon_mi_go_scout" );
+        peer.hp = peer.type->hp;
+        peer.home = home + point::south;
+        std::vector<migo_population::member_record> seeds{member};
+        if( shared ) {
+            seeds.push_back( peer );
+        }
+        REQUIRE( population.commit_seed( seeds, std::nullopt, "", 0, true, false ) );
         overmap_buffer.global_state.migo_populations.sites.push_back( population );
         migo_tower::site_state site;
         site.site_id = id;
@@ -5232,6 +5244,9 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         operation.generation = 1;
         operation.source.source_omt = anchor;
         operation.members = {{member.token.member_id, false, false, home}};
+        if( shared ) {
+            operation.members.push_back( {peer.token.member_id, false, false, peer.home} );
+        }
         operation.sweep.source = anchor;
         operation.sweep.generation = 1;
         operation.sweep.candidates = {{goal}};
@@ -5249,11 +5264,24 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         original.set_migo_intent( intent );
         overmap *retained_owner = nullptr;
         monster *body = nullptr;
+        monster *second_body = nullptr;
         if( abstract ) {
             retained_owner = &overmap_buffer.get( project_to<coords::om>( home ).xy() );
             auto *entity = retained_owner->retain_monster_payload( home, original );
             REQUIRE( entity );
             body = entity->monster_data.get();
+            if( shared ) {
+                monster second( peer.type );
+                second.population_identity() = peer.token;
+                second.set_pos_abs_only( peer.home );
+                second.set_moves( 100 );
+                auto second_intent = intent;
+                second_intent.home = peer.home;
+                second.set_migo_intent( second_intent );
+                auto *second_entity = retained_owner->retain_monster_payload( peer.home, second );
+                REQUIRE( second_entity );
+                second_body = second_entity->monster_data.get();
+            }
         } else {
             body = g->place_critter_at( member.type, start );
             REQUIRE( body );
@@ -5267,6 +5295,9 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         on_out_of_scope clear_fixture( [&]() {
             if( retained_owner ) {
                 CHECK( retained_owner->release_monster_payload( home, member.token.member_id ) );
+                if( shared ) {
+                    CHECK( retained_owner->release_monster_payload( peer.home, peer.token.member_id ) );
+                }
             }
             clear_creatures();
             overmap_buffer.global_state.migo_populations = {};
@@ -5293,6 +5324,14 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         }
         CHECK( body->pos_abs() == home );
         CHECK( body->get_moves() == 100 );
+        if( shared ) {
+            REQUIRE( second_body );
+            CHECK( second_body->pos_abs() == peer.home );
+            CHECK( second_body->get_moves() == 100 );
+            CHECK( second_body->get_hp() == peer.hp );
+            CHECK( second_body->population_identity().epoch == peer.token.epoch );
+            CHECK( second_body->migo_intent()->generation == intent.generation );
+        }
         const auto globals = [&]() {
             std::ostringstream out;
             JsonOut json( out );
@@ -5308,7 +5347,7 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             // this control does not claim an abstract scheduler movement tick.
             raid_perf_scope parent( raid_perf_stage::horde_movement );
             const auto read = migo_tower::prepare_step( *body, member.owner );
-            if( branch == "remote_unknown" ) {
+            if( unknown ) {
                 CHECK( read.next == physical_navigation::action::none );
                 CHECK_FALSE( read.known );
                 CHECK( read.reason == "origin_geometry_unknown" );
@@ -5445,6 +5484,8 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
                                       branch == "abstract" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 2, 0, 2 } :
                                       branch == "remote" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 12, 12, 10 } :
                                       branch == "remote_unknown" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 4, 4, 0 } :
+                                      branch == "remote_shared" ? std::vector<int>{ 0, 2, 0, 0, 0, 1, 13, 12, 11 } :
+                                      branch == "remote_unknown_shared" ? std::vector<int>{ 0, 2, 0, 0, 0, 1, 5, 4, 0 } :
                                       std::vector<int>( stages.size(), 0 );
     std::vector<int> totals( stages.size(), 0 );
     int intervals = 0;
@@ -5459,6 +5500,9 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         const auto object = json_loader::from_string( line.substr( line.find( '{' ) ) ).get_object();
         object.allow_omitted_members();
         CHECK( object.get_string( "mode" ) == mode );
+        CHECK( object.get_string( "stage_scope" ).find(
+                   "retained service-workspace destruction belongs to the inclusive migo_operations parent" ) !=
+               std::string::npos );
         const auto names = object.get_string_array( "stage_names" );
         const auto index = [&]( const std::string &name ) {
             REQUIRE( std::count( names.begin(), names.end(), name ) == 1 );
@@ -5478,7 +5522,8 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             CHECK( lookups == counts.get_int( "resident_hit" ) + counts.get_int( "resident_null" ) +
                    counts.get_int( "buffer_miss" ) );
             CHECK( calls.get_int( index( "nav_view_miss_load" ) ) == counts.get_int( "buffer_miss" ) );
-            if( ( branch == "remote" || branch == "remote_unknown" ) &&
+            if( ( branch == "remote" || branch == "remote_unknown" ||
+                  branch == "remote_shared" || branch == "remote_unknown_shared" ) &&
                 counts.get_int( "buffer_miss" ) > 0 ) {
                 // Distinct requested submaps in this real bounded view share
                 // a serialized segment archive. Preparation may reuse that
@@ -5518,9 +5563,9 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
     // The supported off transition discards the still-open final row.
     CHECK( ( intervals > 0 ) == ( mode != "off" ) );
     CHECK( totals == ( mode == "off" ? std::vector<int>( stages.size(), 0 ) : expected ) );
-    CHECK( lookup_calls == ( mode == "off" ? 0 : branch == "remote" ? 333 :
-                            branch == "remote_unknown" ? 108 : 0 ) );
-    CHECK( level_calls == ( mode != "off" && branch == "remote" ? 5 : 0 ) );
+    CHECK( lookup_calls == ( mode == "off" ? 0 : ( branch == "remote" || branch == "remote_shared" ) ? 333 :
+                            ( branch == "remote_unknown" || branch == "remote_unknown_shared" ) ? 108 : 0 ) );
+    CHECK( level_calls == ( mode != "off" && ( branch == "remote" || branch == "remote_shared" ) ? 5 : 0 ) );
 }
 
 std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test( bool reuse_archive );

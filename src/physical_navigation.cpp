@@ -22,44 +22,95 @@ namespace physical_navigation
 {
 namespace
 {
+struct view_bounds {
+    tripoint_abs_sm first;
+    int size;
+    int low;
+    int high;
+    view_bounds( const tripoint_abs_ms &from, const tripoint_abs_ms &to ) :
+        first( project_to<coords::sm>( tripoint_abs_ms(
+                   std::min( from.x(), to.x() ) - SEEX,
+                   std::min( from.y(), to.y() ) - SEEY, from.z() ) ) ),
+        size( std::min( MAPSIZE, std::max( std::abs( from.x() - to.x() ),
+                                         std::abs( from.y() - to.y() ) ) / SEEX + 3 ) ),
+        low( std::max( -OVERMAP_DEPTH, std::min( from.z(), to.z() ) - 1 ) ),
+        high( std::min( OVERMAP_HEIGHT, std::max( from.z(), to.z() ) + 1 ) ) {}
+    bool operator==( const view_bounds &other ) const {
+        return first == other.first && size == other.size && low == other.low && high == other.high;
+    }
+};
+
 // Borrow existing submaps only. Unknown cells and remote vehicle geometry are
 // walls, including physical parts overhanging from another resident submap.
 class navigation_view : public map
 {
+        struct binding {
+            tripoint_abs_sm position;
+            submap *resident;
+            bool accepted;
+            int field_count;
+        };
         submap unknown;
         std::set<tripoint_abs_sm> available;
+        std::vector<binding> bindings;
+        view_bounds bounds;
+        static bool accepted( submap *sm, const tripoint_abs_sm &p ) {
+            return sm && sm->vehicles.empty() && MAPBUFFER.vehicle_parts_at( p ).empty();
+        }
     public:
         navigation_view( const tripoint_abs_ms &from, const tripoint_abs_ms &to ) :
-            map( std::min( MAPSIZE, std::max( std::abs( from.x() - to.x() ),
-                                              std::abs( from.y() - to.y() ) ) / SEEX + 3 ), true ) {
+            navigation_view( view_bounds( from, to ) ) {}
+        explicit navigation_view( const view_bounds &window, bool retain_bindings = false ) :
+            map( window.size, true ),
+            bounds( window ) {
             unknown.set_all_ter( ter_str_id( "t_wall" ) );
-            const auto first = project_to<coords::sm>( tripoint_abs_ms(
-                    std::min( from.x(), to.x() ) - SEEX,
-                    std::min( from.y(), to.y() ) - SEEY, from.z() ) );
-            set_abs_sub( first );
-            // One preparation has no native actions or geometry/file writes.
-            // Destroy the archive reader here, before any route or movement.
+            set_abs_sub( bounds.first );
+            if( retain_bindings ) {
+                bindings.reserve( static_cast<std::size_t>( bounds.size * bounds.size *
+                                  std::max( 0, bounds.high - bounds.low + 1 ) ) );
+            }
+            // Archive handles end before any route. The view's submaps remain
+            // borrowed only through its caller's read-only preparation span.
             mapbuffer::existing_submap_reader existing( MAPBUFFER );
-            const int low = std::max( -OVERMAP_DEPTH, std::min( from.z(), to.z() ) - 1 );
-            const int high = std::min( OVERMAP_HEIGHT, std::max( from.z(), to.z() ) + 1 );
             for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
                 for( int x = 0; x < getmapsize(); ++x ) {
                     for( int y = 0; y < getmapsize(); ++y ) {
-                        const tripoint_abs_sm p( first.x() + x, first.y() + y, z );
-                        submap *sm = z >= low && z <= high ? existing.lookup( p ) : nullptr;
-                        if( sm && sm->vehicles.empty() && MAPBUFFER.vehicle_parts_at( p ).empty() ) {
+                        const tripoint_abs_sm p( bounds.first.x() + x, bounds.first.y() + y, z );
+                        const bool eligible = z >= bounds.low && z <= bounds.high;
+                        submap *sm = eligible ? existing.lookup( p ) : nullptr;
+                        const bool usable = accepted( sm, p );
+                        if( retain_bindings && eligible ) {
+                            bindings.push_back( {p, sm, usable, sm ? sm->field_count : 0} );
+                        }
+                        if( usable ) {
                             available.insert( p );
                         } else {
                             sm = &unknown;
                         }
                         const tripoint_rel_sm grid( x, y, z );
                         setsubmap( get_nonant( grid ), sm );
-                        if( sm != &unknown ) {
+                        if( usable ) {
                             cache_submap_fields( grid );
                         }
                     }
                 }
             }
+        }
+        bool compatible( const view_bounds &window ) const {
+            if( !( bounds == window ) ) {
+                return false;
+            }
+            // Other existing-only probes may have loaded a previously unknown
+            // resident or indexed an overhanging vehicle. Pointer identity
+            // alone does not establish the original geometry admission.
+            for( const binding &old : bindings ) {
+                submap *now = MAPBUFFER.lookup_submap_cached( old.position );
+                if( now != old.resident || accepted( now, old.position ) != old.accepted ||
+                    ( now && now->field_count != old.field_count ) ) {
+                    return false;
+                }
+            }
+            return true;
         }
         bool known( const tripoint_abs_ms &p ) const {
             return inbounds( p ) && available.count( project_to<coords::sm>( p ) ) != 0;
@@ -68,11 +119,18 @@ class navigation_view : public map
 
 } // namespace
 
+struct preparation::implementation {
+    tripoint_abs_ms goal;
+    std::unique_ptr<navigation_view> view;
+};
+preparation::preparation() = default;
+preparation::~preparation() = default;
+
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
-                     const std::function<bool( const tripoint_abs_ms & )> &occupied )
+                     const std::function<bool( const tripoint_abs_ms & )> &occupied, preparation *prepared )
 {
-    // Declare before the borrowed view so the total includes its destruction
-    // and every refusal. The existing row owns all timing/count state.
+    // Includes every refusal and locally owned view destruction. A retained
+    // service workspace tears down under its inclusive operation parent.
     raid_perf_scope read_scope( raid_perf_stage::physical_navigation_read );
     const auto origin = body.pos_abs();
     step_read out;
@@ -96,12 +154,31 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     // connection. A distant upper-floor home need not have stairs beside the
     // returning actor; a safe current-floor segment can bring it closer.
     const tripoint_abs_ms extent( aim.xy(), goal.z() );
-    std::unique_ptr<navigation_view> remote;
+    std::unique_ptr<navigation_view> owned;
+    navigation_view *remote = nullptr;
     map *here = &get_map();
     if( !here->inbounds( origin ) || !here->inbounds( extent ) ) {
-        raid_perf_scope build_scope( raid_perf_stage::physical_navigation_view_build );
-        remote = std::make_unique<navigation_view>( origin, extent );
-        here = remote.get();
+        const view_bounds window( origin, extent );
+        if( prepared ) {
+            if( !prepared->impl ) {
+                prepared->impl = std::make_unique<preparation::implementation>();
+            }
+            auto &slot = *prepared->impl;
+            if( slot.view && ( slot.goal != goal || !slot.view->compatible( window ) ) ) {
+                slot.view.reset();
+            }
+            if( !slot.view ) {
+                raid_perf_scope build_scope( raid_perf_stage::physical_navigation_view_build );
+                slot.view = std::make_unique<navigation_view>( window, true );
+                slot.goal = goal;
+            }
+            remote = slot.view.get();
+        } else {
+            raid_perf_scope build_scope( raid_perf_stage::physical_navigation_view_build );
+            owned = std::make_unique<navigation_view>( window );
+            remote = owned.get();
+        }
+        here = remote;
     }
     const auto known = [&]( const tripoint_bub_ms & p ) {
         return here->inbounds( p ) && ( !remote || remote->known( here->get_abs( p ) ) );

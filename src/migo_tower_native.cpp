@@ -37,7 +37,8 @@ namespace
 {
 constexpr int sensing_interval = 5 * 60;
 physical_navigation::step_read read_owned_step( const monster &body,
-        const tripoint_abs_ms &goal, migo_population::representation owner )
+        const tripoint_abs_ms &goal, migo_population::representation owner,
+        physical_navigation::preparation *prepared = nullptr )
 {
     return physical_navigation::read_step( body, goal, [&]( const tripoint_abs_ms & p ) {
         if( owner != migo_population::representation::abstract || p == body.pos_abs() ) {
@@ -53,16 +54,17 @@ physical_navigation::step_read read_owned_step( const monster &body,
         overmap *existing = overmap_buffer.get_existing( om_position );
         const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
         return resident && !resident->is_active();
-    } );
+    }, prepared );
 }
 
 physical_navigation::step_read read_service_step( const monster &body,
-        const tripoint_abs_ms &goal, migo_population::representation owner )
+        const tripoint_abs_ms &goal, migo_population::representation owner,
+        physical_navigation::preparation *prepared = nullptr )
 {
     raid_perf_scope scope( owner == migo_population::representation::local ?
                            raid_perf_stage::migo_service_local_navigation :
                            raid_perf_stage::migo_service_abstract_navigation );
-    return read_owned_step( body, goal, owner );
+    return read_owned_step( body, goal, owner, prepared );
 }
 
 bool approach_available( const monster &body, const physical_navigation::step_read &step )
@@ -852,6 +854,10 @@ void service_operations( int now_turn, int active_elapsed )
             continue;
         }
         scout_observation::site_reader reader;
+        // This service span performs no native geometry/action/save/unload.
+        // Only pending probes share preparation; deferred reads stay separate.
+        // The workspace dies here, before the following transport batch.
+        physical_navigation::preparation pending_preparation;
         const auto candidate_at_start = operation.sweep.pending();
         bool safe_approach = false;
         bool fire_refusal = false;
@@ -915,7 +921,7 @@ void service_operations( int now_turn, int active_elapsed )
                     }
                 }
                 if( const auto pending = operation.sweep.pending() ) {
-                    const auto approach = read_service_step( body, *pending, owner );
+                    const auto approach = read_service_step( body, *pending, owner, &pending_preparation );
                     if( operation.sweep.pending() == candidate_at_start ) {
                         const bool available = approach_available( body, approach );
                         if( available ) {

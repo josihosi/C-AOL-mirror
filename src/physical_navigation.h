@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include "coordinates.h"
 
 class monster;
@@ -22,10 +23,26 @@ struct step_read {
     std::string reason;
     std::uint64_t hazard_revision = 0;
 };
+// One operation's synchronous, read-only service span. No native action,
+// terrain/field edit, world/file mutation, save, unload or transport may occur.
+// Owns one compatible view, never a route/result or borrowed actor pointer.
+class preparation
+{
+        struct implementation;
+        std::unique_ptr<implementation> impl;
+        friend step_read read_step( const monster &, const tripoint_abs_ms &,
+                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation * );
+    public:
+        preparation();
+        ~preparation();
+        preparation( const preparation & ) = delete;
+        preparation &operator=( const preparation & ) = delete;
+};
 // A transport owner may supply its actual occupied cells. They affect this
 // short physical route only, never perception or the destination's identity.
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
-                     const std::function<bool( const tripoint_abs_ms & )> &occupied = {} );
+                     const std::function<bool( const tripoint_abs_ms & )> &occupied = {},
+                     preparation *prepared = nullptr );
 // Caller must first authenticate the current physical owner and spend this
 // action once. This opens one adjacent native door, and never moves the body.
 bool commit_door( const monster &body, const tripoint_abs_ms &door );

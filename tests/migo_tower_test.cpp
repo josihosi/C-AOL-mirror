@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <filesystem>
 #include <set>
 #include <sstream>
 #include <string>
@@ -6,6 +7,11 @@
 
 #include "avatar.h"
 #include "calendar.h"
+#include "cata_path.h"
+#include "path_info.h"
+#include "pathfinding.h"
+#include "string_formatter.h"
+#include "worldfactory.h"
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
 #include "do_turn.h"
@@ -3029,4 +3035,255 @@ TEST_CASE( "migo_queued_party_records_a_burning_destination_as_hazardous",
         CHECK( bodies[i]->population_identity().member_id == members[i].token.member_id );
         CHECK( bodies[i]->pos_abs() != goal );
     }
+}
+
+TEST_CASE( "service_preparation_keeps_current_reads_and_rejects_changed_bindings",
+           "[migo_tower][navigation_service_preparation]" )
+{
+    clear_avatar();
+    clear_map();
+    const auto saved_turn = calendar::turn;
+    const tripoint_abs_sm cell( 4000, 4000, 0 );
+    REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( cell ) );
+    on_out_of_scope cleanup( [&]() {
+        MAPBUFFER.clear_outside_reality_bubble();
+        CHECK( calendar::turn == saved_turn );
+    } );
+    auto terrain = std::make_unique<submap>();
+    terrain->set_all_ter( ter_str_id( "t_floor" ) );
+    REQUIRE( MAPBUFFER.add_submap( cell, terrain ) );
+    // Pre-existing distant geometry allows a different actor/window to be
+    // compared without changing any bindings of the first small window.
+    for( int y = 1; y <= 3; ++y ) {
+        auto bridge = std::make_unique<submap>();
+        bridge->set_all_ter( ter_str_id( "t_floor" ) );
+        REQUIRE( MAPBUFFER.add_submap( cell + point( 0, y ), bridge ) );
+    }
+    const auto count_before_reads = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto origin = project_to<coords::ms>( cell ) + point( 2, 6 );
+    const auto goal = origin + point::east * 4;
+    monster body( mtype_id( "mon_mi_go" ) );
+    body.set_pos_abs_only( origin );
+    body.set_moves( 100 );
+    const auto body_bytes = [&]() {
+        std::ostringstream out;
+        JsonOut json( out );
+        body.serialize( json );
+        return out.str();
+    };
+    const auto before = body_bytes();
+    const auto compare = [&]( const physical_navigation::step_read &actual,
+                              const physical_navigation::step_read &expected ) {
+        CHECK( actual.next == expected.next );
+        CHECK( actual.position == expected.position );
+        CHECK( actual.known == expected.known );
+        CHECK( actual.reason == expected.reason );
+        CHECK( actual.hazard_revision == expected.hazard_revision );
+        CHECK( actual.move_cost == expected.move_cost );
+    };
+    {
+        physical_navigation::preparation prepared;
+        const auto first = physical_navigation::read_step( body, goal, {}, &prepared );
+        REQUIRE( first.next == physical_navigation::action::walk );
+        compare( physical_navigation::read_step( body, goal, {}, &prepared ), first );
+        monster distant( body );
+        distant.set_pos_abs_only( origin + point::south * 36 );
+        const auto farther = physical_navigation::read_step( distant, goal );
+        REQUIRE( farther.next == physical_navigation::action::walk );
+        compare( physical_navigation::read_step( distant, goal, {}, &prepared ), farther );
+        compare( physical_navigation::read_step( body, goal, {}, &prepared ), first );
+        const auto occupied = [&]( const tripoint_abs_ms &p ) { return p == goal; };
+        const auto refused = physical_navigation::read_step( body, goal, occupied, &prepared );
+        REQUIRE( refused.next == physical_navigation::action::none );
+        compare( refused, physical_navigation::read_step( body, goal, occupied ) );
+        // No failed result is retained. Changed current occupancy reopens it.
+        compare( physical_navigation::read_step( body, goal, {}, &prepared ), first );
+        // Same window but a different full goal must not retain the old slot.
+        compare( physical_navigation::read_step( body, goal + point::south, {}, &prepared ),
+                 physical_navigation::read_step( body, goal + point::south ) );
+        const auto unknown_goal = origin + point::east * 12;
+        const auto unknown = physical_navigation::read_step( body, unknown_goal, {}, &prepared );
+        REQUIRE_FALSE( unknown.known );
+        CHECK( unknown.next == physical_navigation::action::none );
+        const auto next_cell = cell + point::east;
+        REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( next_cell ) );
+        // Adversarial resident admission: the cached unknown binding must be
+        // rejected, even though the original known resident pointer is stable.
+        auto added = std::make_unique<submap>();
+        added->set_all_ter( ter_str_id( "t_floor" ) );
+        REQUIRE( MAPBUFFER.add_submap( next_cell, added ) );
+        const auto reopened = physical_navigation::read_step( body, unknown_goal, {}, &prepared );
+        REQUIRE( reopened.next == physical_navigation::action::walk );
+        compare( reopened, physical_navigation::read_step( body, unknown_goal ) );
+        monster different( mtype_id( "mon_mi_go_scout" ) );
+        different.set_pos_abs_only( origin + point::south );
+        compare( physical_navigation::read_step( different, goal, {}, &prepared ),
+                 physical_navigation::read_step( different, goal ) );
+    }
+    CHECK( body_bytes() == before );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == count_before_reads + 1 );
+    submap *current = MAPBUFFER.lookup_submap_cached( cell );
+    REQUIRE( current );
+    // Geometry/actions delimit preparation scopes. No workspace crosses these
+    // real field/door edits or the later serialization/representation boundary.
+    current->set_all_ter( ter_str_id( "t_wall" ) );
+    for( int x = 2; x <= 6; ++x ) {
+        current->set_ter( point_sm_ms( x, 6 ), ter_str_id( "t_floor" ) );
+    }
+    current->set_ter( point_sm_ms( 4, 6 ), ter_str_id( "t_door_c" ) );
+    {
+        physical_navigation::preparation prepared;
+        REQUIRE( physical_navigation::read_step( body, goal, {}, &prepared ).next ==
+                 physical_navigation::action::walk );
+        monster cannot_open( mtype_id( "mon_bear_mutant_3headed" ) );
+        REQUIRE( cannot_open.get_pathfinding_settings().max_dist >= 4 );
+        REQUIRE_FALSE( cannot_open.has_flag( mon_flag_CAN_OPEN_DOORS ) );
+        cannot_open.set_pos_abs_only( origin );
+        const auto refused = physical_navigation::read_step( cannot_open, goal, {}, &prepared );
+        CHECK( refused.next == physical_navigation::action::none );
+        compare( refused, physical_navigation::read_step( cannot_open, goal ) );
+    }
+    // The actual native door commit occurs after the old workspace closes.
+    monster at_door( body );
+    at_door.set_pos_abs_only( origin + point::east );
+    REQUIRE( physical_navigation::commit_door( at_door, origin + point::east * 2 ) );
+    {
+        physical_navigation::preparation fresh;
+        compare( physical_navigation::read_step( body, goal, {}, &fresh ),
+                 physical_navigation::read_step( body, goal ) );
+    }
+    current->get_field( point_sm_ms( 6, 6 ) ).add_field( field_type_id( "fd_fire" ), 1, 0_turns );
+    ++current->field_count;
+    {
+        physical_navigation::preparation fresh;
+        const auto fire = physical_navigation::read_step( body, goal, {}, &fresh );
+        CHECK( fire.next == physical_navigation::action::none );
+        CHECK( fire.reason == "approach_fire_hazard" );
+        CHECK( fire.hazard_revision != 0 );
+        compare( fire, physical_navigation::read_step( body, goal ) );
+    }
+    current->get_field( point_sm_ms( 6, 6 ) ).clear();
+    current->field_count = 0;
+    current->set_ter( point_sm_ms( 6, 7 ), ter_str_id( "t_floor" ) );
+    for( const bool contained : {false, true} ) {
+        CAPTURE( contained );
+        current->set_furn( point_sm_ms( 6, 7 ), contained ? furn_str_id( "f_brazier" ) :
+                           furn_str_id::NULL_ID() );
+        current->get_field( point_sm_ms( 6, 7 ) ).add_field( field_type_id( "fd_fire" ), 1, 0_turns );
+        current->field_count = 1;
+        {
+            physical_navigation::preparation fresh;
+            const auto fire = physical_navigation::read_step( body, goal, {}, &fresh );
+            CHECK( ( fire.next == physical_navigation::action::walk ) == contained );
+            CHECK( ( fire.hazard_revision == 0 ) == contained );
+            compare( fire, physical_navigation::read_step( body, goal ) );
+        }
+        current->get_field( point_sm_ms( 6, 7 ) ).clear();
+        current->field_count = 0;
+        current->set_furn( point_sm_ms( 6, 7 ), furn_str_id::NULL_ID() );
+    }
+    current->set_ter( point_sm_ms( 4, 6 ), ter_str_id( "t_stairs_up" ) );
+    auto upper = std::make_unique<submap>();
+    upper->set_all_ter( ter_str_id( "t_floor" ) );
+    upper->set_ter( point_sm_ms( 4, 6 ), ter_str_id( "t_stairs_down" ) );
+    REQUIRE( MAPBUFFER.add_submap( cell + tripoint_rel_sm( 0, 0, 1 ), upper ) );
+    {
+        physical_navigation::preparation fresh;
+        const auto up_goal = goal + tripoint_rel_ms( 0, 0, 1 );
+        const auto approach = physical_navigation::read_step( body, up_goal, {}, &fresh );
+        CHECK( approach.next == physical_navigation::action::walk );
+        CHECK( approach.position.z() == origin.z() );
+        monster at_stair( body );
+        at_stair.set_pos_abs_only( origin + point::east * 2 );
+        const auto crossing = physical_navigation::read_step( at_stair, up_goal, {}, &fresh );
+        CHECK( crossing.next == physical_navigation::action::walk );
+        CHECK( crossing.position == at_stair.pos_abs() + tripoint_rel_ms( 0, 0, 1 ) );
+        compare( crossing, physical_navigation::read_step( at_stair, up_goal ) );
+    }
+    MAPBUFFER.lookup_submap_cached( cell + tripoint_rel_sm( 0, 0, 1 ) )->set_ter(
+        point_sm_ms( 4, 6 ), ter_str_id( "t_floor" ) );
+    {
+        monster below_goal( body );
+        below_goal.set_pos_abs_only( goal );
+        physical_navigation::preparation fresh;
+        const auto missing = physical_navigation::read_step( below_goal,
+                             goal + tripoint_rel_ms( 0, 0, 1 ), {}, &fresh );
+        CHECK( missing.next == physical_navigation::action::none );
+        compare( missing, physical_navigation::read_step( below_goal,
+                 goal + tripoint_rel_ms( 0, 0, 1 ) ) );
+    }
+    std::ostringstream saved;
+    { JsonOut json( saved ); body.serialize( json ); }
+    monster reloaded;
+    reloaded.deserialize( json_loader::from_string( saved.str() ) );
+    {
+        physical_navigation::preparation fresh;
+        const auto after = physical_navigation::read_step( reloaded, goal, {}, &fresh );
+        CHECK( after.next == physical_navigation::action::walk );
+        compare( after, physical_navigation::read_step( reloaded, goal ) );
+    }
+    CHECK( body_bytes() == before );
+}
+
+TEST_CASE( "service_preparation_rejects_vehicle_metadata_from_an_existing_only_load",
+           "[migo_tower][navigation_service_preparation]" )
+{
+    clear_avatar();
+    clear_map();
+    REQUIRE( world_generator->active_world );
+    const auto saved_turn = calendar::turn;
+    const tripoint_abs_sm cell( 4200, 4200, 0 );
+    const auto vehicle_owner = cell + point( 80, 0 );
+    const auto segment = project_to<coords::seg>( project_to<coords::omt>( vehicle_owner ) );
+    const auto directory = PATH_INFO::current_dimension_save_path() / "maps" /
+                           string_format( "%d.%d.%d", segment.x(), segment.y(), segment.z() );
+    REQUIRE_FALSE( std::filesystem::exists( directory.get_unrelative_path() ) );
+    REQUIRE_FALSE( std::filesystem::exists( ( directory + ".zzip" ).get_unrelative_path() ) );
+    on_out_of_scope cleanup( [&]() {
+        MAPBUFFER.clear_outside_reality_bubble();
+        std::filesystem::remove_all( directory.get_unrelative_path() );
+        std::filesystem::remove( ( directory + ".zzip" ).get_unrelative_path() );
+        CHECK( calendar::turn == saved_turn );
+    } );
+    auto terrain = std::make_unique<submap>();
+    terrain->set_all_ter( ter_str_id( "t_floor" ) );
+    REQUIRE( MAPBUFFER.add_submap( cell, terrain ) );
+    {
+        // Authoritative writer produces the actual compressed/plain quad;
+        // its separate buffer is closed before the tested preparation starts.
+        mapbuffer writer;
+        auto remote = std::make_unique<submap>();
+        remote->set_all_ter( ter_str_id( "t_floor" ) );
+        auto machine = std::make_unique<vehicle>( vproto_id( "vehicle_camera_test" ) );
+        REQUIRE( machine->part_count() > 0 );
+        machine->sm_pos = vehicle_owner;
+        machine->part( 0 ).mount = point_rel_ms( -80 * SEEX + 6, 6 );
+        machine->refresh();
+        const auto target = project_to<coords::ms>( vehicle_owner ) +
+                            ( machine->abs_part_pos( machine->part( 0 ) ) - project_to<coords::ms>( machine->sm_pos ) );
+        REQUIRE( project_to<coords::sm>( target ) == cell );
+        remote->vehicles.push_back( std::move( machine ) );
+        REQUIRE( writer.add_submap( vehicle_owner, remote ) );
+        writer.save();
+    }
+    REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( vehicle_owner ) );
+    REQUIRE( MAPBUFFER.vehicle_parts_at( cell ).empty() );
+    monster body( mtype_id( "mon_mi_go" ) );
+    const auto origin = project_to<coords::ms>( cell ) + point( 2, 6 );
+    const auto goal = origin + point::east * 4;
+    body.set_pos_abs_only( origin );
+    physical_navigation::preparation prepared;
+    REQUIRE( physical_navigation::read_step( body, goal, {}, &prepared ).next ==
+             physical_navigation::action::walk );
+    submap *stable = MAPBUFFER.lookup_submap_cached( cell );
+    REQUIRE( MAPBUFFER.lookup_submap_existing( vehicle_owner ) );
+    REQUIRE_FALSE( MAPBUFFER.vehicle_parts_at( cell ).empty() );
+    CHECK( MAPBUFFER.lookup_submap_cached( cell ) == stable );
+    const auto refused = physical_navigation::read_step( body, goal, {}, &prepared );
+    CHECK( refused.next == physical_navigation::action::none );
+    CHECK_FALSE( refused.known );
+    CHECK( refused.reason == "origin_geometry_unknown" );
+    const auto original = physical_navigation::read_step( body, goal );
+    CHECK( refused.reason == original.reason );
+    CHECK( refused.position == original.position );
 }
