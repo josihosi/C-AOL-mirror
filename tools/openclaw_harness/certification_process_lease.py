@@ -47,6 +47,24 @@ def process_command_identity(record: Mapping[str, Any]) -> str:
     return hashlib.sha256(command.encode("utf-8")).hexdigest() if command else ""
 
 
+def process_generation_identity_matches(
+    expected: Mapping[str, Any], observed: Mapping[str, Any],
+) -> bool:
+    """Compare identity fields only; inspection and lifecycle policy stay with callers."""
+    try:
+        expected_pid = int(expected.get("pid", 0) or 0)
+        observed_pid = int(observed.get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if expected_pid <= 0 or expected_pid != observed_pid:
+        return False
+    birth = str(expected.get("birth_identity", "")).strip()
+    if not birth or birth != str(observed.get("birth_identity", "")).strip():
+        return False
+    command = process_command_identity(expected)
+    return bool(command and command == process_command_identity(observed))
+
+
 def public_process_generation(record: Mapping[str, Any]) -> Dict[str, Any]:
     """Expose identity metadata, never inspected arguments or environment."""
     result = {key: record[key] for key in (

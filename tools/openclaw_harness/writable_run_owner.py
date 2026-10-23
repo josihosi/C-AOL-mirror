@@ -13,7 +13,7 @@ from pathlib import Path
 import socket
 import stat
 from typing import Callable, Mapping
-from certification_process_lease import process_command_identity
+from certification_process_lease import process_command_identity, process_generation_identity_matches
 
 
 class WritableRootConflict(RuntimeError):
@@ -29,15 +29,10 @@ ACTIVE: dict[str, 'WritableRunOwner'] = {}
 
 def _generation_matches(expected: Mapping, observed: Mapping) -> bool:
     try:
-        return bool(
-            int(expected.get('pid', 0) or 0) > 0
-            and int(expected.get('pid', 0) or 0) == int(observed.get('pid', 0) or 0)
-            and str(expected.get('birth_identity', '')).strip()
-            and str(expected.get('birth_identity', '')).strip()
-            == str(observed.get('birth_identity', '')).strip()
-            and process_command_identity(expected)
-            and process_command_identity(expected) == process_command_identity(observed)
-        )
+        # Preserve the original conjunction's refusal before reading observed.
+        if int(expected.get('pid', 0) or 0) <= 0:
+            return False
+        return process_generation_identity_matches(expected, observed)
     except (TypeError, ValueError):
         return False
 

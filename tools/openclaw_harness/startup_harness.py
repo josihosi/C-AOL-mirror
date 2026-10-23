@@ -73,6 +73,7 @@ from certification_process_lease import (
     SystemProcessInspector,
     load_certification_manifest,
     process_command_identity,
+    process_generation_identity_matches,
     public_process_generation,
     release_certification_lease_handle,
     reserve_certification_lease,
@@ -24463,20 +24464,7 @@ def process_generation_matches(
     expected: Mapping[str, Any], observed: Mapping[str, Any],
 ) -> bool:
     """Compare the fields that make a persisted PID ownership binding exact."""
-    try:
-        expected_pid = int(expected.get("pid", 0) or 0)
-        observed_pid = int(observed.get("pid", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    return bool(
-        expected_pid > 0
-        and expected_pid == observed_pid
-        and str(expected.get("birth_identity", "")).strip()
-        and str(expected.get("birth_identity", "")).strip()
-        == str(observed.get("birth_identity", "")).strip()
-        and process_command_identity(expected)
-        and process_command_identity(expected) == process_command_identity(observed)
-    )
+    return process_generation_identity_matches(expected, observed)
 
 
 def recorded_process_generation(record: Mapping[str, Any]) -> Dict[str, Any]:

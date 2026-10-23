@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 HARNESS_DIR = Path(__file__).resolve().parent
@@ -26,6 +27,9 @@ from certification_process_lease import (  # noqa: E402
 from identity_binding import canonical_digest, component_identity  # noqa: E402
 from scenario_registry_store import _issue_registry_certification_authority, open_registry  # noqa: E402
 import startup_harness as harness  # noqa: E402
+import certification_process_lease as process_lease  # noqa: E402
+import writable_run_owner as writable  # noqa: E402
+import curses_terminal_transport as terminal  # noqa: E402
 
 
 class FakeInspector:
@@ -41,6 +45,126 @@ class FakeInspector:
         self.signals.append((pid, sig))
         if pid in self.exit_on_signal:
             self.snapshots[pid] = ProcessSnapshot(pid=pid, alive=False)
+
+
+class ProcessGenerationIdentityTest(unittest.TestCase):
+    def setUp(self):
+        self.expected = {"schema": "caol-owned-process-generation-v1", "pid": 42,
+                         "birth_identity": "fixture-birth", "command": "fixture command"}
+        self.adapters = (harness.process_generation_matches, writable._generation_matches)
+
+    def test_actual_adapters_match_legacy_and_public_identity(self):
+        public = process_lease.public_process_generation(self.expected)
+        for match in self.adapters:
+            for expected, observed in ((self.expected, dict(self.expected)),
+                                       (public, self.expected), (self.expected, public),
+                                       (dict(public, pid="42", birth_identity=" fixture-birth "), public)):
+                with self.subTest(adapter=match.__module__, expected=expected):
+                    self.assertTrue(match(expected, observed))
+
+    def test_actual_adapters_reject_mismatched_and_incomplete_identity(self):
+        cases = [{}, {"pid": None}, {"pid": "bad"}, {"pid": 0}, {"pid": -42},
+                 {"pid": []}, {"pid": 43}, {"birth_identity": ""},
+                 {"birth_identity": "  "}, {"birth_identity": "reused-pid"},
+                 {"command": ""}, {"command": "other fixture"},
+                 {"command_sha256": None}, {"command_sha256": "invalid"}]
+        for match in self.adapters:
+            self.assertFalse(match({}, self.expected))
+            self.assertFalse(match(self.expected, {}))
+            for changes in cases:
+                expected = dict(self.expected, **changes)
+                # Missing birth/command are distinct from a changed value.
+                if not changes:
+                    expected.pop("birth_identity")
+                with self.subTest(adapter=match.__module__, changes=changes):
+                    self.assertFalse(match(expected, self.expected))
+                    self.assertFalse(match(self.expected, expected))
+
+    def test_actual_adapters_preserve_malformed_exception_boundaries(self):
+        malformed = dict(self.expected, command="\ud800")
+        with self.assertRaises(UnicodeEncodeError):
+            harness.process_generation_matches(malformed, self.expected)
+        self.assertFalse(writable._generation_matches(malformed, self.expected))
+        for match in self.adapters:
+            self.assertFalse(match(malformed, dict(self.expected, pid=43)))
+            with self.assertRaises(AttributeError):
+                match(None, self.expected)
+            with self.assertRaises(OverflowError):
+                match(dict(self.expected, pid=float("inf")), self.expected)
+
+    def test_writable_keeps_invalid_expected_pid_short_circuit(self):
+        # Writable's original conjunction never accesses observed identity here;
+        # startup deliberately converts both PID fields before its final test.
+        for expected in ({}, {"pid": None}, {"pid": 0}, {"pid": -1}):
+            with self.subTest(expected=expected):
+                self.assertFalse(writable._generation_matches(expected, None))
+                self.assertFalse(writable._generation_matches(expected, {"pid": float("inf")}))
+                with self.assertRaises(AttributeError):
+                    harness.process_generation_matches(expected, None)
+                with self.assertRaises(OverflowError):
+                    harness.process_generation_matches(expected, {"pid": float("inf")})
+
+    def test_terminal_variant_keeps_its_eager_command_validation(self):
+        # This intentionally distinct adapter is outside the extraction.
+        with self.assertRaises(UnicodeEncodeError):
+            terminal._same_generation(dict(self.expected, command="\ud800"),
+                                      dict(self.expected, pid=43))
+
+    def test_shared_owner_does_not_hash_refused_identity_or_repeat_expected_hash(self):
+        with patch.object(process_lease, "process_command_identity",
+                          wraps=process_lease.process_command_identity) as identity:
+            for observed in (dict(self.expected, pid=43), dict(self.expected, birth_identity="other")):
+                self.assertFalse(process_lease.process_generation_identity_matches(self.expected, observed))
+            identity.assert_not_called()
+            observed = dict(self.expected, alive=True)
+            self.assertTrue(process_lease.process_generation_identity_matches(self.expected, observed))
+            self.assertEqual(identity.call_count, 2)
+            self.assertIs(identity.call_args_list[0].args[0], self.expected)
+            self.assertIs(identity.call_args_list[1].args[0], observed)
+
+    def test_identity_comparison_does_not_take_liveness_or_path_ownership(self):
+        observed = dict(self.expected, alive=False, schema="other", executable_path="other")
+        with patch.object(process_lease.SystemProcessInspector, "inspect", side_effect=AssertionError("no OS probe")) as inspect, \
+             patch.object(process_lease.SystemProcessInspector, "signal", side_effect=AssertionError("no signal")) as signal:
+            for match in self.adapters:
+                self.assertTrue(match(self.expected, observed))
+            inspect.assert_not_called()
+            signal.assert_not_called()
+
+    def test_standalone_owner_inspection_keeps_refusal_reasons_without_signaling(self):
+        owner = object.__new__(writable.WritableRunOwner)
+        owner.matches = None
+        with patch.object(process_lease.SystemProcessInspector, "signal", side_effect=AssertionError("no signal")) as signal:
+            for observed, reason in ((dict(self.expected, alive=True), "live_generation"),
+                                     (dict(self.expected, alive=True, birth_identity="new"), "generation_mismatch"),
+                                     (dict(self.expected, alive=None), "identity_unavailable")):
+                owner.inspect = Mock(return_value=observed)
+                with self.subTest(reason=reason), self.assertRaises(writable.WritableRootConflict) as caught:
+                    owner._inspect_generation(self.expected, source="fixture")
+                self.assertEqual(caught.exception.reason, reason)
+                owner.inspect.assert_called_once_with(42)
+            owner.inspect = Mock(return_value=dict(self.expected, alive=False))
+            self.assertIsNone(owner._inspect_generation(self.expected, source="fixture"))
+            signal.assert_not_called()
+
+    def test_standalone_binding_writes_once_only_for_exact_live_identity(self):
+        owner = object.__new__(writable.WritableRunOwner)
+        owner.root = Path("fixture-not-created")
+        owner.matches = None
+        owner.record = {"launch_state": "launching"}
+        owner._write = Mock()
+        for observed in (dict(self.expected, alive=True, birth_identity="other"),
+                         dict(self.expected, alive=False)):
+            owner.inspect = Mock(return_value=observed)
+            with self.assertRaises(writable.WritableRootConflict) as caught:
+                owner.bind_game(self.expected)
+            self.assertEqual(caught.exception.reason, "generation_mismatch")
+            self.assertEqual(owner.record, {"launch_state": "launching"})
+            owner._write.assert_not_called()
+        owner.inspect = Mock(return_value=dict(self.expected, alive=True))
+        owner.bind_game(self.expected)
+        self.assertEqual(owner.record, {"launch_state": "bound", "game_generation": self.expected})
+        owner._write.assert_called_once_with()
 
 
 class CertificationProcessLeaseTest(unittest.TestCase):
