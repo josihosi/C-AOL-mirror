@@ -318,10 +318,6 @@ map::map( int mapsize, bool zlev ) : my_MAPSIZE( mapsize ), my_HALF_MAPSIZE( map
         grid.resize( static_cast<size_t>( my_MAPSIZE ) * my_MAPSIZE, nullptr );
     }
 
-    for( auto &ptr : pathfinding_caches ) {
-        ptr = std::make_unique<pathfinding_cache>();
-    }
-
     dbg( D_INFO ) << "map::map(): my_MAPSIZE: " << my_MAPSIZE << " z-levels enabled:" << zlevels;
     traplocs.resize( trap::count() );
 }
@@ -11626,7 +11622,13 @@ pathfinding_cache::pathfinding_cache()
 
 pathfinding_cache &map::get_pathfinding_cache( int zlev ) const
 {
-    return *pathfinding_caches[zlev + OVERMAP_DEPTH];
+    // Temporary maps need only the levels actually queried or dirtied. A new
+    // cache starts dirty; the existing update owner builds its current flags.
+    auto &cache = pathfinding_caches[zlev + OVERMAP_DEPTH];
+    if( !cache ) {
+        cache = std::make_unique<pathfinding_cache>();
+    }
+    return *cache;
 }
 
 void map::set_pathfinding_cache_dirty( const int zlev )
@@ -11664,7 +11666,7 @@ const pathfinding_cache &map::get_pathfinding_cache_ref( int zlev ) const
 {
     if( !inbounds_z( zlev ) ) {
         debugmsg( "Tried to get pathfinding cache for out of bounds z-level %d", zlev );
-        return *pathfinding_caches[ OVERMAP_DEPTH ];
+        return get_pathfinding_cache( 0 );
     }
     pathfinding_cache &cache = get_pathfinding_cache( zlev );
     if( cache.dirty || !cache.dirty_points.empty() ) {

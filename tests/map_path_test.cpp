@@ -7,6 +7,7 @@
 #include "cata_catch.h"
 #include "character.h"
 #include "coordinates.h"
+#include "debug.h"
 #include "field_type.h"
 #include "game.h"
 #include "map.h"
@@ -90,6 +91,106 @@ static map &setup_map_without_obstacles()
         here.ter_set( p, t_floor );
     }
     return here;
+}
+
+TEST_CASE( "native pathfinding caches preserve first-use and mutation lifetimes",
+           "[map][pathfinding_cache_lifetime]" )
+{
+    const int z = GENERATE( -OVERMAP_DEPTH, -1, 0, 1, OVERMAP_HEIGHT );
+    const std::string before = GENERATE( "fresh", "whole_dirty", "point_dirty" );
+    CAPTURE( z, before );
+    small_fake_map storage( ter_str_id( "t_floor" ) );
+    map &here = *storage.cast_to_map();
+    const auto turn = calendar::turn;
+    const tripoint_bub_ms from( 4, 4, z );
+    const tripoint_bub_ms goal( 8, 4, z );
+    const tripoint_bub_ms changed( 6, 4, z );
+    const bool initially_blocked = before != "fresh";
+    if( initially_blocked ) {
+        here.ter_set( changed, ter_str_id( "t_wall" ) );
+        if( before == "whole_dirty" ) {
+            here.set_pathfinding_cache_dirty( z );
+        } else {
+            here.set_pathfinding_cache_dirty( changed );
+        }
+    }
+    const pathfinding_cache &first = here.get_pathfinding_cache_ref( z );
+    CHECK_FALSE( first.dirty );
+    CHECK( first.dirty_points.empty() );
+    CHECK( first.special[changed.xy()].is_set( PathfindingFlag::Obstacle ) == initially_blocked );
+    CHECK( &here.get_pathfinding_cache_ref( z ) == &first );
+
+    pathfinding_settings settings;
+    settings.max_dist = 20;
+    settings.max_length = 100;
+    const auto route = here.route( from, pathfinding_target::point( goal ), settings );
+    REQUIRE_FALSE( route.empty() );
+    CHECK( route.back() == goal );
+    CHECK( ( std::find( route.begin(), route.end(), changed ) == route.end() ) ==
+           initially_blocked );
+
+    // Change actual geometry after first access. The point and whole-layer
+    // dirty owners must preserve cache identity and rebuild current flags.
+    here.ter_set( changed, ter_str_id( initially_blocked ? "t_floor" : "t_wall" ) );
+    here.set_pathfinding_cache_dirty( changed );
+    CHECK( ( first.dirty || first.dirty_points.count( changed.xy() ) == 1 ) );
+    CHECK( &here.get_pathfinding_cache_ref( z ) == &first );
+    CHECK( first.special[changed.xy()].is_set( PathfindingFlag::Obstacle ) != initially_blocked );
+    here.set_pathfinding_cache_dirty( z );
+    CHECK( first.dirty );
+    CHECK( &here.get_pathfinding_cache_ref( z ) == &first );
+    CHECK_FALSE( first.dirty );
+    CHECK( first.dirty_points.empty() );
+    const auto changed_route = here.route( from, pathfinding_target::point( goal ), settings );
+    REQUIRE_FALSE( changed_route.empty() );
+    CHECK( changed_route.back() == goal );
+    CHECK( ( std::find( changed_route.begin(), changed_route.end(), changed ) !=
+             changed_route.end() ) == initially_blocked );
+
+    const tripoint_bub_ms fire( 5, 5, z );
+    REQUIRE( here.add_field( fire, fd_fire, 1, 0_turns ) );
+    CHECK( here.get_pathfinding_cache_ref( z ).special[fire.xy()].is_set(
+               PathfindingFlag::DangerousField ) );
+    CHECK( here.get_field_intensity( fire, fd_fire ) == 1 );
+    here.delete_field( fire, fd_fire );
+    CHECK( here.get_field_intensity( fire, fd_fire ) == 0 );
+    // Direct deletion only notifies light/transparency. Exercise the existing
+    // pathfinding invalidation owner explicitly, without changing that API.
+    here.set_pathfinding_cache_dirty( fire );
+    CHECK_FALSE( here.get_pathfinding_cache_ref( z ).special[fire.xy()].is_set(
+                     PathfindingFlag::DangerousField ) );
+    const int other_z = z == 0 ? 1 : 0;
+    const pathfinding_cache &other = here.get_pathfinding_cache_ref( other_z );
+    CHECK( &other != &first );
+    CHECK_FALSE( other.special[changed.xy()].is_set( PathfindingFlag::Obstacle ) );
+    CHECK( &here.get_pathfinding_cache_ref( z ) == &first );
+    CHECK( calendar::turn == turn );
+}
+
+TEST_CASE( "invalid pathfinding cache access retains its diagnostic and fallback",
+           "[map][pathfinding_cache_lifetime]" )
+{
+    // No installed geometry: the diagnostic fallback must not try a rebuild.
+    map here;
+    const auto turn = calendar::turn;
+    const pathfinding_cache *upper = nullptr;
+    const std::string upper_error = capture_debugmsg_during( [&]() {
+        upper = &here.get_pathfinding_cache_ref( OVERMAP_HEIGHT + 1 );
+    } );
+    CHECK_THAT( upper_error, Catch::Matchers::Contains(
+                    "Tried to get pathfinding cache for out of bounds z-level" ) );
+    REQUIRE( upper );
+    CHECK( upper->dirty );
+    CHECK( upper->dirty_points.empty() );
+    CHECK_FALSE( upper->special[0][0].is_any_set() );
+    const pathfinding_cache *lower = nullptr;
+    const std::string lower_error = capture_debugmsg_during( [&]() {
+        lower = &here.get_pathfinding_cache_ref( -OVERMAP_DEPTH - 1 );
+    } );
+    CHECK_THAT( lower_error, Catch::Matchers::Contains(
+                    "Tried to get pathfinding cache for out of bounds z-level" ) );
+    CHECK( lower == upper );
+    CHECK( calendar::turn == turn );
 }
 
 TEST_CASE( "find_clear_path_with_adjacent_obstacles", "[map]" )
