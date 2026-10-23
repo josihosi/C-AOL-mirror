@@ -3,11 +3,13 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "active_time.h"
 #include "avatar.h"
 #include "calendar.h"
 #include "cata_path.h"
@@ -47,6 +49,103 @@
 #include "physical_navigation.h"
 #include "physical_light.h"
 #include "submap.h"
+
+TEST_CASE( "shared active arithmetic preserves separate source and operation clocks",
+           "[migo_tower][raid_sweep][active_movement_budget][serialization]" )
+{
+    raid_sweep::progress sweep;
+    sweep.begin( tripoint_abs_omt( 8, 2, 0 ), 1 );
+    raid_sweep::source_memory source;
+    migo_tower::site_state tower;
+    tower.site_id = "separate-clock";
+    tower.anchor = tripoint_abs_omt( 8, 2, 0 );
+    migo_tower::site_state frozen_home = tower;
+    const auto advance = [&]( const int world, const int active ) {
+        sweep.advance( world, active );
+        source.advance( world, active );
+        tower.advance( world, active );
+        frozen_home.advance( world, 0 );
+    };
+    advance( 100, 500 ); // Old/absent anchors adopt with no invented backlog.
+    CHECK( sweep.active_elapsed == 0 );
+    CHECK( source.active_elapsed == 0 );
+    CHECK( tower.active_elapsed == 0 );
+    advance( 105, 3 );
+    advance( 105, 500 ); // Same callback cannot mint another active interval.
+    advance( 104, 500 );
+    advance( 10000, 0 );
+    CHECK( sweep.active_elapsed == 3 );
+    CHECK( source.active_elapsed == 3 );
+    CHECK( tower.active_elapsed == 3 );
+    CHECK( frozen_home.active_elapsed == 0 );
+    advance( 10001, 500 ); // Credit is bounded by this actual one-turn interval.
+    advance( 10002, -5 );
+    CHECK( sweep.active_elapsed == 4 );
+    CHECK( source.active_elapsed == 4 );
+    CHECK( tower.active_elapsed == 4 );
+    const auto roundtrip = []( const auto & value ) {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            value.serialize( json );
+        }
+        auto restored = value;
+        restored.deserialize( json_loader::from_string( out.str() ) );
+        return restored;
+    };
+    auto loaded_sweep = roundtrip( sweep );
+    auto loaded_source = roundtrip( source );
+    auto loaded_tower = roundtrip( tower );
+    CHECK( sweep.last_world == 10002 );
+    CHECK( source.last_world == 10002 );
+    CHECK( tower.last_service_world == 10002 );
+    CHECK( sweep.active_elapsed == 4 ); // Serialization itself spends nothing.
+    for( int replay = 0; replay < 2; ++replay ) {
+        loaded_sweep.advance( 10003, 1 );
+        loaded_source.advance( 10003, 1 );
+        loaded_tower.advance( 10003, 1 );
+    }
+    CHECK( loaded_sweep.active_elapsed == 5 );
+    CHECK( loaded_source.active_elapsed == 5 );
+    CHECK( loaded_tower.active_elapsed == 5 );
+    CHECK( frozen_home.active_elapsed == 0 );
+    frozen_home.advance( 10003, 1 );
+    CHECK( frozen_home.active_elapsed == 1 );
+}
+
+TEST_CASE( "shared native movement funding retains species speed debt and adapter policy",
+           "[migo_tower][active_movement_budget]" )
+{
+    npc human;
+    human.normalize();
+    human.set_speed_base( 83 );
+    human.set_speed_bonus( 0 );
+    monster migo( mtype_id( "mon_mi_go" ) );
+    const int human_speed = human.get_speed();
+    const int migo_speed = migo.get_speed();
+    REQUIRE( human_speed > 0 );
+    REQUIRE( migo_speed > 0 );
+    REQUIRE( human_speed != migo_speed );
+    for( const int speed : { human_speed, migo_speed } ) {
+        const int debt = -150;
+        int each_turn = debt;
+        for( int tick = 0; tick < 60; ++tick ) {
+            each_turn = active_time::funded_moves( each_turn, speed, 1 );
+        }
+        CHECK( active_time::funded_moves( debt, speed, 60 ) == each_turn );
+        CHECK( each_turn == debt + 60 * speed );
+        CHECK( active_time::funded_moves( debt, speed, 0 ) == debt );
+        CHECK( active_time::funded_moves( debt, speed, -1 ) == debt - speed );
+        CHECK( active_time::funded_moves( 13, speed, 0 ) == 13 );
+        CHECK( active_time::funded_moves( std::numeric_limits<int>::max() - 1, speed, 1 ) ==
+               std::numeric_limits<int>::max() );
+        CHECK( active_time::funded_moves( std::numeric_limits<int>::min(), speed, 1 ) ==
+               std::numeric_limits<int>::min() + speed );
+    }
+    // These are still adapter inputs, not a new clock or speed normalization.
+    CHECK( active_time::funded_moves( 0, human_speed, 60 ) !=
+           active_time::funded_moves( 0, migo_speed, 60 ) );
+}
 
 TEST_CASE( "migo_signal_location_and_observer_persist_without_actor_knowledge",
            "[migo_tower][serialization]" )

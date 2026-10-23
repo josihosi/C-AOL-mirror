@@ -9,6 +9,7 @@
 #include <sstream>
 #include <tuple>
 
+#include "active_time.h"
 #include "json.h"
 
 namespace migo_tower
@@ -752,9 +753,7 @@ void site_state::advance( int world_turn, int active_turns )
     if( world_turn <= last_service_world ) {
         return;
     }
-    if( last_service_world >= 0 ) {
-        active_elapsed += std::min( std::max( 0, active_turns ), world_turn - last_service_world );
-    }
+    active_elapsed += active_time::clipped_turns( world_turn, last_service_world, active_turns );
     last_service_world = world_turn;
 }
 

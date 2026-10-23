@@ -5596,6 +5596,11 @@ void npc::set_attitude( npc_attitude new_attitude )
                    get_name(), npc_attitude_id( attitude ), npc_attitude_id( new_attitude ) );
     attitude_group new_group = get_attitude_group( new_attitude );
     attitude_group old_group = get_attitude_group( attitude );
+    if( new_group == attitude_group::fearful && old_group != attitude_group::fearful ) {
+        // An approach/job path is not an escape path. Preserve the order for
+        // later replanning, but let native flight choose its first safe step.
+        path.clear();
+    }
     if( new_group != old_group && !is_fake() && get_player_view().sees( here, *this ) ) {
         switch( new_group ) {
             case attitude_group::hostile:

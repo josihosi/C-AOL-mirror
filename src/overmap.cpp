@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "active_time.h"
 #include "auto_note.h"
 #include "bandit_live_world_probe.h"
 #include "avatar.h"
@@ -1773,7 +1774,7 @@ void overmap::move_hordes( bool migo_operations_only )
             // without accumulating a delayed movement budget.
             if( migo_step.next != physical_navigation::action::none &&
                 intent.last_energy_world != now ) {
-                acting->moves += body.get_speed();
+                acting->moves = active_time::funded_moves( acting->moves, body.get_speed(), 1 );
                 intent.last_energy_world = now;
             }
             if( acting->moves > 0 && migo_step.next == physical_navigation::action::open_door ) {

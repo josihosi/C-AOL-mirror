@@ -293,6 +293,9 @@ TEST_CASE( "committed local assault keeps an unseen tired raider on its search o
     g->reset_light_level();
     const tripoint_abs_ms before_fear = raider.pos_abs();
     get_avatar().setpos( here, here.get_bub( before_fear + point( 5, 0 ) ) );
+    // Sight alone can have zero directional danger. Exercise flight from a
+    // real acquired threat, rather than constrain a random safe escape step.
+    arm_shooter( get_avatar(), itype_id( "M24" ) );
     raider.goto_to_this_pos = before_fear + point( 3, 0 );
     raider.set_attitude( NPCATT_FLEE_TEMP );
     raider.add_effect( efftype_id( "npc_run_away" ), 2_turns );
@@ -303,6 +306,9 @@ TEST_CASE( "committed local assault keeps an unseen tired raider on its search o
     here.invalidate_visibility_cache();
     here.update_visibility_cache( get_avatar().posz() );
     REQUIRE( raider.sees( here, get_avatar() ) );
+    raider.regen_ai_cache();
+    REQUIRE( raider.current_target() == static_cast<Creature *>( &get_avatar() ) );
+    REQUIRE( raider.danger_assessment() > 0.0f );
     raider.set_moves( 100 );
     raider.move();
     CHECK( raider.pos_abs().x() <= before_fear.x() );

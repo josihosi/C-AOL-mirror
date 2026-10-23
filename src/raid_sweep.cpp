@@ -5,6 +5,7 @@
 #include <iterator>
 #include <utility>
 
+#include "active_time.h"
 #include "field_type.h"
 #include "json.h"
 #include "line.h"
@@ -111,9 +112,7 @@ void progress::advance( int world_turn, int active_turns )
     if( world_turn <= last_world ) {
         return;
     }
-    if( last_world >= 0 ) {
-        active_elapsed += std::min( std::max( 0, active_turns ), world_turn - last_world );
-    }
+    active_elapsed += active_time::clipped_turns( world_turn, last_world, active_turns );
     last_world = world_turn;
 }
 
@@ -343,9 +342,7 @@ void source_memory::advance( int world_turn, int active_turns )
     if( world_turn <= last_world ) {
         return;
     }
-    if( last_world >= 0 ) {
-        active_elapsed += std::min( std::max( 0, active_turns ), world_turn - last_world );
-    }
+    active_elapsed += active_time::clipped_turns( world_turn, last_world, active_turns );
     last_world = world_turn;
 }
 

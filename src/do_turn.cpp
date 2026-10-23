@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "active_time.h"
 #include "action.h"
 #include "activity_type.h"
 #include "avatar.h"
@@ -15926,11 +15927,8 @@ bool live_bandit_abstract_scout_member_can_travel( const npc &member )
 
 int live_bandit_scout_cadence_moves( const npc &member, const int elapsed_minutes )
 {
-    return static_cast<int>( std::clamp<int64_t>(
-                                 static_cast<int64_t>( member.get_moves() ) +
-                                 static_cast<int64_t>( member.get_speed() ) *
-                                 to_turns<int>( elapsed_minutes * 1_minutes ),
-                                 std::numeric_limits<int>::min(), std::numeric_limits<int>::max() ) );
+    return active_time::funded_moves( member.get_moves(), member.get_speed(),
+                                      to_turns<int>( elapsed_minutes * 1_minutes ) );
 }
 
 int live_bandit_scout_unbanked_moves( const int previous_moves, const int remaining_moves )

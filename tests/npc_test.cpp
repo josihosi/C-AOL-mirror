@@ -4133,6 +4133,89 @@ TEST_CASE( "visible_observer_burn_preserves_exact_covert_pair_neutrality_and_egr
     CHECK( unrelated.pos_abs() == visible_unrelated_position );
 }
 
+// The profile starts after the same authenticated handoff and physical
+// assembly as production. A local snapshot alone is not an actor save lease.
+static void acquire_profile_pair_at_current_poses( bandit_live_world::site_record &site,
+        const int current_minutes )
+{
+    using namespace bandit_live_world;
+    map &here = get_map();
+    std::map<character_id, tripoint_abs_ms> original_positions;
+    for( const auto id : site.active_outing.member_ids ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( actor );
+        REQUIRE_FALSE( actor->get_bandit_live_world_projection_lease().present );
+        original_positions.emplace( id, actor->pos_abs() );
+    }
+    // Exercise the precise save-owner refusal behind the old seven failures.
+    CHECK_FALSE( persist_live_bandit_local_progress_for_test( site, site ) );
+    for( const auto &[id, position] : original_positions ) {
+        CHECK( overmap_buffer.find_npc( id )->pos_abs() == position );
+        CHECK_FALSE( overmap_buffer.find_npc( id )->get_bandit_live_world_projection_lease().present );
+    }
+    auto &outing = site.active_outing;
+    outing.owner = simulation_owner::abstract;
+    outing.handoff_epoch = 0;
+    outing.local_handoff.clear();
+    for( auto &member : site.members ) {
+        member.state = member_state::outbound;
+    }
+    const auto cursor = current_external_simulation_cursor( site );
+    REQUIRE( cursor );
+    std::vector<local_handoff_member_read> reads;
+    for( const auto &[id, position] : original_positions ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        reads.push_back( { id, true, false, actor->hp_percentage(), position,
+                           position + point::west, position } );
+    }
+    const auto handoff = plan_local_pair_handoff( site, *cursor, current_minutes, reads );
+    for( const auto &note : handoff.notes ) {
+        INFO( note );
+    }
+    REQUIRE( handoff.valid );
+    const auto walk_to = [&]( const character_id id, const tripoint_abs_ms & destination ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        actor->set_moves( 100 );
+        actor->move_to( here.get_bub( destination ), true );
+        return actor->pos_abs() == destination && actor->get_moves() < 100;
+    };
+    REQUIRE( commit_local_pair_handoff( site, handoff, [&]( const auto & snapshot ) {
+        return walk_to( snapshot.npc_id, snapshot.entry_position );
+    }, [&]( const auto & snapshot ) {
+        walk_to( snapshot.npc_id, snapshot.prior_position );
+    } ) == local_handoff_commit_result::applied );
+    std::vector<local_cohesion_member_read> together;
+    for( const auto &[id, position] : original_positions ) {
+        REQUIRE( walk_to( id, position ) );
+        together.push_back( { id, true, false, position } );
+    }
+    const auto local_cursor = current_external_simulation_cursor( site );
+    REQUIRE( local_cursor );
+    const auto assembly = plan_local_pair_cohesion( site, *local_cursor, current_minutes, together );
+    REQUIRE( assembly.valid );
+    REQUIRE( assembly.snapshot.cohesion_assembled );
+    REQUIRE( commit_local_pair_cohesion( site, assembly, false, false ) );
+    REQUIRE( persist_live_bandit_local_projection_leases_for_test( site ) );
+    overmap_buffer.global_state.bandit_live_world.acknowledge_persisted_crossings();
+    CHECK( persist_live_bandit_local_progress_for_test( site, site ) );
+    CHECK( persist_live_bandit_local_progress_for_test( site, site ) );
+    for( const auto &[id, position] : original_positions ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        CHECK( actor->pos_abs() == position );
+        const auto claim = actor->get_bandit_live_world_projection_lease();
+        CHECK( claim.present );
+        CHECK( claim.site_id == site.site_id );
+        CHECK( claim.activity_id == outing.activity_id );
+        CHECK( claim.generation == outing.generation );
+        auto foreign = claim;
+        ++foreign.generation;
+        sync_bandit_live_world_projection_lease_copies( *actor, foreign );
+        CHECK_FALSE( persist_live_bandit_local_progress_for_test( site, site ) );
+        CHECK( actor->pos_abs() == position );
+        sync_bandit_live_world_projection_lease_copies( *actor, claim );
+    }
+}
+
 TEST_CASE( "loaded_covert_pair_movement_has_bounded_route_work",
            "[npc][bandit][loaded_covert_movement_profile]" )
 {
@@ -4189,6 +4272,10 @@ TEST_CASE( "loaded_covert_pair_movement_has_bounded_route_work",
     on_out_of_scope remove_target_camp( [target_omt]() {
         overmap_buffer.remove_camp( target_omt.xy() );
     } );
+
+    // Setup movement/ownership occurs before field injection and the measured
+    // turn. The original profile's phase, solves and motion assertions remain.
+    acquire_profile_pair_at_current_poses( site, current_minutes - 1 );
 
     if( scenario == 2 ) {
         here.add_field( scout.pos_bub( here ), fd_acid, 3 );
@@ -4306,6 +4393,73 @@ TEST_CASE( "loaded_covert_pair_movement_has_bounded_route_work",
         CHECK( scout.pos_abs() != scout_before_profile );
         CHECK( partner.pos_abs() != partner_before_profile );
     }
+}
+
+TEST_CASE( "native fear does not consume a prior approach path",
+           "[npc][behavior][combat][native_flee_route_owner]" )
+{
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_npcs();
+    clear_map_without_vision();
+    clear_avatar();
+    set_time_to_day();
+    map &here = get_map();
+    avatar &player = get_avatar();
+    player.setpos( here, tripoint_bub_ms( 60, 50, 0 ) );
+    arm_shooter( player, itype_M24 );
+    npc &actor = spawn_npc( { 50, 50 }, "test_talker" );
+    clear_character( actor, true );
+    actor.setpos( here, tripoint_bub_ms( 50, 50, 0 ) );
+    const character_id actor_id = actor.getID();
+    on_out_of_scope remove_actor( [actor_id]() {
+        g->remove_npc( actor_id );
+        overmap_buffer.remove_npc( actor_id );
+    } );
+    REQUIRE( player.pos_bub( here ) == tripoint_bub_ms( 60, 50, 0 ) );
+    REQUIRE( actor.pos_bub( here ) == tripoint_bub_ms( 50, 50, 0 ) );
+    actor.set_attitude( NPCATT_KILL );
+    actor.set_mission( NPC_MISSION_NULL );
+    actor.guard_pos.reset();
+    actor.clear_ai_guard_pos();
+    // This is an independently fleeing hostile, not a close-follow formation.
+    actor.rules.clear_flag( ally_rule::follow_close );
+    const tripoint_abs_ms ordered = actor.pos_abs() + point( 3, 0 );
+    actor.goto_to_this_pos = ordered;
+    REQUIRE( actor.update_path( here.get_bub( ordered ) ) );
+    REQUIRE_FALSE( actor.path.empty() );
+    REQUIRE( actor.path.front().x() > actor.pos_bub( here ).x() );
+    REQUIRE( actor.sees( here, player ) );
+    const auto before = actor.pos_abs();
+    const int hp = actor.get_hp();
+    actor.set_attitude( NPCATT_FLEE_TEMP );
+    actor.add_effect( effect_npc_run_away, 10_turns );
+    actor.regen_ai_cache();
+    REQUIRE( actor.current_target() == static_cast<Creature *>( &player ) );
+    REQUIRE( actor.danger_assessment() > 0.0f );
+    actor.set_moves( 100 );
+    actor.move();
+    // An open-field escape has no obstacle requiring approach to the enemy.
+    // Assert actual motion, rather than demanding a particular cache layout.
+    CHECK( actor.pos_abs() != before );
+    CHECK( actor.pos_abs().x() <= before.x() );
+    CHECK( actor.get_moves() < 100 );
+    CHECK( actor.get_hp() == hp );
+    CHECK( actor.goto_to_this_pos == ordered );
+
+    // Repeating an already active fear attitude must not reset a real newly
+    // selected retreat route or mint credit. The next native action follows it.
+    const auto retreat = actor.pos_abs() + point( -3, 0 );
+    REQUIRE( actor.update_path( here.get_bub( retreat ) ) );
+    const auto retained = actor.path;
+    const int moves = actor.get_moves();
+    actor.set_attitude( NPCATT_FLEE_TEMP );
+    CHECK( actor.path == retained );
+    CHECK( actor.get_moves() == moves );
+    const auto retreat_before = actor.pos_abs();
+    actor.set_moves( 100 );
+    actor.move();
+    CHECK( actor.pos_abs().x() < retreat_before.x() );
+    CHECK( actor.get_moves() < 100 );
 }
 
 TEST_CASE( "faction_hostile_tired_npc_fights_not_sleeps", "[npc][npc_ai][needs]" )
