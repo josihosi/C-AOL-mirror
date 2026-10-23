@@ -37,13 +37,16 @@ class navigation_view : public map
                     std::min( from.x(), to.x() ) - SEEX,
                     std::min( from.y(), to.y() ) - SEEY, from.z() ) );
             set_abs_sub( first );
+            // One preparation has no native actions or geometry/file writes.
+            // Destroy the archive reader here, before any route or movement.
+            mapbuffer::existing_submap_reader existing( MAPBUFFER );
             const int low = std::max( -OVERMAP_DEPTH, std::min( from.z(), to.z() ) - 1 );
             const int high = std::min( OVERMAP_HEIGHT, std::max( from.z(), to.z() ) + 1 );
             for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
                 for( int x = 0; x < getmapsize(); ++x ) {
                     for( int y = 0; y < getmapsize(); ++y ) {
                         const tripoint_abs_sm p( first.x() + x, first.y() + y, z );
-                        submap *sm = z >= low && z <= high ? MAPBUFFER.lookup_submap_existing( p ) : nullptr;
+                        submap *sm = z >= low && z <= high ? existing.lookup( p ) : nullptr;
                         if( sm && sm->vehicles.empty() && MAPBUFFER.vehicle_parts_at( p ).empty() ) {
                             available.insert( p );
                         } else {

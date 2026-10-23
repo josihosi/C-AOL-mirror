@@ -21,7 +21,24 @@ class vehicle;
  */
 class mapbuffer
 {
+        struct existing_read_context;
     public:
+        /** One synchronous, read-only geometry preparation. Reuse only the
+         * current successfully opened archive; no geometry/absence cache.
+         * Finish before world/dimension/file changes or native actions. */
+        class existing_submap_reader
+        {
+            public:
+                explicit existing_submap_reader( mapbuffer &source );
+                ~existing_submap_reader();
+                existing_submap_reader( const existing_submap_reader & ) = delete;
+                existing_submap_reader &operator=( const existing_submap_reader & ) = delete;
+                submap *lookup( const tripoint_abs_sm &p );
+            private:
+                mapbuffer &source;
+                std::unique_ptr<existing_read_context> context;
+        };
+
         mapbuffer();
         ~mapbuffer();
 
@@ -101,7 +118,9 @@ class mapbuffer
         // There's a very good reason this is private,
         // if not handled carefully, this can erase in-use submaps and crash the game.
         void remove_submap( const tripoint_abs_sm &addr );
-        submap *unserialize_submaps( const tripoint_abs_sm &p, bool generate_uniform = true );
+        submap *lookup_submap_existing( const tripoint_abs_sm &p, existing_read_context *context );
+        submap *unserialize_submaps( const tripoint_abs_sm &p, bool generate_uniform = true,
+                                    existing_read_context *context = nullptr );
         bool submap_file_exists( const tripoint_abs_sm &p );
         void deserialize( const JsonArray &ja, bool skip_existing = false );
         void save_quad(

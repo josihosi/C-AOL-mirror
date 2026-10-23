@@ -60,6 +60,25 @@ static cata_path find_dirname( const tripoint_abs_omt &om_addr )
     return PATH_INFO::current_dimension_save_path() / "maps" / segment;
 }
 
+// No borrowed submaps or failed results live here. At most one successful
+// archive/footer is held, only for the caller's synchronous preparation.
+struct mapbuffer::existing_read_context {
+    std::filesystem::path path;
+    std::optional<zzip> archive;
+};
+
+mapbuffer::existing_submap_reader::existing_submap_reader( mapbuffer &source ) :
+    source( source ), context( std::make_unique<existing_read_context>() )
+{
+}
+
+mapbuffer::existing_submap_reader::~existing_submap_reader() = default;
+
+submap *mapbuffer::existing_submap_reader::lookup( const tripoint_abs_sm &p )
+{
+    return source.lookup_submap_existing( p, context.get() );
+}
+
 mapbuffer MAPBUFFER;
 
 mapbuffer::mapbuffer() = default;
@@ -214,6 +233,12 @@ submap *mapbuffer::lookup_submap( const tripoint_abs_sm &p )
 
 submap *mapbuffer::lookup_submap_existing( const tripoint_abs_sm &p )
 {
+    return lookup_submap_existing( p, nullptr );
+}
+
+submap *mapbuffer::lookup_submap_existing( const tripoint_abs_sm &p,
+        existing_read_context *context )
+{
     raid_perf_scope lookup_scope( raid_perf_stage::nav_view_lookup, raid_perf_nav_build_active() );
     const auto iter = submaps.find( p );
     if( iter != submaps.end() ) {
@@ -224,7 +249,7 @@ submap *mapbuffer::lookup_submap_existing( const tripoint_abs_sm &p )
     raid_perf_note_nav( raid_perf_nav_event::buffer_miss );
     try {
         raid_perf_scope load_scope( raid_perf_stage::nav_view_miss_load, raid_perf_nav_lookup_active() );
-        return unserialize_submaps( p, false );
+        return unserialize_submaps( p, false, context );
     } catch( const std::exception &err ) {
         raid_perf_note_nav( raid_perf_nav_event::load_failures );
         debugmsg( "Failed to load existing submap %s: %s", p.to_string(), err.what() );
@@ -476,7 +501,8 @@ void mapbuffer::save_quad(
 
 // We're reading in way too many entities here to mess around with creating sub-objects and
 // seeking around in them, so we're using the json streaming API.
-submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool generate_uniform )
+submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool generate_uniform,
+                                      existing_read_context *context )
 {
     // Map the tripoint to the submap quad that stores it.
     const tripoint_abs_omt om_addr = project_to<coords::omt>( p );
@@ -490,17 +516,31 @@ submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool gen
         {
             cata_path zzip_name = dirname;
             zzip_name += zzip_suffix;
-            if( !file_exist( zzip_name ) ) {
-                raid_perf_note_nav( raid_perf_nav_event::missing_archive );
-                return false;
-            }
-
-            raid_perf_note_nav( raid_perf_nav_event::archive_load_calls );
-            std::optional<zzip> z = zzip::load( zzip_name.get_unrelative_path(),
-                                                ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
-            if( !z ) {
-                debugmsg( _fmt( "Failed to load submaps from {0}, could not open zzip.", zzip_name ) );
-                return false;
+            std::optional<zzip> opened;
+            zzip *z = nullptr;
+            const auto path = zzip_name.get_unrelative_path();
+            if( context && context->archive && context->path == path ) {
+                z = &*context->archive;
+            } else {
+                if( !file_exist( zzip_name ) ) {
+                    raid_perf_note_nav( raid_perf_nav_event::missing_archive );
+                    return false;
+                }
+                raid_perf_note_nav( raid_perf_nav_event::archive_load_calls );
+                opened = zzip::load( path,
+                                     ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+                if( !opened ) {
+                    debugmsg( _fmt( "Failed to load submaps from {0}, could not open zzip.", zzip_name ) );
+                    return false;
+                }
+                if( context ) {
+                    context->archive.reset();
+                    context->path = path;
+                    context->archive = std::move( opened );
+                    z = &*context->archive;
+                } else {
+                    z = &*opened;
+                }
             }
             if( !z->has_file( file_name_path ) ) {
                 raid_perf_note_nav( raid_perf_nav_event::missing_quad );

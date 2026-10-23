@@ -5478,6 +5478,14 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             CHECK( lookups == counts.get_int( "resident_hit" ) + counts.get_int( "resident_null" ) +
                    counts.get_int( "buffer_miss" ) );
             CHECK( calls.get_int( index( "nav_view_miss_load" ) ) == counts.get_int( "buffer_miss" ) );
+            if( ( branch == "remote" || branch == "remote_unknown" ) &&
+                counts.get_int( "buffer_miss" ) > 0 ) {
+                // Distinct requested submaps in this real bounded view share
+                // a serialized segment archive. Preparation may reuse that
+                // handle, never infer known geometry from an absent quad.
+                CHECK( counts.get_int( "archive_open_attempts" ) > 0 );
+                CHECK( counts.get_int( "archive_open_attempts" ) < counts.get_int( "buffer_miss" ) );
+            }
             CHECK( setups == counts.get_int( "level_fresh" ) + counts.get_int( "level_reused" ) );
             CHECK( times.get_float( index( "nav_view_lookup" ) ) >=
                    times.get_float( index( "nav_view_miss_load" ) ) );
@@ -5515,7 +5523,7 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
     CHECK( level_calls == ( mode != "off" && branch == "remote" ? 5 : 0 ) );
 }
 
-std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test();
+std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test( bool reuse_archive );
 TEST_CASE( "NAV lookup rows classify real serialized loader branches and restore attribution",
            "[semantic_surface][raid_performance_nav_lookup]" )
 {
@@ -5523,8 +5531,10 @@ TEST_CASE( "NAV lookup rows classify real serialized loader branches and restore
                                    std::make_pair( std::string( "normal" ), false ),
                                    std::make_pair( std::string( "quiet_signal" ), true ),
                                    std::make_pair( std::string( "off" ), true ),
-                                   std::make_pair( std::string( "unbound" ), true ) );
-    const auto &mode = scenario.first;
+                                   std::make_pair( std::string( "unbound" ), true ),
+                                   std::make_pair( std::string( "reader" ), true ) );
+    const bool reuse_archive = scenario.first == "reader";
+    const std::string mode = reuse_archive ? "normal" : scenario.first;
     CAPTURE( mode, scenario.second );
     override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", mode == "unbound" ? "normal" : mode );
     override_option autosave( "AUTOSAVE", "false" );
@@ -5558,7 +5568,7 @@ TEST_CASE( "NAV lookup rows classify real serialized loader branches and restore
     const auto saved_turn = calendar::turn;
     on_out_of_scope restore_turn( [&]() { set_time( saved_turn ); } );
     set_time( calendar::start_of_cataclysm + 1000_minutes + 7_seconds );
-    const std::string run = "nav-lookup-" + mode + ( scenario.second ? "-compressed" : "-plain" );
+    const std::string run = "nav-lookup-" + scenario.first + ( scenario.second ? "-compressed" : "-plain" );
     const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".jsonl" );
     std::filesystem::remove( trace );
     const std::map<std::string, std::optional<std::string>> settings = {
@@ -5615,7 +5625,7 @@ TEST_CASE( "NAV lookup rows classify real serialized loader branches and restore
         const auto position = u.pos_abs();
         const auto moves = u.get_moves();
         const auto bytes = std::filesystem::exists( trace ) ? std::filesystem::file_size( trace ) : 0;
-        expected_counts = exercise_nav_lookup_diagnostics_for_test();
+        expected_counts = exercise_nav_lookup_diagnostics_for_test( reuse_archive );
         CHECK( calendar::turn == time );
         CHECK( u.pos_abs() == position );
         CHECK( u.get_moves() == moves );

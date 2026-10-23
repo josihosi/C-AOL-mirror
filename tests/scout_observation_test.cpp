@@ -978,8 +978,8 @@ TEST_CASE( "existing-only submap retrieval never fills omitted serialized geomet
 // Called under the real turn-row lifetime by the semantic output control.
 // The explicit build/lookup contexts below test attribution and error unwind;
 // they do not claim a native NAV journey or a performance measurement.
-std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test();
-std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test()
+std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test( bool reuse_archive );
+std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test( bool reuse_archive )
 {
     const tripoint_abs_sm stored( 100, 100, 0 );
     const auto omt = project_to<coords::omt>( stored );
@@ -1030,31 +1030,38 @@ std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test()
     REQUIRE( outside.lookup_submap_existing( stored ) );
     CHECK_FALSE( raid_perf_nav_lookup_active() );
     mapbuffer existing;
+    std::optional<mapbuffer::existing_submap_reader> reader;
+    if( reuse_archive ) {
+        reader.emplace( existing );
+    }
+    const auto lookup = [&]( const tripoint_abs_sm &p ) {
+        return reader ? reader->lookup( p ) : existing.lookup_submap_existing( p );
+    };
     {
         raid_perf_scope build( raid_perf_stage::physical_navigation_view_build );
         const bool active = raid_perf_nav_build_active();
         {
             raid_perf_scope nested( raid_perf_stage::physical_navigation_view_build );
             CHECK( raid_perf_nav_build_active() == active );
-            REQUIRE( existing.lookup_submap_existing( stored ) );
+            REQUIRE( lookup( stored ) );
         }
         CHECK( raid_perf_nav_build_active() == active );
         CHECK_FALSE( raid_perf_nav_lookup_active() );
         const auto *original = existing.lookup_submap_cached( stored );
-        CHECK( existing.lookup_submap_existing( stored ) == original );
+        CHECK( lookup( stored ) == original );
         CHECK( original->get_ter( point_sm_ms( 0, 0 ) ) == ter_str_id( "t_wall" ).id() );
         const auto omitted = stored + point( 1, 0 );
-        CHECK_FALSE( existing.lookup_submap_existing( omitted ) );
-        CHECK_FALSE( existing.lookup_submap_existing( omitted ) );
+        CHECK_FALSE( lookup( omitted ) );
+        CHECK_FALSE( lookup( omitted ) );
         CHECK_FALSE( existing.lookup_submap_cached( omitted ) );
-        CHECK_FALSE( existing.lookup_submap_existing( stored + point( 2, 0 ) ) );
-        CHECK_FALSE( existing.lookup_submap_existing( stored + point( 64, 0 ) ) );
+        CHECK_FALSE( lookup( stored + point( 2, 0 ) ) );
+        CHECK_FALSE( lookup( stored + point( 64, 0 ) ) );
         std::string warning;
         {
             restore_on_out_of_scope restore_mode( test_mode );
             test_mode = true; // capture the deliberate loader error without a native modal
             warning = capture_debugmsg_during( [&]() {
-                CHECK_FALSE( existing.lookup_submap_existing( corrupt ) );
+                CHECK_FALSE( lookup( corrupt ) );
             } );
         }
         CHECK_FALSE( warning.empty() );
@@ -1083,8 +1090,8 @@ std::map<std::string, int> exercise_nav_lookup_diagnostics_for_test()
     CHECK( contents() == before_file );
     return {
         { "resident_hit", 1 }, { "resident_null", 0 }, { "buffer_miss", 6 },
-        { "archive_load_calls", compressed ? 5 : 0 },
-        { "archive_open_attempts", compressed ? 8 : 3 }, { "archive_open_failures", 3 },
+        { "archive_load_calls", compressed ? ( reuse_archive ? 1 : 5 ) : 0 },
+        { "archive_open_attempts", compressed ? ( reuse_archive ? 4 : 8 ) : 3 }, { "archive_open_failures", 3 },
         { "missing_archive", compressed ? 1 : 0 }, { "missing_quad", compressed ? 1 : 0 },
         { "omitted_submap", 2 }, { "loaded_submap", 1 }, { "load_failures", 3 },
         { "plain_read_calls", compressed ? 0 : 6 },
@@ -1529,4 +1536,143 @@ TEST_CASE( "active structural scouts separate coarse hostile optics from real da
         CHECK_FALSE( live_bandit_member_route_to_for_test( observer, returning, toward ).empty() );
         CHECK( partner.faction_alarm_requires_response() );
     }
+}
+
+TEST_CASE( "existing-only archive reuse ends with one geometry preparation",
+           "[existing_geometry][navigation_preparation_lifetime]" )
+{
+    const bool compressed = GENERATE( false, true );
+    CAPTURE( compressed );
+    REQUIRE( world_generator->active_world );
+    WORLD &world = *world_generator->active_world;
+    const bool previous_compression = world.has_compression_enabled();
+    REQUIRE( world.set_compression_enabled( compressed ) );
+    on_out_of_scope restore_compression( [&] {
+        CHECK( world.set_compression_enabled( previous_compression ) );
+    } );
+    const tripoint_abs_sm stored( 140, 140, 0 );
+    const auto omitted = stored + point( 1, 0 );
+    const auto absent_quad = stored + point( 2, 0 );
+    const auto corrupt = stored + point( 4, 0 );
+    const auto other_level = stored + tripoint_rel_sm( 0, 0, 1 );
+    const auto directory_for = [&]( const tripoint_abs_sm & p ) {
+        const auto seg = project_to<coords::seg>( project_to<coords::omt>( p ) );
+        return PATH_INFO::current_dimension_save_path() / "maps" /
+               string_format( "%d.%d.%d", seg.x(), seg.y(), seg.z() );
+    };
+    const auto name_for = [&]( const tripoint_abs_sm & p ) {
+        const auto omt = project_to<coords::omt>( p );
+        return string_format( "%d.%d.%d.map", omt.x(), omt.y(), omt.z() );
+    };
+    const auto directory = directory_for( stored );
+    const auto upper_directory = directory_for( other_level );
+    for( const auto &dir : {
+             directory, upper_directory
+         } ) {
+        REQUIRE_FALSE( std::filesystem::exists( dir.get_unrelative_path() ) );
+        REQUIRE_FALSE( std::filesystem::exists( ( dir + ".zzip" ).get_unrelative_path() ) );
+        std::filesystem::create_directories( dir.get_unrelative_path() );
+    }
+    on_out_of_scope remove_fixture( [&] {
+        for( const auto &dir : {directory, upper_directory} ) {
+            std::filesystem::remove_all( dir.get_unrelative_path() );
+            std::filesystem::remove( ( dir + ".zzip" ).get_unrelative_path() );
+        }
+    } );
+    const auto bytes_for = [&]( const std::vector<tripoint_abs_sm> &positions ) {
+        std::ostringstream bytes;
+        JsonOut writer( bytes );
+        writer.start_array();
+        for( const auto &p : positions ) {
+            submap sample;
+            sample.set_all_ter( ter_str_id( "t_floor" ) );
+            writer.start_object();
+            writer.member( "version", savegame_version );
+            writer.member( "coordinates", p.raw() );
+            sample.store( writer );
+            writer.end_object();
+        }
+        writer.end_array();
+        return bytes.str();
+    };
+    const auto dictionary = ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path();
+    const auto write_quad = [&]( const tripoint_abs_sm & p, const std::string & bytes ) {
+        const auto dir = directory_for( p );
+        if( compressed ) {
+            auto archive = zzip::load( ( dir + ".zzip" ).get_unrelative_path(), dictionary );
+            REQUIRE( archive );
+            REQUIRE( archive->add_file( name_for( p ), bytes ) );
+        } else {
+            std::ofstream out( ( dir / name_for( p ) ).get_unrelative_path() );
+            out << bytes;
+            REQUIRE( out.good() );
+        }
+    };
+    write_quad( stored, bytes_for( {stored} ) );
+    write_quad( corrupt, "invalid-json" );
+    write_quad( other_level, bytes_for( {other_level} ) );
+    const auto archive_bytes = [&]( const cata_path & dir ) {
+        const auto file = compressed ? dir + ".zzip" : dir / name_for( stored );
+        std::ifstream input( file.get_unrelative_path(), std::ios::binary );
+        return std::string( std::istreambuf_iterator<char>( input ), {} );
+    };
+    const auto before_bytes = archive_bytes( directory );
+    const auto global_count = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto before_turn = calendar::turn;
+    mapbuffer reference;
+    mapbuffer actual;
+    {
+        mapbuffer::existing_submap_reader reader( actual );
+        // Distinct submaps and quads share an archive. Interleave another z
+        // archive then revisit, exercising replacement of the single handle.
+        for( const auto &p : {
+                 stored, absent_quad, omitted, omitted, other_level,
+                 absent_quad, stored
+             } ) {
+            const submap *expected = reference.lookup_submap_existing( p );
+            const submap *result = reader.lookup( p );
+            CHECK( static_cast<bool>( result ) == static_cast<bool>( expected ) );
+            if( result ) {
+                CHECK( result->get_ter( point_sm_ms( 0, 0 ) ) ==
+                       expected->get_ter( point_sm_ms( 0, 0 ) ) );
+            }
+        }
+        CHECK( reader.lookup( stored ) == actual.lookup_submap_cached( stored ) );
+        CHECK_FALSE( actual.lookup_submap_cached( omitted ) );
+        CHECK_FALSE( actual.lookup_submap_cached( absent_quad ) );
+        for( int repeat = 0; repeat < 2; ++repeat ) {
+            const std::string warning = capture_debugmsg_during( [&] {
+                CHECK_FALSE( reader.lookup( corrupt ) );
+            } );
+            CHECK_FALSE( warning.empty() ); // errors are retried/reported, not cached away
+        }
+    }
+    CHECK( archive_bytes( directory ) == before_bytes );
+    CHECK( std::distance( actual.begin(), actual.end() ) == 2 );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == global_count );
+    CHECK( calendar::turn == before_turn );
+    // Only after the preparation closes may authoritative state change.
+    submap *resident = actual.lookup_submap_cached( stored );
+    REQUIRE( resident );
+    resident->set_ter( point_sm_ms( 0, 0 ), ter_str_id( "t_wall" ).id() );
+    write_quad( stored, bytes_for( {stored, omitted} ) );
+    write_quad( absent_quad, bytes_for( {absent_quad} ) );
+    {
+        mapbuffer::existing_submap_reader fresh( actual );
+        REQUIRE( fresh.lookup( omitted ) );
+        REQUIRE( fresh.lookup( absent_quad ) );
+        CHECK( fresh.lookup( stored ) == resident );
+        CHECK( resident->get_ter( point_sm_ms( 0, 0 ) ) == ter_str_id( "t_wall" ).id() );
+        CHECK( fresh.lookup( omitted )->get_ter( point_sm_ms( 0, 0 ) ) == ter_str_id( "t_floor" ).id() );
+    }
+    // Clearing/reloading is a new preparation, with no retained map pointers.
+    actual.clear();
+    {
+        mapbuffer::existing_submap_reader reloaded( actual );
+        REQUIRE( reloaded.lookup( stored ) );
+        CHECK( reloaded.lookup( stored )->get_ter( point_sm_ms( 0, 0 ) ) == ter_str_id( "t_floor" ).id() );
+        REQUIRE( reloaded.lookup( omitted ) );
+    }
+    CHECK( calendar::turn == before_turn );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == global_count );
 }
