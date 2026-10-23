@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import argparse
-from runner import openvino_output_settings, ollama_final_text, strip_think_tags
+from runner import (
+    openvino_output_settings, ollama_final_text, ollama_generate_request, strip_think_tags,
+)
 import json
 import os
 import re
 import shutil
-import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -126,20 +127,8 @@ def load_pipeline(model_dir: str, device: str, max_prompt_len: int):
 
 def ollama_generate(ollama_url: str, model: str, prompt: str,
                     temperature: float) -> Dict[str, Any]:
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": float(temperature),
-            "num_predict": -1,  # Ollama generate-until-stop; no application output cap.
-        },
-    }
-    url = ollama_url.rstrip("/") + "/api/generate"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    # Keep the summarizer's existing model-default thinking policy explicit.
+    return ollama_generate_request(ollama_url, model, prompt, temperature, think=None)
 
 
 def extract_traits_from_condition(cond: Dict[str, Any], out: List[str]) -> None:

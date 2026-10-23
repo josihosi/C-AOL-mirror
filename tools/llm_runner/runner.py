@@ -500,23 +500,30 @@ def run_openvino_self_test(args: argparse.Namespace, log_fp: Optional[TextIO]) -
         return 1
 
 
-def ollama_generate(ollama_url: str, model: str, prompt: str, temperature: float) -> Dict[str, Any]:
+def ollama_generate_request(ollama_url: str, model: str, prompt: str, temperature: float,
+                            *, think: Optional[bool]) -> Dict[str, Any]:
+    """Send one generation request; None preserves omission of the think field."""
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        # NPC requests need a final action line, not a reasoning-token budget.
-        "think": False,
-        "options": {
-            "temperature": float(temperature),
-            "num_predict": -1,  # Ollama's supported generate-until-stop setting.
-        },
+    }
+    if think is not None:
+        payload["think"] = think
+    payload["options"] = {
+        "temperature": float(temperature),
+        "num_predict": -1,  # Ollama's supported generate-until-stop setting.
     }
     url = ollama_url.rstrip("/") + "/api/generate"
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def ollama_generate(ollama_url: str, model: str, prompt: str, temperature: float) -> Dict[str, Any]:
+    # NPC requests need a final action line, not a reasoning-token budget.
+    return ollama_generate_request(ollama_url, model, prompt, temperature, think=False)
 
 
 def ollama_unload(ollama_url: str, model: str, log_fp: Optional[TextIO]) -> None:

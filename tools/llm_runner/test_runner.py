@@ -223,6 +223,120 @@ class RunnerFinalResponseTest(unittest.TestCase):
             "think": False, "options": {"temperature": 0.6, "num_predict": -1},
         })
 
+    def test_ollama_adapters_preserve_wire_policy_and_response_lifetime(self):
+        import background_summarizer as summary
+        for adapter, policy in ((runner.ollama_generate, {"think": False}),
+                                (summary.ollama_generate, {})):
+            with self.subTest(adapter=adapter.__module__):
+                raw = {"response": "Prêt.|idle", "thinking": "not final"}
+                response = io.BytesIO(json.dumps(raw, ensure_ascii=False).encode("utf-8"))
+                with patch.object(runner.urllib.request, "urlopen", return_value=response) as send:
+                    self.assertEqual(adapter("http://fixture///", "installed-model", "café 界🙂", .6), raw)
+                request = send.call_args.args[0]
+                expected = {"model": "installed-model", "prompt": "café 界🙂", "stream": False,
+                            **policy, "options": {"temperature": .6, "num_predict": -1}}
+                self.assertEqual(request.data, json.dumps(expected).encode("utf-8"))
+                self.assertEqual(request.full_url, "http://fixture/api/generate")
+                self.assertEqual(request.get_method(), "POST")
+                self.assertEqual(request.get_header("Content-type"), "application/json")
+                self.assertEqual(send.call_args.kwargs, {"timeout": 600})
+                self.assertTrue(response.closed)
+                if adapter is summary.ollama_generate:
+                    self.assertNotIn("think", json.loads(request.data))
+
+    def test_ollama_adapters_propagate_transport_errors_without_retry(self):
+        import background_summarizer as summary
+        errors = [runner.urllib.error.HTTPError("http://fixture", 503, "fixture failure", {}, None),
+                  runner.urllib.error.URLError("fixture unavailable"), TimeoutError("fixture timeout")]
+        for adapter in (runner.ollama_generate, summary.ollama_generate):
+            for error in errors:
+                with self.subTest(adapter=adapter.__module__, error=type(error).__name__), \
+                     patch.object(runner.urllib.request, "urlopen", side_effect=error) as send:
+                    with self.assertRaises(type(error)) as caught:
+                        adapter("http://fixture", "unchanged", "unchanged", .6)
+                    self.assertIs(caught.exception, error)
+                    send.assert_called_once()
+
+    def test_ollama_adapters_close_invalid_responses_and_keep_strict_decoding(self):
+        import background_summarizer as summary
+        for adapter in (runner.ollama_generate, summary.ollama_generate):
+            for body, error_type in ((b'\xff', UnicodeDecodeError), (b'{broken', json.JSONDecodeError)):
+                response = io.BytesIO(body)
+                with self.subTest(adapter=adapter.__module__, body=body), \
+                     patch.object(runner.urllib.request, "urlopen", return_value=response) as send:
+                    with self.assertRaises(error_type):
+                        adapter("http://fixture", "unchanged", "unchanged", .6)
+                    self.assertTrue(response.closed)
+                    send.assert_called_once()
+
+    def test_ollama_stdio_actual_transport_recovers_after_error_and_empty_final(self):
+        args = argparse.Namespace(ollama_model="installed-model", ollama_url="http://fixture")
+        requests = [{"request_id": name, "prompt": "unchanged"} for name in ("error", "empty", "after")]
+        output, log = io.StringIO(), io.StringIO()
+        replies = [runner.urllib.error.URLError("fixture unavailable"),
+                   io.BytesIO(json.dumps({"response": "", "thinking": "PRIVATE_REASONING"}).encode()),
+                   io.BytesIO(json.dumps({"response": "Ready.|idle"}).encode())]
+        with patch.object(runner.urllib.request, "urlopen", side_effect=replies) as send, \
+             patch.object(sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))), \
+             patch.object(sys, "stdout", output):
+            self.assertEqual(runner.run_ollama_mode(args, log), 0)
+        rows = list(map(json.loads, output.getvalue().splitlines()))
+        self.assertEqual([r["request_id"] for r in rows], ["error", "empty", "after"])
+        self.assertEqual([r["ok"] for r in rows], [False, False, True])
+        self.assertIn("fixture unavailable", rows[0]["error"])
+        self.assertIn("no acceptable final text", rows[1]["error"])
+        self.assertEqual(rows[1]["text"], "")
+        self.assertEqual(rows[2]["text"], "Ready.|idle")
+        self.assertNotIn("PRIVATE_REASONING", output.getvalue() + log.getvalue())
+        self.assertEqual(send.call_count, 3)
+        self.assertTrue(all(json.loads(call.args[0].data)["think"] is False
+                            for call in send.call_args_list))
+
+    def test_summary_actual_transport_keeps_invalid_text_retry_and_prompt_stages(self):
+        import background_summarizer as summary
+        args = argparse.Namespace(retry_invalid=1, debug_io=False, debug_invalid=False,
+                                  temperature=.4, ollama_url="http://fixture", ollama_model="summary-model")
+        final = "brave, loyal, resourceful, calm, clever | We should keep moving."
+        replies = [io.BytesIO(json.dumps({"response": text}).encode())
+                   for text in ("", "<think>unfinished", final)]
+        with patch.object(runner.urllib.request, "urlopen", side_effect=replies) as send, \
+             patch.object(summary, "build_prompt_from_text", side_effect=["default", "strict"]) as prompt:
+            result = summary.generate_summary_text("unchanged", "fixture", args, "ollama", None)
+        self.assertEqual(result, ("brave, loyal, resourceful, calm, clever", "We should keep moving."))
+        self.assertEqual(prompt.call_args_list, [unittest.mock.call("unchanged", strict=False),
+                                               unittest.mock.call("unchanged", strict=True)])
+        payloads = [json.loads(call.args[0].data) for call in send.call_args_list]
+        self.assertEqual([p["prompt"] for p in payloads], ["default", "default", "strict"])
+        self.assertTrue(all("think" not in p for p in payloads))
+
+    def test_summary_does_not_retry_transport_failure_as_invalid_text(self):
+        import background_summarizer as summary
+        args = argparse.Namespace(retry_invalid=3, debug_io=False, debug_invalid=False,
+                                  temperature=.4, ollama_url="http://fixture", ollama_model="summary-model")
+        error = TimeoutError("fixture timeout")
+        with patch.object(runner.urllib.request, "urlopen", side_effect=error) as send, \
+             patch.object(summary, "build_prompt_from_text", return_value="unchanged") as prompt:
+            with self.assertRaises(TimeoutError) as caught:
+                summary.generate_summary_text("unchanged", "fixture", args, "ollama", None)
+        self.assertIs(caught.exception, error)
+        send.assert_called_once()
+        prompt.assert_called_once_with("unchanged", strict=False)
+
+    def test_ollama_unload_keeps_distinct_payload_timeout_and_failure_policy(self):
+        log = io.StringIO()
+        response = io.BytesIO(b'closed\xff')
+        with patch.object(runner.urllib.request, "urlopen", return_value=response) as send:
+            runner.ollama_unload("http://fixture/", "installed-model", log)
+        self.assertEqual(json.loads(send.call_args.args[0].data),
+                         {"model": "installed-model", "keep_alive": 0, "stream": False})
+        self.assertEqual(send.call_args.kwargs, {"timeout": 30})
+        self.assertIn("closed\ufffd", log.getvalue())
+        self.assertTrue(response.closed)
+        with patch.object(runner.urllib.request, "urlopen", side_effect=TimeoutError("fixture timeout")) as send:
+            runner.ollama_unload("http://fixture", "installed-model", log)
+        self.assertIn("ollama unload exception: fixture timeout", log.getvalue())
+        send.assert_called_once()
+
     def run_response(self, raw):
         args = argparse.Namespace(ollama_model="installed-model", ollama_url="http://127.0.0.1:11434")
         request = {"request_id": "native-request", "prompt": "game snapshot", "max_tokens": 256}
@@ -391,7 +505,7 @@ class RunnerFinalResponseTest(unittest.TestCase):
                     args.ollama_url, args.ollama_model = "http://fixture", "unchanged-model"
                     with patch.dict(sys.modules, {"openvino_genai": sdk}), \
                          patch.object(summary, "build_prompt_from_text", return_value="unchanged prompt"), \
-                         patch.object(summary.urllib.request, "urlopen", side_effect=send), \
+                         patch.object(runner.urllib.request, "urlopen", side_effect=send), \
                          patch.object(sys, "stdout", output):
                         result = summary.generate_summary_text("unchanged", "fixture", args, backend, pipe)
                     self.assertEqual(bool(result[0]), expected)
@@ -403,6 +517,7 @@ class RunnerFinalResponseTest(unittest.TestCase):
                     else:
                         self.assertTrue(captured)
                         self.assertTrue(all(body["options"]["num_predict"] == -1 for body in captured))
+                        self.assertTrue(all("think" not in body for body in captured))
 
     def test_wrapper_commands_and_payloads_ignore_retired_output_caps(self):
         import npc_harness as harness
