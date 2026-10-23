@@ -265,13 +265,6 @@ static void openclaw_harness_write_turn_trace( const char *event, const char *st
 // Task-local diagnostic only: identical timing in both logging variants.  The
 // rows stay in memory while native waiting advances, and are published after
 // the interval, at an excluded input boundary.  Nothing here changes scheduling.
-enum class raid_perf_stage : std::size_t {
-    operations, horde_movement, population, fields, items, map_cache,
-    signal_total, signal_discovery, signal_hordes, creatures, overmap_npcs,
-    pre_input_world, post_input_action,
-    npc_site_bootstrap, npc_signal_copy, npc_channel_audit, human_activation,
-    watch_preflight, watch_optical_read, watch_record_view, count
-};
 static constexpr std::size_t raid_perf_stage_count =
     static_cast<std::size_t>( raid_perf_stage::count );
 struct raid_perf_row {
@@ -284,6 +277,7 @@ struct raid_perf_row {
     double save_seconds = 0;
     debug_sink_statistics sink;
     std::array<double, raid_perf_stage_count> stages{};
+    std::array<std::size_t, raid_perf_stage_count> stage_calls{};
     std::size_t discovered_sources = 0;
     std::size_t horde_packets = 0;
     std::size_t horde_diagnostic_records = 0;
@@ -309,25 +303,21 @@ static std::size_t raid_perf_wait_generation()
            activity.input_generation() : 0;
 }
 
-class raid_perf_scope
+raid_perf_scope::raid_perf_scope( raid_perf_stage target ) : row( raid_perf_current ), stage( target )
 {
-    public:
-        explicit raid_perf_scope( raid_perf_stage stage ) : row( raid_perf_current ), stage( stage ) {
-            if( row ) {
-                started = std::chrono::steady_clock::now();
-            }
-        }
-        ~raid_perf_scope() {
-            if( row ) {
-                row->stages[static_cast<std::size_t>( stage )] +=
-                    std::chrono::duration<double>( std::chrono::steady_clock::now() - started ).count();
-            }
-        }
-    private:
-        raid_perf_row *row;
-        raid_perf_stage stage;
-        std::chrono::steady_clock::time_point started;
-};
+    if( row ) {
+        ++row->stage_calls[static_cast<std::size_t>( stage )];
+        started = std::chrono::steady_clock::now();
+    }
+}
+
+raid_perf_scope::~raid_perf_scope()
+{
+    if( row ) {
+        row->stages[static_cast<std::size_t>( stage )] +=
+            std::chrono::duration<double>( std::chrono::steady_clock::now() - started ).count();
+    }
+}
 
 static void raid_perf_flush_after_wait()
 {
@@ -341,7 +331,7 @@ static void raid_perf_flush_after_wait()
     js.member( "mode", raid_perf_mode );
     js.member( "run_id", std::string( std::getenv( "OPENCLAW_HARNESS_RUN_ID" ) ) );
     js.member( "stage_scope",
-               "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; watch_preflight includes disjoint watch_optical_read and watch_record_view children; do not add nested stages" );
+               "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; watch_preflight includes disjoint watch_optical_read and watch_record_view children; Mi-go service navigation children split local/abstract physical owners; migo_local_plan and migo_local_move cover full native monster plan/move calls with an existing Mi-go intent, including pre-hook targeting; they are disjoint local creature children containing authenticated migo_local_prepare_navigation; migo_abstract_prepare_navigation measures the abstract transport prepare_step route child; do not add nested stages" );
     js.member( "watch_scope",
                "Actual preflight/read/record_view calls; eligible record_view calls are not confirmed writes; cached views sum each preflight's retained geometry/lighting views, including failed lighting, not per-read allocations or unique world cells" );
     js.member( "debug_sink_scope",
@@ -353,7 +343,10 @@ static void raid_perf_flush_after_wait()
         "signal_total", "signal_discovery", "signal_hordes", "creatures", "overmap_npcs",
         "pre_input_world", "post_input_action",
         "npc_site_bootstrap", "npc_signal_copy", "npc_channel_audit", "human_activation",
-        "watch_preflight", "watch_optical_read", "watch_record_view"
+        "watch_preflight", "watch_optical_read", "watch_record_view",
+        "migo_service_local_navigation", "migo_service_abstract_navigation",
+        "migo_local_plan", "migo_local_move",
+        "migo_local_prepare_navigation", "migo_abstract_prepare_navigation"
     } );
     js.member( "rows" );
     js.start_array();
@@ -371,6 +364,7 @@ static void raid_perf_flush_after_wait()
         js.member( "debug_log_replacements", row.sink.replacements );
         js.member( "debug_log_replacement_seconds", row.sink.replacement_nanoseconds / 1e9 );
         js.member( "stages_seconds", row.stages );
+        js.member( "stage_calls", row.stage_calls );
         js.member( "discovered_sources", row.discovered_sources );
         js.member( "horde_packets", row.horde_packets );
         js.member( "horde_diagnostic_records", row.horde_diagnostic_records );

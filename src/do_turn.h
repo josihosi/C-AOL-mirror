@@ -7,6 +7,7 @@
 #include "live_light.h"
 
 #include <cstddef>
+#include <chrono>
 #include <map>
 #include <optional>
 #include <string>
@@ -19,6 +20,34 @@ class map;
 class monster;
 class npc;
 class openclaw_harness_turn_trace;
+
+// Existing bounded diagnostic row, shared only to measure actual native owners.
+// WALL scopes/call counts are inert without an active run-bound diagnostic row.
+// Scopes are synchronous children of that row; they must not outlive its turn.
+enum class raid_perf_stage : std::size_t {
+    operations, horde_movement, population, fields, items, map_cache,
+    signal_total, signal_discovery, signal_hordes, creatures, overmap_npcs,
+    pre_input_world, post_input_action,
+    npc_site_bootstrap, npc_signal_copy, npc_channel_audit, human_activation,
+    watch_preflight, watch_optical_read, watch_record_view,
+    migo_service_local_navigation, migo_service_abstract_navigation,
+    migo_local_plan, migo_local_move,
+    migo_local_prepare_navigation, migo_abstract_prepare_navigation, count
+};
+struct raid_perf_row;
+class raid_perf_scope
+{
+    public:
+        explicit raid_perf_scope( raid_perf_stage stage );
+        ~raid_perf_scope();
+        raid_perf_scope( const raid_perf_scope & ) = delete;
+        raid_perf_scope &operator=( const raid_perf_scope & ) = delete;
+
+    private:
+        raid_perf_row *row;
+        raid_perf_stage stage;
+        std::chrono::steady_clock::time_point started;
+};
 
 // Exclude only a native input acquisition outside handle_action's existing
 // input phase. Nested acquisitions leave their parent's phase untouched.

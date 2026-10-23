@@ -35,6 +35,11 @@
 #include <iostream>
 #include "npc.h"
 #include "monster.h"
+#include "horde_entity.h"
+#include "migo_population_native.h"
+#include "migo_tower_ai.h"
+#include "migo_tower_native.h"
+#include "mtype.h"
 #include "options_helpers.h"
 #include "overmap.h"
 #include "overmap_ui.h"
@@ -5051,6 +5056,300 @@ TEST_CASE( "watch diagnostics separate actual optical and recording owners witho
     CHECK( u.pos_abs() == position );
     CHECK( site_bytes() == before_site );
 }
+
+TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners without extra work",
+           "[semantic_surface][raid_performance_migo_split]" )
+{
+    const std::string mode = GENERATE( "normal", "quiet_signal", "off" );
+    const std::string branch = GENERATE( "local", "abstract", "unowned" );
+    CAPTURE( mode, branch );
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    on_out_of_scope restore_world( [&]() {
+        clear_creatures();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+    } );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", mode );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const auto world = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    avatar &u = get_avatar();
+    u.setpos( get_map(), tripoint_bub_ms( 60, 60, 0 ), false );
+    clear_creatures();
+    overmap_buffer.global_state.migo_populations = {};
+    overmap_buffer.global_state.migo_towers = {};
+    overmap_buffer.global_state.bandit_live_world = {};
+    u.set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    const auto position = u.pos_abs();
+    const auto saved_turn = calendar::turn;
+    on_out_of_scope restore_turn( [&]() { set_time( saved_turn ); } );
+    // Exercise the actual owners under the real current-row/output lifetime.
+    // Explicit leases and calls below are component setup, not a native journey
+    // or a performance measurement of the live Windows scheduler.
+    set_time( calendar::start_of_cataclysm + 1000_minutes + 7_seconds );
+
+    const std::string run = "migo-split-" + mode + "-" + branch;
+    const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".jsonl" );
+    std::filesystem::remove( trace );
+    const std::map<std::string, std::optional<std::string>> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", std::nullopt },
+        { "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", std::nullopt }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &setting : settings ) {
+        const char *old_value = std::getenv( setting.first.c_str() );
+        previous[setting.first] = old_value ? std::optional<std::string>( old_value ) : std::nullopt;
+        assign_test_environment( setting.first, setting.second );
+    }
+    on_out_of_scope restore_environment( [&]() {
+        for( const auto &setting : previous ) {
+            assign_test_environment( setting.first, setting.second );
+        }
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    // Saved reentry's first turn does not advance and has no diagnostic row.
+    // Arm the branch hook only after that ordinary first Pause has completed.
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    u.set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+    auto &manager = openclaw_harness_semantic_surface_manager();
+
+    bool called = false;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &surface ) {
+        if( surface.kind != "world" || called ) {
+            return;
+        }
+        called = true;
+        map &here = get_map();
+        const tripoint_bub_ms start( 64, 64, 0 );
+        const auto home = here.get_abs( start );
+        const auto goal = here.get_abs( start + point::east * 4 );
+        const auto anchor = project_to<coords::omt>( home );
+        for( int dx = 0; dx <= 4; ++dx ) {
+            here.ter_set( start + point( dx, 0 ), ter_str_id( "t_floor" ) );
+        }
+        here.invalidate_map_cache( 0 );
+        const std::string id = "diagnostic-real-owner";
+        migo_population::member_record member;
+        member.token = {id, "member", 1, anchor};
+        member.type = mtype_id( "mon_mi_go" );
+        member.home = home;
+        member.owner = branch == "abstract" ? migo_population::representation::abstract :
+                       migo_population::representation::local;
+        member.assignment = migo_population::duty::dispatched;
+        member.hp = member.type->hp;
+        migo_population::site_record population;
+        population.id = id;
+        population.anchor = anchor;
+        REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+        overmap_buffer.global_state.migo_populations.sites.push_back( population );
+        migo_tower::site_state site;
+        site.site_id = id;
+        site.anchor = anchor;
+        migo_tower::operation_record operation;
+        operation.generation = 1;
+        operation.source.source_omt = anchor;
+        operation.members = {{member.token.member_id, false, false, home}};
+        operation.sweep.source = anchor;
+        operation.sweep.generation = 1;
+        operation.sweep.candidates = {{goal}};
+        operation.overdue_after_active = 100000;
+        operation.advance( to_turn<int>( calendar::turn ) - 1, 0 );
+        site.operation = operation;
+        overmap_buffer.global_state.migo_towers.sites.push_back( site );
+        monster original( member.type );
+        original.population_identity() = member.token;
+        original.set_pos_abs_only( home );
+        original.set_moves( 100 );
+        migo_tower::member_intent intent;
+        intent.generation = 1;
+        intent.home = home;
+        original.set_migo_intent( intent );
+        overmap *retained_owner = nullptr;
+        monster *body = nullptr;
+        if( branch == "abstract" ) {
+            retained_owner = &overmap_buffer.get( project_to<coords::om>( home ).xy() );
+            auto *entity = retained_owner->retain_monster_payload( home, original );
+            REQUIRE( entity );
+            body = entity->monster_data.get();
+        } else {
+            body = g->place_critter_at( member.type, start );
+            REQUIRE( body );
+            body->population_identity() = member.token;
+            body->set_migo_intent( intent );
+            body->set_moves( 100 );
+            if( branch == "unowned" ) {
+                ++body->population_identity().epoch;
+            }
+        }
+        on_out_of_scope clear_fixture( [&]() {
+            if( retained_owner ) {
+                CHECK( retained_owner->release_monster_payload( home, member.token.member_id ) );
+            }
+            clear_creatures();
+            overmap_buffer.global_state.migo_populations = {};
+            overmap_buffer.global_state.migo_towers = {};
+        } );
+        REQUIRE( body );
+        const auto time_before = calendar::turn;
+        const auto avatar_moves = u.get_moves();
+        const auto trace_bytes = std::filesystem::file_size( trace );
+        const auto hp = body->get_hp();
+        {
+            // Same parent as the production do_turn service call; no synthetic
+            // child scope or duplicate route is installed by this control.
+            raid_perf_scope parent( raid_perf_stage::operations );
+            migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        }
+        CHECK( body->pos_abs() == home );
+        CHECK( body->get_moves() == 100 );
+        const auto globals = [&]() {
+            std::ostringstream out;
+            JsonOut json( out );
+            json.start_array();
+            overmap_buffer.global_state.migo_populations.serialize( json );
+            overmap_buffer.global_state.migo_towers.serialize( json );
+            json.end_array();
+            return out.str();
+        };
+        const auto after_service = globals();
+        if( branch == "abstract" ) {
+            // Real retained payload and authenticated abstract prepare owner;
+            // this control does not claim an abstract scheduler movement tick.
+            raid_perf_scope parent( raid_perf_stage::horde_movement );
+            const auto read = migo_tower::prepare_step( *body, member.owner );
+            CHECK( read.next == physical_navigation::action::walk );
+            CHECK( read.position == home + point::east );
+            CHECK( body->pos_abs() == home );
+            CHECK( body->get_moves() == 100 );
+        } else {
+            raid_perf_scope parent( raid_perf_stage::creatures );
+            if( branch == "local" ) {
+                body->plan();
+            } else {
+                CHECK_FALSE( migo_tower::plan_local( *body, false, nullptr ) );
+            }
+            CHECK( body->pos_abs() == home );
+            CHECK( body->get_moves() == 100 );
+            if( branch == "local" ) {
+                body->move();
+            } else {
+                CHECK_FALSE( migo_tower::move_local( *body ) );
+            }
+            CHECK( body->pos_abs() == ( branch == "local" ? home + point::east : home ) );
+            CHECK( body->get_moves() == ( branch == "local" ? 0 : 100 ) );
+        }
+        CHECK( globals() == after_service );
+        CHECK( body->get_hp() == hp );
+        CHECK( body->population_identity().site_id == id );
+        CHECK( body->population_identity().member_id == member.token.member_id );
+        CHECK( body->population_identity().epoch == ( branch == "unowned" ? 2 : 1 ) );
+        CHECK( calendar::turn == time_before );
+        CHECK( u.get_moves() == avatar_moves );
+        CHECK( u.pos_abs() == position );
+        CHECK( std::filesystem::file_size( trace ) == trace_bytes );
+    } );
+    on_out_of_scope clear_observer( [&]() { manager.set_descriptor_observer( {} ); } );
+    for( int i = 0; i < 3; ++i ) {
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        REQUIRE_FALSE( g->do_turn() );
+    }
+    REQUIRE( called );
+    {
+        override_option off( "RAID_PERFORMANCE_DIAGNOSTIC", "off" );
+        REQUIRE( ungetch( pause->front() ) != -1 );
+        u.set_moves( 100 );
+        REQUIRE_FALSE( g->do_turn() );
+    }
+    const std::vector<std::string> stages = {
+        "migo_service_local_navigation", "migo_service_abstract_navigation", "migo_local_plan",
+        "migo_local_move", "migo_local_prepare_navigation", "migo_abstract_prepare_navigation"
+    };
+    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 2, 0 } :
+                                      branch == "abstract" ? std::vector<int>{ 0, 1, 0, 0, 0, 1 } :
+                                      std::vector<int>{ 0, 0, 0, 0, 0, 0 };
+    std::vector<int> totals( stages.size(), 0 );
+    int intervals = 0;
+    std::ifstream input( trace );
+    for( std::string line; std::getline( input, line ); ) {
+        if( line.find( "raid_performance_interval" ) == std::string::npos ) {
+            continue;
+        }
+        ++intervals;
+        const auto object = json_loader::from_string( line.substr( line.find( '{' ) ) ).get_object();
+        object.allow_omitted_members();
+        CHECK( object.get_string( "mode" ) == mode );
+        const auto names = object.get_string_array( "stage_names" );
+        const auto index = [&]( const std::string &name ) {
+            REQUIRE( std::count( names.begin(), names.end(), name ) == 1 );
+            return std::distance( names.begin(), std::find( names.begin(), names.end(), name ) );
+        };
+        for( const auto value : object.get_array( "rows" ) ) {
+            const auto row = value.get_object();
+            row.allow_omitted_members();
+            const auto times = row.get_array( "stages_seconds" );
+            const auto calls = row.get_array( "stage_calls" );
+            REQUIRE( times.size() == names.size() );
+            REQUIRE( calls.size() == names.size() );
+            for( std::size_t i = 0; i < stages.size(); ++i ) {
+                const auto slot = index( stages[i] );
+                totals[i] += calls.get_int( slot );
+                CHECK( ( times.get_float( slot ) > 0 ) == ( calls.get_int( slot ) > 0 ) );
+            }
+            CHECK( times.get_float( index( "migo_operations" ) ) >=
+                   times.get_float( index( "migo_service_local_navigation" ) ) +
+                   times.get_float( index( "migo_service_abstract_navigation" ) ) );
+            CHECK( times.get_float( index( "creatures" ) ) >=
+                   times.get_float( index( "migo_local_plan" ) ) +
+                   times.get_float( index( "migo_local_move" ) ) );
+            CHECK( times.get_float( index( "migo_local_plan" ) ) +
+                   times.get_float( index( "migo_local_move" ) ) >=
+                   times.get_float( index( "migo_local_prepare_navigation" ) ) );
+            CHECK( times.get_float( index( "horde_movement" ) ) >=
+                   times.get_float( index( "migo_abstract_prepare_navigation" ) ) );
+        }
+    }
+    // The supported off transition discards the still-open final row.
+    CHECK( ( intervals > 0 ) == ( mode != "off" ) );
+    CHECK( totals == ( mode == "off" ? std::vector<int>( stages.size(), 0 ) : expected ) );
+}
+
 #endif
 
 #if !defined(TILES)

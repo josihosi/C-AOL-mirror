@@ -1,6 +1,7 @@
 // Monster movement code; essentially, the AI
 #include "monster.h" // IWYU pragma: associated
 #include "migo_tower_native.h"
+#include "do_turn.h"
 
 #include <algorithm>
 #include <chrono>
@@ -2379,6 +2380,12 @@ static bool apply_targeted_live_plan_adapter( monster &mon, map &here, Creature 
 
 void monster::plan()
 {
+    // Include native targeting/action work before the species hook. The
+    // authenticated prepare_step route remains its separately timed child.
+    std::optional<raid_perf_scope> diagnostic;
+    if( migo_intent() ) {
+        diagnostic.emplace( raid_perf_stage::migo_local_plan );
+    }
     monster_plan mon_plan( *this );
 
     map &here = get_map();
@@ -2858,6 +2865,12 @@ bool monster::die_if_drowning( const tripoint_bub_ms &at_pos, const int chance )
 // 4) Sound-based tracking
 void monster::move()
 {
+    // Include native targeting/action work before the species hook. The
+    // authenticated prepare_step route remains its separately timed child.
+    std::optional<raid_perf_scope> diagnostic;
+    if( migo_intent() ) {
+        diagnostic.emplace( raid_perf_stage::migo_local_move );
+    }
     map &here = get_map();
 
     add_msg_debug( debugmode::DF_MONMOVE, "Monster %s starting monmove::move, remaining moves %d",

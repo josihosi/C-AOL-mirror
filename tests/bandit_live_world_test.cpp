@@ -9481,6 +9481,203 @@ TEST_CASE( "bandit_live_world_transition_stream_reconciles_external_tail",
     }
 }
 
+// Explicit opt-in producer diagnostic, not a native scheduler benchmark or a
+// latency assertion. Each comparison writes the same complete rows. Keeping an
+// output handle or deferring flush here does not authorize that lifetime in game.
+TEST_CASE( "transition writer separates full producer from equivalent output costs",
+           "[.transition_writer_cost][transition_writer_cost][nogame]" )
+{
+    namespace probe = bandit_live_world_probe;
+    const char *directory = std::getenv( "CAOL_TRANSITION_WRITER_COST_DIRECTORY" );
+    const auto path = ( directory ? std::filesystem::u8path( directory ) :
+                       std::filesystem::temp_directory_path() ) / "caol-transition-writer-cost.jsonl";
+    REQUIRE( std::filesystem::is_directory( path.parent_path() ) );
+    // Refuse existing inputs; this control owns only its new component files.
+    REQUIRE_FALSE( std::filesystem::exists( path ) );
+    const auto output_path = path.string() + ".output";
+    REQUIRE_FALSE( std::filesystem::exists( output_path ) );
+    const char *old_path = std::getenv( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH" );
+    const char *old_run = std::getenv( "OPENCLAW_HARNESS_RUN_ID" );
+    const std::optional<std::string> saved_path = old_path ?
+            std::optional<std::string>( old_path ) : std::nullopt;
+    const std::optional<std::string> saved_run = old_run ?
+            std::optional<std::string>( old_run ) : std::nullopt;
+    const auto environment = []( const char *key, const std::optional<std::string> &value ) {
+        if( value ) {
+            set_test_env( key, value->c_str(), 1 );
+        } else {
+            unset_test_env( key );
+        }
+    };
+    on_out_of_scope cleanup( [&]() {
+        environment( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", saved_path );
+        environment( "OPENCLAW_HARNESS_RUN_ID", saved_run );
+        std::error_code error;
+        std::filesystem::remove( path, error );
+        std::filesystem::remove( output_path, error );
+    } );
+    environment( "OPENCLAW_HARNESS_TRANSITION_EVENT_PATH", path.string() );
+    environment( "OPENCLAW_HARNESS_RUN_ID", "writer-cost-run" );
+    const auto clear = []( const std::filesystem::path &target ) {
+        std::ofstream output( target, std::ios::binary | std::ios::trunc );
+        REQUIRE( output.good() );
+    };
+    const auto contents = []( const std::filesystem::path &target ) {
+        // Normalize native text-mode CRLF on Windows, as the existing writer does.
+        std::ifstream input( target );
+        return std::string( std::istreambuf_iterator<char>( input ), {} );
+    };
+    std::vector<probe::transition_event> events;
+    for( int index = 0; index < 64; ++index ) {
+        probe::transition_event event;
+        event.game_minutes = 7800;
+        event.domain = "bandit_live_world";
+        event.transition = "watch_geometry_read";
+        event.outcome = "diagnostic";
+        event.site_id = index < 32 ? "overmap_special:bandit_camp@69,111,0" :
+                        "overmap_special:cannibal_camp@72,111,0";
+        event.operation_id = event.site_id + "#watch-control";
+        event.target_lead_id = "source-control";
+        event.target_lead_revision = 1;
+        event.generation = 1;
+        event.reason = "role=target_corner candidate=(70,110,0) origin=(1692,2652,0) "
+                       "target=(1704,2664,0) known=0 visible=0 reason=lighting_geometry_unavailable";
+        event.actor_ids = index < 32 ? std::vector<std::int64_t>{ 101, 102 } :
+                          std::vector<std::int64_t>{ 103, 104 };
+        events.push_back( std::move( event ) );
+    }
+    // Exact fixture encoder is checked byte-for-byte against the real producer
+    // before using it to compare JsonOut on file and memory streams. This only
+    // covers this watch payload, not every optional transition payload.
+    const auto encode = [&]( std::ostream &out, const int index ) {
+        const auto &event = events[index];
+        JsonOut json( out );
+        json.start_object();
+        json.member( "schema_version", 1 );
+        json.member( "sequence", index + 1 );
+        json.member( "run_id", "writer-cost-run" );
+        json.member( "game_minutes", event.game_minutes );
+        json.member( "domain", event.domain );
+        json.member( "transition", event.transition );
+        json.member( "outcome", event.outcome );
+        json.member( "site_id", event.site_id );
+        json.member( "operation_id", event.operation_id );
+        json.member( "target_lead_id", event.target_lead_id );
+        json.member( "target_lead_revision", event.target_lead_revision );
+        json.member( "generation", event.generation );
+        json.member( "reason", event.reason );
+        json.member( "actor_ids", event.actor_ids );
+        json.end_object();
+        out.put( '\n' );
+    };
+    std::vector<std::string> rows;
+    std::string expected;
+    for( int index = 0; index < 64; ++index ) {
+        std::ostringstream out;
+        encode( out, index );
+        rows.push_back( out.str() );
+        expected += rows.back();
+    }
+    std::map<std::string, std::vector<double>> seconds;
+    const auto measure = [&]( const std::string &label, const auto &work ) {
+        const auto start = std::chrono::steady_clock::now();
+        work();
+        seconds[label].push_back( std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - start ).count() );
+    };
+    for( int repeat = 0; repeat < 5; ++repeat ) {
+        clear( path );
+        REQUIRE( probe::transition_events_enabled() );
+        probe::session counters( probe::collection_mode::timings );
+        measure( "actual_producer_64", [&]() {
+            for( const auto &event : events ) {
+                // Includes the production record_view eligibility check.
+                REQUIRE( probe::transition_events_enabled() );
+                probe::record_live_transition_event( event );
+            }
+        } );
+        REQUIRE( probe::transition_events_enabled() );
+        CHECK( contents( path ) == expected );
+        CHECK( counters.result().counters[static_cast<std::size_t>(
+                    probe::counter::transition_stream_records_validated )] == 64 );
+        measure( "unchanged_stream_checks_128", [&]() {
+            for( int check = 0; check < 128; ++check ) {
+                REQUIRE( probe::transition_events_enabled() );
+            }
+        } );
+        CHECK( counters.result().counters[static_cast<std::size_t>(
+                    probe::counter::transition_stream_records_validated )] == 64 );
+        clear( path );
+        REQUIRE( probe::transition_events_enabled() );
+        measure( "preformatted_append_and_tail_validation_64", [&]() {
+            for( const auto &row : rows ) {
+                {
+                    std::ofstream out( path, std::ios::app );
+                    out.write( row.data(), row.size() );
+                    out.flush();
+                    REQUIRE( out.good() );
+                }
+                REQUIRE( probe::transition_events_enabled() );
+            }
+        } );
+        CHECK( contents( path ) == expected );
+        for( const std::string mode : { "direct_json_open_flush_64", "memory_json_open_flush_64",
+                                       "preformatted_open_flush_64", "preformatted_one_open_flush_each_64",
+                                       "preformatted_one_open_one_flush_64" } ) {
+            clear( output_path );
+            measure( mode, [&]() {
+                if( mode == "preformatted_one_open_flush_each_64" ||
+                    mode == "preformatted_one_open_one_flush_64" ) {
+                    std::ofstream out( output_path, std::ios::app );
+                    for( const auto &row : rows ) {
+                        out.write( row.data(), row.size() );
+                        if( mode == "preformatted_one_open_flush_each_64" ) {
+                            out.flush();
+                        }
+                    }
+                    out.flush();
+                    REQUIRE( out.good() );
+                } else {
+                    for( int index = 0; index < 64; ++index ) {
+                        std::ofstream out( output_path, std::ios::app );
+                        if( mode == "direct_json_open_flush_64" ) {
+                            encode( out, index );
+                        } else if( mode == "memory_json_open_flush_64" ) {
+                            std::ostringstream memory;
+                            encode( memory, index );
+                            const std::string row = memory.str();
+                            out.write( row.data(), row.size() );
+                        } else {
+                            out.write( rows[index].data(), rows[index].size() );
+                        }
+                        out.flush();
+                        REQUIRE( out.good() );
+                    }
+                }
+            } );
+            CHECK( contents( output_path ) == expected );
+        }
+        measure( "memory_json_only_64", [&]() {
+            std::ostringstream out;
+            for( int index = 0; index < 64; ++index ) {
+                encode( out, index );
+            }
+            REQUIRE( out.str() == expected );
+        } );
+    }
+    std::ostringstream report;
+    JsonOut json( report );
+    json.start_object();
+    json.member( "kind", "transition_writer_cost_control" );
+    json.member( "location_role", directory ? "explicit_isolated_component_directory" :
+                 "system_temporary_directory" );
+    json.member( "rows_per_interval", 64 );
+    json.member( "logical_bytes_per_interval", expected.size() );
+    json.member( "wall_seconds", seconds );
+    json.end_object();
+    std::cout << "TRANSITION_WRITER_COST " << report.str() << '\n';
+}
+
 TEST_CASE( "bandit_live_world_transition_receipts_bind_owner_and_pair_facts",
            "[bandit][live_world][transition_event][local_handoff]" )
 {

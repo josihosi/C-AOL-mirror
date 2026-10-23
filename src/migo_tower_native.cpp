@@ -8,6 +8,7 @@
 #include <tuple>
 
 #include "calendar.h"
+#include "do_turn.h"
 #include "avatar.h"
 #include "field_type.h"
 #include "creature_tracker.h"
@@ -53,6 +54,15 @@ physical_navigation::step_read read_owned_step( const monster &body,
         const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
         return resident && !resident->is_active();
     } );
+}
+
+physical_navigation::step_read read_service_step( const monster &body,
+        const tripoint_abs_ms &goal, migo_population::representation owner )
+{
+    raid_perf_scope scope( owner == migo_population::representation::local ?
+                           raid_perf_stage::migo_service_local_navigation :
+                           raid_perf_stage::migo_service_abstract_navigation );
+    return read_owned_step( body, goal, owner );
 }
 
 bool approach_available( const monster &body, const physical_navigation::step_read &step )
@@ -712,7 +722,12 @@ physical_navigation::step_read prepare_step( monster &body, migo_population::rep
             intent.phase = member_phase::searching;
         }
     }
-    result = read_owned_step( body, *goal, owner );
+    {
+        raid_perf_scope scope( owner == migo_population::representation::local ?
+                               raid_perf_stage::migo_local_prepare_navigation :
+                               raid_perf_stage::migo_abstract_prepare_navigation );
+        result = read_owned_step( body, *goal, owner );
+    }
     intent.waypoint = result.next == physical_navigation::action::none ?
                       body.pos_abs() : result.position;
     return result;
@@ -892,7 +907,7 @@ void service_operations( int now_turn, int active_elapsed )
                         rl_dist( candidate.position, body.pos_abs() ) > local_bound ) {
                         continue;
                     }
-                    const auto reopened = read_owned_step( body, candidate.position, owner );
+                    const auto reopened = read_service_step( body, candidate.position, owner );
                     if( reopened.known && reopened.next != physical_navigation::action::none &&
                         approach_available( body, reopened ) ) {
                         operation.sweep.reconsider( candidate.position, 0, token.member_id );
@@ -900,7 +915,7 @@ void service_operations( int now_turn, int active_elapsed )
                     }
                 }
                 if( const auto pending = operation.sweep.pending() ) {
-                    const auto approach = read_owned_step( body, *pending, owner );
+                    const auto approach = read_service_step( body, *pending, owner );
                     if( operation.sweep.pending() == candidate_at_start ) {
                         const bool available = approach_available( body, approach );
                         if( available ) {
