@@ -32,7 +32,8 @@ enum class raid_perf_stage : std::size_t {
     watch_preflight, watch_optical_read, watch_record_view,
     migo_service_local_navigation, migo_service_abstract_navigation,
     migo_local_plan, migo_local_move,
-    migo_local_prepare_navigation, migo_abstract_prepare_navigation, count
+    migo_local_prepare_navigation, migo_abstract_prepare_navigation,
+    physical_navigation_read, physical_navigation_view_build, physical_navigation_native_route, count
 };
 struct raid_perf_row;
 class raid_perf_scope

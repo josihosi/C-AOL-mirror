@@ -28,6 +28,7 @@
 #include "player_activity.h"
 #include "map.h"
 #include "map_helpers_tests.h"
+#include "mapbuffer.h"
 #include "map_helpers.h"
 #include "do_turn.h"
 #include "messages.h"
@@ -60,6 +61,7 @@
 #include "debug_console.h"
 #include "game.h"
 #include "field_type.h"
+#include "field.h"
 #include "imgui/imgui.h"
 #include "inventory_ui.h"
 #include "input_popup.h"
@@ -68,9 +70,11 @@
 #include "item.h"
 #include "popup.h"
 #include "player_helpers.h"
+#include "physical_navigation.h"
 #include "semantic_surface.h"
 #include "sounds.h"
 #include "raid_decision_trace.h"
+#include "raid_sweep.h"
 #include "ranged.h"
 #include "string_input_popup.h"
 #include "type_id.h"
@@ -5058,10 +5062,10 @@ TEST_CASE( "watch diagnostics separate actual optical and recording owners witho
 }
 
 TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners without extra work",
-           "[semantic_surface][raid_performance_migo_split]" )
+           "[semantic_surface][raid_performance_migo_split][raid_performance_navigation_inner]" )
 {
     const std::string mode = GENERATE( "normal", "quiet_signal", "off" );
-    const std::string branch = GENERATE( "local", "abstract", "unowned" );
+    const std::string branch = GENERATE( "local", "abstract", "unowned", "remote", "remote_unknown" );
     CAPTURE( mode, branch );
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
@@ -5157,19 +5161,60 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         called = true;
         map &here = get_map();
         const tripoint_bub_ms start( 64, 64, 0 );
-        const auto home = here.get_abs( start );
-        const auto goal = here.get_abs( start + point::east * 4 );
-        const auto anchor = project_to<coords::omt>( home );
-        for( int dx = 0; dx <= 4; ++dx ) {
-            here.ter_set( start + point( dx, 0 ), ter_str_id( "t_floor" ) );
+        const bool remote = branch == "remote" || branch == "remote_unknown";
+        const bool abstract = branch == "abstract" || remote;
+        const auto anchor = project_to<coords::omt>( here.get_abs( start ) ) +
+                            ( remote ? point( 12, branch == "remote_unknown" ? 12 : 0 ) : point::zero );
+        const auto home = remote ? project_to<coords::ms>( anchor ) + point( 12, 12 ) :
+                          here.get_abs( start );
+        const auto goal = home + point::east * 4;
+        const auto old_terrain = overmap_buffer.ter_existing( anchor );
+        const tripoint_abs_omt upper_anchor( anchor.xy(), 1 );
+        const auto old_upper_terrain = overmap_buffer.ter_existing( upper_anchor );
+        std::optional<tinymap> remote_terrain;
+        std::optional<tinymap> upper_terrain;
+        if( remote ) {
+            REQUIRE_FALSE( here.inbounds( home ) );
+            REQUIRE_FALSE( here.inbounds( goal ) );
+            if( branch == "remote_unknown" ) {
+                REQUIRE_FALSE( MAPBUFFER.lookup_submap_existing( project_to<coords::sm>( home ) ) );
+            } else {
+                overmap_buffer.ter_set( anchor, oter_str_id( "field" ) );
+                remote_terrain.emplace();
+                remote_terrain->load( anchor, false );
+                overmap_buffer.ter_set( upper_anchor, oter_str_id( "field" ) );
+                upper_terrain.emplace();
+                upper_terrain->load( upper_anchor, false );
+                for( int z = 0; z <= 1; ++z ) {
+                    tinymap &terrain = z == 0 ? *remote_terrain : *upper_terrain;
+                    for( const auto &tile : terrain.points_in_rectangle( tripoint_omt_ms( 0, 0, z ),
+                            tripoint_omt_ms( 23, 23, z ) ) ) {
+                        terrain.ter_set( tile, ter_str_id( "t_floor" ) );
+                        terrain.furn_set( tile, furn_str_id::NULL_ID() );
+                    }
+                }
+            }
+        } else {
+            for( int dx = 0; dx <= 4; ++dx ) {
+                here.ter_set( start + point( dx, 0 ), ter_str_id( "t_floor" ) );
+            }
+            here.invalidate_map_cache( 0 );
         }
-        here.invalidate_map_cache( 0 );
+        on_out_of_scope restore_geometry( [&]() {
+            if( remote ) {
+                overmap_buffer.ter_set( anchor, old_terrain );
+                if( upper_terrain ) {
+                    overmap_buffer.ter_set( upper_anchor, old_upper_terrain );
+                }
+                MAPBUFFER.clear_outside_reality_bubble();
+            }
+        } );
         const std::string id = "diagnostic-real-owner";
         migo_population::member_record member;
         member.token = {id, "member", 1, anchor};
         member.type = mtype_id( "mon_mi_go" );
         member.home = home;
-        member.owner = branch == "abstract" ? migo_population::representation::abstract :
+        member.owner = abstract ? migo_population::representation::abstract :
                        migo_population::representation::local;
         member.assignment = migo_population::duty::dispatched;
         member.hp = member.type->hp;
@@ -5202,7 +5247,7 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         original.set_migo_intent( intent );
         overmap *retained_owner = nullptr;
         monster *body = nullptr;
-        if( branch == "abstract" ) {
+        if( abstract ) {
             retained_owner = &overmap_buffer.get( project_to<coords::om>( home ).xy() );
             auto *entity = retained_owner->retain_monster_payload( home, original );
             REQUIRE( entity );
@@ -5230,6 +5275,14 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
         const auto avatar_moves = u.get_moves();
         const auto trace_bytes = std::filesystem::file_size( trace );
         const auto hp = body->get_hp();
+        const auto buffered_cells = [&]() {
+            std::vector<tripoint_abs_sm> cells;
+            for( const auto &entry : MAPBUFFER ) {
+                cells.push_back( entry.first );
+            }
+            return cells;
+        };
+        const auto cells_before = buffered_cells();
         {
             // Same parent as the production do_turn service call; no synthetic
             // child scope or duplicate route is installed by this control.
@@ -5248,13 +5301,20 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             return out.str();
         };
         const auto after_service = globals();
-        if( branch == "abstract" ) {
+        if( abstract ) {
             // Real retained payload and authenticated abstract prepare owner;
             // this control does not claim an abstract scheduler movement tick.
             raid_perf_scope parent( raid_perf_stage::horde_movement );
             const auto read = migo_tower::prepare_step( *body, member.owner );
-            CHECK( read.next == physical_navigation::action::walk );
-            CHECK( read.position == home + point::east );
+            if( branch == "remote_unknown" ) {
+                CHECK( read.next == physical_navigation::action::none );
+                CHECK_FALSE( read.known );
+                CHECK( read.reason == "origin_geometry_unknown" );
+                CHECK( read.position == home );
+            } else {
+                CHECK( read.next == physical_navigation::action::walk );
+                CHECK( read.position == home + point::east );
+            }
             CHECK( body->pos_abs() == home );
             CHECK( body->get_moves() == 100 );
         } else {
@@ -5274,6 +5334,83 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
             CHECK( body->pos_abs() == ( branch == "local" ? home + point::east : home ) );
             CHECK( body->get_moves() == ( branch == "local" ? 0 : 100 ) );
         }
+        if( remote ) {
+            // Identical reads exercise the real remote wrapper, without
+            // execution or a diagnostic-only cached route.
+            std::ostringstream before_body;
+            { JsonOut json( before_body ); body->serialize( json ); }
+            const auto first = physical_navigation::read_step( *body, goal );
+            const auto repeated = physical_navigation::read_step( *body, goal );
+            CHECK( repeated.next == first.next );
+            CHECK( repeated.position == first.position );
+            CHECK( repeated.move_cost == first.move_cost );
+            CHECK( repeated.reason == first.reason );
+            CHECK( repeated.known == first.known );
+            CHECK( repeated.hazard_revision == first.hazard_revision );
+            if( remote_terrain ) {
+                // Occupancy refuses the destination without movement. The
+                // existing refusal-only geometry route remains diagnostic.
+                const auto occupied = physical_navigation::read_step( *body, goal,
+                [&]( const tripoint_abs_ms &p ) { return p == goal; } );
+                CHECK( occupied.next == physical_navigation::action::none );
+                CHECK( occupied.reason == "no_existing_safe_native_route" );
+                map &native_map = *remote_terrain->cast_to_map();
+                const auto native_goal = rebase_bub( remote_terrain->get_omt( goal ) );
+                for( const bool neighbor : {false, true} ) {
+                    CAPTURE( neighbor );
+                    const auto tile = remote_terrain->get_omt( neighbor ? goal + point::south : goal );
+                    REQUIRE( remote_terrain->add_field( tile, field_type_id( "fd_fire" ), 1 ) );
+                    const auto *raw_fire = remote_terrain->field_at( tile ).find_field( field_type_id( "fd_fire" ) );
+                    REQUIRE( raw_fire );
+                    REQUIRE( raw_fire->get_field_intensity() == 1 );
+                    REQUIRE( native_map.get_field_intensity( rebase_bub( tile ), field_type_id( "fd_fire" ) ) == 1 );
+                    REQUIRE( body->will_move_to( &native_map, native_goal ) );
+                    // Native danger checks inspect the field directly. The
+                    // borrowed view must also honor its field-presence cache.
+                    CHECK( body->know_danger_at( &native_map, native_goal ) == neighbor );
+                    const auto fire = physical_navigation::read_step( *body, goal );
+                    CHECK( fire.next == physical_navigation::action::none );
+                    CHECK( fire.reason == "approach_fire_hazard" );
+                    CHECK( fire.hazard_revision != 0 );
+                    monster on_goal( *body );
+                    on_goal.set_pos_abs_only( goal );
+                    const auto at_goal = physical_navigation::read_step( on_goal, goal );
+                    CHECK( at_goal.next == physical_navigation::action::none );
+                    CHECK( at_goal.reason == "approach_fire_hazard" );
+                    CHECK( at_goal.hazard_revision == raid_sweep::fire_revision( native_map, {native_goal} ) );
+                    CHECK( raw_fire->get_field_intensity() == 1 );
+                    remote_terrain->delete_field( tile, field_type_id( "fd_fire" ) );
+                }
+                const auto extinguished = physical_navigation::read_step( *body, goal );
+                CHECK( extinguished.next == physical_navigation::action::walk );
+                CHECK( extinguished.hazard_revision == 0 );
+                const auto contained_tile = remote_terrain->get_omt( goal + point::south );
+                remote_terrain->furn_set( contained_tile, furn_str_id( "f_brazier" ) );
+                REQUIRE( remote_terrain->add_field( contained_tile, field_type_id( "fd_fire" ), 1 ) );
+                const auto contained = physical_navigation::read_step( *body, goal );
+                CHECK( contained.next == physical_navigation::action::walk );
+                CHECK( contained.hazard_revision == 0 );
+                CHECK( remote_terrain->field_at( contained_tile ).find_field( field_type_id( "fd_fire" ) ) );
+                remote_terrain->delete_field( contained_tile, field_type_id( "fd_fire" ) );
+                remote_terrain->furn_set( contained_tile, furn_str_id::NULL_ID() );
+                // A real matching connection exercises the stair-route call
+                // site; reaching the stairs still precedes any floor change.
+                const auto stairs = home + point::east * 2;
+                const auto upper_stairs = stairs + tripoint_rel_ms( 0, 0, 1 );
+                remote_terrain->ter_set( remote_terrain->get_omt( stairs ), ter_str_id( "t_stairs_up" ) );
+                upper_terrain->ter_set( upper_terrain->get_omt( upper_stairs ), ter_str_id( "t_stairs_down" ) );
+                const auto stair = physical_navigation::read_step( *body, goal + tripoint_rel_ms( 0, 0, 1 ) );
+                CHECK( stair.next == physical_navigation::action::walk );
+                CHECK( stair.position == home + point::east );
+                CHECK( stair.position.z() == home.z() );
+                CHECK( remote_terrain->ter( remote_terrain->get_omt( stairs ) ) == ter_str_id( "t_stairs_up" ) );
+                CHECK( upper_terrain->ter( upper_terrain->get_omt( upper_stairs ) ) == ter_str_id( "t_stairs_down" ) );
+            }
+            std::ostringstream after_body;
+            { JsonOut json( after_body ); body->serialize( json ); }
+            CHECK( after_body.str() == before_body.str() );
+        }
+        CHECK( buffered_cells() == cells_before ); // no new physical map generation
         CHECK( globals() == after_service );
         CHECK( body->get_hp() == hp );
         CHECK( body->population_identity().site_id == id );
@@ -5299,11 +5436,14 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
     }
     const std::vector<std::string> stages = {
         "migo_service_local_navigation", "migo_service_abstract_navigation", "migo_local_plan",
-        "migo_local_move", "migo_local_prepare_navigation", "migo_abstract_prepare_navigation"
+        "migo_local_move", "migo_local_prepare_navigation", "migo_abstract_prepare_navigation",
+        "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route"
     };
-    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 2, 0 } :
-                                      branch == "abstract" ? std::vector<int>{ 0, 1, 0, 0, 0, 1 } :
-                                      std::vector<int>{ 0, 0, 0, 0, 0, 0 };
+    const std::vector<int> expected = branch == "local" ? std::vector<int>{ 1, 0, 1, 1, 2, 0, 3, 0, 3 } :
+                                      branch == "abstract" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 2, 0, 2 } :
+                                      branch == "remote" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 12, 12, 10 } :
+                                      branch == "remote_unknown" ? std::vector<int>{ 0, 1, 0, 0, 0, 1, 4, 4, 0 } :
+                                      std::vector<int>( stages.size(), 0 );
     std::vector<int> totals( stages.size(), 0 );
     int intervals = 0;
     std::ifstream input( trace );
@@ -5343,6 +5483,9 @@ TEST_CASE( "Mi-go diagnostics follow actual local and abstract route owners with
                    times.get_float( index( "migo_local_prepare_navigation" ) ) );
             CHECK( times.get_float( index( "horde_movement" ) ) >=
                    times.get_float( index( "migo_abstract_prepare_navigation" ) ) );
+            CHECK( times.get_float( index( "physical_navigation_read" ) ) >=
+                   times.get_float( index( "physical_navigation_view_build" ) ) +
+                   times.get_float( index( "physical_navigation_native_route" ) ) );
         }
     }
     // The supported off transition discards the still-open final row.

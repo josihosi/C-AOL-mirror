@@ -453,6 +453,9 @@ class map
 
     protected:
         map( int mapsize, bool zlev );
+        // Mirror native field-presence metadata after installing an existing
+        // submap. Does not load geometry or alter any field.
+        void cache_submap_fields( const tripoint_rel_sm &gridp );
     public:
         // Constructors & Initialization
         map() : map( MAPSIZE, true ) { }

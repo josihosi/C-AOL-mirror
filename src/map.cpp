@@ -9224,9 +9224,7 @@ void map::loadn( const point_bub_sm &grid, bool update_vehicles )
         if( !tmpsub->active_items.empty() ) {
             submaps_with_active_items_dirty.emplace( pos );
         }
-        if( tmpsub->field_count > 0 ) {
-            get_cache( z ).field_cache.set( grid.x() + grid.y() * MAPSIZE );
-        }
+        cache_submap_fields( tripoint_rel_sm( grid.x(), grid.y(), z ) );
 
         // Destroy bugged no-part vehicles
         auto &veh_vec = tmpsub->vehicles;
@@ -10862,6 +10860,14 @@ const submap *map::unsafe_get_submap_at( const tripoint_bub_ms &p ) const
 {
     cata_assert( inbounds( p ) );
     return get_submap_at_grid( { p.x() / SEEX, p.y() / SEEY, p.z() } );
+}
+
+void map::cache_submap_fields( const tripoint_rel_sm &gridp )
+{
+    const submap *sm = get_submap_at_grid( gridp );
+    if( sm && sm->field_count > 0 ) {
+        get_cache( gridp.z() ).field_cache.set( gridp.x() + gridp.y() * MAPSIZE );
+    }
 }
 
 void map::setsubmap( const size_t grididx, submap *const smap )

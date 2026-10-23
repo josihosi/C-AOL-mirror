@@ -331,7 +331,7 @@ static void raid_perf_flush_after_wait()
     js.member( "mode", raid_perf_mode );
     js.member( "run_id", std::string( std::getenv( "OPENCLAW_HARNESS_RUN_ID" ) ) );
     js.member( "stage_scope",
-               "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; watch_preflight includes disjoint watch_optical_read and watch_record_view children; Mi-go service navigation children split local/abstract physical owners; migo_local_plan and migo_local_move cover full native monster plan/move calls with an existing Mi-go intent, including pre-hook targeting; they are disjoint local creature children containing authenticated migo_local_prepare_navigation; migo_abstract_prepare_navigation measures the abstract transport prepare_step route child; do not add nested stages" );
+               "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; watch_preflight includes disjoint watch_optical_read and watch_record_view children; Mi-go service navigation children split local/abstract physical owners; migo_local_plan and migo_local_move cover full native monster plan/move calls with an existing Mi-go intent, including pre-hook targeting; they are disjoint local creature children containing authenticated migo_local_prepare_navigation; migo_abstract_prepare_navigation measures the abstract transport prepare_step route child; physical_navigation_read includes early returns and remote-view destruction and contains disjoint physical_navigation_view_build and physical_navigation_native_route children; view_build is construction only, native_route includes callbacks and caches, not pure A-star CPU; direct arrival checks may have no service/prepare parent; do not add nested stages" );
     js.member( "watch_scope",
                "Actual preflight/read/record_view calls; eligible record_view calls are not confirmed writes; cached views sum each preflight's retained geometry/lighting views, including failed lighting, not per-read allocations or unique world cells" );
     js.member( "debug_sink_scope",
@@ -346,7 +346,8 @@ static void raid_perf_flush_after_wait()
         "watch_preflight", "watch_optical_read", "watch_record_view",
         "migo_service_local_navigation", "migo_service_abstract_navigation",
         "migo_local_plan", "migo_local_move",
-        "migo_local_prepare_navigation", "migo_abstract_prepare_navigation"
+        "migo_local_prepare_navigation", "migo_abstract_prepare_navigation",
+        "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route"
     } );
     js.member( "rows" );
     js.start_array();

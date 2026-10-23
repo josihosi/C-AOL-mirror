@@ -6,6 +6,7 @@
 #include <set>
 #include <vector>
 
+#include "do_turn.h"
 #include "field_type.h"
 #include "line.h"
 #include "map.h"
@@ -48,7 +49,11 @@ class navigation_view : public map
                         } else {
                             sm = &unknown;
                         }
-                        setsubmap( get_nonant( tripoint_rel_sm( x, y, z ) ), sm );
+                        const tripoint_rel_sm grid( x, y, z );
+                        setsubmap( get_nonant( grid ), sm );
+                        if( sm != &unknown ) {
+                            cache_submap_fields( grid );
+                        }
                     }
                 }
             }
@@ -63,6 +68,9 @@ class navigation_view : public map
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                      const std::function<bool( const tripoint_abs_ms & )> &occupied )
 {
+    // Declare before the borrowed view so the total includes its destruction
+    // and every refusal. The existing row owns all timing/count state.
+    raid_perf_scope read_scope( raid_perf_stage::physical_navigation_read );
     const auto origin = body.pos_abs();
     step_read out;
     out.position = origin;
@@ -88,6 +96,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     std::unique_ptr<navigation_view> remote;
     map *here = &get_map();
     if( !here->inbounds( origin ) || !here->inbounds( extent ) ) {
+        raid_perf_scope build_scope( raid_perf_stage::physical_navigation_view_build );
         remote = std::make_unique<navigation_view>( origin, extent );
         here = remote.get();
     }
@@ -128,6 +137,10 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
     // exhaust the native route budget on harmless home-world atmosphere.
     settings.avoid_dangerous_fields = false;
     settings.bash_strength.clear(); // An unseen wall is not an invented doorway.
+    const auto native_route = [&]( const tripoint_bub_ms &to, const auto &exclude ) {
+        raid_perf_scope route_scope( raid_perf_stage::physical_navigation_native_route );
+        return here->route( from, pathfinding_target::point( to ), settings, exclude );
+    };
     std::vector<tripoint_bub_ms> route;
     if( origin.z() != goal.z() ) {
         const int dz = goal.z() > origin.z() ? 1 : -1;
@@ -145,7 +158,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                 route = {landing};
                 break;
             }
-            auto candidate = here->route( from, pathfinding_target::point( stair ), settings, avoid );
+            auto candidate = native_route( stair, avoid );
             if( !candidate.empty() && ( route.empty() || candidate.size() < route.size() ) ) {
                 route = std::move( candidate );
             }
@@ -176,7 +189,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             if( avoid( to ) ) {
                 continue;
             }
-            route = here->route( from, pathfinding_target::point( to ), settings, avoid );
+            route = native_route( to, avoid );
             if( !route.empty() ) {
                 break;
             }
@@ -193,8 +206,7 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
             // executed. A fire-excluded route is a hazard, not a searched
             // candidate or an invented impassable wall. Other geometry and
             // native door/floor constraints remain in force.
-            const auto approach = here->route( from, pathfinding_target::point( here->get_bub( aim ) ),
-                                               settings, geometry_only );
+            const auto approach = native_route( here->get_bub( aim ), geometry_only );
             const bool fire_blocked = std::any_of( approach.begin(), approach.end(),
             [&]( const auto & cell ) {
                 return raid_sweep::fire_approach( *here, cell );
