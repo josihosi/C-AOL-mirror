@@ -417,11 +417,49 @@ void game::save_shortcuts( std::ostream &fout )
 }
 #endif
 
-void overmap::load_monster_groups( const JsonArray &jsin )
+namespace
 {
+bool has_saved_predator_identity( const JsonObject &source )
+{
+    if( !source.has_object( "caol_predator" ) ) {
+        return false;
+    }
+    JsonObject identity = source.get_object( "caol_predator" );
+    identity.allow_omitted_members();
+    return !identity.get_string( "actor_id", "" ).empty();
+}
+
+void adopt_group_predator_identities( mongroup &group, const JsonObject &source,
+                                     const std::string &entry )
+{
+    if( !source.has_array( "monsters" ) ) {
+        return;
+    }
+    std::size_t index = 0;
+    for( JsonObject saved : source.get_array( "monsters" ) ) {
+        saved.allow_omitted_members(); // Native payload reader already consumed the body.
+        if( index >= group.monsters.size() ) {
+            break;
+        }
+        monster &body = group.monsters[index];
+        if( body.is_caol_predator() && !has_saved_predator_identity( saved ) ) {
+            overmap_buffer.adopt_legacy_predator_identity( body, entry + ":" + std::to_string( index ) );
+        }
+        ++index;
+    }
+}
+} // namespace
+
+void overmap::load_monster_groups( const JsonArray &jsin, monster_owner_decode_mode mode )
+{
+    std::size_t group_index = 0;
     for( JsonArray mongroup_with_tripoints : jsin ) {
         mongroup new_group;
-        new_group.deserialize( mongroup_with_tripoints.next_object() );
+        JsonObject saved_group = mongroup_with_tripoints.next_object();
+        new_group.deserialize( saved_group );
+        adopt_group_predator_identities( new_group, saved_group,
+                                        "group:" + loc.to_string() + ":" + std::to_string( group_index++ ) );
+        const bool has_real_snapshots = !new_group.monsters.empty();
         bool reset_target = false;
         if( new_group.target ==  point_abs_sm() ) { // Remove after 0.I
             reset_target = true;
@@ -429,22 +467,57 @@ void overmap::load_monster_groups( const JsonArray &jsin )
 
         JsonArray tripoints_json = mongroup_with_tripoints.next_array();
         tripoint_om_sm temp;
+        if( has_real_snapshots && tripoints_json.size() != 1 ) {
+            tripoints_json.throw_error( "Fullbody monster groups require exactly one position" );
+        }
         for( JsonValue tripoint_json : tripoints_json ) {
             temp.deserialize( tripoint_json );
             new_group.abs_pos = project_combine( pos(), temp );
             if( reset_target ) { // Remove after 0.I
                 new_group.set_target( new_group.abs_pos.xy() );
             }
-            if( new_group.horde ) {
+            for( const monster &body : new_group.monsters ) {
+                if( overmap_buffer.find_loaded_overmap( pos() ) == this && body.is_caol_predator() ) {
+                    overmap_buffer.confirm_predator_position( body,
+                            predator_activation::representation::group,
+                            project_to<coords::ms>( new_group.abs_pos ) );
+                }
+            }
+            if( mode == monster_owner_decode_mode::existing_actors_only &&
+                new_group.monsters.empty() ) {
+                continue;
+            }
+            if( mode == monster_owner_decode_mode::existing_actors_only ) {
+                // Actor-only scratch owners have no terrain summaries. Keep
+                // genuine snapshots at their native group container; normal
+                // loading owns any later geometry-dependent migration.
+                add_mon_group( std::move( new_group ) );
+                continue;
+            }
+            if( has_real_snapshots &&
+                new_group.behaviour == mongroup::horde_behaviour::nemesis ) {
+                // A genuine nemesis snapshot keeps its native group scheduler
+                // across reload. Anonymous recipes and other horde migration
+                // retain their established policy below.
+                add_mon_group( std::move( new_group ) );
+            } else if( new_group.horde ) {
                 // Migrate "horde" type monster groups to new horde map.
-                if( !new_group.monsters.empty() ) {
+                if( has_real_snapshots ) {
                     spawn_monsters( temp, new_group.monsters );
+                    if( !new_group.monsters.empty() ) {
+                        // Refused real snapshots still belong to this source.
+                        // They are not anonymous replacements or dead actors.
+                        new_group.population = 0;
+                        add_mon_group( std::move( new_group ) );
+                    }
                 } else {
                     if( new_group.type == GROUP_ZOMBIE ) {
                         new_group.type = GROUP_ZOMBIE_HORDE;
                     }
                     spawn_mongroup( temp, new_group.type, new_group.population );
                 }
+            } else if( has_real_snapshots ) {
+                add_mon_group( std::move( new_group ) );
             } else {
                 add_mon_group( new_group );
             }
@@ -456,12 +529,120 @@ void overmap::load_monster_groups( const JsonArray &jsin )
     }
 }
 
-void overmap::load_legacy_monstergroups( const JsonArray &jsin )
+void overmap::load_legacy_monstergroups( const JsonArray &jsin, monster_owner_decode_mode mode )
 {
+    std::size_t group_index = 0;
     for( JsonObject mongroup_json : jsin ) {
         mongroup new_group;
         new_group.deserialize_legacy( mongroup_json );
-        add_mon_group( new_group );
+        adopt_group_predator_identities( new_group, mongroup_json,
+                                        "legacy_group:" + loc.to_string() + ":" + std::to_string( group_index++ ) );
+        for( const monster &body : new_group.monsters ) {
+            if( overmap_buffer.find_loaded_overmap( pos() ) == this && body.is_caol_predator() ) {
+                overmap_buffer.confirm_predator_position( body, predator_activation::representation::group,
+                        project_to<coords::ms>( new_group.abs_pos ) );
+            }
+        }
+        if( mode == monster_owner_decode_mode::normal_load || !new_group.monsters.empty() ) {
+            if( !new_group.monsters.empty() ) {
+                add_mon_group( std::move( new_group ) );
+            } else {
+                add_mon_group( new_group );
+            }
+        }
+    }
+}
+
+void overmap::unserialize_monster_owners( const JsonMember &om_member,
+        monster_owner_decode_mode mode )
+{
+    const std::string name = om_member.name();
+    if( name == "mongroups" ) {
+        load_legacy_monstergroups( om_member, mode );
+    } else if( name == "monster_groups" ) {
+        load_monster_groups( om_member, mode );
+    } else if( name == "monster_map" ) {
+        // Migration code for old "monster_map" to new "horde_map"
+        JsonArray monster_map_json = om_member;
+        while( monster_map_json.has_more() ) {
+            tripoint_om_sm monster_location;
+            monster new_monster;
+            monster_location.deserialize( monster_map_json.next_value() );
+            JsonObject saved = monster_map_json.next_object();
+            new_monster.deserialize( saved, project_combine( loc, monster_location ) );
+            if( new_monster.is_caol_predator() && !has_saved_predator_identity( saved ) ) {
+                overmap_buffer.adopt_legacy_predator_identity( new_monster,
+                        "monster_map:" + new_monster.pos_abs().to_string() );
+            }
+            const auto accepted = hordes.spawn_entity( new_monster.pos_abs(), new_monster );
+            if( accepted ) {
+                new_monster.transfer_owned_items_to( *( *accepted )->second.monster_data );
+            }
+            if( accepted && overmap_buffer.find_loaded_overmap( pos() ) == this &&
+                ( *accepted )->second.monster_data->is_caol_predator() ) {
+                overmap_buffer.confirm_predator_position( *( *accepted )->second.monster_data,
+                        predator_activation::representation::abstract, ( *accepted )->first );
+            }
+        }
+    } else if( name == "horde_map" ) {
+        JsonArray monster_map_json = om_member;
+        while( monster_map_json.has_more() ) {
+            tripoint_abs_ms monster_location;
+            std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> result;
+            monster_location.deserialize( monster_map_json.next_value() );
+            point_abs_om omp;
+            tripoint_om_sm monster_submap;
+            std::tie( omp, monster_submap ) = project_remain<coords::om>( project_to<coords::sm>
+                                              ( monster_location ) );
+            if( monster_map_json.test_string() ) {
+                mtype_id monster_id( monster_map_json.next_string() );
+                result = hordes.spawn_entity( monster_location, monster_id );
+            } else {
+                monster new_monster;
+                JsonObject saved = monster_map_json.next_object();
+                new_monster.deserialize( saved );
+                if( new_monster.is_caol_predator() && !has_saved_predator_identity( saved ) ) {
+                    overmap_buffer.adopt_legacy_predator_identity( new_monster,
+                            "horde:" + monster_location.to_string() + ":" + new_monster.type->id.str() );
+                }
+                result = hordes.spawn_entity( monster_location, new_monster );
+                if( result ) {
+                    new_monster.transfer_owned_items_to( *( *result )->second.monster_data );
+                }
+            }
+
+            if( result.has_value() ) {
+                ( *result )->second.destination.deserialize( monster_map_json.next_value() );
+                ( *result )->second.tracking_intensity = monster_map_json.next_int();
+                ( *result )->second.last_processed.deserialize( monster_map_json.next_value() );
+                ( *result )->second.moves = monster_map_json.next_int();
+                if( monster_map_json.test_object() ) {
+                    JsonObject light_memory = monster_map_json.next_object();
+                    light_memory.read( "source", ( *result )->second.light_source );
+                    light_memory.read( "sample_id", ( *result )->second.light_sample_id );
+                    light_memory.read( "observed", ( *result )->second.light_observed );
+                    light_memory.read( "expires", ( *result )->second.light_expires );
+                    light_memory.read( "strength", ( *result )->second.light_interest_strength );
+                }
+                // spawn_entity chose a bucket before the persisted path
+                // was restored.  Reclassify only after its complete
+                // route is present, otherwise saved active hordes reload
+                // inert and never reach the ordinary scheduler.
+                horde_entity &entity = ( *result )->second;
+                if( overmap_buffer.find_loaded_overmap( pos() ) == this &&
+                    entity.monster_data && entity.monster_data->is_caol_predator() ) {
+                    overmap_buffer.confirm_predator_position( *entity.monster_data,
+                            predator_activation::representation::abstract, monster_location );
+                }
+                hordes.refresh_entity_bucket( monster_location );
+            } else {
+                // We deserialized something nasty, skip the rest of the stored values
+                monster_map_json.next_value();
+                monster_map_json.next_int();
+                monster_map_json.next_value();
+                monster_map_json.next_int();
+            }
+        }
     }
 }
 
@@ -475,11 +656,28 @@ void overmap::unserialize( const cata_path &file_name, std::istream &fin )
 
 void overmap::unserialize( std::istream &fin )
 {
+    unserialize( fin, monster_owner_decode_mode::normal_load );
+}
+
+void overmap::unserialize( std::istream &fin, monster_owner_decode_mode mode )
+{
     chkversion( fin );
     std::string s = std::string( std::istreambuf_iterator<char>( fin ),
                                  std::istreambuf_iterator<char>() );
     JsonValue jsin = json_loader::from_string( std::move( s ) );
-    unserialize( jsin.get_object() );
+    if( mode == monster_owner_decode_mode::normal_load ) {
+        unserialize( jsin.get_object() );
+    } else {
+        JsonObject source = jsin.get_object();
+        source.allow_omitted_members();
+        for( JsonMember section : source ) {
+            const std::string name = section.name();
+            if( name == "monster_map" || name == "horde_map" || name == "monster_groups" ||
+                name == "mongroups" ) {
+                unserialize_monster_owners( section, mode );
+            }
+        }
+    }
 }
 
 void overmap::unserialize( const JsonObject &jsobj )
@@ -578,10 +776,8 @@ void overmap::unserialize( const JsonObject &jsobj )
                     settings = new_region_set;
                 }
             }
-        } else if( name == "mongroups" ) {
-            load_legacy_monstergroups( om_member );
-        } else if( name == "monster_groups" ) {
-            load_monster_groups( om_member );
+        } else if( name == "mongroups" || name == "monster_groups" ) {
+            unserialize_monster_owners( om_member, monster_owner_decode_mode::normal_load );
         } else if( name == "cities" ) {
             JsonArray cities_json = om_member;
             for( JsonObject city_json : cities_json ) {
@@ -679,61 +875,8 @@ void overmap::unserialize( const JsonObject &jsobj )
                 }
                 radios.push_back( new_radio );
             }
-        } else if( name == "monster_map" ) {
-            // Migration code for old "monster_map" to new "horde_map"
-            JsonArray monster_map_json = om_member;
-            while( monster_map_json.has_more() ) {
-                tripoint_om_sm monster_location;
-                monster new_monster;
-                monster_location.deserialize( monster_map_json.next_value() );
-                new_monster.deserialize( monster_map_json.next_object(), project_combine( loc, monster_location ) );
-                hordes.spawn_entity( new_monster.pos_abs(), new_monster );
-            }
-        } else if( name == "horde_map" ) {
-            JsonArray monster_map_json = om_member;
-            while( monster_map_json.has_more() ) {
-                tripoint_abs_ms monster_location;
-                std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> result;
-                monster_location.deserialize( monster_map_json.next_value() );
-                point_abs_om omp;
-                tripoint_om_sm monster_submap;
-                std::tie( omp, monster_submap ) = project_remain<coords::om>( project_to<coords::sm>
-                                                  ( monster_location ) );
-                if( monster_map_json.test_string() ) {
-                    mtype_id monster_id( monster_map_json.next_string() );
-                    result = hordes.spawn_entity( monster_location, monster_id );
-                } else {
-                    monster new_monster;
-                    new_monster.deserialize( monster_map_json.next_object() );
-                    result = hordes.spawn_entity( monster_location, new_monster );
-                }
-
-                if( result.has_value() ) {
-                    ( *result )->second.destination.deserialize( monster_map_json.next_value() );
-                    ( *result )->second.tracking_intensity = monster_map_json.next_int();
-                    ( *result )->second.last_processed.deserialize( monster_map_json.next_value() );
-                    ( *result )->second.moves = monster_map_json.next_int();
-                    if( monster_map_json.test_object() ) {
-                        JsonObject light_memory = monster_map_json.next_object();
-                        light_memory.read( "source", ( *result )->second.light_source );
-                        light_memory.read( "sample_id", ( *result )->second.light_sample_id );
-                        light_memory.read( "observed", ( *result )->second.light_observed );
-                        light_memory.read( "expires", ( *result )->second.light_expires );
-                        light_memory.read( "strength", ( *result )->second.light_interest_strength );
-                    }
-                    // spawn_entity chose a bucket before the persisted path
-                    // was restored.  Reclassify only after its complete
-                    // route is present, otherwise saved active hordes reload
-                    // inert and never reach the ordinary scheduler.
-                    hordes.refresh_entity_bucket( monster_location );
-                } else {
-                    // We deserialized something nasty, skip the rest of the stored values
-                    monster_map_json.next_value();
-                    monster_map_json.next_int();
-                    monster_map_json.next_value();
-                    monster_map_json.next_int();
-                }
-            }
+        } else if( name == "monster_map" || name == "horde_map" ) {
+            unserialize_monster_owners( om_member, monster_owner_decode_mode::normal_load );
         } else if( name == "map_data" ) {
             JsonArray map_data_json = om_member;
             while( map_data_json.has_more() ) {
@@ -1361,6 +1504,17 @@ void overmap::save_monster_groups( JsonOut &jout ) const
     binned_groups;
     binned_groups.reserve( zg.size() );
     for( const auto &pos_group : zg ) {
+        if( !pos_group.second.monsters.empty() ) {
+            // A fullbody group is never binned. Serialize the actual owner:
+            // copying a monster would mint new identities for its items.
+            jout.start_array();
+            pos_group.second.serialize( jout, true );
+            jout.start_array();
+            jout.write( pos_group.first );
+            jout.end_array();
+            jout.end_array();
+            continue;
+        }
         // Each group in bin adds only position
         // so that 100 identical groups are 1 group data and 100 tripoints
         std::list<tripoint_om_sm> &positions = binned_groups[pos_group.second];
@@ -1668,10 +1822,12 @@ void overmap::serialize( std::ostream &fout ) const
 ////////////////////////////////////////////////////////////////////////////////////////
 ///// mongroup
 template<typename Archive>
-void mongroup::io( Archive &archive )
+void mongroup::io( Archive &archive, bool omit_position )
 {
     archive.io( "type", type );
-    archive.io( "abs_pos", abs_pos, tripoint_abs_sm::zero );
+    if( !omit_position ) {
+        archive.io( "abs_pos", abs_pos, tripoint_abs_sm::zero );
+    }
     archive.io( "population", population, 1u );
     archive.io( "dying", dying, false );
     archive.io( "horde", horde, false );
@@ -1689,10 +1845,10 @@ void mongroup::deserialize( const JsonObject &jo )
     io( archive );
 }
 
-void mongroup::serialize( JsonOut &json ) const
+void mongroup::serialize( JsonOut &json, bool omit_position ) const
 {
     io::JsonObjectOutputArchive archive( json );
-    const_cast<mongroup *>( this )->io( archive );
+    const_cast<mongroup *>( this )->io( archive, omit_position );
 }
 
 void mongroup::deserialize_legacy( const JsonObject &jo )
@@ -1722,7 +1878,7 @@ void mongroup::deserialize_legacy( const JsonObject &jo )
             for( JsonObject monster_json : ja ) {
                 monster new_monster;
                 new_monster.deserialize( monster_json );
-                monsters.push_back( new_monster );
+                monsters.push_back( std::move( new_monster ) );
             }
         }
     }
@@ -2188,6 +2344,7 @@ void overmap_global_state::serialize( JsonOut &json ) const
     json.end_array();
     json.member( "zombie_rider_light_memory_last_turn", zombie_rider_light_memory_last_turn );
     json.member( "zombie_rider_bands", zombie_rider_bands );
+    json.member( "predator_activity", predator_activity );
     json.member( "placed_regions", placed_regions );
 
     json.end_object();
@@ -2254,6 +2411,8 @@ void overmap_global_state::deserialize( const JsonObject &json )
     if( !json.read( "zombie_rider_light_memory_last_turn", zombie_rider_light_memory_last_turn ) ) {
         zombie_rider_light_memory_last_turn = calendar::turn;
     }
+    predator_activity.clear();
+    json.read( "predator_activity", predator_activity );
     if( json.has_member( "zombie_rider_bands" ) ) {
         json.read( "zombie_rider_bands", zombie_rider_bands );
     } else {

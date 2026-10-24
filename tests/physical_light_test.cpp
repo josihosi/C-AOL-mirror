@@ -1379,6 +1379,13 @@ TEST_CASE( "physical_light_native_same_omt_sources_remain_independent",
     setup_dark_native_lightmap();
     avatar &guy = get_avatar();
     map &here = get_map();
+    // A loaded map can start on either submap of an OMT. Local tile65 does
+    // not guarantee that the unchanged +/-3 source pair shares an OMT.
+    const auto omt = coords::project_to<coords::omt>( guy.pos_abs() );
+    const auto center = here.get_bub( coords::project_to<coords::ms>( omt ) +
+                                    tripoint_rel_ms( SEEX, SEEY, 0 ) );
+    REQUIRE( here.inbounds( center ) );
+    guy.setpos( here, center );
     const tripoint_bub_ms bright_pos = guy.pos_bub() + tripoint::east * 3;
     const tripoint_bub_ms dim_pos = guy.pos_bub() + tripoint::west * 3;
     REQUIRE( coords::project_to<coords::omt>( here.get_abs( bright_pos ) ) ==

@@ -4946,7 +4946,8 @@ monster *game::place_critter_around( const mtype_id &id, const tripoint_bub_ms &
 monster *game::place_critter_around( const shared_ptr_fast<monster> &mon,
                                      const tripoint_bub_ms &center,
                                      const int radius,
-                                     bool forced )
+                                     bool forced,
+                                     const std::function<void( monster & )> &on_accept )
 {
     map &here = get_map();
 
@@ -4966,6 +4967,11 @@ monster *game::place_critter_around( const shared_ptr_fast<monster> &mon,
     }
     mon->spawn( *where );
     if( critter_tracker->add( mon ) ) {
+        // Ownership transactions finish at actual tracker acceptance. Gravity
+        // may move or kill the accepted body and must see its rightful owner.
+        if( on_accept ) {
+            on_accept( *mon );
+        }
         mon->gravity_check();
         return mon.get();
     }
@@ -5036,11 +5042,17 @@ bool game::update_zombie_pos( const monster &critter, const tripoint_abs_ms &old
 void game::remove_zombie( const monster &critter )
 {
     critter_tracker->remove( critter );
+    if( critter.is_caol_predator() ) {
+        // Removal need not be death (capture and native handoff also remove).
+        // Recheck surviving range witnesses without changing their leases.
+        overmap_buffer.global_state.predator_activity.invalidate_activation();
+    }
 }
 
 void game::clear_zombies()
 {
     critter_tracker->clear();
+    overmap_buffer.global_state.predator_activity.invalidate_activation();
     writhing_stalker::reset_transient_pressure_history();
 }
 
@@ -5246,7 +5258,43 @@ bool game::swap_critters( Creature &a, Creature &b )
             return false;
         }
 
+        auto &world = overmap_buffer.global_state.predator_activity;
+        const auto may_swap = [&]( const monster &body ) {
+            if( !body.is_caol_predator() ) {
+                return true;
+            }
+            const auto &life = body.predator_state();
+            const auto *prior = world.find( life.actor_id );
+            return !body.is_dead() && !life.actor_id.empty() &&
+                   ( !prior || ( prior->owner != predator_activation::representation::dead &&
+                                 prior->owner != predator_activation::representation::captured &&
+                                 life.handoff_epoch >= prior->epoch &&
+                                 ( !prior->confirmed || world.owns( life.actor_id, life.handoff_epoch,
+                                         predator_activation::representation::local, body.pos_abs() ) ) ) );
+        };
+        if( !may_swap( *lhs_as_mon ) || !may_swap( *rhs_as_mon ) ||
+            ( lhs_as_mon->is_caol_predator() && rhs_as_mon->is_caol_predator() &&
+              lhs_as_mon->predator_state().actor_id == rhs_as_mon->predator_state().actor_id ) ) {
+            return false;
+        }
+        for( monster *body : { lhs_as_mon, rhs_as_mon } ) {
+            if( body->is_caol_predator() ) {
+                overmap_buffer.confirm_predator_position( *body,
+                        predator_activation::representation::local, body->pos_abs() );
+            }
+        }
+        const auto lhs_old = lhs_as_mon->pos_abs();
+        const auto rhs_old = rhs_as_mon->pos_abs();
         critter_tracker->swap_positions( *lhs_as_mon, *rhs_as_mon );
+        const auto commit = [&]( const monster &body, const tripoint_abs_ms &old ) {
+            if( body.is_caol_predator() ) {
+                const auto &life = body.predator_state();
+                world.move( life.actor_id, life.handoff_epoch,
+                            predator_activation::representation::local, old, body.pos_abs() );
+            }
+        };
+        commit( *lhs_as_mon, lhs_old );
+        commit( *rhs_as_mon, rhs_old );
         return true;
     }
 

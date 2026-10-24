@@ -1556,6 +1556,12 @@ horde_entity *overmap::retain_monster_payload( const tripoint_abs_ms &p, const m
         // candidates still wait for their separate transfer commit.
         migo_population::commit_position( *retained.monster_data,
                                           migo_population::representation::abstract, p );
+        if( retained.monster_data->is_caol_predator() &&
+            overmap_buffer.find_loaded_overmap( pos() ) == this ) {
+            retained.monster_data->ensure_predator_state();
+            overmap_buffer.confirm_predator_position( *retained.monster_data,
+                    predator_activation::representation::abstract, p );
+        }
     }
     return &retained;
 }
@@ -1599,16 +1605,34 @@ std::optional<tripoint_om_ms> overmap::find_open_space_in_submap( const tripoint
 
 void overmap::spawn_monsters( const tripoint_om_sm &p, std::vector<monster> &monsters )
 {
-    tripoint_om_ms submap_origin = project_to<coords::ms>( p );
+    const tripoint_om_ms submap_origin = project_to<coords::ms>( p );
+    const tripoint_abs_ms source = project_combine( pos(), submap_origin );
     point_rel_ms cursor{ 0, 0 };
-    for( monster &mon_to_spawn : monsters ) {
-        std::optional<tripoint_om_ms> open_space =
-            find_open_space_in_submap( submap_origin, cursor );
+    for( auto body = monsters.begin(); body != monsters.end(); ) {
+        const auto open_space = find_open_space_in_submap( submap_origin, cursor );
         if( !open_space ) {
-            // Ran out of space on the submap!
-            return;
+            return; // Unplaced real snapshots remain in their source vector.
         }
-        hordes.spawn_entity( project_combine( pos(), *open_space ), mon_to_spawn );
+        const tripoint_abs_ms destination = project_combine( pos(), *open_space );
+        auto accepted = hordes.spawn_entity( destination, *body );
+        if( !accepted ) {
+            ++body;
+            continue;
+        }
+        monster &placed = *( *accepted )->second.monster_data;
+        if( placed.is_caol_predator() && !placed.is_dead() ) {
+            ++placed.predator_state().handoff_epoch;
+            if( overmap_buffer.find_loaded_overmap( pos() ) == this &&
+                !overmap_buffer.transfer_predator_owner( placed,
+                        predator_activation::representation::group, source,
+                        predator_activation::representation::abstract, destination ) ) {
+                hordes.erase( hordes.find( *open_space ) );
+                ++body;
+                continue;
+            }
+        }
+        body->transfer_owned_items_to( placed );
+        body = monsters.erase( body );
     }
 }
 
@@ -1662,7 +1686,7 @@ void overmap::refresh_monster_schedule( const tripoint_abs_ms &p )
     hordes.refresh_entity_bucket( p );
 }
 
-void overmap::move_hordes( bool migo_operations_only )
+void overmap::move_hordes( bool migo_operations_only, bool predators_only )
 {
     // TODO: throttle processing of monsters.
     // Specifically for throttling, only a process a subset of the eligible monster buckets per invocation.
@@ -1682,6 +1706,11 @@ void overmap::move_hordes( bool migo_operations_only )
     std::vector<pending_horde_migration> migrating_hordes;
     for( horde_map::iterator mon = hordes.get_view( horde_map_flavors::active ).begin(),
          mon_end = hordes.end(); mon != mon_end; ) {
+        if( predators_only && mon->second.get_type()->id.str() != "mon_zombie_rider" &&
+            mon->second.get_type()->id.str() != "mon_writhing_stalker" ) {
+            ++mon;
+            continue;
+        }
         if( migo_operations_only && ( !mon->second.monster_data ||
                                      !migo_tower::owns_intent( *mon->second.monster_data,
                                              migo_population::representation::abstract ) ) ) {
@@ -1717,6 +1746,11 @@ void overmap::move_hordes( bool migo_operations_only )
                                          mon->second.monster_data->has_handoff_identity() ) ||
                                        type_id == "mon_writhing_stalker" ||
                                        type_id == "mon_zombie_rider";
+        const bool caol_predator = type_id == "mon_writhing_stalker" || type_id == "mon_zombie_rider";
+        if( caol_predator && !overmap_buffer.predator_activity_at( mon->second, mon->first ) ) {
+            ++mon;
+            continue;
+        }
         // Keep an immutable owner snapshot before evolution, intent, or
         // movement bookkeeping.  A rejected prepared transfer must restore
         // the exact lightweight owner rather than a partially advanced copy.
@@ -1728,6 +1762,12 @@ void overmap::move_hordes( bool migo_operations_only )
             prepared_predator.emplace( mon->second );
             acting = &*prepared_predator;
         }
+        const auto commit_prepared = [&]() {
+            if( mon->second.monster_data && prepared_predator->monster_data ) {
+                mon->second.monster_data->transfer_owned_items_to( *prepared_predator->monster_data );
+            }
+            mon->second = std::move( *prepared_predator );
+        };
         int native_elapsed = 1;
         if( acting->monster_data && !acting->monster_data->population_identity().empty() ) {
             // The native container authenticates position before body work.
@@ -1739,6 +1779,15 @@ void overmap::move_hordes( bool migo_operations_only )
                                            migo_population::representation::abstract,
                                            to_turn<int>( calendar::turn ),
                                            migo_tower::activity_boundary::process, &native_elapsed ) ) {
+                ++mon;
+                continue;
+            }
+        }
+        if( caol_predator ) {
+            acting->ensure_predator_payload( mon->first );
+            acting->monster_data->set_pos_abs_only( mon->first );
+            if( !overmap_buffer.predator_activity_for( *acting->monster_data,
+                    predator_activation::representation::abstract, mon->first, &native_elapsed ) ) {
                 ++mon;
                 continue;
             }
@@ -1766,9 +1815,25 @@ void overmap::move_hordes( bool migo_operations_only )
         if( !evolution_advanced ) {
             acting->advance_evolution( mon->first );
         }
-        // A predator becomes heavy only when it is actually scheduled by the
-        // abstract owner.  This preserves ordinary type-only horde entries.
-        acting->advance_predator_intent( mon->first, to_turn<int>( calendar::turn ) );
+        if( !caol_predator && acting->monster_data && acting->monster_data->is_caol_predator() ) {
+            // An ordinary native evolution may first create this identity.
+            // Adopt only the actually committed result. The ordinary native
+            // scheduler owns this current opportunity; adopting the new CAOL
+            // clock must not cancel its speed credit or invent past elapsed.
+            const auto where = project_to<coords::omt>( mon->first );
+            const auto player = get_player_character().pos_abs_omt();
+            if( std::max( std::abs( where.x() - player.x() ),
+                          std::abs( where.y() - player.y() ) ) > 40 ) {
+                if( prepared_predator ) {
+                    commit_prepared();
+                }
+                overmap_buffer.confirm_predator_position( *mon->second.monster_data,
+                        predator_activation::representation::abstract, mon->first );
+                ++mon;
+                continue;
+            }
+        }
+        acting->advance_predator_intent( mon->first, to_turn<int>( calendar::turn ), native_elapsed );
         const bool migo_work = acting->monster_data && migo_tower::owns_intent(
                                    *acting->monster_data, migo_population::representation::abstract );
         physical_navigation::step_read migo_step;
@@ -1800,7 +1865,7 @@ void overmap::move_hordes( bool migo_operations_only )
                     acting->moves = 0;
                 }
                 acting->synchronize_payload( mon->first );
-                mon->second = std::move( *prepared_predator );
+                commit_prepared();
                 ++mon;
                 continue;
             }
@@ -1812,14 +1877,24 @@ void overmap::move_hordes( bool migo_operations_only )
         if( ( migo_work && migo_step.next == physical_navigation::action::walk ) ||
             ( !migo_work && acting->tracking_intensity > 0 && mon->first != acting->destination ) ) {
             if( !migo_work ) {
-                acting->tracking_intensity--;
                 if( native_elapsed > 0 ) {
-                    acting->moves += acting->type_id->speed;
+                    acting->tracking_intensity--;
+                    if( acting->monster_data && acting->monster_data->is_caol_predator() ) {
+                        auto &life = acting->monster_data->predator_state();
+                        if( life.last_energy_world != to_turn<int>( calendar::turn ) ) {
+                            // This is still the private prepared transaction:
+                            // refusal discards both its credit and this stamp.
+                            acting->moves += acting->type_id->speed;
+                            life.last_energy_world = to_turn<int>( calendar::turn );
+                        }
+                    } else {
+                        acting->moves += acting->type_id->speed;
+                    }
                 }
             }
             if( acting->moves <= 0 ) {
                 if( prepared_predator ) {
-                    mon->second = std::move( *prepared_predator );
+                    commit_prepared();
                 }
                 mon++;
                 continue;
@@ -1900,6 +1975,19 @@ void overmap::move_hordes( bool migo_operations_only )
                     g->remove_zombie( *placed_monster );
                     placed_monster = nullptr;
                 }
+                if( placed_monster && placed_monster->is_caol_predator() ) {
+                    const auto *record = overmap_buffer.global_state.predator_activity.find(
+                                             placed_monster->predator_state().actor_id );
+                    const bool committed = record ? overmap_buffer.transfer_predator_owner( *placed_monster,
+                                           predator_activation::representation::abstract, mon->first,
+                                           predator_activation::representation::local, viable_candidates.front() ) :
+                                           overmap_buffer.confirm_predator_position( *placed_monster,
+                                                   predator_activation::representation::local, viable_candidates.front() );
+                    if( !committed ) {
+                        g->remove_zombie( *placed_monster );
+                        placed_monster = nullptr;
+                    }
+                }
                 if( placed_monster == nullptr ) {
                     // If the tile is occupied it can't enter, just don't move for now.
                     if( prepared_predator ) {
@@ -1910,6 +1998,9 @@ void overmap::move_hordes( bool migo_operations_only )
                     mon++;
                     continue;
                 }
+                if( mon->second.monster_data ) {
+                    mon->second.monster_data->transfer_owned_items_to( *placed_monster );
+                }
                 if( placed_monster->is_caol_predator() ) {
                     predator_lifecycle_state &state = placed_monster->predator_state();
                     state.last_advanced_turn = to_turn<int>( calendar::turn );
@@ -1917,7 +2008,7 @@ void overmap::move_hordes( bool migo_operations_only )
                 // spawn clears explicit goals; the same owning handoff must
                 // restore route priority without replacing a pending sound.
                 acting->synchronize_navigation( *placed_monster );
-                if( migo_work ) {
+                if( migo_work || placed_monster->is_caol_predator() ) {
                     placed_monster->on_load();
                 }
                 mon = hordes.erase( mon );
@@ -1933,6 +2024,9 @@ void overmap::move_hordes( bool migo_operations_only )
             // Advance the loop iterator past the current node, which we will be removing.
             mon++;
             auto monster_node = hordes.extract( moving_mon );
+            if( prepared_predator ) {
+                source_state = std::move( monster_node.mapped() );
+            }
             // Extract the untouched abstract owner first.  The prepared
             // predator belongs only to the outbound transport node; should
             // a destination reject it, source_state is exactly the node that
@@ -1950,7 +2044,11 @@ void overmap::move_hordes( bool migo_operations_only )
             if( migo_work ) {
                 acting->synchronize_payload( mon->first );
             }
-            mon->second = std::move( *prepared_predator );
+            commit_prepared();
+            if( mon->second.monster_data && mon->second.monster_data->is_caol_predator() ) {
+                overmap_buffer.confirm_predator_position( *mon->second.monster_data,
+                        predator_activation::representation::abstract, mon->first );
+            }
             mon++;
         } else {
             mon++;
@@ -1999,6 +2097,33 @@ void overmap::move_hordes( bool migo_operations_only )
             hordes.insert( std::move( monster_node ) );
             continue;
         }
+        if( monster_node.mapped().monster_data && monster_node.mapped().monster_data->is_caol_predator() ) {
+            const monster &body = *monster_node.mapped().monster_data;
+            auto &world = overmap_buffer.global_state.predator_activity;
+            const auto &life = body.predator_state();
+            const bool committed = world.find( life.actor_id ) ? world.move( life.actor_id,
+                                   life.handoff_epoch, predator_activation::representation::abstract,
+                                   source_position, monster_node.key() ) :
+                                   overmap_buffer.confirm_predator_position( body,
+                                           predator_activation::representation::abstract, monster_node.key() );
+            if( !committed ) {
+                monster_node.key() = source_position;
+                monster_node.mapped() = std::move( migrating.source_state );
+                monster_node.mapped().last_processed = calendar::turn;
+                hordes.insert( std::move( monster_node ) );
+                continue;
+            }
+        }
+        if( monster_node.mapped().monster_data &&
+            monster_node.mapped().monster_data->has_handoff_identity() &&
+            migrating.source_state.monster_data &&
+            migrating.source_state.monster_data->has_handoff_identity() ) {
+            // An existing handoff source owns the private prepared copy's
+            // original items. In-place ordinary evolution already owns them
+            // in this node; its pre-evolution rollback copy is not that owner.
+            migrating.source_state.monster_data->transfer_owned_items_to(
+                *monster_node.mapped().monster_data );
+        }
         monster_node.mapped().synchronize_payload( monster_node.key() );
         if( monster_node.mapped().monster_data ) {
             migo_population::commit_position( *monster_node.mapped().monster_data,
@@ -2010,27 +2135,81 @@ void overmap::move_hordes( bool migo_operations_only )
 
 /**
  * Move the nemesis horde towards the player.
- * Currently only works for the first nemesis horde. If there are multiple, only the first one will be moved.
+ * Anonymous recipe groups retain their one-group cadence. Every fullbody
+ * entry present at callback start receives at most one native opportunity.
  *
  */
 void overmap::move_nemesis()
 {
-    // Prevent hordes to be moved twice by putting them in here after moving.
-    decltype( zg ) tmpzg;
-    //cycle through zombie groups, skip non-nemesis hordes
-    for( std::multimap<tripoint_om_sm, mongroup>::iterator it = zg.begin(); it != zg.end(); ) {
-        mongroup &mg = it->second;
-        if( !mg.horde || mg.behaviour != mongroup::horde_behaviour::nemesis ) {
-            ++it;
+    // Snapshot only existing entries. A split made below never receives a
+    // second movement opportunity in this callback.
+    std::vector<decltype( zg )::iterator> initial;
+    for( auto it = zg.begin(); it != zg.end(); ++it ) {
+        if( it->second.horde && it->second.behaviour == mongroup::horde_behaviour::nemesis ) {
+            initial.push_back( it );
+        }
+    }
+    const bool has_predators = std::any_of( initial.begin(), initial.end(), []( const auto entry ) {
+        return std::any_of( entry->second.monsters.begin(), entry->second.monsters.end(),
+        []( const monster &body ) { return body.is_caol_predator(); } );
+    } );
+    if( has_predators ) {
+        overmap_buffer.bootstrap_predator_positions();
+    }
+    decltype( zg ) completed;
+    bool anonymous_serviced = false;
+    for( const auto it : initial ) {
+        const bool fullbody = !it->second.monsters.empty();
+        if( !fullbody && anonymous_serviced ) {
+            continue;
+        }
+        if( !fullbody ) {
+            anonymous_serviced = true; // Original one-recipe cadence.
+        }
+        // Move the actual payloads through this synchronous native owner.
+        // Copying monsters would mint new item UIDs even for frozen bodies.
+        mongroup moving = std::move( it->second );
+        auto bodies = std::move( moving.monsters );
+        moving.monsters.clear();
+        mongroup retained = moving; // metadata only, no snapshot copies
+        const auto source = project_to<coords::ms>( moving.abs_pos );
+        auto &activity = overmap_buffer.global_state.predator_activity;
+        if( fullbody ) {
+            for( monster &body : bodies ) {
+                if( body.is_caol_predator() && !body.is_dead() ) {
+                    body.ensure_predator_state();
+                    overmap_buffer.confirm_predator_position( body,
+                            predator_activation::representation::group, source );
+                }
+            }
+            activity.refresh( get_player_character().pos_abs_omt().xy(),
+                              to_turn<int>( calendar::turn ), overmap_buffer.global_state.zombie_rider_bands );
+            for( monster &body : bodies ) {
+                bool eligible = true;
+                if( body.is_caol_predator() ) {
+                    const auto &life = body.predator_state();
+                    const auto *record = activity.find( life.actor_id );
+                    eligible = !body.is_dead() && activity.owns( life.actor_id, life.handoff_epoch,
+                               predator_activation::representation::group, source ) && record->activity.active;
+                }
+                ( eligible ? moving.monsters : retained.monsters ).push_back( std::move( body ) );
+            }
+            if( !retained.monsters.empty() ) {
+                // Full snapshots already replace nominal recipe population.
+                // Splitting must never turn that ignored value into births.
+                retained.population = 0;
+                moving.population = 0;
+            }
+        }
+        if( fullbody && moving.monsters.empty() ) {
+            completed.emplace( it->first, std::move( retained ) );
+            zg.erase( it );
             continue;
         }
 
         point_abs_om omp;
         tripoint_om_sm local_sm;
-        std::tie( omp, local_sm ) = project_remain<coords::om>( mg.abs_pos );
-
-        // Decrease movement chance according to the terrain we're currently on.
-        // Hordes will tend toward roads / open fields and path around specials.
+        std::tie( omp, local_sm ) = project_remain<coords::om>( moving.abs_pos );
         const oter_id &walked_into = ter( project_to<coords::omt>( local_sm ) );
         int movement_chance = 25;
         if( is_ot_match( "road", walked_into, ot_match_type::contains ) ) {
@@ -2044,46 +2223,46 @@ void overmap::move_nemesis()
         } else if( is_ot_match( "river", walked_into, ot_match_type::prefix ) ) {
             movement_chance = 10;
         }
-
-        //update the nemesis coordinates in abs_sm for movement across overmaps
-        if( one_in( movement_chance ) && rng( 0, 200 ) < mg.avg_speed() ) {
-            if( mg.abs_pos.x() > mg.nemesis_target.x() ) {
-                mg.abs_pos.x()--;
+        const bool moved = one_in( movement_chance ) && rng( 0, 200 ) < moving.avg_speed();
+        if( moved ) {
+            moving.abs_pos.x() += ( moving.nemesis_target.x() > moving.abs_pos.x() ) -
+                                  ( moving.nemesis_target.x() < moving.abs_pos.x() );
+            moving.abs_pos.y() += ( moving.nemesis_target.y() > moving.abs_pos.y() ) -
+                                  ( moving.nemesis_target.y() < moving.abs_pos.y() );
+            const auto destination = project_to<coords::ms>( moving.abs_pos );
+            // A cross-overmap group remains a prepared source owner until
+            // fix_nemesis accepts the destination guard and transfers its node.
+            if( project_to<coords::om>( moving.abs_pos ).xy() == pos() ) {
+                for( auto body = moving.monsters.begin(); body != moving.monsters.end(); ) {
+                    if( body->is_caol_predator() && !activity.move( body->predator_state().actor_id,
+                            body->predator_state().handoff_epoch, predator_activation::representation::group,
+                            source, destination ) ) {
+                        retained.monsters.push_back( std::move( *body ) );
+                        body = moving.monsters.erase( body );
+                        retained.population = 0;
+                        moving.population = 0;
+                    } else {
+                        ++body;
+                    }
+                }
             }
-            if( mg.abs_pos.x() < mg.nemesis_target.x() ) {
-                mg.abs_pos.x()++;
-            }
-            if( mg.abs_pos.y() > mg.nemesis_target.y() ) {
-                mg.abs_pos.y()--;
-            }
-            if( mg.abs_pos.y() < mg.nemesis_target.y() ) {
-                mg.abs_pos.y()++;
-            }
-
-            //if the nemesis horde is on the same overmap as its target
-            //update the horde's om_sm coords from the abs_sm so it can spawn in correctly
-            if( project_to<coords::om>( mg.nemesis_target ) == omp ) {
-
-                // Erase the group at its old location, add the group with the new location
-                tmpzg.emplace( mg.rel_pos(), mg );
-                zg.erase( it++ );
-
-                //there is only one nemesis horde, so we can stop looping after we move it
-                break;
-
-            }
-
-            //only one nemesis, so we break after moving it
-            break;
-
-        } else {
-            //and we also break if it doesnt move
-            break;
         }
+        if( !retained.monsters.empty() ) {
+            completed.emplace( it->first, std::move( retained ) );
+        }
+        // Genuine bodies keep their committed local key current even when
+        // targeting another overmap. A crossing retains that last source key
+        // until fix_nemesis accepts it. Anonymous recipes keep their native key policy.
+        const bool local_destination = project_to<coords::om>( moving.abs_pos ).xy() == pos();
+        const auto key = moved && local_destination &&
+                         ( fullbody || project_to<coords::om>( moving.nemesis_target ) == omp ) ?
+                         moving.rel_pos() : it->first;
+        if( !fullbody || !moving.monsters.empty() ) {
+            completed.emplace( key, std::move( moving ) );
+        }
+        zg.erase( it );
     }
-    // and now back into the monster group map.
-    zg.insert( tmpzg.begin(), tmpzg.end() );
-
+    zg.insert( std::make_move_iterator( completed.begin() ), std::make_move_iterator( completed.end() ) );
 }
 
 bool overmap::remove_nemesis()
@@ -4277,6 +4456,12 @@ std::vector<std::reference_wrapper<mongroup>> overmap::debug_unsafe_get_groups_a
 void overmap::add_mon_group( const mongroup &group )
 {
     zg.emplace( group.rel_pos(), group );
+}
+
+void overmap::add_mon_group( mongroup &&group )
+{
+    const auto position = group.rel_pos();
+    zg.emplace( position, std::move( group ) );
 }
 
 void overmap::add_mon_group( const mongroup &group, int radius )

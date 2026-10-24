@@ -2611,6 +2611,14 @@ void monster::load( const JsonObject &data )
         predator.read( "ammo_initialization_version", state.ammo_initialization_version );
         predator.read( "band_reference", state.band_reference );
         predator.read( "band_revision_cache", state.band_revision_cache );
+        predator.read( "activity_bound", state.activity_bound );
+        predator.read( "activity_adopted_world", state.activity_adopted_world );
+        predator.read( "activity_suspension", state.activity_suspension );
+        predator.read( "activity_active_turns", state.activity_active_turns );
+        predator.read( "last_native_process_world", state.last_native_process_world );
+        state.last_energy_world = predator.get_int( "last_energy_world", -1 );
+        predator.read( "light_work_until_active", state.light_work_until_active );
+        predator.read( "light_work_sample", state.light_work_sample );
         ensure_predator_state();
     }
 
@@ -2636,31 +2644,31 @@ void monster::load( const JsonObject &data )
         JsonValue tied_item_json = data.get_member( "tied_item" );
         item newitem;
         newitem.deserialize( tied_item_json );
-        tied_item = cata::make_value<item>( newitem );
+        tied_item = cata::make_value<item>( std::move( newitem ) );
     }
     if( data.has_object( "tack_item" ) ) {
         JsonValue tack_item_json = data.get_member( "tack_item" );
         item newitem;
         newitem.deserialize( tack_item_json );
-        tack_item = cata::make_value<item>( newitem );
+        tack_item = cata::make_value<item>( std::move( newitem ) );
     }
     if( data.has_object( "armor_item" ) ) {
         JsonValue armor_item_json = data.get_member( "armor_item" );
         item newitem;
         newitem.deserialize( armor_item_json );
-        armor_item = cata::make_value<item>( newitem );
+        armor_item = cata::make_value<item>( std::move( newitem ) );
     }
     if( data.has_object( "storage_item" ) ) {
         JsonValue storage_item_json = data.get_member( "storage_item" );
         item newitem;
         newitem.deserialize( storage_item_json );
-        storage_item = cata::make_value<item>( newitem );
+        storage_item = cata::make_value<item>( std::move( newitem ) );
     }
     if( data.has_object( "battery_item" ) ) {
         JsonValue battery_item_json = data.get_member( "battery_item" );
         item newitem;
         newitem.deserialize( battery_item_json );
-        battery_item = cata::make_value<item>( newitem );
+        battery_item = cata::make_value<item>( std::move( newitem ) );
     }
     data.read( "hp", hp );
 
@@ -2810,6 +2818,14 @@ void monster::store( JsonOut &json ) const
         json.member( "ammo_initialization_version", state.ammo_initialization_version );
         json.member( "band_reference", state.band_reference );
         json.member( "band_revision_cache", state.band_revision_cache );
+        json.member( "activity_bound", state.activity_bound );
+        json.member( "activity_adopted_world", state.activity_adopted_world );
+        json.member( "activity_suspension", state.activity_suspension );
+        json.member( "activity_active_turns", state.activity_active_turns );
+        json.member( "last_native_process_world", state.last_native_process_world );
+        json.member( "last_energy_world", state.last_energy_world );
+        json.member( "light_work_until_active", state.light_work_until_active );
+        json.member( "light_work_sample", state.light_work_sample );
         json.end_object();
     }
     if( !population_member.empty() ) {

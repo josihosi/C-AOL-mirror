@@ -9910,7 +9910,8 @@ void map::spawn_monsters_submap_group( const tripoint_rel_sm &gp, mongroup &grou
     Character &player_character = get_player_character();
     const int s_range = std::min( HALF_MAPSIZE_X,
                                   player_character.sight_range( g->light_level( player_character.posz() ) ) );
-    int pop = group.population;
+    const std::size_t real_snapshot_count = group.monsters.size();
+    int pop = real_snapshot_count == 0 ? group.population : 0;
     std::vector<tripoint_bub_ms> locations;
     if( !ignore_sight ) {
         // If the submap is one of the outermost submaps, assume that monsters are
@@ -9988,10 +9989,14 @@ void map::spawn_monsters_submap_group( const tripoint_rel_sm &gp, mongroup &grou
         dbg( D_WARNING ) << "Empty locations for group " << group.type.str() <<
                          " at " << gp.x() << "," << gp.y() << "," << gp.z() <<
                          " global " << glp.x() << "," << glp.y() << "," << glp.z();
-        // Just kill the group. It's not like we're removing existing monsters
-        // Unless it's a horde - then don't kill it and let it spawn behind a tree or smoke cloud
+        // Preserve actual bodies. Anonymous population retains its existing
+        // non-horde refusal policy; it must not be regenerated on each retry.
         if( !group.horde ) {
-            group.clear();
+            if( real_snapshot_count == 0 ) {
+                group.clear();
+            } else {
+                group.population = 0;
+            }
         }
 
         return;
@@ -10019,14 +10024,35 @@ void map::spawn_monsters_submap_group( const tripoint_rel_sm &gp, mongroup &grou
         }
     }
 
-    // Find horde's target submap
-    for( monster &tmp : group.monsters ) {
+    const tripoint_abs_ms source = project_to<coords::ms>( group.abs_pos );
+    std::vector<monster> refused;
+    for( std::size_t index = 0; index < group.monsters.size(); ++index ) {
+        monster &tmp = group.monsters[index];
+        const bool real_snapshot = index < real_snapshot_count;
+        const bool transfer_predator = real_snapshot && tmp.is_caol_predator() && !tmp.is_dead();
+        if( transfer_predator ) {
+            tmp.ensure_predator_state();
+            if( !overmap_buffer.confirm_predator_position( tmp,
+                    predator_activation::representation::group, source ) ) {
+                refused.push_back( std::move( tmp ) );
+                continue;
+            }
+            auto &world = overmap_buffer.global_state.predator_activity;
+            world.refresh( player_character.pos_abs_omt().xy(), to_turn<int>( calendar::turn ),
+                           overmap_buffer.global_state.zombie_rider_bands );
+            if( !world.find( tmp.predator_state().actor_id )->activity.active ) {
+                refused.push_back( std::move( tmp ) );
+                continue;
+            }
+        }
+        bool accepted = false;
         for( int tries = 0; tries < 10 && !locations.empty(); tries++ ) {
             const tripoint_bub_ms local_pos = random_entry_removed( locations );
             const tripoint_abs_ms abs_pos = get_abs( local_pos );
             if( !tmp.can_move_to( local_pos ) ) {
                 continue; // target can not contain the monster
             }
+            monster prepared( tmp );
             if( group.horde ) {
                 // Give monster a random point near horde's expected destination
                 const tripoint_sm_ms pos_in_sm( rng( 0, SEEX ), rng( 0, SEEY ), local_pos.z() );
@@ -10034,21 +10060,42 @@ void map::spawn_monsters_submap_group( const tripoint_rel_sm &gp, mongroup &grou
 
                 // The monster will wander to the rand_dest for several turns which is determined by the distance and interest
                 const int turns = rl_dist( abs_pos, rand_dest ) + group.interest;
-                tmp.wander_to( rand_dest, turns );
+                prepared.wander_to( rand_dest, turns );
                 add_msg_debug( debugmode::DF_MAP, "%s targeting %s", tmp.disp_name(),
-                               tmp.wander_pos.to_string_writable() );
+                               prepared.wander_pos.to_string_writable() );
             }
 
-            monster *const placed = g->place_critter_at( make_shared_fast<monster>( tmp ),
-                                    local_pos );
+            if( transfer_predator ) {
+                ++prepared.predator_state().handoff_epoch;
+            }
+            monster *placed = g->place_critter_at( make_shared_fast<monster>( std::move( prepared ) ),
+                              local_pos );
+            if( placed && transfer_predator &&
+                !overmap_buffer.transfer_predator_owner( *placed,
+                        predator_activation::representation::group, source,
+                        predator_activation::representation::local, abs_pos ) ) {
+                g->remove_zombie( *placed );
+                placed = nullptr;
+            }
             if( placed ) {
-                placed->on_load();
+                if( real_snapshot ) {
+                    tmp.transfer_owned_items_to( *placed );
+                }
+                placed->on_load(); // Same native position/ownership-before-load order.
+                accepted = true;
             }
             break;
         }
+        if( real_snapshot && !accepted ) {
+            refused.push_back( std::move( tmp ) );
+        }
     }
-    // indicates the group is empty, and can be removed later
-    group.clear();
+    if( refused.empty() ) {
+        group.clear();
+    } else {
+        group.monsters = std::move( refused );
+        group.population = 0;
+    }
 }
 
 void map::spawn_monsters_submap( const tripoint_rel_sm &gp, bool ignore_sight, bool spawn_nonlocal )

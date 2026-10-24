@@ -1,12 +1,14 @@
 #include "horde_entity.h"
 
 #include <algorithm>
+#include <limits>
 
 #include "mtype.h"
 #include "monster.h"
 #include "migo_tower_ai.h"
 #include "migo_tower_native.h"
 #include "point.h"
+#include "overmapbuffer.h"
 
 namespace
 {
@@ -113,8 +115,13 @@ bool horde_entity::is_active() const
     const monster &payload = *monster_data;
     const auto &state = payload.writhing_stalker_state();
     // A finite light investigation/search also needs arrival and expiry
-    // service when this actor has never acquired a character.
-    if( ( state.has_light_observed_position && state.has_committed_waypoint &&
+    // service when this actor has never acquired a character. Source expiry
+    // does not erase its accepted location job. Keep even an overdue job
+    // scheduled so the guarded native owner can retire it, without renewing
+    // the source or its allowance here.
+    const bool retained_light_job = !state.light_sample_id.empty() &&
+                                    state.light_sample_id == payload.predator_state().light_work_sample;
+    if( ( ( state.has_light_observed_position || retained_light_job ) && state.has_committed_waypoint &&
           ( state.phase == writhing_stalker::lifecycle_phase::shadowing ||
             state.phase == writhing_stalker::lifecycle_phase::approaching ) ) ||
         ( state.phase == writhing_stalker::lifecycle_phase::searching &&
@@ -141,9 +148,11 @@ bool horde_entity::can_perceive_light() const
     return type != nullptr && type->has_flag( mon_flag_SEES );
 }
 
-void horde_entity::expire_light_interest( const time_point &now )
+void horde_entity::expire_light_interest( const time_point &now, light_interest_expiry expiry )
 {
-    if( light_expires == calendar::turn_zero || now < light_expires || destination != light_source ||
+    if( expiry == light_interest_expiry::retain_actor_work ||
+        ( expiry == light_interest_expiry::native_world &&
+          ( light_expires == calendar::turn_zero || now < light_expires ) ) || destination != light_source ||
         tracking_intensity > light_interest_strength ) {
         return;
     }
@@ -161,6 +170,8 @@ void horde_entity::ensure_predator_payload( const tripoint_abs_ms &position )
     monster_data = std::make_unique<monster>( type->id );
     monster_data->set_pos_abs_only( position );
     monster_data->set_moves( moves );
+    overmap_buffer.adopt_legacy_predator_identity( *monster_data,
+            "horde:" + position.to_string() + ":" + type->id.str() );
     monster_data->predator_state();
 }
 
@@ -251,20 +262,30 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         return false;
     }
     predator_lifecycle_state &life = monster_data->predator_state();
-    if( life.last_advanced_turn == now_turn ) {
+    const bool stalker = monster_data->type->id.str() == "mon_writhing_stalker";
+    if( life.last_advanced_turn == now_turn ||
+        ( stalker && ( life.last_advanced_turn > now_turn ||
+                       monster_data->writhing_stalker_state().last_advanced_turn > now_turn ) ) ) {
+        return true;
+    }
+    // A newly authenticated interval earns no historical work. It still has
+    // a current native opportunity to observe arrival or retire a sound,
+    // but a frozen or unauthenticated body must not consume that opportunity.
+    if( active_elapsed == 0 && stalker &&
+        ( now_turn != to_turn<int>( calendar::turn ) ||
+          !overmap_buffer.predator_activity_for( *monster_data,
+                  predator_activation::representation::abstract, position ) ) ) {
         return true;
     }
     life.last_advanced_turn = now_turn;
-    if( monster_data->type->id.str() == "mon_writhing_stalker" ) {
+    if( active_elapsed == 0 && !stalker ) {
+        return true;
+    }
+    if( stalker ) {
         writhing_stalker::persistent_state &state = monster_data->writhing_stalker_state();
         const bool carried_route = state.owns_waypoint( destination ) &&
                                    !sound_owns_destination( *monster_data, destination );
-        state.advance_to( now_turn, active_elapsed );
-        if( active_elapsed == 0 ) {
-            // The shared activation owner must also gate transport/evolution
-            // before this entrypoint; this seam does not implement that system.
-            return true;
-        }
+        writhing_stalker::advance_active_work( *monster_data, now_turn );
         // Also settle an arrived carrier restored from an older payload
         // before a new speculative waypoint can replace its destination.
         if( writhing_stalker::retire_arrived_sound( *monster_data, destination, position ) ) {
@@ -293,8 +314,11 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         }
         // Abstract transport executes its own native one-tile steps. A local
         // intermediate light step must not replace the observed source goal.
+        const bool retained_light_location = overmap_buffer.predator_light_work_alive( *monster_data ) &&
+                                             !state.light_sample_id.empty() && life.light_work_sample == state.light_sample_id &&
+                                             state.light_observed_turn >= 0 && state.light_observed_turn <= now_turn;
         if( state.sighting_active_turn < 0 && state.search_started_active < 0 &&
-            state.light_interest_active( now_turn ) &&
+            ( state.light_interest_active( now_turn ) || retained_light_location ) &&
             ( state.phase == writhing_stalker::lifecycle_phase::shadowing ||
               state.phase == writhing_stalker::lifecycle_phase::approaching ) ) {
             state.committed_waypoint = state.light_observed_position;
@@ -344,11 +368,14 @@ bool horde_entity::advance_predator_intent( const tripoint_abs_ms &position, con
         // recognition.  Real local observations remain the only way to set
         // target_identity.
         if( !state.evidence_valid( now_turn ) && !light_sample_id.empty() &&
-            light_expires > calendar::turn ) {
+            overmap_buffer.predator_light_work_alive( *monster_data ) ) {
             state.phase = zombie_rider_overmap_ai::pursuit_phase::searching;
             state.movement_waypoint = light_source;
             state.has_movement_waypoint = true;
-            state.search_until_turn = to_turn<int>( light_expires );
+            const auto remaining = life.light_work_until_active -
+                                   overmap_buffer.predator_active_time( *monster_data );
+            state.search_until_turn = static_cast<int>( std::min<std::int64_t>(
+                                          std::numeric_limits<int>::max(), now_turn + remaining ) );
         }
         if( state.has_movement_waypoint ) {
             destination = state.movement_waypoint;

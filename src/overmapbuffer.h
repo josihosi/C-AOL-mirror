@@ -29,6 +29,7 @@
 #include "overmap_types.h"
 #include "overmap_worldgen.h"
 #include "point.h"
+#include "predator_state.h"
 #include "simple_pathfinding.h"
 #include "type_id.h"
 #include "zombie_rider_overmap_ai.h"
@@ -208,6 +209,7 @@ struct overmap_global_state {
     // Authoritative durable membership for zombie-rider bands.  Light memory
     // may select investigators but never creates membership in this registry.
     zombie_rider_overmap_ai::rider_band_registry zombie_rider_bands;
+    predator_activation::world_state predator_activity;
     // placed regions by overmap
     std::unordered_map<tripoint_abs_om, region_settings_id> placed_regions;
 
@@ -246,6 +248,32 @@ class overmapbuffer
         // The single advancing-turn owner for local and abstract rider
         // encounters, membership union, and encounter-bounded sharing.
         void reconcile_rider_band_encounters();
+        // Native owner boundaries authenticate the only body. Range queries
+        // use this compact ledger; they never load distant submaps.
+        void bootstrap_predator_positions();
+        bool predator_activity_at( horde_entity &entity, const tripoint_abs_ms &position,
+                                   int *active_turns = nullptr );
+        bool confirm_predator_position( const monster &body,
+                                        predator_activation::representation owner,
+                                        const tripoint_abs_ms &position );
+        bool transfer_predator_owner( monster &destination,
+                                      predator_activation::representation from,
+                                      const tripoint_abs_ms &source_position,
+                                      predator_activation::representation to,
+                                      const tripoint_abs_ms &destination_position );
+        void adopt_legacy_predator_identity( monster &body, const std::string &entry );
+        bool predator_activity_for( monster &body, predator_activation::representation owner,
+                                    const tripoint_abs_ms &position, int *active_turns = nullptr );
+        bool prepare_predator_capture( monster &body );
+        bool can_release_captured_predator( const monster &body, std::int64_t item_uid );
+        // Synchronous placement acceptance only, after the preflight above.
+        void release_captured_predator( monster &body, std::int64_t item_uid,
+                                       std::uint64_t snapshot_epoch );
+        std::int64_t predator_active_time( const monster &body ) const;
+        std::int64_t predator_pending_pause( const monster &body ) const;
+        bool predator_light_work_alive( const monster &body ) const;
+        void retain_predator_light_work( monster &body, const std::string &sample,
+                                         int observed_world, int duration_turns );
 
         /**
          * Returns the overmap terrain at the given OMT coordinates.
@@ -709,6 +737,7 @@ class overmapbuffer
         void inc_major_river_count();
 
     private:
+        void confirm_predator_owners( overmap &owner );
         /**
          * Common function used by the find_closest/all/random to determine if the location is
          * findable based on the specified criteria.
@@ -788,7 +817,7 @@ class overmapbuffer
          * Go thorough the monster groups of the overmap to find the nemesis
          * horde from the "hunted" trait and move it across overmaps.
          */
-        void fix_nemesis( overmap &new_overmap );
+        void fix_nemesis( overmap &new_overmap, bool fullbody );
         /**
          * Moves out-of-bounds NPCs to the overmaps they should be in.
          */

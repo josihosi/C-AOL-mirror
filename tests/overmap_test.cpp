@@ -413,7 +413,7 @@ TEST_CASE( "predator cross-overmap handoff cannot advance twice in one turn",
            "[overmap][hordes][predator]" )
 {
     restore_on_out_of_scope restore_calendar_turn( calendar::turn );
-    calendar::turn = calendar::turn_zero + 1_turns;
+    calendar::turn = calendar::turn_zero;
     clear_overmaps();
     clear_map_and_put_player_underground();
 
@@ -429,6 +429,9 @@ TEST_CASE( "predator cross-overmap handoff cannot advance twice in one turn",
 
     const tripoint_abs_ms source = project_combine( source_om_pos,
                                    tripoint_om_ms( OMAPX * 2 * SEEX - 1, 20 * SEEX, 0 ) );
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope restore_avatar( [&]() { get_avatar().setpos( old_avatar, false ); } );
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( source ) - point( 39, 0 ) ), false );
     const tripoint_abs_ms handoff = source + point_rel_ms( 1, 0 );
     const tripoint_abs_ms goal = handoff + point_rel_ms( 1, 0 );
     REQUIRE( project_to<coords::om>( handoff ).xy() == destination_om_pos );
@@ -476,6 +479,11 @@ TEST_CASE( "predator cross-overmap handoff cannot advance twice in one turn",
         outbound->monster_data->add_item( item( itype_id( "rock" ) ) );
         outbound->monster_data->ammo[itype_id( "zombie_rider_tainted_bone_arrow" )] = 0;
         outbound->monster_data->predator_state().handoff_epoch = 5;
+        // Native zero-action adoption precedes this one real active interval.
+        // Seed current intent only afterward; the tested handoff is not a
+        // fabricated backlog grant at first cold binding.
+        source_om->hordes.expire_light_interest( calendar::turn );
+        calendar::turn += 1_turns;
         outbound->monster_data->predator_state().last_advanced_turn = to_turn<int>( calendar::turn );
         const std::string actor_id = outbound->monster_data->predator_state().actor_id;
         if( type == mtype_id( "mon_writhing_stalker" ) ) {

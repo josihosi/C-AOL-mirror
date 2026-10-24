@@ -3,6 +3,9 @@
 #include "creature.h"
 #include "json.h"
 #include "calendar.h"
+#include "monster.h"
+#include "mtype.h"
+#include "overmapbuffer.h"
 #include "rng.h"
 
 #include <algorithm>
@@ -10,12 +13,47 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <limits>
 #include <unordered_set>
 #include <tuple>
 #include <utility>
 
 namespace writhing_stalker
 {
+
+void advance_active_work( monster &stalker, const int now_turn )
+{
+    if( stalker.type->id.str() != "mon_writhing_stalker" || stalker.is_dead() ||
+        now_turn != to_turn<int>( calendar::turn ) ) {
+        return;
+    }
+    auto &life = stalker.predator_state();
+    const auto &world = overmap_buffer.global_state.predator_activity;
+    const auto *actor = world.find( life.actor_id );
+    if( !actor || !life.activity_bound ||
+        life.activity_adopted_world != actor->activity.adopted_world ||
+        !actor->activity.active || actor->activity.last_world != now_turn ||
+        actor->activity.adopted_world < 0 || actor->activity.adopted_world > now_turn ||
+        actor->type != stalker.type->id.str() ||
+        !world.owns( life.actor_id, life.handoff_epoch, actor->owner, stalker.pos_abs() ) ) {
+        return;
+    }
+    auto &state = stalker.writhing_stalker_state();
+    const auto active = actor->activity.active_at( now_turn );
+    if( now_turn <= state.last_advanced_turn || active < life.activity_active_turns ) {
+        return; // A future anchor or repeated callback cannot spend work.
+    }
+    const int earned = static_cast<int>( std::min<std::int64_t>(
+                           std::numeric_limits<int>::max(), active - life.activity_active_turns ) );
+    const bool retained = overmap_buffer.predator_light_work_alive( stalker );
+    if( state.last_advanced_turn < 0 ) {
+        // The native registry already authenticated this interval. Initialize
+        // its origin without inventing work before that adoption boundary.
+        state.advance_to( actor->activity.adopted_world, 0, retained );
+    }
+    state.advance_to( now_turn, earned, retained );
+    life.activity_active_turns = active;
+}
 
 void familiar_place::serialize( JsonOut &json ) const
 {
@@ -37,7 +75,23 @@ void familiar_place::deserialize( const JsonObject &json )
     json.read( "revisit_at_active", revisit_at_active );
 }
 
-void persistent_state::advance_to( const int now_turn, const int active_elapsed )
+void persistent_state::suspend_work( const int paused_turns )
+{
+    if( paused_turns <= 0 ) {
+        return;
+    }
+    // Route progress is earned work too: suspension cannot spend its
+    // no-progress allowance while a body is frozen or captured.
+    for( int *deadline : { &cooldown_until_turn, &search_until_turn, &last_progress_turn } ) {
+        if( *deadline >= 0 ) {
+            *deadline = static_cast<int>( std::min<std::int64_t>(
+                    std::numeric_limits<int>::max(), static_cast<std::int64_t>( *deadline ) + paused_turns ) );
+        }
+    }
+}
+
+void persistent_state::advance_to( const int now_turn, const int active_elapsed,
+                                 const bool retained_light_work )
 {
     if( now_turn <= last_advanced_turn ) {
         return;
@@ -51,15 +105,15 @@ void persistent_state::advance_to( const int now_turn, const int active_elapsed 
             place.valid = false;
         }
     }
-    if( has_light_observed_position && light_expires_turn >= 0 && now_turn >= light_expires_turn ) {
+    if( light_observed_turn >= 0 && !light_sample_id.empty() &&
+        light_expires_turn >= 0 && now_turn >= light_expires_turn ) {
         const bool expired_route = sighting_active_turn < 0 && search_started_active < 0 &&
                                    has_committed_waypoint &&
                                    ( phase == lifecycle_phase::shadowing || phase == lifecycle_phase::approaching );
         has_light_observed_position = false;
-        light_observed_turn = -1;
-        light_expires_turn = -1;
-        light_sample_id.clear();
-        if( expired_route ) {
+        // Acquisition remains a world fact. Retained work may remember this
+        // old location, but light_interest_active never calls it current sight.
+        if( expired_route && !retained_light_work ) {
             has_committed_waypoint = false;
             phase = lifecycle_phase::idle;
             phase_entered_turn = now_turn;
@@ -131,7 +185,9 @@ bool persistent_state::arrive_at( const tripoint_abs_ms &position )
         return true;
     }
     if( sighting_active_turn < 0 && search_started_active < 0 &&
-        has_light_observed_position && position == light_observed_position &&
+        light_observed_turn >= 0 && !light_sample_id.empty() &&
+        has_committed_waypoint && committed_waypoint == light_observed_position &&
+        position == light_observed_position &&
         ( phase == lifecycle_phase::shadowing || phase == lifecycle_phase::approaching ) ) {
         phase = lifecycle_phase::searching;
         phase_entered_turn = last_advanced_turn;

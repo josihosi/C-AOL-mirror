@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,6 +16,17 @@
 #include "avatar.h"
 #include "avatar_action.h"
 #include "bodypart.h"
+#include "cata_scope_helpers.h"
+#include "creature_tracker.h"
+#include "json.h"
+#include "json_loader.h"
+#include "map.h"
+#include "map_helpers.h"
+#include "map_helpers_tests.h"
+#include "monster.h"
+#include "overmapbuffer.h"
+#include "predator_state.h"
+#include "writhing_stalker_ai.h"
 #include "calendar.h"
 #include "cata_catch.h"
 #include "character_attire.h"
@@ -1383,4 +1395,420 @@ TEST_CASE( "uncraft_blacklist_is_pruned", "[item]" )
             CHECK_FALSE( is_within_tolerance );
         }
     }
+}
+
+// NEW fixtures use native constructor identities, never rewrite copied tokens.
+static monster &new_capture_predator( const mtype_id &type, const tripoint_bub_ms &position )
+{
+    for( int n = 0; n < 256; ++n ) {
+        auto body = make_shared_fast<monster>( type );
+        body->ensure_predator_state();
+        const auto &id = body->predator_state().actor_id;
+        bool occupied = overmap_buffer.global_state.predator_activity.find( id ) != nullptr;
+        for( const monster &other : g->all_monsters() ) {
+            occupied = occupied || ( other.is_caol_predator() && other.predator_state().actor_id == id );
+        }
+        if( occupied ) {
+            continue;
+        }
+        body->ammo = body->type->starting_ammo;
+        monster *placed = g->place_critter_at( body, position );
+        REQUIRE( placed );
+        return *placed;
+    }
+    FAIL( "no unused native predator constructor identity" );
+    std::abort();
+}
+
+static std::string capture_body_bytes( const monster &body )
+{
+    std::ostringstream out;
+    JsonOut json( out );
+    body.serialize( json );
+    return out.str();
+}
+
+static std::string capture_ledger_bytes()
+{
+    std::ostringstream out;
+    JsonOut json( out );
+    overmap_buffer.global_state.predator_activity.serialize( json );
+    return out.str();
+}
+
+TEST_CASE( "native_capture_predator_item_owner_freezes_reload_and_resumes_once",
+           "[item][predator_activation][capture][native]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 9000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms from( 65, 65, 0 );
+    const tripoint_bub_ms to = from + point::east * 3;
+    here.ter_set( from, ter_id( "t_floor" ) );
+    here.ter_set( to, ter_id( "t_floor" ) );
+    get_avatar().setpos( here, tripoint_bub_ms( from.xy(), -2 ) );
+    const std::string type = GENERATE( "mon_zombie_rider", "mon_writhing_stalker" );
+    monster &body = new_capture_predator( mtype_id( type ), from );
+    REQUIRE( overmap_buffer.predator_activity_for( body, predator_activation::representation::local, body.pos_abs() ) );
+    const auto id = body.predator_state().actor_id;
+    const auto epoch = body.predator_state().handoff_epoch;
+    body.set_hp( body.get_hp() - 5 );
+    body.set_moves( 173 );
+    body.add_item( item( itype_id( "rock" ), calendar::turn ) );
+    const auto inventory_uid = body.inv.front().uid().get_value();
+    const auto hp = body.get_hp();
+    const auto ammo = body.ammo;
+    const auto active_before = overmap_buffer.predator_active_time( body );
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    const auto carrier_uid = carrier.uid().get_value();
+    carrier.contain_monster( from );
+    REQUIRE( carrier.has_var( "contained_json" ) );
+    CHECK_FALSE( get_creature_tracker().creature_at<monster>( from ) );
+    const auto *record = overmap_buffer.global_state.predator_activity.find( id );
+    REQUIRE( record );
+    CHECK( record->owner == predator_activation::representation::captured );
+    CHECK( record->epoch == epoch + 1 );
+    CHECK( record->capture_item_uid == carrier_uid );
+    CHECK_FALSE( record->position );
+    CHECK_FALSE( record->activity.active );
+    const auto contained = carrier.get_var( "contained_json", "" );
+    calendar::turn += 600_turns;
+    // Actual native item and ledger serializers, without an item/UID copy.
+    const std::string item_json = serialize( carrier );
+    const std::string ledger_json = capture_ledger_bytes();
+    item loaded;
+    deserialize_from_string( loaded, item_json );
+    { JsonObject json = json_loader::from_string( ledger_json ).get_object();
+      overmap_buffer.global_state.predator_activity.deserialize( json ); }
+    CHECK( loaded.uid().get_value() == carrier_uid );
+    CHECK( loaded.get_var( "contained_json", "" ) == contained );
+    const auto refused_before = capture_ledger_bytes();
+    here.ter_set( to, ter_id( "t_wall" ) );
+    CHECK_FALSE( loaded.release_monster( to, 0 ) );
+    CHECK( loaded.get_var( "contained_json", "" ) == contained );
+    CHECK( capture_ledger_bytes() == refused_before );
+    here.ter_set( to, ter_id( "t_floor" ) );
+    // A copied item is not the native captured owner.
+    item clone( loaded );
+    REQUIRE( clone.uid().get_value() != carrier_uid );
+    CHECK_FALSE( clone.release_monster( to, 0 ) );
+    CHECK( capture_ledger_bytes() == refused_before );
+    REQUIRE( loaded.release_monster( to, 0 ) );
+    monster *released = get_creature_tracker().creature_at<monster>( to );
+    REQUIRE( released );
+    CHECK( released->predator_state().actor_id == id );
+    CHECK( released->predator_state().handoff_epoch == epoch + 2 );
+    CHECK( released->get_hp() == hp );
+    CHECK( released->ammo == ammo );
+    CHECK( released->get_moves() == 173 );
+    REQUIRE( released->inv.size() == 1 );
+    CHECK( released->inv.front().uid().get_value() == inventory_uid );
+    CHECK( overmap_buffer.predator_active_time( *released ) == active_before );
+    CHECK( released->predator_state().activity_suspension == 600 );
+    CHECK_FALSE( loaded.has_var( "contained_json" ) );
+    CHECK_FALSE( clone.release_monster( from, 0 ) );
+    CHECK( overmap_buffer.global_state.predator_activity.owns( id, epoch + 2,
+           predator_activation::representation::local, released->pos_abs() ) );
+    const auto once = capture_body_bytes( *released );
+    REQUIRE( overmap_buffer.predator_activity_for( *released, predator_activation::representation::local, released->pos_abs() ) );
+    CHECK( capture_body_bytes( *released ) == once );
+    calendar::turn += 1_turns;
+    int earned = -1;
+    REQUIRE( overmap_buffer.predator_activity_for( *released, predator_activation::representation::local, released->pos_abs(), &earned ) );
+    CHECK( earned == 1 );
+    CHECK( overmap_buffer.predator_active_time( *released ) == active_before + 1 );
+}
+
+TEST_CASE( "native_capture_refuses_foreign_local_and_missing_owner_without_rebinding",
+           "[item][predator_activation][capture][native]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    map &here = get_map();
+    const tripoint_bub_ms p( 65, 65, 0 );
+    get_avatar().setpos( here, p + point::west * 3 );
+    monster &body = new_capture_predator( mtype_id( "mon_writhing_stalker" ), p );
+    REQUIRE( overmap_buffer.predator_activity_for( body, predator_activation::representation::local, body.pos_abs() ) );
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    carrier.set_var( "contained_json", capture_body_bytes( body ) );
+    const auto before_body = capture_body_bytes( body );
+    const auto before_record = capture_ledger_bytes();
+    CHECK_FALSE( carrier.release_monster( p + point::east, 0 ) );
+    CHECK( capture_body_bytes( body ) == before_body );
+    CHECK( capture_ledger_bytes() == before_record );
+    g->remove_zombie( body );
+    CHECK_FALSE( carrier.release_monster( p + point::east, 0 ) );
+    CHECK( capture_ledger_bytes() == before_record );
+    CHECK( carrier.get_var( "contained_json", "" ) == before_body );
+}
+
+TEST_CASE( "native_placement_acceptance_is_once_before_gravity_and_absent_on_refusal",
+           "[item][predator_activation][capture][native]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    map &here = get_map();
+    const tripoint_bub_ms p( 65, 65, 0 );
+    get_avatar().setpos( here, p + point::west * 3 );
+    auto candidate = make_shared_fast<monster>( mtype_id( "mon_zombie" ) );
+    int callbacks = 0;
+    here.ter_set( p, ter_id( "t_wall" ) );
+    CHECK_FALSE( g->place_critter_around( candidate, p, 0, false, [&]( monster & ) { ++callbacks; } ) );
+    CHECK( callbacks == 0 );
+    here.ter_set( p, ter_id( "t_floor" ) );
+    REQUIRE( g->place_critter_around( candidate, p, 0, false, [&]( monster &accepted ) {
+        ++callbacks;
+        CHECK( &accepted == candidate.get() );
+        CHECK( accepted.pos_bub() == p );
+        CHECK( get_creature_tracker().creature_at<monster>( p ) == &accepted );
+    } ) );
+    CHECK( callbacks == 1 );
+    CHECK_FALSE( candidate->is_caol_predator() );
+}
+
+TEST_CASE( "native_capture_acceptance_before_forced_gravity_keeps_local_or_death_owner",
+           "[item][predator_activation][capture][native][falling]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    map &here = get_map();
+    const tripoint_bub_ms from( 65, 65, 0 );
+    const tripoint_bub_ms air = from + point::east * 3;
+    const tripoint_bub_ms landing = air + tripoint( 0, 0, -3 );
+    here.ter_set( from, ter_id( "t_floor" ) );
+    for( int z = 0; z > -3; --z ) {
+        here.ter_set( tripoint_bub_ms( air.xy(), z ), ter_id( "t_open_air" ) );
+    }
+    here.ter_set( landing, ter_id( "t_floor" ) );
+    get_avatar().setpos( here, from + point::west * 3 );
+    const std::string type = GENERATE( "mon_zombie_rider", "mon_writhing_stalker" );
+    const bool fatal = GENERATE( false, true );
+    CAPTURE( type, fatal );
+    monster &body = new_capture_predator( mtype_id( type ), from );
+    REQUIRE( overmap_buffer.predator_activity_for( body, predator_activation::representation::local, body.pos_abs() ) );
+    const auto id = body.predator_state().actor_id;
+    const auto epoch = body.predator_state().handoff_epoch;
+    if( fatal ) {
+        body.set_hp( 1 );
+    }
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    carrier.contain_monster( from );
+    REQUIRE( carrier.has_var( "contained_json" ) );
+    // These real species avoid unsupported air at the ordinary item route.
+    // Retain that refusal. Exercise the separate existing forced-placement
+    // route to test acceptance ordering against genuine native gravity.
+    const auto ledger_before = capture_ledger_bytes();
+    const auto item_before = serialize( carrier );
+    CHECK_FALSE( carrier.release_monster( air, 0 ) );
+    CHECK( serialize( carrier ) == item_before );
+    CHECK( capture_ledger_bytes() == ledger_before );
+    auto candidate = make_shared_fast<monster>();
+    deserialize_from_string( *candidate, carrier.get_var( "contained_json", "" ) );
+    REQUIRE( overmap_buffer.can_release_captured_predator( *candidate, carrier.uid().get_value() ) );
+    int callbacks = 0;
+    REQUIRE( g->place_critter_around( candidate, air, 0, true, [&]( monster &accepted ) {
+        ++callbacks;
+        CHECK( accepted.pos_bub() == air );
+        CHECK( get_creature_tracker().creature_at<monster>( air ) == &accepted );
+        overmap_buffer.release_captured_predator( accepted, carrier.uid().get_value(), epoch );
+        carrier.erase_var( "contained_name" );
+        carrier.erase_var( "contained_json" );
+        carrier.erase_var( "name" );
+        carrier.erase_var( "weight" );
+    } ) );
+    CHECK( callbacks == 1 );
+    CHECK_FALSE( carrier.has_var( "contained_json" ) );
+    // creature_at intentionally excludes dead bodies before cleanup. Retain
+    // the actual accepted native shared_ptr, not an absence-as-death premise.
+    monster *fallen = candidate.get();
+    REQUIRE( fallen->pos_bub() == landing );
+    CHECK( ( get_creature_tracker().creature_at<monster>( landing ) == fallen ) == !fatal );
+    CHECK( fallen->predator_state().handoff_epoch == epoch + 2 );
+    CHECK( overmap_buffer.global_state.predator_activity.owns( id, epoch + 2,
+           predator_activation::representation::local, fallen->pos_abs() ) );
+    CHECK( fallen->is_dead() == fatal );
+    g->cleanup_dead(); // ordinary death owns the accepted post-gravity body
+    const auto *record = overmap_buffer.global_state.predator_activity.find( id );
+    REQUIRE( record );
+    CHECK( record->epoch == epoch + 2 );
+    CHECK( record->owner == ( fatal ? predator_activation::representation::dead :
+                             predator_activation::representation::local ) );
+    CHECK_FALSE( carrier.has_var( "contained_json" ) );
+}
+
+TEST_CASE( "native_capture_legacy_item_adopts_zero_only_without_genuine_owner",
+           "[item][predator_activation][capture][native][legacy]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 12000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms from( 65, 65, 0 );
+    const tripoint_bub_ms to = from + point::east * 3;
+    get_avatar().setpos( here, from + point::west * 3 );
+    here.ter_set( from, ter_id( "t_floor" ) );
+    here.ter_set( to, ter_id( "t_floor" ) );
+    overmap_buffer.bootstrap_predator_positions();
+    monster &body = new_capture_predator( mtype_id( "mon_writhing_stalker" ), from );
+    const auto id = body.predator_state().actor_id;
+    const auto epoch = body.predator_state().handoff_epoch;
+    REQUIRE_FALSE( overmap_buffer.global_state.predator_activity.find( id ) );
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    // Actual old native item format, prior to introduction of CAPTURED.
+    carrier.set_var( "contained_json", capture_body_bytes( body ) );
+    carrier.set_var( "contained_name", body.type->nname() );
+    const auto before = capture_ledger_bytes();
+    CHECK_FALSE( carrier.release_monster( to, 0 ) ); // genuine unqueried LOCAL owner
+    CHECK( capture_ledger_bytes() == before );
+    g->remove_zombie( body );
+    calendar::turn += 777_turns;
+    REQUIRE( carrier.release_monster( to, 0 ) );
+    monster *released = get_creature_tracker().creature_at<monster>( to );
+    REQUIRE( released );
+    CHECK( released->predator_state().actor_id == id );
+    CHECK( released->predator_state().handoff_epoch == epoch + 2 );
+    CHECK( overmap_buffer.predator_active_time( *released ) == 0 );
+    CHECK( released->predator_state().activity_adopted_world == to_turn<int>( calendar::turn ) );
+    CHECK( released->predator_state().activity_suspension == 0 );
+    const auto once = capture_body_bytes( *released );
+    released->process_turn();
+    CHECK( capture_body_bytes( *released ) == once );
+}
+
+TEST_CASE( "native_capture_settles_prior_frozen_body_pause_before_snapshot_once",
+           "[item][predator_activation][capture][native][biology]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 15013_turns );
+    map &here = get_map();
+    const tripoint_bub_ms from( 65, 65, 0 );
+    const tripoint_bub_ms to = from + point::east * 3;
+    here.ter_set( from, ter_id( "t_floor" ) );
+    here.ter_set( to, ter_id( "t_floor" ) );
+    get_avatar().setpos( here, from + point::west * 3 );
+    const std::string type = GENERATE( "mon_zombie_rider", "mon_writhing_stalker" );
+    monster &body = new_capture_predator( mtype_id( type ), from );
+    REQUIRE( overmap_buffer.predator_activity_for( body, predator_activation::representation::local, body.pos_abs() ) );
+    body.set_baby_timer( calendar::turn + 61_minutes );
+    const auto anchor = []( const monster &value, const std::string &key ) {
+        const auto json = json_loader::from_string( capture_body_bytes( value ) ).get_object();
+        json.allow_omitted_members();
+        return json.get_int64( key );
+    };
+    const auto baby = anchor( body, "baby_timer" );
+    const auto update = anchor( body, "last_updated" );
+    const auto evolution = anchor( body, "suspended_evolution_time" );
+    const auto active = overmap_buffer.predator_active_time( body );
+    const auto where = body.pos_abs_omt();
+    get_avatar().setpos( project_to<coords::ms>( where - point( 41, 0 ) ), false );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( body, predator_activation::representation::local, body.pos_abs() ) );
+    calendar::turn += 77_turns;
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    carrier.contain_monster( from );
+    REQUIRE( carrier.has_var( "contained_json" ) );
+    monster snapshot;
+    deserialize_from_string( snapshot, carrier.get_var( "contained_json", "" ) );
+    CHECK( snapshot.predator_state().activity_suspension == 77 );
+    CHECK( anchor( snapshot, "baby_timer" ) == baby + 77 );
+    calendar::turn += 53_turns;
+    get_avatar().setpos( here, from + point::west * 3 );
+    REQUIRE( carrier.release_monster( to, 0 ) );
+    monster *released = get_creature_tracker().creature_at<monster>( to );
+    REQUIRE( released );
+    CHECK( released->predator_state().activity_suspension == 130 );
+    CHECK( anchor( *released, "baby_timer" ) == baby + 130 );
+    CHECK( anchor( *released, "last_updated" ) == update + 130 );
+    CHECK( anchor( *released, "suspended_evolution_time" ) == evolution + 130 );
+    CHECK( overmap_buffer.predator_active_time( *released ) == active );
+    const auto once = capture_body_bytes( *released );
+    REQUIRE( overmap_buffer.predator_activity_for( *released, predator_activation::representation::local, released->pos_abs() ) );
+    CHECK( capture_body_bytes( *released ) == once );
+}
+
+
+TEST_CASE( "native_capture_refuses_malformed_epoch_or_future_body_without_mutation",
+           "[item][predator_activation][capture][native]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 19000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms p( 65, 65, 0 );
+    here.ter_set( p, ter_id( "t_floor" ) );
+    get_avatar().setpos( here, p + point::west * 3 );
+    monster &body = new_capture_predator( mtype_id( "mon_writhing_stalker" ), p );
+    const bool future = GENERATE( false, true );
+    if( future ) {
+        REQUIRE( overmap_buffer.predator_activity_for( body, predator_activation::representation::local, body.pos_abs() ) );
+        calendar::turn -= 1_turns;
+    } else {
+        // Deliberately invalid input, not an authenticated positive identity.
+        body.predator_state().handoff_epoch = std::numeric_limits<std::uint64_t>::max();
+    }
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    const auto body_before = capture_body_bytes( body );
+    const auto item_before = serialize( carrier );
+    const auto ledger_before = capture_ledger_bytes();
+    carrier.contain_monster( p );
+    CHECK( capture_body_bytes( body ) == body_before );
+    CHECK( serialize( carrier ) == item_before );
+    CHECK( capture_ledger_bytes() == ledger_before );
+    CHECK( get_creature_tracker().creature_at<monster>( p ) == &body );
+}
+
+TEST_CASE( "native_capture_ordinary_nonpredator_preserves_native_item_and_body_route",
+           "[item][predator_activation][capture][native]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    map &here = get_map();
+    const tripoint_bub_ms from( 65, 65, 0 );
+    const tripoint_bub_ms to = from + point::east * 3;
+    here.ter_set( from, ter_id( "t_floor" ) );
+    here.ter_set( to, ter_id( "t_floor" ) );
+    get_avatar().setpos( here, from + point::west * 3 );
+    monster *body = g->place_critter_at( mtype_id( "mon_zombie" ), from );
+    REQUIRE( body );
+    body->set_hp( body->get_hp() - 3 );
+    body->add_item( item( itype_id( "rock" ), calendar::turn ) );
+    const auto hp = body->get_hp();
+    const auto rock = body->inv.front().uid().get_value();
+    const auto ledger = capture_ledger_bytes();
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    const auto carrier_uid = carrier.uid().get_value();
+    carrier.contain_monster( from );
+    REQUIRE( carrier.has_var( "contained_json" ) );
+    REQUIRE( carrier.release_monster( to, 0 ) );
+    body = get_creature_tracker().creature_at<monster>( to );
+    REQUIRE( body );
+    CHECK_FALSE( body->is_caol_predator() );
+    CHECK( body->type->id == mtype_id( "mon_zombie" ) );
+    CHECK( body->get_hp() == hp );
+    REQUIRE( body->inv.size() == 1 );
+    CHECK( body->inv.front().uid().get_value() == rock );
+    CHECK( carrier.uid().get_value() == carrier_uid );
+    CHECK_FALSE( carrier.has_var( "contained_json" ) );
+    CHECK( capture_ledger_bytes() == ledger );
 }

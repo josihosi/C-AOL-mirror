@@ -11,17 +11,20 @@
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
 #include "character.h"
+#include "creature_tracker.h"
 #include "damage.h"
 #include "debug.h"
 #include "effect.h"
 #include "game.h"
 #include "horde_entity.h"
 #include "json.h"
+#include "item.h"
 #include "json_loader.h"
 #include "level_cache.h"
 #include "map.h"
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
+#include "memory_fast.h"
 #include "monster.h"
 #include "mongroup.h"
 #include "mtype.h"
@@ -31,6 +34,7 @@
 #include "overmapbuffer.h"
 #include "player_helpers.h"
 #include "projectile.h"
+#include "rng.h"
 #include "scout_observation.h"
 #include "scent_map.h"
 #include "type_id.h"
@@ -49,6 +53,44 @@ static const species_id species_ZOMBIE( "ZOMBIE" );
 
 namespace
 {
+
+// Only NEW fixture births use this factory. Copies, handoffs and reloads
+// retain their existing token and must still pass the native ownership guards.
+monster new_stalker_fixture_body()
+{
+    std::optional<monster> fresh;
+    for( int attempt = 0; attempt < 256; ++attempt ) {
+        fresh.emplace( mon_writhing_stalker );
+        const auto &token = fresh->predator_state().actor_id;
+        bool owned = overmap_buffer.global_state.predator_activity.find( token ) != nullptr;
+        for( const monster &body : g->all_monsters() ) {
+            owned = owned || ( body.is_caol_predator() && body.predator_state().actor_id == token );
+        }
+        if( !owned ) {
+            break;
+        }
+        // Native constructor retries consume RNG; never rewrite a token or
+        // reset canonical authority to make a copied identity look new.
+        fresh.reset();
+    }
+    REQUIRE( fresh ); // fail openly if the bounded fixture cannot obtain a birth
+    return std::move( *fresh );
+}
+
+monster &spawn_new_stalker_fixture( const tripoint_bub_ms &start, bool death_drops = true )
+{
+    monster probe( mon_writhing_stalker ); // same predicate probe as spawn_test_monster
+    REQUIRE( get_creature_tracker().creature_at( start ) == nullptr );
+    REQUIRE( probe.will_move_to( start ) );
+    REQUIRE( probe.know_danger_at( start ) );
+    auto fresh = make_shared_fast<monster>( new_stalker_fixture_body() );
+    fresh->ammo = fresh->type->starting_ammo; // native type-placement adapter
+    monster *placed = g->place_critter_at( fresh, start );
+    REQUIRE( placed );
+    REQUIRE( placed == fresh.get() );
+    placed->death_drops = death_drops;
+    return *placed;
+}
 
 const char *decision_trace_name( const writhing_stalker::decision value )
 {
@@ -222,6 +264,530 @@ monster round_trip_writhing_stalker( const monster &stalker )
 
 } // namespace
 
+TEST_CASE( "stalker_new_fixture_birth_keeps_foreign_native_token_authority",
+           "[writhing_stalker][monster][fixture_ownership]" )
+{
+    const auto original_rng = rng_get_engine();
+    on_out_of_scope restore_rng( [&] { rng_get_engine() = original_rng; } );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_map_without_vision();
+    clear_avatar();
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    const auto birth_rng = rng_get_engine();
+    monster &first = spawn_new_stalker_fixture( center + point::east * 2 );
+    REQUIRE( overmap_buffer.predator_activity_for( first,
+             predator_activation::representation::local, first.pos_abs() ) );
+    const auto id = first.predator_state().actor_id;
+    const auto position = first.pos_abs();
+    const auto epoch = first.predator_state().handoff_epoch;
+    auto retained = get_creature_tracker().find( position );
+    REQUIRE( retained.get() == &first );
+    g->remove_zombie( first ); // absent is not dead or authority to reuse its token
+    std::ostringstream before;
+    { JsonOut json( before ); retained->serialize( json ); }
+    const auto turn = calendar::turn;
+    const auto map_origin = here.get_abs_sub();
+    rng_get_engine() = birth_rng; // reproduce the independent fixture's native draws
+    monster &second = spawn_new_stalker_fixture( center + point::east * 5 );
+    CHECK( second.predator_state().actor_id != id );
+    CHECK( second.predator_state().handoff_epoch == 0 );
+    CHECK( get_creature_tracker().find( second.pos_abs() ).get() == &second );
+    auto &world = overmap_buffer.global_state.predator_activity;
+    CHECK_FALSE( world.confirm( id, mon_writhing_stalker.str(), epoch,
+                               predator_activation::representation::local, second.pos_abs(),
+                               to_turn<int>( calendar::turn ) ) );
+    CHECK( world.owns( id, epoch, predator_activation::representation::local, position ) );
+    std::ostringstream after;
+    { JsonOut json( after ); retained->serialize( json ); }
+    CHECK( after.str() == before.str() );
+    CHECK( calendar::turn == turn );
+    CHECK( here.get_abs_sub() == map_origin );
+    REQUIRE( overmap_buffer.predator_activity_for( second,
+             predator_activation::representation::local, second.pos_abs() ) );
+    CHECK( world.owns( second.predator_state().actor_id, 0,
+                       predator_activation::representation::local, second.pos_abs() ) );
+    CHECK( overmap_buffer.predator_active_time( second ) == 0 );
+}
+
+TEST_CASE( "stalker_new_abstract_fixture_birth_preserves_prior_owner_and_reload",
+           "[writhing_stalker][predator_activation][native][fixture_ownership]" )
+{
+    const auto original_rng = rng_get_engine();
+    on_out_of_scope restore_rng( [&] { rng_get_engine() = original_rng; } );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    clear_map_and_put_player_underground();
+    on_out_of_scope clear_local( [&] {
+        clear_map_without_vision();
+        get_avatar().setpos( old_avatar, false );
+    } );
+    set_time( calendar::turn_zero + 100000_turns );
+    map &here = get_map();
+    const auto source = here.get_abs( tripoint_bub_ms( -36, 65, 0 ) );
+    const auto other = source + point::east * 3;
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    std::string first_id;
+    std::string second_id;
+    on_out_of_scope cleanup( [&] {
+        om.release_monster_payload( source, first_id );
+        om.release_monster_payload( other, second_id );
+    } );
+    REQUIRE( overmap_buffer.entity_at( source ) == nullptr );
+    REQUIRE( overmap_buffer.entity_at( other ) == nullptr );
+    const auto birth_rng = rng_get_engine();
+    monster first = new_stalker_fixture_body();
+    first_id = first.predator_state().actor_id;
+    first.set_pos_abs_only( source );
+    first.set_moves( 0 );
+    REQUIRE( om.hordes.spawn_entity( source, first ) );
+    auto *first_owner = overmap_buffer.entity_at( source );
+    REQUIRE( first_owner );
+    REQUIRE( first_owner->monster_data );
+    REQUIRE( overmap_buffer.predator_activity_at( *first_owner, source ) );
+    REQUIRE( overmap_buffer.predator_activity_for( *first_owner->monster_data,
+             predator_activation::representation::abstract, source ) );
+    auto &world = overmap_buffer.global_state.predator_activity;
+    const auto bytes = []( const monster &body ) {
+        std::ostringstream out;
+        { JsonOut json( out ); body.serialize( json ); }
+        return out.str();
+    };
+    const auto original_body = bytes( *first_owner->monster_data );
+    const auto origin = here.get_abs_sub();
+    const auto now = calendar::turn;
+    // The same genuine constructor draw collides with a prior native owner.
+    // Only a NEW birth may retry; the old body's copy must remain refused.
+    rng_get_engine() = birth_rng;
+    monster collision( mon_writhing_stalker );
+    REQUIRE( world.find( collision.predator_state().actor_id ) != nullptr );
+    rng_get_engine() = birth_rng;
+    monster second = new_stalker_fixture_body();
+    second_id = second.predator_state().actor_id;
+    CHECK( second_id != first_id );
+    CHECK( world.find( second_id ) == nullptr ); // factory does not authenticate
+    second.set_pos_abs_only( other );
+    second.set_moves( 0 );
+    REQUIRE( om.hordes.spawn_entity( other, second ) );
+    auto *second_owner = overmap_buffer.entity_at( other );
+    REQUIRE( second_owner );
+    REQUIRE( second_owner->monster_data );
+    REQUIRE( overmap_buffer.predator_activity_at( *second_owner, other ) );
+    REQUIRE( overmap_buffer.predator_activity_for( *second_owner->monster_data,
+             predator_activation::representation::abstract, other ) );
+    CHECK( overmap_buffer.predator_active_time( *second_owner->monster_data ) == 0 );
+    CHECK( second_owner->monster_data->writhing_stalker_state().active_turns == 0 );
+    CHECK( second_owner->monster_data->get_moves() == 0 );
+    CHECK( world.owns( first_id, 0, predator_activation::representation::abstract, source ) );
+    monster foreign = *first_owner->monster_data;
+    foreign.set_pos_abs_only( other );
+    const auto refused = bytes( foreign );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( foreign,
+                 predator_activation::representation::abstract, other ) );
+    CHECK( bytes( foreign ) == refused );
+    const bool reload = GENERATE( false, true );
+    if( reload ) {
+        *second_owner->monster_data = round_trip_writhing_stalker( *second_owner->monster_data );
+        om.hordes.refresh_entity_bucket( other );
+    }
+    const auto loaded = bytes( *second_owner->monster_data );
+    REQUIRE( overmap_buffer.predator_activity_for( *second_owner->monster_data,
+             predator_activation::representation::abstract, other ) );
+    CHECK( bytes( *second_owner->monster_data ) == loaded );
+    CHECK( second_owner->monster_data->predator_state().actor_id == second_id );
+    CHECK( second_owner->monster_data->predator_state().handoff_epoch == 0 );
+    CHECK( world.owns( second_id, 0, predator_activation::representation::abstract, other ) );
+    CHECK( bytes( *first_owner->monster_data ) == original_body );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( foreign,
+                 predator_activation::representation::abstract, other ) );
+    CHECK( bytes( foreign ) == refused );
+    CHECK( calendar::turn == now );
+    CHECK( here.get_abs_sub() == origin );
+}
+
+TEST_CASE( "stalker_activation_query_preserves_native_intent_owner",
+           "[writhing_stalker][predator_activation][native][intent_owner]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope cleanup( [&] {
+        clear_map_without_vision();
+        get_avatar().setpos( old_avatar, false );
+    } );
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 100000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    monster &body = spawn_new_stalker_fixture( center + point::east * 2 );
+    const auto position = body.pos_abs();
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::local, position ) );
+    auto &state = body.writhing_stalker_state();
+    const int now = to_turn<int>( calendar::turn );
+    state.advance_to( now );
+    REQUIRE( state.observe_light_interest( position + point::east, "query-owner", now, 1 ) );
+    const auto intent_bytes = [&]() {
+        std::ostringstream out;
+        { JsonOut json( out ); state.serialize( json ); }
+        return out.str();
+    };
+    const auto before = intent_bytes();
+    const auto consumed = body.predator_state().activity_active_turns;
+    const auto moves = body.get_moves();
+    calendar::turn += 2_turns;
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::local, position ) );
+    CHECK( intent_bytes() == before );
+    CHECK( body.predator_state().activity_active_turns == consumed );
+    CHECK( body.get_moves() == moves );
+    CHECK( body.pos_abs() == position );
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::local, position ) );
+    CHECK( intent_bytes() == before );
+}
+
+TEST_CASE( "stalker_native_work_consumes_once_across_pause_and_transfer",
+           "[writhing_stalker][predator_activation][native][intent_owner]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    overmap *abstract_owner = nullptr;
+    std::string actor;
+    tripoint_abs_ms position;
+    on_out_of_scope cleanup( [&] {
+        clear_map_without_vision();
+        if( abstract_owner ) {
+            abstract_owner->release_monster_payload( position, actor );
+        }
+        get_avatar().setpos( old_avatar, false );
+    } );
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 100000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    monster &body = spawn_new_stalker_fixture( center + point::east * 2 );
+    position = body.pos_abs();
+    actor = body.predator_state().actor_id;
+    const auto bytes = []( const monster &value ) {
+        std::ostringstream out;
+        { JsonOut json( out ); value.serialize( json ); }
+        return out.str();
+    };
+    const auto query = [&]() {
+        return overmap_buffer.predator_activity_for( body,
+                predator_activation::representation::local, position );
+    };
+    const auto advance = [&]() {
+        writhing_stalker::advance_active_work( body, to_turn<int>( calendar::turn ) );
+    };
+    REQUIRE( query() );
+    advance();
+    auto &state = body.writhing_stalker_state();
+    REQUIRE( state.observe_light_interest( position + point::east, "native-owner",
+                                         to_turn<int>( calendar::turn ), 1 ) );
+    calendar::turn += 2_turns;
+    REQUIRE( query() );
+    CHECK( body.predator_state().activity_active_turns == 0 );
+    advance();
+    CHECK( state.active_turns == 2 );
+    CHECK( body.predator_state().activity_active_turns == 2 );
+    CHECK( state.phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( state.has_committed_waypoint );
+    const auto once = bytes( body );
+    advance();
+    REQUIRE( query() );
+    advance();
+    CHECK( bytes( body ) == once );
+
+    monster foreign = round_trip_writhing_stalker( body );
+    ++foreign.predator_state().handoff_epoch;
+    const auto refused = bytes( foreign );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( foreign,
+                 predator_activation::representation::local, position ) );
+    writhing_stalker::advance_active_work( foreign, to_turn<int>( calendar::turn ) );
+    CHECK( bytes( foreign ) == refused );
+    CHECK( bytes( body ) == once );
+
+    const auto current_state = state;
+    state.advance_to( to_turn<int>( calendar::turn ) + 20, 0 );
+    calendar::turn += 1_turns;
+    REQUIRE( query() );
+    const auto future = bytes( body );
+    advance();
+    CHECK( bytes( body ) == future );
+    state = current_state;
+    // This one authenticated active turn is still unconsumed at suspension.
+    const auto where = project_to<coords::omt>( position );
+    get_avatar().setpos( project_to<coords::ms>( where - point( 41, 0 ) ), false );
+    CHECK_FALSE( query() );
+    const auto frozen = bytes( body );
+    calendar::turn += 30_turns;
+    CHECK_FALSE( query() );
+    advance();
+    CHECK( bytes( body ) == frozen );
+    body = round_trip_writhing_stalker( body );
+    CHECK( bytes( body ) == frozen );
+    advance();
+    CHECK( bytes( body ) == frozen );
+    get_avatar().setpos( project_to<coords::ms>( where - point( 40, 0 ) ), false );
+    REQUIRE( query() );
+    advance();
+    CHECK( state.active_turns == 3 );
+    CHECK( body.predator_state().activity_active_turns == 3 );
+    const auto resumed = bytes( body );
+    advance();
+    REQUIRE( query() );
+    CHECK( bytes( body ) == resumed );
+    calendar::turn += 1_turns;
+    REQUIRE( query() );
+    advance();
+    CHECK( state.active_turns == 4 );
+    CHECK( body.predator_state().activity_active_turns == 4 );
+    const int moves = body.get_moves();
+
+    g->despawn_monster( body );
+    abstract_owner = overmap_buffer.find_loaded_overmap( project_to<coords::om>( position ).xy() );
+    REQUIRE( abstract_owner );
+    auto *owner = overmap_buffer.entity_at( position );
+    REQUIRE( owner );
+    REQUIRE( owner->monster_data );
+    calendar::turn += 1_turns;
+    monster &payload = *owner->monster_data;
+    REQUIRE( overmap_buffer.predator_activity_for( payload,
+             predator_activation::representation::abstract, position ) );
+    writhing_stalker::advance_active_work( payload, to_turn<int>( calendar::turn ) );
+    CHECK( payload.writhing_stalker_state().active_turns == 5 );
+    CHECK( payload.predator_state().activity_active_turns == 5 );
+    CHECK( payload.get_moves() == moves );
+    CHECK( payload.pos_abs() == position );
+    const auto abstract_once = bytes( payload );
+    writhing_stalker::advance_active_work( payload, to_turn<int>( calendar::turn ) );
+    CHECK( bytes( payload ) == abstract_once );
+
+    // The actual abstract sound writer and native intent owner retire an
+    // arrived carrier once, after taking their pre-advance ownership snapshot.
+    calendar::turn += 1_turns;
+    abstract_owner->hordes.signal_entities( position, 20 );
+    owner = overmap_buffer.entity_at( position );
+    REQUIRE( owner );
+    REQUIRE( owner->monster_data );
+    monster &signaled = *owner->monster_data;
+    REQUIRE( signaled.provocative_sound );
+    REQUIRE( signaled.wandf > 0 );
+    REQUIRE( overmap_buffer.predator_activity_for( signaled,
+             predator_activation::representation::abstract, position ) );
+    REQUIRE( owner->advance_predator_intent( position, to_turn<int>( calendar::turn ), 1 ) );
+    CHECK_FALSE( signaled.provocative_sound );
+    CHECK( signaled.wandf == 0 );
+    CHECK( owner->tracking_intensity == 0 );
+    CHECK( signaled.writhing_stalker_state().active_turns == 6 );
+    CHECK( signaled.predator_state().activity_active_turns == 6 );
+    const auto retired = bytes( signaled );
+    REQUIRE( owner->advance_predator_intent( position, to_turn<int>( calendar::turn ), 1 ) );
+    CHECK( bytes( signaled ) == retired );
+
+    // Exact native materialization prepares a disposable body. An occupied
+    // destination must retain the original body and consumption stamp, then
+    // allow a genuine retry without spending either elapsed interval twice.
+    monster &blocker = spawn_test_monster( mon_zombie.str(), here.get_bub( position ) );
+    calendar::turn += 1_turns;
+    overmap_buffer.spawn_monster( project_to<coords::sm>( position ), false );
+    owner = overmap_buffer.entity_at( position );
+    REQUIRE( owner );
+    REQUIRE( owner->monster_data );
+    CHECK( bytes( *owner->monster_data ) == retired );
+    CHECK( get_creature_tracker().find( position ).get() == &blocker );
+    g->remove_zombie( blocker );
+    overmap_buffer.spawn_monster( project_to<coords::sm>( position ), false );
+    CHECK( overmap_buffer.entity_at( position ) == nullptr );
+    auto restored = get_creature_tracker().find( position );
+    REQUIRE( restored );
+    REQUIRE( restored->predator_state().actor_id == actor );
+    writhing_stalker::advance_active_work( *restored, to_turn<int>( calendar::turn ) );
+    CHECK( restored->writhing_stalker_state().active_turns == 7 );
+    CHECK( restored->predator_state().activity_active_turns == 7 );
+    const auto retried = bytes( *restored );
+    writhing_stalker::advance_active_work( *restored, to_turn<int>( calendar::turn ) );
+    CHECK( bytes( *restored ) == retried );
+}
+
+TEST_CASE( "stalker_light_anchor_is_independent_of_native_consumption_stamp",
+           "[writhing_stalker][predator_activation][native][intent_owner][light]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope cleanup( [&] {
+        clear_map_without_vision();
+        get_avatar().setpos( old_avatar, false );
+    } );
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 600_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    monster &body = spawn_new_stalker_fixture( center + point::east * 2 );
+    const auto position = body.pos_abs();
+    REQUIRE_FALSE( body.predator_state().activity_bound );
+    REQUIRE( overmap_buffer.confirm_predator_position( body,
+             predator_activation::representation::local, position ) );
+    overmap_buffer.global_state.predator_activity.refresh( get_avatar().pos_abs_omt().xy(),
+            600, overmap_buffer.global_state.zombie_rider_bands );
+    calendar::turn += 10_turns;
+    // A genuine native owner was authenticated at600, while its legacy body
+    // has not yet bound the interval. Project remaining carrier work first.
+    overmap_buffer.retain_predator_light_work( body, "legacy-anchor", 600, 60 );
+    CHECK( body.predator_state().light_work_until_active == 50 );
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::local, position ) );
+    CHECK( body.predator_state().light_work_until_active == 60 );
+    CHECK( body.predator_state().activity_active_turns == 0 );
+    writhing_stalker::advance_active_work( body, 610 );
+    CHECK( body.writhing_stalker_state().active_turns == 10 );
+    CHECK( body.predator_state().activity_active_turns == 10 );
+    CHECK( body.predator_state().light_work_until_active == 60 );
+    calendar::turn += 2_turns;
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::local, position ) );
+    CHECK( body.predator_state().activity_active_turns == 10 );
+    overmap_buffer.retain_predator_light_work( body, "fresh-anchor", 612, 30 );
+    CHECK( body.predator_state().light_work_until_active == 42 );
+    writhing_stalker::advance_active_work( body, 612 );
+    CHECK( body.writhing_stalker_state().active_turns == 12 );
+    CHECK( body.predator_state().activity_active_turns == 12 );
+    CHECK( body.predator_state().light_work_until_active == 42 );
+}
+
+TEST_CASE( "stalker_first_authentication_never_invents_newborn_elapsed",
+           "[writhing_stalker][predator_activation][native][intent_owner]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope cleanup( [&] {
+        clear_map_without_vision();
+        get_avatar().setpos( old_avatar, false );
+    } );
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 100_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    monster &body = spawn_new_stalker_fixture( center + point::east * 2 );
+    const bool authenticate_at_birth = GENERATE( false, true );
+    if( authenticate_at_birth ) {
+        REQUIRE( overmap_buffer.predator_activity_for( body,
+                 predator_activation::representation::local, body.pos_abs() ) );
+    }
+    calendar::turn += 1_turns;
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::local, body.pos_abs() ) );
+    writhing_stalker::advance_active_work( body, 101 );
+    const auto expected = authenticate_at_birth ? 1 : 0;
+    CHECK( body.writhing_stalker_state().active_turns == expected );
+    CHECK( body.predator_state().activity_active_turns == expected );
+    writhing_stalker::advance_active_work( body, 101 );
+    CHECK( body.writhing_stalker_state().active_turns == expected );
+}
+
+TEST_CASE( "stalker_zero_credit_native_opportunity_keeps_current_observation",
+           "[writhing_stalker][predator_activation][native][intent_owner][zero_credit]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    overmap *native_owner = nullptr;
+    std::string actor;
+    tripoint_abs_ms position;
+    on_out_of_scope cleanup( [&] {
+        clear_map_without_vision();
+        if( native_owner ) { native_owner->release_monster_payload( position, actor ); }
+        get_avatar().setpos( old_avatar, false );
+    } );
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 1000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    monster &local = spawn_new_stalker_fixture( center + point::east * 2 );
+    position = local.pos_abs();
+    actor = local.predator_state().actor_id;
+    const auto where = project_to<coords::omt>( position );
+    REQUIRE( overmap_buffer.predator_activity_for( local,
+             predator_activation::representation::local, position ) );
+    g->despawn_monster( local );
+    native_owner = overmap_buffer.find_loaded_overmap( project_to<coords::om>( position ).xy() );
+    REQUIRE( native_owner );
+    auto *entry = overmap_buffer.entity_at( position );
+    REQUIRE( entry );
+    REQUIRE( entry->monster_data );
+    monster &body = *entry->monster_data;
+    const auto bytes = []( const monster &value ) {
+        std::ostringstream out;
+        { JsonOut json( out ); value.serialize( json ); }
+        return out.str();
+    };
+    get_avatar().setpos( project_to<coords::ms>( where - point( 41, 0 ) ), false );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( body,
+                 predator_activation::representation::abstract, position ) );
+    const auto frozen = bytes( body );
+    calendar::turn += 30_turns;
+    REQUIRE( entry->advance_predator_intent( position, 1030, 0 ) );
+    CHECK( bytes( body ) == frozen );
+    get_avatar().setpos( project_to<coords::ms>( where - point( 40, 0 ) ), false );
+    int elapsed = -1;
+    REQUIRE( overmap_buffer.predator_activity_for( body,
+             predator_activation::representation::abstract, position, &elapsed ) );
+    REQUIRE( elapsed == 0 );
+    native_owner->hordes.signal_entities( position, 20 );
+    entry = overmap_buffer.entity_at( position );
+    REQUIRE( entry );
+    REQUIRE( entry->monster_data );
+    monster &heard = *entry->monster_data;
+    REQUIRE( heard.provocative_sound );
+    REQUIRE( heard.wandf > 0 );
+    const auto moves = heard.get_moves();
+    const auto active = heard.writhing_stalker_state().active_turns;
+    REQUIRE( entry->advance_predator_intent( position, 1030, elapsed ) );
+    CHECK_FALSE( heard.provocative_sound );
+    CHECK( heard.wandf == 0 );
+    CHECK( entry->tracking_intensity == 0 );
+    CHECK( heard.writhing_stalker_state().active_turns == active );
+    CHECK( heard.predator_state().activity_active_turns == 0 );
+    CHECK( heard.get_moves() == moves );
+    CHECK( heard.pos_abs() == position );
+    const auto once = bytes( heard );
+    REQUIRE( entry->advance_predator_intent( position, 1030, 0 ) );
+    CHECK( bytes( heard ) == once );
+
+    calendar::turn += 1_turns;
+    horde_entity foreign( heard );
+    ++foreign.monster_data->predator_state().handoff_epoch;
+    const auto refused = bytes( *foreign.monster_data );
+    REQUIRE( foreign.advance_predator_intent( position, 1031, 0 ) );
+    CHECK( bytes( *foreign.monster_data ) == refused );
+    get_avatar().setpos( project_to<coords::ms>( where - point( 41, 0 ) ), false );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( heard,
+                 predator_activation::representation::abstract, position ) );
+    const auto refrozen = bytes( heard );
+    REQUIRE( entry->advance_predator_intent( position, 1031, 0 ) );
+    CHECK( bytes( heard ) == refrozen );
+    get_avatar().setpos( project_to<coords::ms>( where - point( 40, 0 ) ), false );
+    REQUIRE( overmap_buffer.predator_activity_for( heard,
+             predator_activation::representation::abstract, position ) );
+    heard.writhing_stalker_state().advance_to( 1041, 0 );
+    const auto future = bytes( heard );
+    REQUIRE( entry->advance_predator_intent( position, 1031, 0 ) );
+    CHECK( bytes( heard ) == future );
+}
+
 TEST_CASE( "writhing_stalker_monster_footing", "[writhing_stalker][monster]" )
 {
     const mtype &stalker = *mon_writhing_stalker;
@@ -337,7 +903,7 @@ TEST_CASE( "writhing_stalker_live_plan_consumes_quiet_side_cutoff_seam",
     set_time( calendar::turn_zero + 0_hours );
     refresh_writhing_stalker_arena( here );
 
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), stalker_start );
+    monster &stalker = spawn_new_stalker_fixture( stalker_start );
     monster &pressure_a = spawn_test_monster( mon_zombie.str(), center + point::east * 3 );
     monster &pressure_b = spawn_test_monster( mon_zombie.str(),
                           center + point::east * 4 + point::north );
@@ -375,6 +941,11 @@ TEST_CASE( "writhing_stalker_live_plan_consumes_quiet_side_cutoff_seam",
 TEST_CASE( "writhing_stalker_live_plan_is_independent_of_diagnostic_filter",
            "[writhing_stalker][monster][map][debug]" )
 {
+    // Both arms create disposable native bodies. Catch resets their RNG in
+    // the next independent test, so do not leave these bodies' durable tokens
+    // in the world after their local owners have been cleared.
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope clear_fixture_bodies( [] { clear_map_without_vision(); } );
     struct plan_state {
         tripoint_abs_ms destination;
         tripoint_abs_ms wander_destination;
@@ -403,7 +974,7 @@ TEST_CASE( "writhing_stalker_live_plan_is_independent_of_diagnostic_filter",
 
         limitDebugLevel( diagnostics_enabled ? DL_ALL : 0 );
         limitDebugClass( D_GAME );
-        monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 5 );
+        monster &stalker = spawn_new_stalker_fixture( center + point::east * 5 );
         stalker.anger = 100;
         stalker.aggro_character = true;
         REQUIRE( stalker.sees( here, you ) );
@@ -653,7 +1224,7 @@ TEST_CASE( "writhing_stalker_linked_melee_miss_binds_resolution_time_observers",
     set_time( calendar::turn_zero );
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 5 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 5 );
     monster &attacker = spawn_test_monster( mon_zombie.str(), center + point::east );
     attacker.aggro_character = true;
     attacker.set_dest( you.pos_abs() );
@@ -676,8 +1247,8 @@ TEST_CASE( "writhing_stalker_linked_projectile_miss_is_idempotent_and_visibility
     const tripoint_bub_ms center{ 65, 65, 0 };
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
-    monster &observer = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 6 );
-    monster &target = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 4 );
+    monster &observer = spawn_new_stalker_fixture( center + point::east * 6 );
+    monster &target = spawn_new_stalker_fixture( center + point::east * 4 );
     monster &attacker = spawn_test_monster( mon_zombie.str(), center + point::east * 2 );
     attacker.aggro_character = true;
     attacker.set_dest( target.pos_abs() );
@@ -1283,12 +1854,19 @@ TEST_CASE( "writhing_stalker_live_plan_retreats_about_eight_tiles_after_burst",
     set_time( calendar::turn_zero + 0_hours );
     refresh_writhing_stalker_arena( here );
 
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), stalker_start );
+    monster &stalker = spawn_new_stalker_fixture( stalker_start );
     stalker.anger = 100;
     stalker.aggro_character = true;
     stalker.writhing_stalker_state().attempts_spent = 2;
 
     REQUIRE( stalker.sees( here, you ) );
+    const auto &life = stalker.predator_state();
+    INFO( "withdrawal actor=" << life.actor_id << " epoch=" << life.handoff_epoch <<
+          " pose=" << stalker.pos_abs().to_string() );
+    const auto *prior = overmap_buffer.global_state.predator_activity.find( life.actor_id );
+    INFO( "prior owner=" << ( prior ? static_cast<int>( prior->owner ) : -1 ) << " epoch=" <<
+          ( prior ? prior->epoch : 0 ) << " confirmed=" << ( prior && prior->confirmed ) << " pose=" <<
+          ( prior && prior->position ? prior->position->to_string() : "absent" ) );
     stalker.plan();
 
     const auto &withdrawal_state = stalker.writhing_stalker_state();
@@ -1441,7 +2019,7 @@ TEST_CASE( "writhing_stalker_no_target_plan_retains_committed_waypoint",
     here.ter_set( center + point::east, ter_id( "t_wall" ) );
     refresh_writhing_stalker_arena( here );
 
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 2 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 2 );
     auto &state = stalker.writhing_stalker_state();
     stalker.anger = 0;
     stalker.aggro_character = false;
@@ -1526,7 +2104,7 @@ TEST_CASE( "writhing_stalker_hidden_target_cannot_refresh_observation_or_route",
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
 
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), stalker_start );
+    monster &stalker = spawn_new_stalker_fixture( stalker_start );
     stalker.anger = 100;
     stalker.aggro_character = true;
     REQUIRE( stalker.sees( here, you ) );
@@ -1579,7 +2157,7 @@ TEST_CASE( "writhing_stalker_pressure_history_is_visible_absolute_and_lifecycle_
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
 
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 6 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 6 );
     monster &pressure = spawn_test_monster( mon_zombie.str(), center + point::east * 3 );
     pressure.set_dest( you.pos_abs() );
     pressure.aggro_character = true;
@@ -1644,7 +2222,7 @@ TEST_CASE( "writhing_stalker_pressure_history_survives_a_real_bubble_shift",
     // The player drives the bubble rebase; the NPC remains the observed target.
     you.setpos( here, center + point::south * 30 );
     npc &target = spawn_npc( point_bub_ms( center.xy() ), "test_talker" );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 6 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 6 );
     monster &pressure = spawn_test_monster( mon_zombie.str(), center + point::east * 3 );
     pressure.set_dest( target.pos_abs() );
     pressure.aggro_character = true;
@@ -2022,7 +2600,7 @@ TEST_CASE( "stalker_closing_a_real_attack_opening_replaces_the_attack_destinatio
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 3 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     // Actual visible pressure supplies the evaluator's commitment footing;
@@ -2091,7 +2669,7 @@ TEST_CASE( "stalker_finished_pursuit_then_light_arrival_expires_after_reload_and
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 3 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     stalker.plan();
@@ -2159,7 +2737,7 @@ TEST_CASE( "stalker_actor_weather_uses_the_physical_ray_without_indoor_range_pen
     }
     const tripoint_bub_ms origin( 10, 65, 0 );
     you.setpos( here, origin + point::east * ( indoors ? 20 : 71 ) );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), origin );
+    monster &stalker = spawn_new_stalker_fixture( origin );
     for( const char *weather_id : { "clear", "fog" } ) {
         scoped_weather_override weather{ weather_type_id( weather_id ) };
         here.invalidate_map_cache( 1 );
@@ -2195,7 +2773,7 @@ TEST_CASE( "stalker_native_retreat_authority_survives_the_abstract_intent_caller
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 2 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 2 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     auto &state = stalker.writhing_stalker_state();
@@ -2258,8 +2836,8 @@ TEST_CASE( "stalker_pursuit_actual_planner_acquires_at_three_OMT_and_rejects_hid
     }
     you.setpos( here, tripoint_bub_ms( 82, 65, 0 ) );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), origin );
-    monster &second = spawn_test_monster( mon_writhing_stalker.str(), origin + point::north * 2 );
+    monster &stalker = spawn_new_stalker_fixture( origin );
+    monster &second = spawn_new_stalker_fixture( origin + point::north * 2 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     second.anger = 100;
@@ -2344,8 +2922,7 @@ TEST_CASE( "stalker_pursuit_native_route_uses_short_steps_without_invented_searc
     }
     you.setpos( here, tripoint_bub_ms( 80, 66, 0 ) );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(),
-                       tripoint_bub_ms( 30, 66, 0 ) );
+    monster &stalker = spawn_new_stalker_fixture( tripoint_bub_ms( 30, 66, 0 ) );
     stalker.anger = 100;
     stalker.aggro_character = true;
     REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
@@ -2396,7 +2973,7 @@ TEST_CASE( "stalker_pursuit_native_flight_preempts_visible_and_remembered_approa
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 5 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 5 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     refresh_writhing_stalker_arena( here );
@@ -2456,7 +3033,7 @@ TEST_CASE( "stalker_pursuit_native_opening_requires_dark_solitude_or_witnessed_a
     you.setpos( here, center );
     set_time_to_day();
     scoped_weather_override weather( weather_type_id( "clear" ) );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 3 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     std::vector<monster *> zombies;
@@ -2539,7 +3116,7 @@ TEST_CASE( "stalker_real_horde_scheduler_retains_arrival_search_and_revisit",
             overmap_buffer.set_passable( center + point( x, y ), true );
         }
     }
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     original.set_moves( 100 );
     auto &memory = original.writhing_stalker_state();
@@ -2645,8 +3222,7 @@ TEST_CASE( "stalker_transferred_route_fallback_ends_with_pursuit_but_real_sound_
     you.setpos( here, tripoint_bub_ms( 80, 66, 0 ) );
     refresh_writhing_stalker_arena( here );
     const bool retreat = GENERATE( false, true );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(),
-                       tripoint_bub_ms( retreat ? 77 : 30, 66, 0 ) );
+    monster &stalker = spawn_new_stalker_fixture( tripoint_bub_ms( retreat ? 77 : 30, 66, 0 ) );
     stalker.anger = 100;
     stalker.aggro_character = true;
     REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
@@ -2736,7 +3312,7 @@ TEST_CASE( "stalker_idle_memory_offload_schedules_without_fabricated_movement_an
     const auto source = get_map().get_abs( tripoint_bub_ms( -36, 65, 0 ) );
     overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
     om.hordes.clear();
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     CHECK_FALSE( horde_entity( original ).is_active() );
     auto &memory = original.writhing_stalker_state();
@@ -2752,6 +3328,18 @@ TEST_CASE( "stalker_idle_memory_offload_schedules_without_fabricated_movement_an
     REQUIRE( owner != nullptr );
     CHECK( owner->is_active() );
     CHECK( owner->tracking_intensity == 0 );
+    // Birth becomes native authority at its first actual scheduler opportunity,
+    // not retroactively at the fixture's constructor timestamp.
+    const auto birth_moves = owner->monster_data->get_moves();
+    const auto carrier_moves = owner->moves;
+    overmap_buffer.move_hordes();
+    owner = overmap_buffer.entity_at( source );
+    REQUIRE( owner != nullptr );
+    CHECK( owner->monster_data->predator_state().activity_adopted_world == 100 );
+    CHECK( owner->monster_data->writhing_stalker_state().active_turns == 0 );
+    CHECK( owner->monster_data->get_moves() == birth_moves );
+    CHECK( owner->moves == carrier_moves );
+    CHECK( owner->monster_data->pos_abs() == source );
     set_time( calendar::turn + 1_turns );
     overmap_buffer.move_hordes();
     owner = overmap_buffer.entity_at( source );
@@ -2790,7 +3378,7 @@ TEST_CASE( "stalker_idle_abstract_sound_survives_pending_familiar_revisit",
     for( int x = 0; x <= 5; ++x ) {
         overmap_buffer.set_passable( source + point::east * x, true );
     }
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     original.set_moves( 100 );
     const bool learned = GENERATE( false, true );
@@ -2852,7 +3440,7 @@ TEST_CASE( "stalker_abstract_retreat_arrival_and_recovery_are_finite",
             overmap_buffer.set_passable( source + point( x, y ), true );
         }
     }
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     original.set_moves( 100 );
     auto &state = original.writhing_stalker_state();
@@ -2948,7 +3536,7 @@ TEST_CASE( "stalker_abstract_light_arrival_expires_without_replacing_new_sound",
             overmap_buffer.set_passable( source + point( x, y ), true );
         }
     }
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     original.set_moves( 100 );
     auto &state = original.writhing_stalker_state();
@@ -3047,40 +3635,78 @@ TEST_CASE( "stalker_recovery_budget_survives_visible_reacquisition_before_local_
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 2 );
-    stalker.anger = 100;
-    stalker.aggro_character = true;
-    stalker.writhing_stalker_state().attempts_spent = 2;
-    stalker.plan();
-    REQUIRE( stalker.writhing_stalker_state().phase ==
+    monster &initial_stalker = spawn_new_stalker_fixture( center + point::east * 2 );
+    initial_stalker.anger = 100;
+    initial_stalker.aggro_character = true;
+    initial_stalker.writhing_stalker_state().attempts_spent = 2;
+    initial_stalker.plan();
+    REQUIRE( initial_stalker.writhing_stalker_state().phase ==
              writhing_stalker::lifecycle_phase::retreating );
-    stalker.plan();
-    REQUIRE( stalker.writhing_stalker_state().phase ==
+    initial_stalker.plan();
+    REQUIRE( initial_stalker.writhing_stalker_state().phase ==
              writhing_stalker::lifecycle_phase::cooldown );
-    const int recovery = stalker.writhing_stalker_state().cooldown_until_turn;
+    const int recovery = initial_stalker.writhing_stalker_state().cooldown_until_turn;
     // Native withdrawal starts a short run effect. Let ordinary body turns
     // expire it before testing recognition after the longer recovery.
     for( int turn = 0; turn < 8; ++turn ) {
         set_time( calendar::turn + 1_turns );
-        stalker.process_turn();
+        initial_stalker.process_turn();
     }
-    const auto actor = stalker.predator_state().actor_id;
+    const auto actor = initial_stalker.predator_state().actor_id;
+    const auto position = initial_stalker.pos_abs();
+    const auto epoch = initial_stalker.predator_state().handoff_epoch;
+    on_out_of_scope release_native_fixture( [&] {
+        if( auto *owner = overmap_buffer.find_loaded_overmap( project_to<coords::om>( position ).xy() ) ) {
+            owner->release_monster_payload( position, actor );
+        }
+    } );
     const bool abstract_owner = GENERATE( false, true );
+    monster *resumed = &initial_stalker;
+    horde_entity *native = nullptr;
+    if( abstract_owner ) {
+        // A standalone local copy is not an accepted abstract owner.
+        horde_entity refused( initial_stalker );
+        std::ostringstream before;
+        { JsonOut json( before ); refused.monster_data->serialize( json ); }
+        CHECK_FALSE( overmap_buffer.predator_activity_for( *refused.monster_data,
+                     predator_activation::representation::abstract, position ) );
+        std::ostringstream after;
+        { JsonOut json( after ); refused.monster_data->serialize( json ); }
+        CHECK( after.str() == before.str() );
+        REQUIRE( g->despawn_monster( initial_stalker ) );
+        native = overmap_buffer.entity_at( position );
+        REQUIRE( native != nullptr );
+        REQUIRE( native->monster_data );
+        CHECK( native->monster_data->predator_state().actor_id == actor );
+        CHECK( native->monster_data->predator_state().handoff_epoch == epoch + 1 );
+    }
     set_time( calendar::turn_zero + time_duration::from_turns( recovery + 1 ) );
+    if( abstract_owner ) {
+        // Run the actual accepted owner after its handoff world turn. The
+        // same native clock refresh as the scheduler supplies earned work;
+        // an arbitrary explicit elapsed argument cannot replace this owner.
+        int elapsed = 0;
+        REQUIRE( overmap_buffer.predator_activity_for( *native->monster_data,
+                 predator_activation::representation::abstract, position, &elapsed ) );
+        REQUIRE( native->advance_predator_intent( position, recovery + 1, elapsed ) );
+        overmap_buffer.spawn_monster( project_to<coords::sm>( position ), false );
+        CHECK( overmap_buffer.entity_at( position ) == nullptr );
+        resumed = get_creature_tracker().creature_at<monster>( here.get_bub( position ) );
+        REQUIRE( resumed != nullptr );
+        CHECK( resumed->predator_state().handoff_epoch == epoch + 2 );
+    } else {
+        // observe_current_target is entered by the native planner after its
+        // eligibility query; supply that same actual local owner boundary.
+        REQUIRE( overmap_buffer.predator_activity_for( initial_stalker,
+                 predator_activation::representation::local, position ) );
+        REQUIRE( writhing_stalker::observe_current_target( initial_stalker ) == &you );
+    }
+    monster &stalker = *resumed;
     INFO( "reacquire anger=" << stalker.anger << " morale=" << stalker.morale <<
           " attitude=" << static_cast<int>( stalker.attitude_to( you ) ) <<
           " run=" << stalker.has_effect( efftype_id( "run" ) ) <<
           " fleeing=" << stalker.is_fleeing( you ) <<
           " physical=" << writhing_stalker::can_observe_actor( stalker, you ) );
-    if( abstract_owner ) {
-        // The actual abstract caller advances recovery then immediately
-        // reacquires the physically visible character before local combat.
-        horde_entity transferred( stalker );
-        REQUIRE( transferred.advance_predator_intent( stalker.pos_abs(), recovery + 1 ) );
-        stalker = *transferred.monster_data;
-    } else {
-        REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
-    }
     REQUIRE( stalker.writhing_stalker_state().evidence_turn == recovery + 1 );
     REQUIRE( stalker.writhing_stalker_state().search_started_active == -1 );
     REQUIRE( stalker.writhing_stalker_state().search_until_turn == -1 );
@@ -3093,13 +3719,17 @@ TEST_CASE( "stalker_recovery_budget_survives_visible_reacquisition_before_local_
     // Supply the existing actual same-target pressure/witnessed-attack
     // opening. A healthy avatar alone may truthfully receive only shadow.
     std::vector<monster *> zombies;
-    for( const point &offset : { point::west, point::south, point::east, point::south_west } ) {
+    for( const point &offset : { point::west, point::south, point::south_east, point::south_west } ) {
         monster &zombie = spawn_test_monster( mon_zombie.str(), center + offset );
         zombie.aggro_character = true;
         zombie.set_dest( you.pos_abs() );
         REQUIRE( zombie.attack_target() == &you );
         zombies.push_back( &zombie );
     }
+    // Keep the actual approach tile free: a friendly zombie there consumes
+    // native blocked movement and is not a post-recovery combat opening.
+    REQUIRE( get_creature_tracker().creature_at( center + point::east ) == nullptr );
+    REQUIRE( here.passable( center + point::east ) );
     refresh_writhing_stalker_arena( here );
     REQUIRE( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 4 );
     CHECK( you.deal_melee_attack( zombies.front(), -1000 ) < 0 );
@@ -3151,7 +3781,7 @@ TEST_CASE( "stalker_local_unlearned_light_expiry_retires_native_route_preserving
     // separated from character recognition after that setup.
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &stalker = spawn_new_stalker_fixture( center );
     stalker.anger = 100;
     stalker.morale = 20;
     const auto light = stalker.pos_abs() + point::east * 6;
@@ -3209,7 +3839,7 @@ TEST_CASE( "stalker_legacy_light_search_acquisition_cannot_reset_a_new_native_bu
     Character &you = get_player_character();
     you.setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &stalker = spawn_new_stalker_fixture( center );
     stalker.anger = 100;
     stalker.aggro_character = true;
     auto &state = stalker.writhing_stalker_state();
@@ -3283,7 +3913,7 @@ TEST_CASE( "stalker_old_recovery_cannot_erase_an_early_native_burst",
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::north_east );
+    monster &stalker = spawn_new_stalker_fixture( center + point::north_east );
     stalker.anger = 100;
     stalker.aggro_character = true;
     stalker.writhing_stalker_state().attempts_spent = old_spent;
@@ -3361,7 +3991,7 @@ TEST_CASE( "stalker_hidden_recovery_cannot_own_a_later_withdrawal_toward_moved_p
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 2 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 2 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     stalker.writhing_stalker_state().attempts_spent = 2;
@@ -3433,7 +4063,7 @@ TEST_CASE( "stalker_native_combat_consumes_old_recovery_without_erasing_sound_or
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::north_east );
+    monster &stalker = spawn_new_stalker_fixture( center + point::north_east );
     stalker.anger = 100;
     stalker.aggro_character = true;
     stalker.writhing_stalker_state().attempts_spent = 2;
@@ -3502,9 +4132,14 @@ TEST_CASE( "stalker_bounded_search_completion_cannot_refund_native_combat",
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::north_east );
+    monster &stalker = spawn_new_stalker_fixture( center + point::north_east );
     stalker.anger = 100;
     stalker.aggro_character = true;
+    // Establish the genuine loaded birth before any observed search/attack
+    // work. The later31minutes are earned active time, not pre-auth absence.
+    REQUIRE( overmap_buffer.predator_activity_for( stalker,
+             predator_activation::representation::local, stalker.pos_abs() ) );
+    CHECK( overmap_buffer.predator_active_time( stalker ) == 0 );
     REQUIRE( writhing_stalker::observe_current_target( stalker ) == &you );
     stalker.writhing_stalker_state().begin_search();
     const auto search_start = stalker.writhing_stalker_state().search_started_active;
@@ -3543,7 +4178,7 @@ TEST_CASE( "stalker_distant_light_uses_reachable_native_steps_before_finite_arri
     const bool slow = GENERATE( false, true );
     here.ter_set( center + point::east * 4, ter_id( slow ? "t_dirtmound" : "t_wall" ) );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &stalker = spawn_new_stalker_fixture( center );
     stalker.anger = 100;
     const auto light = here.get_abs( center + point::east * 24 );
     REQUIRE( stalker.get_pathfinding_settings().max_dist == 10 );
@@ -3607,7 +4242,7 @@ TEST_CASE( "stalker_due_or_started_familiar_visit_preserves_accepted_sound_then_
             overmap_buffer.set_passable( source + point( x, y ), true );
         }
     }
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     original.set_moves( 100 );
     auto &memory = original.writhing_stalker_state();
@@ -3618,6 +4253,18 @@ TEST_CASE( "stalker_due_or_started_familiar_visit_preserves_accepted_sound_then_
     memory.advance_to( 1000 );
     const auto actor = original.predator_state().actor_id;
     REQUIRE( om.hordes.spawn_entity( source, original ) );
+    // Establish the actual native birth interval before waiting for a due
+    // active-time visit. Unauthenticated absence cannot fund that visit.
+    const auto birth_active = memory.active_turns;
+    const auto birth_moves = original.get_moves();
+    overmap_buffer.move_hordes();
+    auto *born = overmap_buffer.entity_at( source );
+    REQUIRE( born != nullptr );
+    REQUIRE( born->monster_data );
+    CHECK( born->monster_data->predator_state().activity_adopted_world == 1000 );
+    CHECK( born->monster_data->writhing_stalker_state().active_turns == birth_active );
+    CHECK( born->monster_data->get_moves() == birth_moves );
+    CHECK( born->monster_data->pos_abs() == source );
     const auto find_owner = [&]() -> std::pair<tripoint_abs_ms, horde_entity *> {
         for( const auto &entry : om.horde_entities() ) {
             if( entry.second->monster_data &&
@@ -3715,7 +4362,7 @@ TEST_CASE( "stalker_distant_light_short_step_survives_transfer_then_expires_with
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
     here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
     refresh_writhing_stalker_arena( here );
-    monster *local = &spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster *local = &spawn_new_stalker_fixture( center );
     local->anger = 100;
     const auto light = here.get_abs( center + point::east * 24 );
     REQUIRE( local->writhing_stalker_state().observe_light_interest(
@@ -3762,8 +4409,43 @@ TEST_CASE( "stalker_distant_light_short_step_survives_transfer_then_expires_with
     CHECK_FALSE( local->has_dest() );
     CHECK( local->wandf == 0 );
     local->set_moves( 100 );
+    // Compare the same authenticated body with a plain native idle action.
+    // The expired light may not buy a route or another action, but ordinary
+    // idle stumbling remains legitimate. Replay the identical engine state,
+    // never select a seed or rewrite an existing actor's identity.
+    std::ostringstream before_idle;
+    { JsonOut json( before_idle ); local->serialize( json ); }
+    const auto native_rng = rng_get_engine();
+    const auto now = to_turn<int>( calendar::turn );
+    const auto active_before = overmap_buffer.global_state.predator_activity.find( actor )->activity.active_at( now );
+    auto &idle = local->writhing_stalker_state();
+    idle.light_observed_turn = -1;
+    idle.light_expires_turn = -1;
+    idle.light_sample_id.clear();
     local->move();
-    CHECK( local->pos_abs() == position );
+    const auto idle_position = local->pos_abs();
+    const auto idle_moves = local->get_moves();
+    const auto idle_hp = local->get_hp();
+    const auto idle_rng_after = rng_get_engine();
+    CHECK( overmap_buffer.global_state.predator_activity.find( actor )->activity.active_at( now ) == active_before );
+    // Use the actual movement owner to restore the probe's pose before the
+    // native body reload. No direct ledger, token, epoch or clock assignment.
+    local->setpos( here, here.get_bub( position ) );
+    local->deserialize( json_loader::from_string( before_idle.str() ).get_object() );
+    REQUIRE( overmap_buffer.global_state.predator_activity.owns(
+                 actor, local->predator_state().handoff_epoch,
+                 predator_activation::representation::local, position ) );
+    rng_get_engine() = native_rng;
+    local->move();
+    CHECK( local->pos_abs() == idle_position );
+    CHECK( local->get_moves() == idle_moves );
+    CHECK( local->get_hp() == idle_hp );
+    CHECK( rng_get_engine() == idle_rng_after );
+    CHECK( overmap_buffer.global_state.predator_activity.find( actor )->activity.active_at( now ) == active_before );
+    CHECK_FALSE( local->has_dest() );
+    CHECK( local->wandf == 0 );
+    CHECK( local->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+    CHECK_FALSE( local->writhing_stalker_state().has_committed_waypoint );
     CHECK( horde_entity( *local ).tracking_intensity == 0 );
     CHECK( local->writhing_stalker_state().evidence_turn == -1 );
     clear_map_without_vision();
@@ -3781,7 +4463,7 @@ TEST_CASE( "stalker_abstract_sound_keeps_its_carrier_when_light_is_active_or_exp
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
     here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
     refresh_writhing_stalker_arena( here );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &original = spawn_new_stalker_fixture( center );
     original.anger = 100;
     const auto source = original.pos_abs();
     const auto sound = source + point::south * 6;
@@ -3838,11 +4520,15 @@ TEST_CASE( "stalker_distant_remembered_goal_routes_local_steps_after_real_sound"
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &stalker = spawn_new_stalker_fixture( center );
     stalker.anger = 100;
     const auto remembered = stalker.pos_abs() + point::west * 180;
     REQUIRE_FALSE( here.inbounds( remembered ) );
     REQUIRE( scout_observation::site_sightline( stalker.pos_abs(), remembered ).empty() );
+    // Authenticate this actual native birth before waiting for earned work.
+    REQUIRE( overmap_buffer.predator_activity_for( stalker,
+             predator_activation::representation::local, stalker.pos_abs() ) );
+    CHECK( overmap_buffer.predator_active_time( stalker ) == 0 );
     auto &memory = stalker.writhing_stalker_state();
     memory.advance_to( 1000 );
     // Accepted observation fixture; navigation does not claim remote sensing.
@@ -3869,7 +4555,9 @@ TEST_CASE( "stalker_distant_remembered_goal_routes_local_steps_after_real_sound"
     if( light ) {
         // Recent direct evidence deliberately outranks a light observation.
         set_time( calendar::turn + 201_turns );
-        memory.advance_to( to_turn<int>( calendar::turn ) );
+        // Consume the real owning interval before injecting this accepted
+        // light-observation fixture; do not manually debit the same work.
+        stalker.plan();
         REQUIRE( memory.observe_light_interest( remembered, "remembered-distant-source",
                  to_turn<int>( calendar::turn ), 300 ) );
     } else {
@@ -3923,7 +4611,11 @@ TEST_CASE( "stalker_distant_remembered_navigation_keeps_loaded_and_blocked_limit
         }
         refresh_writhing_stalker_arena( here );
     }
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &stalker = spawn_new_stalker_fixture( center );
+    // Authenticate this actual native birth before waiting for earned work.
+    REQUIRE( overmap_buffer.predator_activity_for( stalker,
+             predator_activation::representation::local, stalker.pos_abs() ) );
+    CHECK( overmap_buffer.predator_active_time( stalker ) == 0 );
     auto &memory = stalker.writhing_stalker_state();
     memory.advance_to( 1000 );
     const auto remembered = stalker.pos_abs() + point::west * 180;
@@ -3976,7 +4668,7 @@ TEST_CASE( "stalker_visible_stationary_shadow_continues_steps_then_holds_standof
     }
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 32 );
+    monster &stalker = spawn_new_stalker_fixture( center + point::east * 32 );
     stalker.anger = 100;
     stalker.aggro_character = true;
     // Actual same-target pressure keeps this native bright/focused approach
@@ -4107,7 +4799,7 @@ TEST_CASE( "stalker_expired_sound_flag_cannot_own_delayed_transferred_pursuit",
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &original = spawn_new_stalker_fixture( center );
     original.anger = 100;
     original.hear_sound( center + point::south * 3, 24, 3, true );
     REQUIRE( original.provocative_sound );
@@ -4257,7 +4949,7 @@ TEST_CASE( "stalker_sound_stays_pending_beneath_current_sight_or_retreat_handoff
     prepare_writhing_stalker_arena( here, center );
     you.setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    monster &original = spawn_new_stalker_fixture( center + point::east * 3 );
     original.anger = 100;
     original.aggro_character = true;
     const bool retreat = GENERATE( false, true );
@@ -4300,7 +4992,25 @@ TEST_CASE( "stalker_sound_stays_pending_beneath_current_sight_or_retreat_handoff
     CHECK( local->wandf > 0 );
     CHECK( local->wander_pos == sound );
     position = local->pos_abs();
-    horde_entity owner( *local );
+    // A local copy cannot claim the abstract representation. Keep this
+    // refusal before exercising a second genuine native handoff.
+    horde_entity refused( *local );
+    std::ostringstream refused_before;
+    { JsonOut json( refused_before ); refused.monster_data->serialize( json ); }
+    CHECK_FALSE( overmap_buffer.predator_activity_for( *refused.monster_data,
+                 predator_activation::representation::abstract, position ) );
+    std::ostringstream refused_after;
+    { JsonOut json( refused_after ); refused.monster_data->serialize( json ); }
+    CHECK( refused_after.str() == refused_before.str() );
+    REQUIRE( g->despawn_monster( *local ) );
+    auto *accepted = overmap_buffer.entity_at( position );
+    REQUIRE( accepted != nullptr );
+    REQUIRE( accepted->monster_data );
+    CHECK( accepted->monster_data->predator_state().handoff_epoch == epoch + 3 );
+    on_out_of_scope release_native_fixture( [&] { om.release_monster_payload( position, actor ); } );
+    horde_entity &owner = *accepted;
+    REQUIRE( overmap_buffer.predator_activity_for( *owner.monster_data,
+             predator_activation::representation::abstract, position ) );
     REQUIRE( owner.advance_predator_intent( position, to_turn<int>( calendar::turn ) ) );
     // Native fleeing does not acquire a fresh hostile watch observation.
     CHECK( owner.monster_data->writhing_stalker_state().evidence_turn ==
@@ -4323,7 +5033,10 @@ TEST_CASE( "stalker_sound_stays_pending_beneath_current_sight_or_retreat_handoff
     you.setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
     refresh_writhing_stalker_arena( here );
     set_time( calendar::turn + 31_minutes );
-    REQUIRE( owner.advance_predator_intent( position, to_turn<int>( calendar::turn ) ) );
+    int elapsed = 0;
+    REQUIRE( overmap_buffer.predator_activity_for( *owner.monster_data,
+             predator_activation::representation::abstract, position, &elapsed ) );
+    REQUIRE( owner.advance_predator_intent( position, to_turn<int>( calendar::turn ), elapsed ) );
     CHECK( owner.destination == sound );
     CHECK( owner.tracking_intensity > 0 );
     CHECK( owner.monster_data->wander_pos == sound );
@@ -4341,7 +5054,7 @@ TEST_CASE( "stalker_selected_sound_budget_is_not_renewed_before_native_transport
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &original = spawn_new_stalker_fixture( center );
     original.anger = 100;
     original.hear_sound( center + point::south * 6, 30, 6, true );
     REQUIRE( original.provocative_sound );
@@ -4379,7 +5092,7 @@ TEST_CASE( "stalker_native_unlearned_goal_precedes_pending_sound_during_handoff"
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &original = spawn_new_stalker_fixture( center );
     original.anger = 100;
     const auto goal = here.get_abs( center + point::east * 6 );
     const auto sound = here.get_abs( center + point::south * 6 );
@@ -4432,32 +5145,100 @@ TEST_CASE( "stalker_pending_sound_spends_native_budget_on_committed_route_steps"
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
-    monster &heard_locally = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &heard_locally = spawn_new_stalker_fixture( center );
     heard_locally.anger = 100;
     heard_locally.hear_sound( center + point::south * 6, 30, 6, true );
     REQUIRE( heard_locally.provocative_sound );
-    const int budget = heard_locally.wandf;
-    REQUIRE( budget > 2 );
-    monster original( heard_locally );
+    const int prior_budget = heard_locally.wandf;
+    REQUIRE( prior_budget > 2 );
+    const auto bytes = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut json( out ); value.serialize( json ); }
+        return out.str();
+    };
+    const auto removed_actor = heard_locally.predator_state().actor_id;
+    auto removed = get_creature_tracker().find( heard_locally.pos_abs() );
+    REQUIRE( removed.get() == &heard_locally );
+    monster translated( heard_locally );
     g->remove_zombie( heard_locally );
-    // Translate the accepted callback into an unloaded route fixture. This
-    // proves transport lifetime, not physical hearing or remote perception.
-    const auto source = here.get_abs( tripoint_bub_ms( -budget - 48, 65, 0 ) );
+    const auto removed_before = bytes( *removed );
+    // Translation is NOT a handoff: the old LOCAL owner must refuse this
+    // copied identity at another abstract pose, without changing either body.
+    const auto source = here.get_abs( tripoint_bub_ms( -360, 65, 0 ) );
+    REQUIRE_FALSE( here.inbounds( source ) );
+    REQUIRE( rl_dist( project_to<coords::omt>( source ).xy(),
+                     get_avatar().pos_abs_omt().xy() ) <= 40 );
     const auto sound = source + point::south * 6;
-    const auto goal = source + point::east * ( budget + 12 );
+    translated.set_pos_abs_only( source );
+    translated.wander_to( sound, prior_budget );
+    translated.set_dest( source + point::east * ( prior_budget + 12 ) );
+    translated.set_moves( 100 );
+    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
+    REQUIRE( om.hordes.spawn_entity( source, translated ) );
+    auto *refused = overmap_buffer.entity_at( source );
+    REQUIRE( refused != nullptr );
+    const auto translated_before = bytes( *refused->monster_data );
+    auto &world = overmap_buffer.global_state.predator_activity;
+    REQUIRE( world.find( removed_actor ) );
+    const auto authority_before = bytes( *world.find( removed_actor ) );
+    CHECK_FALSE( overmap_buffer.predator_activity_at( *refused, source ) );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( *refused->monster_data,
+                 predator_activation::representation::abstract, source ) );
+    CHECK( bytes( *refused->monster_data ) == translated_before );
+    CHECK( bytes( *removed ) == removed_before );
+    CHECK( bytes( *world.find( removed_actor ) ) == authority_before );
+    REQUIRE( om.release_monster_payload( source, removed_actor ) );
+
+    // Separate genuine NEW abstract birth. No old identity or pose is
+    // rewritten to gain this owner. The native signal is real abstract input,
+    // not physical off-bubble hearing or a claimed remote observation.
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
-    original.wander_to( sound, budget );
-    original.set_dest( goal );
     original.set_moves( 100 );
     const auto actor = original.predator_state().actor_id;
-    overmap &om = overmap_buffer.get( project_to<coords::om>( source ).xy() );
-    om.hordes.clear();
+    REQUIRE( actor != removed_actor );
+    REQUIRE( om.hordes.spawn_entity( source, original ) );
+    om.hordes.signal_entities( sound, 5 );
+    auto *accepted = overmap_buffer.entity_at( source );
+    REQUIRE( accepted != nullptr );
+    REQUIRE( accepted->monster_data );
+    REQUIRE( accepted->monster_data->provocative_sound );
+    const int budget = accepted->monster_data->wandf;
+    REQUIRE( budget > 2 );
+    const auto goal = source + point::east * ( budget + 12 );
+    const auto epoch = accepted->monster_data->predator_state().handoff_epoch;
+    REQUIRE( world.find( actor ) );
+    const auto clock_before = bytes( *world.find( actor ) );
+    const int active_delta_before = world.find( actor )->activity.active_delta;
+    const bool confirmed_before = world.find( actor )->confirmed;
+    point_abs_om ignored;
+    tripoint_om_ms local;
+    std::tie( ignored, local ) = project_remain<coords::om>( source );
+    auto node = om.hordes.extract( om.hordes.find( local ) );
+    auto payload = std::move( node.mapped().monster_data );
+    payload->set_dest( goal );
+    const auto route_body = bytes( *payload );
+    // This value construction is route fixture preparation, not a new sensed
+    // order. Keep the actual payload/UIDs and native node ownership intact.
+    horde_entity route( *payload );
+    route.monster_data = std::move( payload );
+    node.mapped() = std::move( route );
+    om.hordes.insert( std::move( node ) );
+    accepted = overmap_buffer.entity_at( source );
+    REQUIRE( accepted != nullptr );
+    CHECK( bytes( *accepted->monster_data ) == route_body );
+    CHECK( accepted->monster_data->pos_abs() == source );
+    CHECK( accepted->monster_data->predator_state().actor_id == actor );
+    CHECK( accepted->monster_data->predator_state().handoff_epoch == epoch );
+    CHECK( bytes( *world.find( actor ) ) == clock_before );
+    CHECK( world.find( actor )->activity.active_delta == active_delta_before );
+    CHECK( world.find( actor )->confirmed == confirmed_before );
+    CHECK( world.owns( actor, epoch, predator_activation::representation::abstract, source ) );
     for( int x = 0; x <= budget + 12; ++x ) {
         const auto cell = source + point::east * x;
         overmap_buffer.get( project_to<coords::om>( cell ).xy() );
         overmap_buffer.set_passable( cell, true );
     }
-    REQUIRE( om.hordes.spawn_entity( source, original ) );
     for( int step = 1; step <= budget; ++step ) {
         set_time( calendar::turn + 1_turns );
         overmap_buffer.move_hordes();
@@ -4496,7 +5277,7 @@ TEST_CASE( "stalker_native_recovery_rejects_light_before_touching_pending_sound"
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    monster &original = spawn_new_stalker_fixture( center + point::east * 3 );
     original.anger = 100;
     original.aggro_character = true;
     // Exhausted budget is a fixture; actual native planning owns withdrawal,
@@ -4544,9 +5325,20 @@ TEST_CASE( "stalker_native_recovery_rejects_light_before_touching_pending_sound"
     const auto sound = position + point::south * 6;
     const auto light = same_coordinate ? sound : position + point::west * 6;
     if( pending_sound ) {
-        // Real native callback on the retained payload; the light packet
-        // below is an admitted adapter fixture, not native fire proof.
+        // The accepted owner is abstract. Its local-hearing callback must
+        // refuse without touching this body; genuine abstract sound is then
+        // delivered through the native horde owner, above existing interest.
+        std::ostringstream before;
+        { JsonOut json( before ); owner->monster_data->serialize( json ); }
+        CHECK_FALSE( overmap_buffer.predator_activity_for( *owner->monster_data,
+                     predator_activation::representation::local, position ) );
         owner->monster_data->hear_sound( here.get_bub( sound ), 30, 6, true );
+        std::ostringstream after;
+        { JsonOut json( after ); owner->monster_data->serialize( json ); }
+        CHECK( after.str() == before.str() );
+        om.hordes.signal_entities( sound, 100 );
+        owner = overmap_buffer.entity_at( position );
+        REQUIRE( owner != nullptr );
         REQUIRE( owner->monster_data->provocative_sound );
         REQUIRE( owner->monster_data->wandf > 0 );
     }
@@ -4592,7 +5384,7 @@ TEST_CASE( "stalker_idle_light_admission_preserves_independent_native_sound",
     const tripoint_bub_ms center( 65, 65, 0 );
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &original = spawn_new_stalker_fixture( center );
     const auto source = original.pos_abs();
     const auto sound = source + point::south * 6;
     const bool pending = GENERATE( false, true );
@@ -4653,18 +5445,47 @@ TEST_CASE( "stalker_arrived_sound_settlement_respects_zero_active_time",
     set_time( calendar::turn_zero + 1000_turns );
     map &here = get_map();
     const auto position = here.get_abs( tripoint_bub_ms( 65, 65, 0 ) );
-    monster original( mon_writhing_stalker );
-    original.set_pos_abs_only( position );
+    const auto bytes = []( const monster &body ) {
+        std::ostringstream out;
+        { JsonOut json( out ); body.serialize( json ); }
+        return out.str();
+    };
+    monster unowned = new_stalker_fixture_body();
+    unowned.set_pos_abs_only( position );
+    const auto unowned_before = bytes( unowned );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( unowned,
+                 predator_activation::representation::local, position ) );
+    unowned.hear_sound( here.get_bub( position ), 30, 0, true );
+    CHECK_FALSE( unowned.provocative_sound );
+    CHECK( bytes( unowned ) == unowned_before );
+    monster &original = spawn_new_stalker_fixture( here.get_bub( position ) );
     original.hear_sound( here.get_bub( position ), 30, 0, true );
     REQUIRE( original.provocative_sound );
     const int budget = original.wandf;
     REQUIRE( budget > 0 );
-    horde_entity owner( original );
+    horde_entity refused( original );
+    const auto refused_before = bytes( *refused.monster_data );
+    REQUIRE( refused.advance_predator_intent( position, 1000, 0 ) );
+    CHECK( bytes( *refused.monster_data ) == refused_before );
+    const auto actor = original.predator_state().actor_id;
+    REQUIRE( g->despawn_monster( original ) );
+    auto *accepted = overmap_buffer.entity_at( position );
+    REQUIRE( accepted != nullptr );
+    overmap &om = overmap_buffer.get( project_to<coords::om>( position ).xy() );
+    on_out_of_scope release_native_fixture( [&] { om.release_monster_payload( position, actor ); } );
+    horde_entity &owner = *accepted;
+    // The transfer already owns this world turn. Zero may not duplicate its
+    // opportunity; a newly adopted eligible callback is covered separately.
     REQUIRE( owner.advance_predator_intent( position, 1000, 0 ) );
     CHECK( owner.monster_data->provocative_sound );
     CHECK( owner.monster_data->wandf == budget );
     CHECK( owner.tracking_intensity == budget );
-    REQUIRE( owner.advance_predator_intent( position, 1001, 1 ) );
+    set_time( calendar::turn + 1_turns );
+    int elapsed = 0;
+    REQUIRE( overmap_buffer.predator_activity_for( *owner.monster_data,
+             predator_activation::representation::abstract, position, &elapsed ) );
+    REQUIRE( elapsed == 1 );
+    REQUIRE( owner.advance_predator_intent( position, 1001, elapsed ) );
     CHECK_FALSE( owner.monster_data->provocative_sound );
     CHECK( owner.monster_data->wandf == 0 );
     CHECK( owner.tracking_intensity == 0 );
@@ -4683,7 +5504,7 @@ TEST_CASE( "stalker_native_arrived_retreat_unload_keeps_pending_sound",
     prepare_writhing_stalker_arena( here, center );
     get_player_character().setpos( here, center );
     refresh_writhing_stalker_arena( here );
-    monster &original = spawn_test_monster( mon_writhing_stalker.str(), center + point::east * 3 );
+    monster &original = spawn_new_stalker_fixture( center + point::east * 3 );
     original.anger = 100;
     original.aggro_character = true;
     // Exhausted budget is a fixture; actual native planning owns withdrawal,
@@ -4787,7 +5608,7 @@ TEST_CASE( "stalker_abstract_retreat_arrival_retires_only_its_own_carrier",
             overmap_buffer.set_passable( source + point( x, y ), true );
         }
     }
-    monster original( mon_writhing_stalker );
+    monster original = new_stalker_fixture_body();
     original.set_pos_abs_only( source );
     original.set_moves( 100 );
     auto &state = original.writhing_stalker_state();
@@ -4802,15 +5623,23 @@ TEST_CASE( "stalker_abstract_retreat_arrival_retires_only_its_own_carrier",
     state.cooldown_until_turn = 1060;
     state.attempts_spent = 2;
     original.set_dest( retreat );
-    if( sound_kind != 0 ) {
-        // Actual native callback on translated route fixture, not physical
-        // off-bubble hearing evidence.
-        original.hear_sound( here.get_bub( sound ), 30, sound_kind == 2 ? 1 : 6, true );
-        REQUIRE( original.provocative_sound );
-    }
-    const int budget = original.wandf;
     const auto actor = original.predator_state().actor_id;
     REQUIRE( om.hordes.spawn_entity( source, original ) );
+    if( sound_kind != 0 ) {
+        // Deliver through the genuine accepted abstract owner. This is an
+        // abstract sound order, not physical off-bubble local hearing proof.
+        // Native set_dest starts this carrier at interest 1000; the signal
+        // must actually exceed that interest rather than be silently refused.
+        om.hordes.signal_entities( sound, 100 );
+    }
+    auto *prepared = overmap_buffer.entity_at( source );
+    REQUIRE( prepared != nullptr );
+    REQUIRE( prepared->monster_data );
+    if( sound_kind != 0 ) {
+        REQUIRE( prepared->monster_data->provocative_sound );
+    }
+    CHECK( prepared->monster_data->provocative_sound == ( sound_kind != 0 ) );
+    const int budget = prepared->monster_data->wandf;
     overmap_buffer.move_hordes();
     auto *owner = overmap_buffer.entity_at( retreat );
     REQUIRE( owner != nullptr );
@@ -4872,7 +5701,7 @@ TEST_CASE( "stalker_local_sound_arrival_cannot_reactivate_during_speculative_nav
     get_player_character().setpos( here, tripoint_bub_ms( 65, 65, -2 ) );
     get_scent().reset();
     refresh_writhing_stalker_arena( here );
-    monster &stalker = spawn_test_monster( mon_writhing_stalker.str(), center );
+    monster &stalker = spawn_new_stalker_fixture( center );
     stalker.anger = 100;
     const auto desired = stalker.pos_abs() + point::west * 24;
     const auto sound = stalker.pos_abs() + point::east * 6;
@@ -4966,4 +5795,306 @@ TEST_CASE( "stalker_local_sound_arrival_cannot_reactivate_during_speculative_nav
     CHECK( stalker.wandf == 0 );
     CHECK( stalker.writhing_stalker_state().evidence_turn == evidence );
     clear_map_without_vision();
+}
+
+TEST_CASE( "stalker_materialized_expired_light_retains_then_settles_only_earned_route",
+           "[writhing_stalker][predator_activation][native][light][intent_owner]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_time( calendar::turn );
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope cleanup( [&] { clear_map_without_vision(); get_avatar().setpos( old_avatar, false ); } );
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 5000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_avatar().setpos( here, tripoint_bub_ms( center.xy(), -2 ) );
+    monster &first = spawn_new_stalker_fixture( center );
+    const auto position = first.pos_abs();
+    const auto actor = first.predator_state().actor_id;
+    const auto source = position + point::east * 6;
+    REQUIRE( overmap_buffer.predator_activity_for( first, predator_activation::representation::local, position ) );
+    auto &state = first.writhing_stalker_state();
+    REQUIRE( state.observe_light_interest( source, "retained-materialized-light", 5000, 60 ) );
+    overmap_buffer.retain_predator_light_work( first, "retained-materialized-light", 5000, 60 );
+    const auto phase = state.phase;
+    const bool arrival = GENERATE( false, true );
+    REQUIRE( g->despawn_monster( first ) );
+    overmap &owner = overmap_buffer.get( project_to<coords::om>( position ).xy() );
+    on_out_of_scope release( [&] { owner.release_monster_payload( position, actor ); } );
+    auto *abstract = overmap_buffer.entity_at( position );
+    REQUIRE( abstract );
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( position ) - point( 41, 0 ) ), false );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( *abstract->monster_data, predator_activation::representation::abstract, position ) );
+    const auto bytes = []( const monster &body ) { std::ostringstream out; { JsonOut json( out ); body.serialize( json ); } return out.str(); };
+    const auto frozen = bytes( *abstract->monster_data );
+    calendar::turn += 1000_turns;
+    CHECK_FALSE( overmap_buffer.predator_activity_for( *abstract->monster_data, predator_activation::representation::abstract, position ) );
+    CHECK( bytes( *abstract->monster_data ) == frozen );
+    *abstract->monster_data = round_trip_writhing_stalker( *abstract->monster_data );
+    CHECK( bytes( *abstract->monster_data ) == frozen );
+    get_avatar().setpos( here, tripoint_bub_ms( center.xy(), -2 ) );
+    REQUIRE( overmap_buffer.predator_activity_for( *abstract->monster_data, predator_activation::representation::abstract, position ) );
+    overmap_buffer.spawn_monster( project_to<coords::sm>( position ), false );
+    REQUIRE( overmap_buffer.entity_at( position ) == nullptr );
+    auto restored = get_creature_tracker().find( position );
+    REQUIRE( restored );
+    writhing_stalker::advance_active_work( *restored, 6000 );
+    CHECK_FALSE( restored->writhing_stalker_state().light_interest_active( 6000 ) );
+    CHECK_FALSE( restored->writhing_stalker_state().has_light_observed_position );
+    CHECK( restored->writhing_stalker_state().has_committed_waypoint );
+    CHECK( restored->writhing_stalker_state().phase == phase );
+    CHECK( restored->writhing_stalker_state().light_observed_turn == 5000 );
+    CHECK_FALSE( restored->writhing_stalker_state().observe_light_interest( source, "retained-materialized-light", 5000, 60 ) );
+    if( arrival ) {
+        // Real native relocation, no pose-only hop. Arrival is a remembered
+        // place observation, not restored current optical evidence.
+        restored->set_moves( 1000 );
+        for( int step = 1; step <= 6; ++step ) {
+            REQUIRE( restored->move_to( center + point::east * step, false ) );
+        }
+        CHECK( restored->pos_abs() == source );
+        CHECK( restored->get_moves() < 1000 );
+        CHECK( restored->writhing_stalker_state().arrive_at( restored->pos_abs() ) );
+        CHECK( restored->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::searching );
+        CHECK_FALSE( restored->writhing_stalker_state().has_committed_waypoint );
+        const auto deadline = restored->writhing_stalker_state().search_until_turn;
+        CHECK_FALSE( restored->writhing_stalker_state().arrive_at( restored->pos_abs() ) );
+        CHECK( restored->writhing_stalker_state().search_until_turn == deadline );
+    } else {
+        calendar::turn += 60_turns;
+        REQUIRE( overmap_buffer.predator_activity_for( *restored, predator_activation::representation::local, restored->pos_abs() ) );
+        writhing_stalker::advance_active_work( *restored, 6060 );
+        CHECK_FALSE( overmap_buffer.predator_light_work_alive( *restored ) );
+        CHECK_FALSE( restored->writhing_stalker_state().has_committed_waypoint );
+        CHECK( restored->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+        const auto settled = bytes( *restored );
+        writhing_stalker::advance_active_work( *restored, 6060 );
+        CHECK( bytes( *restored ) == settled );
+    }
+}
+
+TEST_CASE( "stalker_capture_suspends_only_owned_progress_timeout",
+           "[writhing_stalker][predator_activation][native][capture][progress]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    clear_map_and_put_player_underground();
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    set_time( calendar::turn_zero + 810000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    get_avatar().setpos( here, tripoint_bub_ms( center.xy(), -2 ) );
+    monster &first = spawn_new_stalker_fixture( center );
+    const auto id = first.predator_state().actor_id;
+    const auto source = first.pos_abs() + point::east * 6;
+    REQUIRE( overmap_buffer.predator_activity_for( first, predator_activation::representation::local, first.pos_abs() ) );
+    // Accepted typed-light setup, not an optical-acquisition claim.
+    REQUIRE( first.writhing_stalker_state().observe_light_interest( source, "pause-progress", 810000, 5000 ) );
+    overmap_buffer.retain_predator_light_work( first, "pause-progress", 810000, 5000 );
+    first.plan();
+    REQUIRE( first.has_dest() );
+    const auto anchor = first.writhing_stalker_state().last_progress_turn;
+    REQUIRE( anchor == 810000 );
+    const auto observed = first.writhing_stalker_state().light_observed_turn;
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    carrier.contain_monster( center );
+    REQUIRE( carrier.has_var( "contained_json" ) );
+    calendar::turn += 1000_turns;
+    REQUIRE( carrier.release_monster( center ) );
+    auto restored = get_creature_tracker().find( here.get_abs( center ) );
+    REQUIRE( restored );
+    REQUIRE( restored->predator_state().actor_id == id );
+    CHECK( restored->writhing_stalker_state().last_progress_turn == anchor + 1000 );
+    restored->plan();
+    CHECK( restored->writhing_stalker_state().phase != writhing_stalker::lifecycle_phase::searching );
+    CHECK( restored->has_dest() );
+    CHECK( restored->writhing_stalker_state().light_observed_turn == observed );
+    calendar::turn += 51_turns; // real active no-progress time still expires
+    restored->plan();
+    CHECK( restored->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::searching );
+    CHECK( restored->writhing_stalker_state().light_observed_turn == observed );
+}
+
+TEST_CASE( "stalker_retained_light_executes_successive_native_short_steps",
+           "[writhing_stalker][predator_activation][native][capture][light][journey]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    clear_map_and_put_player_underground();
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    set_time( calendar::turn_zero + 820000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms center( 65, 65, 0 );
+    prepare_writhing_stalker_arena( here, center );
+    here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
+    refresh_writhing_stalker_arena( here );
+    get_avatar().setpos( here, tripoint_bub_ms( center.xy(), -2 ) );
+    get_scent().reset();
+    monster &first = spawn_new_stalker_fixture( center );
+    const auto id = first.predator_state().actor_id;
+    const auto source = first.pos_abs() + point::east * 24;
+    REQUIRE( overmap_buffer.predator_activity_for( first, predator_activation::representation::local, first.pos_abs() ) );
+    REQUIRE( first.writhing_stalker_state().observe_light_interest( source, "short-step-journey", 820000, 40 ) );
+    overmap_buffer.retain_predator_light_work( first, "short-step-journey", 820000, 40 );
+    first.plan();
+    REQUIRE( first.has_dest() );
+    REQUIRE( first.get_dest() != source );
+    const auto original_prefix = first.get_dest();
+    item carrier( itype_id( "pet_carrier" ), calendar::turn );
+    carrier.contain_monster( center );
+    REQUIRE( carrier.has_var( "contained_json" ) );
+    calendar::turn += 45_turns; // world evidence expired; below the independent progress timeout
+    REQUIRE( carrier.release_monster( center ) );
+    auto restored = get_creature_tracker().find( here.get_abs( center ) );
+    REQUIRE( restored );
+    REQUIRE( restored->predator_state().actor_id == id );
+    bool advanced_beyond_prefix = false;
+    for( int step = 0; step < 39 && restored->pos_abs() != source; ++step ) {
+        calendar::turn += 1_turns;
+        restored->process_turn();
+        restored->plan();
+        CHECK_FALSE( restored->writhing_stalker_state().light_interest_active( to_turn<int>( calendar::turn ) ) );
+        CHECK( restored->writhing_stalker_state().light_observed_turn == 820000 );
+        if( restored->get_moves() > 0 ) {
+            restored->move();
+        }
+        advanced_beyond_prefix = advanced_beyond_prefix ||
+                                 rl_dist( restored->pos_abs(), source ) < rl_dist( original_prefix, source );
+    }
+    CHECK( advanced_beyond_prefix );
+    CHECK( restored->pos_abs() == source );
+    restored->plan();
+    CHECK( restored->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::searching );
+    CHECK_FALSE( restored->writhing_stalker_state().has_light_observed_position );
+    CHECK( restored->writhing_stalker_state().light_observed_turn == 820000 );
+}
+
+TEST_CASE( "stalker_abstract_expired_light_keeps_arrival_and_finite_search_scheduled",
+           "[writhing_stalker][predator_activation][native][light][scheduler]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    const auto old_avatar = get_avatar().pos_abs();
+    clear_map_and_put_player_underground();
+    set_time( calendar::turn_zero + 830000_turns );
+    const auto start = get_map().get_abs( tripoint_bub_ms( -36, 65, 0 ) );
+    const auto light = start + point::east * 3;
+    const auto observer = get_avatar().pos_abs();
+    overmap &om = overmap_buffer.get( project_to<coords::om>( start ).xy() );
+    om.hordes.clear();
+    on_out_of_scope cleanup( [&] {
+        om.hordes.clear();
+        clear_map_without_vision();
+        get_avatar().setpos( old_avatar, false );
+    } );
+    for( int x = -5; x <= 8; ++x ) {
+        for( int y = -5; y <= 5; ++y ) {
+            overmap_buffer.set_passable( start + point( x, y ), true );
+        }
+    }
+    monster born = new_stalker_fixture_body();
+    born.set_pos_abs_only( start );
+    born.set_moves( 0 );
+    const auto actor = born.predator_state().actor_id;
+    REQUIRE( om.hordes.spawn_entity( start, born ) );
+    // An accepted typed-light packet is setup, not a physical ray claim.
+    REQUIRE( om.hordes.attract_entities_to_light( light, 60, 20, "abstract-earned-arrival",
+             calendar::turn, []( const tripoint_abs_ms & ) { return true; }, nullptr ) == 1 );
+    overmap_buffer.move_hordes(); // actual zero-credit birth opportunity
+    auto *owner = overmap_buffer.entity_at( start );
+    REQUIRE( owner );
+    REQUIRE_FALSE( owner->monster_data->writhing_stalker_state().has_pursuit_memory );
+    CHECK( owner->moves == 0 );
+    CHECK( overmap_buffer.predator_active_time( *owner->monster_data ) == 0 );
+    const auto bytes = []( const monster &body ) {
+        std::ostringstream out;
+        { JsonOut json( out ); body.serialize( json ); }
+        return out.str();
+    };
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( start ) + point( 41, 0 ) ), false );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( *owner->monster_data,
+                 predator_activation::representation::abstract, start ) );
+    const auto frozen = bytes( *owner->monster_data );
+    calendar::turn += 100_turns; // source freshness ends, earned work does not
+    overmap_buffer.move_hordes();
+    REQUIRE( overmap_buffer.entity_at( start ) == owner );
+    CHECK( bytes( *owner->monster_data ) == frozen );
+    *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+    CHECK( bytes( *owner->monster_data ) == frozen );
+    CHECK( overmap_buffer.predator_active_time( *owner->monster_data ) == 0 );
+    get_avatar().setpos( observer, false );
+    overmap_buffer.move_hordes(); // resume settles pause, never funds a step
+    REQUIRE( overmap_buffer.entity_at( start ) );
+    CHECK( overmap_buffer.entity_at( start )->moves == 0 );
+    CHECK( overmap_buffer.predator_active_time( *overmap_buffer.entity_at( start )->monster_data ) == 0 );
+    tripoint_abs_ms current = start;
+    for( int step = 0; step < 8 && current != light; ++step ) {
+        calendar::turn += 1_turns;
+        overmap_buffer.move_hordes();
+        owner = nullptr;
+        for( const auto &entry : om.horde_entities() ) {
+            if( entry.second->monster_data && entry.second->monster_data->predator_state().actor_id == actor ) {
+                current = entry.first;
+                owner = entry.second;
+            }
+        }
+        REQUIRE( owner );
+        CHECK_FALSE( owner->monster_data->writhing_stalker_state().light_interest_active(
+                         to_turn<int>( calendar::turn ) ) );
+        CHECK( owner->monster_data->writhing_stalker_state().light_observed_turn == 830000 );
+    }
+    REQUIRE( current == light );
+    REQUIRE( owner );
+    CHECK( owner->tracking_intensity == 0 );
+    CHECK( owner->is_active() ); // arrival still needs its next native callback
+    const bool sound = GENERATE( false, true );
+    if( sound ) {
+        om.hordes.signal_entities( light + point::south * 3, 20 );
+    }
+    calendar::turn += 1_turns;
+    overmap_buffer.move_hordes();
+    owner = nullptr;
+    for( const auto &entry : om.horde_entities() ) {
+        if( entry.second->monster_data && entry.second->monster_data->predator_state().actor_id == actor ) {
+            current = entry.first;
+            owner = entry.second;
+        }
+    }
+    REQUIRE( owner );
+    CHECK( owner->monster_data->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::searching );
+    CHECK_FALSE( owner->monster_data->writhing_stalker_state().has_light_observed_position );
+    const auto deadline = owner->monster_data->writhing_stalker_state().search_until_turn;
+    CHECK( deadline == to_turn<int>( calendar::turn ) + 20 );
+    if( sound ) {
+        CHECK( owner->destination == light + point::south * 3 );
+        CHECK( current == light + point::south );
+    } else {
+        CHECK( current == light );
+        CHECK( owner->tracking_intensity == 0 );
+    }
+    const auto settled = bytes( *owner->monster_data );
+    const auto moves = owner->moves;
+    overmap_buffer.move_hordes();
+    CHECK( bytes( *owner->monster_data ) == settled );
+    CHECK( owner->moves == moves );
+    if( !sound ) {
+        // Reload the actual arrived owner, keeping its finite deadline.
+        *owner->monster_data = round_trip_writhing_stalker( *owner->monster_data );
+        om.hordes.refresh_entity_bucket( current );
+        calendar::turn += 21_turns;
+        overmap_buffer.move_hordes();
+        owner = overmap_buffer.entity_at( light );
+        REQUIRE( owner );
+        CHECK( owner->monster_data->writhing_stalker_state().phase == writhing_stalker::lifecycle_phase::idle );
+        CHECK_FALSE( owner->monster_data->writhing_stalker_state().has_committed_waypoint );
+        CHECK_FALSE( owner->is_active() );
+        CHECK( owner->tracking_intensity == 0 );
+        const auto retired = bytes( *owner->monster_data );
+        calendar::turn += 100_turns;
+        overmap_buffer.move_hordes();
+        CHECK( bytes( *owner->monster_data ) == retired );
+    }
 }

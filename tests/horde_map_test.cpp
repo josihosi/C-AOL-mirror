@@ -1,11 +1,14 @@
 #include "horde_map.h"
 
+#include "avatar.h"
 #include "cata_catch.h"
+#include "cata_scope_helpers.h"
 #include "coordinates.h"
 #include "effect.h"
 #include "map.h"
 #include "monster.h"
 #include "mtype.h"
+#include "overmapbuffer.h"
 #include "rng.h"
 
 static const mtype_id mon_pseudo_dormant_zombie( "mon_pseudo_dormant_zombie" );
@@ -62,9 +65,22 @@ static void place_monster_as_entity( horde_map &test_horde, monster &mon )
 
 TEST_CASE( "predator horde payload is lazy and retains its opaque identity", "[hordes][predator]" )
 {
+    const auto old_avatar = get_avatar().pos_abs();
+    const auto old_time = calendar::turn;
+    const auto old_world = overmap_buffer.global_state;
+    calendar::turn = calendar::turn_zero + 1000_turns; // saved sight77 is genuinely old
+    on_out_of_scope restore( [&]() {
+        get_avatar().setpos( old_avatar, false );
+        overmap_buffer.global_state = old_world;
+        calendar::turn = old_time;
+    } );
     horde_map test_horde;
     test_horde.set_location( point_abs_om( 42, 42 ) );
     const tripoint_abs_ms stalker_pos = random_abs_location( test_horde );
+    // The positive observation needs an eligible native actor; this identity
+    // fixture's arbitrary OM42 container is not near the default avatar.
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( stalker_pos ) -
+                         point( 39, 0 ) ), false );
     point_abs_om ignored_om;
     tripoint_om_ms local_stalker_pos;
     std::tie( ignored_om, local_stalker_pos ) = project_remain<coords::om>( stalker_pos );
@@ -134,10 +150,24 @@ TEST_CASE( "predator horde payload is lazy and retains its opaque identity", "[h
     // A heavy rider uses the same legitimate finite horde light observation
     // to progress while abstract.  It remains an area investigation, never a
     // fabricated direct prey observation.
-    heavy_rider->light_source = rider_pos + point_rel_ms( 12, 0 );
-    heavy_rider->light_sample_id = "legitimate-rider-light-sample";
-    heavy_rider->light_observed = calendar::turn;
-    heavy_rider->light_expires = calendar::turn + 10_turns;
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( rider_pos ) -
+                         point( 39, 0 ) ), false );
+    const auto rider_light = rider_pos + point_rel_ms( 12, 0 );
+    const auto rider_visible = [&]( const tripoint_abs_ms &p ) { return p == rider_pos; };
+    CHECK( test_horde.attract_entities_to_light( rider_light, 10, 4,
+            "legitimate-rider-light-sample", calendar::turn, rider_visible ) == 0 );
+    CHECK( heavy_rider->monster_data->has_effect( effect_blind ) );
+    CHECK( heavy_rider->light_sample_id.empty() );
+    heavy_rider->monster_data->remove_effect( effect_blind );
+    // Effect removal leaves the previous turn's derived vision cache until
+    // the native turn's bonus reset. Refresh that prerequisite, not sensing.
+    CHECK_FALSE( heavy_rider->monster_data->can_see() );
+    heavy_rider->monster_data->reset_bonuses();
+    REQUIRE( heavy_rider->monster_data->can_see() );
+    REQUIRE( test_horde.attract_entities_to_light( rider_light, 10, 4,
+             "legitimate-rider-light-sample", calendar::turn, rider_visible ) == 1 );
+    heavy_rider = test_horde.entity_at( local_rider_pos );
+    REQUIRE( heavy_rider != nullptr ); // native admission can move its bucket
     CHECK( heavy_rider->advance_predator_intent( rider_pos, to_turn<int>( calendar::turn ) ) );
     CHECK( heavy_rider->destination == heavy_rider->light_source );
     CHECK( heavy_rider->tracking_intensity > 0 );
@@ -146,6 +176,8 @@ TEST_CASE( "predator horde payload is lazy and retains its opaque identity", "[h
     CHECK( heavy_rider->monster_data->zombie_rider_pursuit_state().has_movement_waypoint );
     CHECK( heavy_rider->monster_data->zombie_rider_pursuit_state().movement_waypoint ==
            heavy_rider->light_source );
+    CHECK( heavy_rider->monster_data->zombie_rider_pursuit_state().target_identity == 0 );
+    CHECK_FALSE( heavy_rider->monster_data->zombie_rider_pursuit_state().has_last_observed_position );
 }
 
 TEST_CASE( "ordinary upgradeable horde evolution remains lightweight", "[hordes][evolution]" )

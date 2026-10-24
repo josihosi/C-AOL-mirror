@@ -50,6 +50,7 @@
 
 class JsonArray;
 class JsonObject;
+class JsonMember;
 class JsonOut;
 class JsonValue;
 class cata_path;
@@ -778,7 +779,7 @@ class overmap
         void alert_entity( const tripoint_om_ms &location, const tripoint_abs_ms &destination,
                            int intensity );
         void process_mongroups();
-        void move_hordes( bool migo_operations_only = false );
+        void move_hordes( bool migo_operations_only = false, bool predators_only = false );
 
         //nemesis movement for "hunted" trait
         void signal_nemesis( const tripoint_abs_sm & );
@@ -1013,12 +1014,22 @@ class overmap
         void place_radios();
 
         void add_mon_group( const mongroup &group );
+        void add_mon_group( mongroup &&group );
         void add_mon_group( const mongroup &group, int radius );
         // Spawns a new mongroup (to be called by worldgen code)
         void spawn_mon_group( const mongroup &group, int radius );
 
-        void load_monster_groups( const JsonArray &jsin );
-        void load_legacy_monstergroups( const JsonArray &jsin );
+        enum class monster_owner_decode_mode {
+            normal_load,
+            existing_actors_only
+        };
+        // Shared native actor-section reader. Cold activation discovery must
+        // not run anonymous population expansion or publish a partial overmap.
+        void unserialize_monster_owners( const JsonMember &section,
+                                         monster_owner_decode_mode mode );
+        void unserialize( std::istream &fin, monster_owner_decode_mode mode );
+        void load_monster_groups( const JsonArray &jsin, monster_owner_decode_mode mode );
+        void load_legacy_monstergroups( const JsonArray &jsin, monster_owner_decode_mode mode );
         void save_monster_groups( JsonOut &jo ) const;
     public:
         static void load_oter_id_camp_migration( const JsonObject &jo );

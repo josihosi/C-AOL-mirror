@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <sstream>
 #include <tuple>
 
@@ -10,6 +11,7 @@
 #include "json.h"
 #include "math_parser_diag_value.h"
 #include "monster.h"
+#include "overmapbuffer.h"
 #include "predator_state.h"
 
 namespace zombie_rider_overmap_ai
@@ -111,6 +113,7 @@ void rider_band_registry::ensure_member( const std::string &actor_id )
     if( !actor_id.empty() && members.find( actor_id ) == members.end() ) {
         members.emplace( actor_id, member { actor_id } );
         revisions.emplace( actor_id, 1 );
+        living_index_dirty = true;
     }
 }
 
@@ -147,6 +150,7 @@ bool rider_band_registry::register_encounter( const rider_band_encounter &encoun
     const std::string root = std::min( first_root, second_root );
     const std::string absorbed = std::max( first_root, second_root );
     members[absorbed].parent = root;
+    living_index_dirty = true;
     // A merge changes the canonical band's membership exactly once.  The
     // absorbed root remains an alias so old loaded caches can be reconciled.
     const std::uint64_t inherited = std::max( revisions[root], revisions[absorbed] );
@@ -163,6 +167,7 @@ bool rider_band_registry::record_casualty( const std::string &actor_id, const in
     const std::string root = root_for( actor_id );
     found->second.alive = false;
     found->second.casualty_turn = turn;
+    living_index_dirty = true;
     observations.erase( actor_id );
     bump_revision( root );
     return true;
@@ -223,15 +228,29 @@ bool rider_band_registry::in_same_band( const std::string &first_actor_id,
     return !first.empty() && first == root_for( second_actor_id );
 }
 
+const std::vector<std::string> &rider_band_registry::living_actor_ids(
+    const std::string &actor_id ) const
+{
+    if( living_index_dirty ) {
+        living_by_band.clear();
+        for( const auto &entry : members ) {
+            if( entry.second.alive ) {
+                const auto root = root_for( entry.first );
+                if( !root.empty() ) {
+                    living_by_band[root].push_back( entry.first );
+                }
+            }
+        }
+        living_index_dirty = false;
+    }
+    const auto found = living_by_band.find( root_for( actor_id ) );
+    static const std::vector<std::string> empty;
+    return found == living_by_band.end() ? empty : found->second;
+}
+
 int rider_band_registry::living_members( const std::string &actor_id ) const
 {
-    const std::string root = root_for( actor_id );
-    if( root.empty() ) {
-        return 0;
-    }
-    return std::count_if( members.begin(), members.end(), [&root, this]( const auto & entry ) {
-        return entry.second.alive && root_for( entry.first ) == root;
-    } );
+    return static_cast<int>( living_actor_ids( actor_id ).size() );
 }
 
 std::uint64_t rider_band_registry::revision_for( const std::string &actor_id ) const
@@ -259,6 +278,8 @@ std::string rider_band_registry::diagnostic_json() const
 void rider_band_registry::clear()
 {
     members.clear();
+    living_by_band.clear();
+    living_index_dirty = true;
     revisions.clear();
     encounter_turns.clear();
     observations.clear();
@@ -345,10 +366,37 @@ void rider_band_registry::deserialize( const JsonObject &json )
     }
 }
 
+void rider_pursuit_state::suspend_work( const int paused_turns )
+{
+    if( paused_turns <= 0 ) {
+        return;
+    }
+    if( has_last_observed_position && last_observed_turn >= 0 ) {
+        retained_observation_work = true;
+        if( phase == pursuit_phase::pursuing && search_until_turn < 0 ) {
+            // Preserve the earned finite observation allowance as remembered
+            // position work, without changing its real acquisition timestamp.
+            search_until_turn = static_cast<int>( std::min<std::int64_t>(
+                                    std::numeric_limits<int>::max(),
+                                    static_cast<std::int64_t>( last_observed_turn ) + 201 ) );
+        }
+    }
+    for( int *deadline : { &search_until_turn, &impact_recovery_until_turn } ) {
+        if( *deadline >= 0 ) {
+            *deadline = static_cast<int>( std::min<std::int64_t>(
+                    std::numeric_limits<int>::max(), static_cast<std::int64_t>( *deadline ) + paused_turns ) );
+        }
+    }
+}
+
 void rider_pursuit_state::advance_to( const int now_turn )
 {
     if( has_last_observed_position && last_observed_turn >= 0 &&
         now_turn >= last_observed_turn && now_turn - last_observed_turn > 200 ) {
+        if( retained_observation_work && search_until_turn > now_turn ) {
+            phase = pursuit_phase::searching;
+            return; // evidence_valid still rejects this as current sight.
+        }
         phase = pursuit_phase::idle;
         target_identity = 0;
         has_last_observed_position = false;
@@ -357,6 +405,7 @@ void rider_pursuit_state::advance_to( const int now_turn )
         evidence_source_actor_id.clear();
         evidence_provenance.clear();
         search_until_turn = -1;
+        retained_observation_work = false;
         return;
     }
     if( phase == pursuit_phase::searching && search_until_turn >= 0 && now_turn >= search_until_turn ) {
@@ -368,6 +417,7 @@ void rider_pursuit_state::advance_to( const int now_turn )
         evidence_source_actor_id.clear();
         evidence_provenance.clear();
         search_until_turn = -1;
+        retained_observation_work = false;
     }
 }
 
@@ -424,6 +474,7 @@ void rider_pursuit_state::observe( const std::uint64_t identity,
     last_observed_position = position;
     has_last_observed_position = true;
     last_observed_turn = now_turn;
+    retained_observation_work = false;
     movement_waypoint = position;
     has_movement_waypoint = true;
     search_until_turn = -1;
@@ -442,6 +493,7 @@ void rider_pursuit_state::relay( const rider_band_observation &observation )
     last_observed_position = observation.position;
     has_last_observed_position = true;
     last_observed_turn = observation.observed_turn;
+    retained_observation_work = false;
     movement_waypoint = observation.position;
     has_movement_waypoint = true;
     search_until_turn = -1;
@@ -469,6 +521,7 @@ void rider_pursuit_state::serialize( JsonOut &json ) const
     json.member( "has_movement_waypoint", has_movement_waypoint );
     json.member( "movement_waypoint", movement_waypoint );
     json.member( "search_until_turn", search_until_turn );
+    json.member( "retained_observation_work", retained_observation_work );
     json.member( "impact_ready", impact_ready );
     json.member( "impact_ready_turn", impact_ready_turn );
     json.member( "impact_recovery_until_turn", impact_recovery_until_turn );
@@ -491,6 +544,7 @@ void rider_pursuit_state::deserialize( const JsonObject &json )
     json.read( "has_movement_waypoint", has_movement_waypoint );
     json.read( "movement_waypoint", movement_waypoint );
     json.read( "search_until_turn", search_until_turn );
+    json.read( "retained_observation_work", retained_observation_work );
     json.read( "impact_ready", impact_ready );
     json.read( "impact_ready_turn", impact_ready_turn );
     json.read( "impact_recovery_until_turn", impact_recovery_until_turn );
@@ -507,6 +561,9 @@ const std::string camp_posture_key( "caol_zombie_rider_camp_posture" );
 const std::string camp_source_key( "caol_zombie_rider_camp_source" );
 const std::string camp_intent_until_key( "caol_zombie_rider_camp_intent_until" );
 const std::string camp_slot_key( "caol_zombie_rider_camp_slot" );
+const std::string camp_sample_key( "caol_zombie_rider_camp_sample" );
+const std::string camp_observed_key( "caol_zombie_rider_camp_observed" );
+const std::string camp_expires_key( "caol_zombie_rider_camp_expires" );
 
 int current_turn_number()
 {
@@ -780,11 +837,26 @@ void clear_camp_pressure_intent( monster &rider )
     rider.remove_value( camp_source_key );
     rider.remove_value( camp_intent_until_key );
     rider.remove_value( camp_slot_key );
+    rider.remove_value( camp_sample_key );
+    rider.remove_value( camp_observed_key );
+    rider.remove_value( camp_expires_key );
+}
+
+void suspend_camp_pressure_work( monster &rider, const int paused_turns )
+{
+    const diag_value *until = rider.maybe_get_value( camp_intent_until_key );
+    if( paused_turns > 0 && until && until->is_dbl() ) {
+        const int shifted = static_cast<int>( std::min<std::int64_t>(
+                                std::numeric_limits<int>::max(),
+                                static_cast<std::int64_t>( until->dbl() ) + paused_turns ) );
+        rider.set_value( camp_intent_until_key, shifted );
+    }
 }
 
 void set_camp_pressure_intent( monster &rider, rider_camp_pressure_posture posture,
                                const tripoint_abs_ms &source, int duration_turns,
-                               int formation_slot )
+                               int formation_slot, const std::string &sample_id,
+                               int observed_world, int expires_world )
 {
     if( posture == rider_camp_pressure_posture::none || duration_turns <= 0 ) {
         clear_camp_pressure_intent( rider );
@@ -795,6 +867,9 @@ void set_camp_pressure_intent( monster &rider, rider_camp_pressure_posture postu
     rider.set_value( camp_source_key, source );
     rider.set_value( camp_intent_until_key, current_turn_number() + std::max( 1, duration_turns ) );
     rider.set_value( camp_slot_key, std::max( 0, formation_slot ) );
+    rider.set_value( camp_sample_key, sample_id );
+    rider.set_value( camp_observed_key, observed_world );
+    rider.set_value( camp_expires_key, expires_world );
 }
 
 std::optional<rider_camp_pressure_intent> get_camp_pressure_intent( monster &rider )
@@ -815,7 +890,22 @@ std::optional<rider_camp_pressure_intent> get_camp_pressure_intent( monster &rid
     intent.posture = posture_from_string( posture_value->str() );
     intent.source = source_value->tripoint();
     intent.formation_slot = std::max( 0, static_cast<int>( slot_value->dbl() ) );
-    intent.turns_remaining = static_cast<int>( until_value->dbl() ) - current_turn_number();
+    const auto effective_now = static_cast<std::int64_t>( current_turn_number() ) -
+                               overmap_buffer.predator_pending_pause( rider );
+    intent.turns_remaining = static_cast<int>( std::clamp<std::int64_t>(
+                                static_cast<std::int64_t>( until_value->dbl() ) - effective_now,
+                                std::numeric_limits<int>::min(), std::numeric_limits<int>::max() ) );
+    if( const diag_value *sample = rider.maybe_get_value( camp_sample_key ); sample && sample->is_str() ) {
+        intent.sample_id = sample->str();
+    }
+    if( const diag_value *observed = rider.maybe_get_value( camp_observed_key );
+        observed && observed->is_dbl() ) {
+        intent.observed_world = static_cast<int>( observed->dbl() );
+    }
+    if( const diag_value *expires = rider.maybe_get_value( camp_expires_key );
+        expires && expires->is_dbl() ) {
+        intent.expires_world = static_cast<int>( expires->dbl() );
+    }
     if( intent.posture == rider_camp_pressure_posture::none || intent.turns_remaining <= 0 ) {
         clear_camp_pressure_intent( rider );
         return std::nullopt;

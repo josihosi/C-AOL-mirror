@@ -13,6 +13,7 @@
 #include <tuple>
 #include <type_traits>
 
+#include "active_time.h"
 #include "basecamp.h"
 #include "bandit_live_world_probe.h"
 #include "calendar.h"
@@ -24,6 +25,7 @@
 #include "color.h"
 #include "coordinates.h"
 #include "cuboid_rectangle.h"
+#include "creature_tracker.h"
 #include "debug.h"
 #include "filesystem.h"
 #include "flexbuffer_json.h"
@@ -76,6 +78,419 @@ static int omt_to_sm_copy( int a )
 }
 
 overmapbuffer overmap_buffer;
+
+namespace predator_activation
+{
+void activity_interval::evaluate( int now, bool eligible )
+{
+    if( last_world < 0 ) {
+        adopted_world = last_world = now;
+        active = eligible;
+        active_delta = 0;
+    } else if( now >= last_world ) {
+        if( now > last_world ) {
+            const int elapsed = now - last_world;
+            active_delta = active && eligible ?
+                           active_time::clipped_turns( now, last_world, elapsed ) : 0;
+            suspended_turns += elapsed - active_delta;
+            last_world = now;
+        } else if( !eligible ) {
+            active_delta = 0;
+        }
+        active = eligible;
+    }
+}
+
+std::int64_t activity_interval::suspension_at( int now ) const
+{
+    return suspended_turns + ( !active && last_world >= 0 ?
+                              std::max( 0, now - last_world ) : 0 );
+}
+
+std::int64_t activity_interval::active_at( int now ) const
+{
+    return adopted_world < 0 ? 0 : std::max<std::int64_t>( 0,
+           static_cast<std::int64_t>( now ) - adopted_world - suspension_at( now ) );
+}
+
+void activity_interval::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "adopted_world", adopted_world );
+    json.member( "last_world", last_world );
+    json.member( "active", active );
+    json.member( "suspended_turns", suspended_turns );
+    json.end_object();
+}
+
+void activity_interval::deserialize( const JsonObject &json )
+{
+    *this = activity_interval();
+    json.read( "adopted_world", adopted_world );
+    json.read( "last_world", last_world );
+    json.read( "active", active );
+    json.read( "suspended_turns", suspended_turns );
+    suspended_turns = std::max<std::int64_t>( 0, suspended_turns );
+}
+
+void actor_record::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "actor_id", actor_id );
+    json.member( "type", type );
+    json.member( "epoch", epoch );
+    json.member( "owner", static_cast<int>( owner ) );
+    json.member( "position", position );
+    json.member( "activity", activity );
+    if( owner == representation::captured ) {
+        json.member( "capture_item_uid", capture_item_uid );
+    }
+    json.end_object();
+}
+
+void actor_record::deserialize( const JsonObject &json )
+{
+    *this = actor_record();
+    json.read( "actor_id", actor_id );
+    json.read( "type", type );
+    json.read( "epoch", epoch );
+    const int saved_owner = json.get_int( "owner", static_cast<int>( representation::dead ) );
+    if( saved_owner >= static_cast<int>( representation::local ) &&
+        saved_owner <= static_cast<int>( representation::captured ) ) {
+        owner = static_cast<representation>( saved_owner );
+    }
+    json.read( "position", position );
+    json.read( "activity", activity );
+    json.read( "capture_item_uid", capture_item_uid );
+    if( owner == representation::captured ) {
+        position.reset();
+        activity.active = false;
+        confirmed = capture_item_uid > 0;
+    }
+}
+
+const actor_record *world_state::find( const std::string &id ) const
+{
+    const auto entry = actors.find( id );
+    return entry == actors.end() ? nullptr : &entry->second;
+}
+
+actor_record *world_state::find( const std::string &id )
+{
+    const auto entry = actors.find( id );
+    return entry == actors.end() ? nullptr : &entry->second;
+}
+
+void world_state::index_position( const actor_record &actor, bool add )
+{
+    if( !actor.confirmed || actor.owner == representation::dead ||
+        actor.owner == representation::captured || !actor.position ) {
+        return;
+    }
+    const auto p = project_to<coords::omt>( *actor.position ).xy();
+    if( add ) {
+        positions[p.x()][p.y()].insert( actor.actor_id );
+    } else {
+        auto x = positions.find( p.x() );
+        if( x == positions.end() ) {
+            return;
+        }
+        auto y = x->second.find( p.y() );
+        if( y != x->second.end() ) {
+            y->second.erase( actor.actor_id );
+            if( y->second.empty() ) {
+                x->second.erase( y );
+            }
+        }
+        if( x->second.empty() ) {
+            positions.erase( x );
+        }
+    }
+}
+
+bool world_state::confirm( const std::string &id, const std::string &type,
+                          std::uint64_t epoch, representation owner,
+                          const tripoint_abs_ms &position, int now )
+{
+    if( id.empty() || owner == representation::dead || owner == representation::captured || now < 0 ) {
+        return false;
+    }
+    auto found = actors.find( id );
+    if( found != actors.end() &&
+        ( found->second.owner == representation::dead ||
+          found->second.owner == representation::captured || epoch < found->second.epoch ||
+          ( found->second.confirmed && ( epoch != found->second.epoch ||
+                                        owner != found->second.owner ||
+                                        found->second.position != position ) ) ) ) {
+        return false;
+    }
+    auto &actor = actors[id];
+    if( actor.confirmed && actor.position == position && actor.type == type ) {
+        return true;
+    }
+    index_position( actor, false );
+    if( actor.position && actor.position != position ) {
+        forget_legacy_entry( id );
+    }
+    actor.actor_id = id;
+    actor.type = type;
+    actor.epoch = epoch;
+    actor.owner = owner;
+    actor.position = position;
+    actor.confirmed = true;
+    if( actor.activity.last_world < 0 ) {
+        actor.activity.evaluate( now, false );
+    }
+    index_position( actor, true );
+    invalidate_activation();
+    return true;
+}
+
+bool world_state::owns( const std::string &id, std::uint64_t epoch,
+                       representation owner, const tripoint_abs_ms &position ) const
+{
+    const auto *actor = find( id );
+    return actor && actor->confirmed && actor->epoch == epoch && actor->owner == owner &&
+           owner != representation::dead && actor->position == position;
+}
+
+bool world_state::move( const std::string &id, std::uint64_t epoch, representation owner,
+                        const tripoint_abs_ms &from, const tripoint_abs_ms &to )
+{
+    if( !owns( id, epoch, owner, from ) ) {
+        return false;
+    }
+    auto &actor = *find( id );
+    index_position( actor, false );
+    if( from != to ) {
+        forget_legacy_entry( id );
+    }
+    actor.position = to;
+    index_position( actor, true );
+    invalidate_activation();
+    return true;
+}
+
+bool world_state::transfer( const std::string &id, std::uint64_t old_epoch,
+                           representation from, representation to,
+                           const tripoint_abs_ms &position, int now )
+{
+    auto *actor = find( id );
+    if( now < 0 || !actor || !actor->confirmed || actor->epoch != old_epoch || actor->owner != from ||
+        from == representation::dead || to == representation::dead ||
+        from == representation::captured || to == representation::captured ) {
+        return false;
+    }
+    index_position( *actor, false );
+    forget_legacy_entry( id );
+    actor->epoch = old_epoch + 1;
+    actor->owner = to;
+    actor->position = position;
+    index_position( *actor, true );
+    invalidate_activation();
+    return true;
+}
+
+bool world_state::capture( const std::string &id, std::uint64_t epoch,
+                           const tripoint_abs_ms &position, std::int64_t item_uid, int now )
+{
+    if( item_uid <= 0 || now < 0 || epoch > std::numeric_limits<std::uint64_t>::max() - 2 ||
+        !owns( id, epoch, representation::local, position ) ||
+        find( id )->activity.last_world > now ) {
+        return false;
+    }
+    auto &actor = *find( id );
+    index_position( actor, false );
+    forget_legacy_entry( id );
+    actor.activity.evaluate( now, false );
+    actor.owner = representation::captured;
+    actor.epoch = epoch + 1;
+    actor.position.reset();
+    actor.capture_item_uid = item_uid;
+    active_ids.erase( id );
+    invalidate_activation();
+    return true;
+}
+
+bool world_state::release_capture( const std::string &id, std::uint64_t captured_epoch,
+                                   std::int64_t item_uid, const tripoint_abs_ms &position, int now )
+{
+    auto *actor = find( id );
+    if( !actor || !actor->confirmed || actor->owner != representation::captured ||
+        actor->epoch != captured_epoch || actor->capture_item_uid != item_uid ||
+        item_uid <= 0 || now < actor->activity.last_world ||
+        captured_epoch == std::numeric_limits<std::uint64_t>::max() ) {
+        return false;
+    }
+    actor->activity.evaluate( now, false );
+    actor->owner = representation::local;
+    actor->epoch = captured_epoch + 1;
+    actor->position = position;
+    actor->capture_item_uid = 0;
+    index_position( *actor, true );
+    invalidate_activation();
+    return true;
+}
+
+void world_state::record_death( const std::string &id, std::uint64_t epoch, int now )
+{
+    if( id.empty() ) {
+        return;
+    }
+    auto &actor = actors[id];
+    if( actor.epoch > epoch ) {
+        return;
+    }
+    index_position( actor, false );
+    forget_legacy_entry( id );
+    actor.actor_id = id;
+    actor.epoch = epoch;
+    actor.owner = representation::dead;
+    actor.position.reset();
+    actor.confirmed = true;
+    actor.activity.evaluate( now, false );
+    active_ids.erase( id );
+    invalidate_activation();
+}
+
+std::string world_state::legacy_identity( const std::string &entry,
+        const std::string &proposed )
+{
+    const auto found = legacy_entries.find( entry );
+    if( found != legacy_entries.end() ) {
+        return found->second;
+    }
+    if( entry.empty() || proposed.empty() ) {
+        return proposed;
+    }
+    legacy_actor_entries[proposed] = entry;
+    return legacy_entries.emplace( entry, proposed ).first->second;
+}
+
+void world_state::forget_legacy_entry( const std::string &id )
+{
+    const auto old = legacy_actor_entries.find( id );
+    if( old != legacy_actor_entries.end() ) {
+        legacy_entries.erase( old->second );
+        legacy_actor_entries.erase( old );
+    }
+}
+
+void world_state::refresh( const point_abs_omt &center, int now,
+                           const zombie_rider_overmap_ai::rider_band_registry &bands )
+{
+    if( evaluated_world == now && evaluated_center == center ) {
+        return;
+    }
+    std::set<std::string> eligible;
+    const auto available = []( const actor_record *actor ) {
+        if( !actor || !actor->confirmed || actor->owner == representation::dead ||
+            actor->owner == representation::captured || !actor->position ) {
+            return false;
+        }
+        if( actor->owner == representation::local ) {
+            // A removed local body is missing, not a surviving range witness.
+            // This is a bounded tracker lookup, never a loaded-actor scan or
+            // a far-map read, and grants no death/loss knowledge.
+            if( !g ) {
+                return false;
+            }
+            const auto body = get_creature_tracker().find( *actor->position );
+            return body && body->is_caol_predator() && body->pos_abs() == *actor->position &&
+                   body->predator_state().actor_id == actor->actor_id &&
+                   body->predator_state().handoff_epoch == actor->epoch;
+        }
+        return true;
+    };
+    for( auto x = positions.lower_bound( center.x() - 40 );
+         x != positions.end() && x->first <= center.x() + 40; ++x ) {
+        for( auto y = x->second.lower_bound( center.y() - 40 );
+             y != x->second.end() && y->first <= center.y() + 40; ++y ) {
+            for( const auto &id : y->second ) {
+                const auto *actor = find( id );
+                if( !available( actor ) ) {
+                    continue;
+                }
+                eligible.insert( id );
+                if( actor->type == "mon_zombie_rider" ) {
+                    for( const auto &peer_id : bands.living_actor_ids( id ) ) {
+                        const auto *peer = find( peer_id );
+                        if( available( peer ) ) {
+                            eligible.insert( peer_id );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Only previously active or currently eligible entities need settlement.
+    // Frozen history computes suspended elapsed lazily from its last boundary.
+    auto changed = active_ids;
+    changed.insert( eligible.begin(), eligible.end() );
+    for( const auto &id : changed ) {
+        if( auto *actor = find( id ) ) {
+            actor->activity.evaluate( now, eligible.count( id ) > 0 );
+        }
+    }
+    active_ids = std::move( eligible );
+    evaluated_center = center;
+    evaluated_world = now;
+}
+
+void world_state::invalidate_activation()
+{
+    evaluated_world = -1;
+}
+
+const std::set<std::string> &world_state::active_actors() const
+{
+    return active_ids;
+}
+
+void world_state::clear()
+{
+    actors.clear();
+    legacy_entries.clear();
+    legacy_actor_entries.clear();
+    positions.clear();
+    active_ids.clear();
+    evaluated_center.reset();
+    evaluated_world = -1;
+    bootstrapped = bootstrapping = false;
+}
+
+void world_state::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "actors" );
+    json.start_array();
+    for( const auto &entry : actors ) {
+        json.write( entry.second );
+    }
+    json.end_array();
+    json.member( "legacy_entries", legacy_entries );
+    json.end_object();
+}
+
+void world_state::deserialize( const JsonObject &json )
+{
+    clear();
+    for( JsonObject entry : json.get_array( "actors" ) ) {
+        actor_record actor;
+        actor.deserialize( entry );
+        if( !actor.actor_id.empty() ) {
+            if( actor.activity.active ) {
+                active_ids.insert( actor.actor_id );
+            }
+            actors.emplace( actor.actor_id, std::move( actor ) );
+        }
+    }
+    json.read( "legacy_entries", legacy_entries );
+    for( const auto &entry : legacy_entries ) {
+        legacy_actor_entries.emplace( entry.second, entry.first );
+    }
+}
+} // namespace predator_activation
 
 overmapbuffer::overmapbuffer()
     : last_requested_overmap( nullptr )
@@ -149,6 +564,7 @@ overmap &overmapbuffer::get( const point_abs_om &p )
     overmap &new_om = *( overmaps[ p ] = std::make_unique<overmap>( p ) );
     global_state.overmap_count++;
     new_om.populate();
+    confirm_predator_owners( new_om );
     // Note: fix_mongroups might load other overmaps, so overmaps.back() is not
     // necessarily the overmap at (x,y)
     fix_mongroups( new_om );
@@ -170,6 +586,7 @@ void overmapbuffer::create_custom_overmap( const point_abs_om &p, overmap_specia
     overmap &new_om = *( overmaps[ p ] = std::make_unique<overmap>( p ) );
     global_state.overmap_count++;
     new_om.populate( specials );
+    confirm_predator_owners( new_om );
 }
 
 void overmapbuffer::fix_mongroups( overmap &new_overmap )
@@ -202,14 +619,15 @@ void overmapbuffer::fix_mongroups( overmap &new_overmap )
     }
 }
 
-void overmapbuffer::fix_nemesis( overmap &new_overmap )
+void overmapbuffer::fix_nemesis( overmap &new_overmap, bool fullbody )
 {
     for( std::multimap<tripoint_om_sm, mongroup>::iterator it = new_overmap.zg.begin();
          it != new_overmap.zg.end(); ) {
         mongroup &mg = it->second;
 
         //if it's not the nemesis, continue
-        if( mg.behaviour != mongroup::horde_behaviour::nemesis ) {
+        if( mg.behaviour != mongroup::horde_behaviour::nemesis ||
+            ( !mg.monsters.empty() ) != fullbody ) {
             ++it;
             continue;
         }
@@ -225,6 +643,47 @@ void overmapbuffer::fix_nemesis( overmap &new_overmap )
 
         //otherwise, place it in the overmap that corresponds to its abs_sm coords
         overmap &om = get( omp );
+        if( fullbody ) {
+            // move_nemesis has only prepared abs_pos. Its original native
+            // key still owns the source until this destination accepts it.
+            const auto source = project_combine( new_overmap.pos(), it->first );
+            const auto source_ms = project_to<coords::ms>( source );
+            const auto destination_ms = project_to<coords::ms>( mg.abs_pos );
+            auto &activity = global_state.predator_activity;
+            bool accepted = om.safe_at_worldgen.count( project_to<coords::omt>( mg.rel_pos() ) ) == 0;
+            std::set<std::string> identities;
+            for( const monster &body : mg.monsters ) {
+                if( body.is_caol_predator() ) {
+                    const auto &life = body.predator_state();
+                    accepted = accepted && !body.is_dead() &&
+                               identities.insert( life.actor_id ).second &&
+                               activity.owns( life.actor_id, life.handoff_epoch,
+                                       predator_activation::representation::group, source_ms );
+                }
+            }
+            if( !accepted ) {
+                mg.abs_pos = source; // Uncommitted candidate only; no reverse movement/debit.
+                ++it;
+                continue;
+            }
+            const auto destination_key = mg.rel_pos();
+            auto node = new_overmap.zg.extract( it++ );
+            node.key() = destination_key;
+            const auto placed = om.zg.insert( std::move( node ) );
+            // Native multimap insertion cannot reject a key. No callback or
+            // body work intervenes between the complete lease check and these
+            // same-representation position commits; epochs do not change.
+            for( const monster &body : placed->second.monsters ) {
+                if( body.is_caol_predator() ) {
+                    const auto &life = body.predator_state();
+                    const bool committed = activity.move( life.actor_id, life.handoff_epoch,
+                                           predator_activation::representation::group, source_ms,
+                                           destination_ms );
+                    cata_assert( committed );
+                }
+            }
+            continue;
+        }
         om.spawn_mon_group( mg, 1 );
         new_overmap.zg.erase( it++ );
         //there should only be one nemesis, so we can break after finding it
@@ -316,6 +775,7 @@ void overmap_global_state::clear()
     zombie_rider_light_memory.clear();
     zombie_rider_light_memory_last_turn = calendar::turn_zero;
     zombie_rider_bands.clear();
+    predator_activity.clear();
     placed_regions.clear();
     overmap_count = 0;
     major_river_count = 0;
@@ -339,6 +799,10 @@ void overmapbuffer::reconcile_rider_band_encounters()
         // is the ownership boundary, so restore the durable identity before
         // considering an encounter; never use a process-local creature ID.
         rider.ensure_predator_state();
+        if( !predator_activity_for( rider, predator_activation::representation::local,
+                                   rider.pos_abs() ) ) {
+            return;
+        }
         const std::string actor_id = rider.predator_state().actor_id;
         if( actor_id.empty() || !seen_actor_ids.insert( actor_id ).second ) {
             return;
@@ -388,6 +852,7 @@ void overmapbuffer::reconcile_rider_band_encounters()
             first->actor_id, second->actor_id, now, reciprocal, reachable } ) ) {
                 continue;
             }
+            global_state.predator_activity.invalidate_activation();
             // The registry is the sole membership owner.  These are only
             // immediately refreshed projections for the two live payloads.
             global_state.zombie_rider_bands.reconcile_cache( first->actor_id,
@@ -480,6 +945,439 @@ overmap *overmapbuffer::find_loaded_overmap( const point_abs_om &p )
 {
     const auto found = overmaps.find( p );
     return found == overmaps.end() ? nullptr : found->second.get();
+}
+
+bool overmapbuffer::confirm_predator_position( const monster &body,
+        predator_activation::representation owner, const tripoint_abs_ms &position )
+{
+    if( !body.is_caol_predator() || body.is_dead() || body.predator_state().actor_id.empty() ) {
+        return false;
+    }
+    const auto &life = body.predator_state();
+    auto &world = global_state.predator_activity;
+    const auto *prior = world.find( life.actor_id );
+    if( prior && prior->confirmed && prior->owner == predator_activation::representation::group &&
+        owner == predator_activation::representation::abstract && prior->epoch + 1 == life.handoff_epoch ) {
+        // A complete native load can migrate a previously cold-indexed group.
+        // The accepted container/payload epoch, not a speculative decode pose,
+        // establishes this representation transition.
+        return world.transfer( life.actor_id, prior->epoch, prior->owner, owner, position,
+                               to_turn<int>( calendar::turn ) );
+    }
+    return world.confirm( life.actor_id, body.type->id.str(),
+            life.handoff_epoch, owner, position, to_turn<int>( calendar::turn ) );
+}
+
+bool overmapbuffer::transfer_predator_owner( monster &destination,
+        predator_activation::representation from, const tripoint_abs_ms &source_position,
+        predator_activation::representation to, const tripoint_abs_ms &destination_position )
+{
+    if( !destination.is_caol_predator() ) {
+        return true;
+    }
+    const auto &life = destination.predator_state();
+    auto &world = global_state.predator_activity;
+    if( life.handoff_epoch == 0 || !world.owns( life.actor_id, life.handoff_epoch - 1,
+            from, source_position ) ) {
+        return false;
+    }
+    return world.transfer( life.actor_id, life.handoff_epoch - 1, from, to,
+                           destination_position, to_turn<int>( calendar::turn ) );
+}
+
+void overmapbuffer::adopt_legacy_predator_identity( monster &body, const std::string &entry )
+{
+    if( !body.is_caol_predator() ) {
+        return;
+    }
+    body.ensure_predator_state();
+    auto &life = body.predator_state();
+    life.actor_id = global_state.predator_activity.legacy_identity( entry, life.actor_id );
+}
+
+void overmapbuffer::confirm_predator_owners( overmap &om )
+{
+    auto &world = global_state.predator_activity;
+    const int now = to_turn<int>( calendar::turn );
+    for( const auto &entry : om.horde_entities() ) {
+        horde_entity &entity = *entry.second;
+        if( entity.monster_data && entity.monster_data->is_caol_predator() ) {
+            entity.monster_data->ensure_predator_state();
+            confirm_predator_position( *entity.monster_data,
+                                      predator_activation::representation::abstract, entry.first );
+        } else if( !entity.monster_data &&
+                   ( entity.get_type()->id.str() == "mon_zombie_rider" ||
+                     entity.get_type()->id.str() == "mon_writhing_stalker" ) ) {
+            // This is one existing type-only entity, not an anonymous
+            // population recipe. Its compact identity needs no temporary
+            // biological constructor, ammo roll, evolution or on_load.
+            const std::string locator = "horde:" + entry.first.to_string() + ":" +
+                                        entity.get_type()->id.str();
+            std::string id = world.legacy_identity( locator, {} );
+            if( id.empty() ) {
+                id = world.legacy_identity( locator, random_string( 32 ) );
+            }
+            world.confirm( id, entity.get_type()->id.str(), 0,
+                           predator_activation::representation::abstract, entry.first, now );
+        }
+    }
+    for( auto &entry : om.zg ) {
+        for( monster &body : entry.second.monsters ) {
+            if( body.is_caol_predator() && !body.is_dead() ) {
+                body.ensure_predator_state();
+                confirm_predator_position( body, predator_activation::representation::group,
+                                          project_to<coords::ms>( entry.second.abs_pos ) );
+            }
+        }
+    }
+
+}
+
+void overmapbuffer::bootstrap_predator_positions()
+{
+    auto &world = global_state.predator_activity;
+    if( world.bootstrapped || world.bootstrapping || !g ) {
+        return;
+    }
+    world.bootstrapping = true;
+    struct bootstrap_guard {
+        predator_activation::world_state &world;
+        ~bootstrap_guard() {
+            world.bootstrapping = false;
+        }
+    } guard{ world };
+    for( monster &body : g->all_monsters() ) {
+        if( body.is_caol_predator() && !body.is_dead() ) {
+            body.ensure_predator_state();
+            confirm_predator_position( body, predator_activation::representation::local, body.pos_abs() );
+        }
+    }
+    for( auto &entry : overmaps ) {
+        confirm_predator_owners( *entry.second );
+    }
+    if( world_generator && world_generator->active_world ) {
+        const bool compressed = world_generator->active_world->has_compression_enabled();
+        const cata_path root = compressed ? PATH_INFO::current_dimension_save_path() /
+                               zzip_overmap_directory : PATH_INFO::current_dimension_save_path();
+        for( const auto &path : get_files_from_path( "o.", root, false, false ) ) {
+            const std::string name = path.get_unrelative_path().filename().u8string();
+            int x = 0;
+            int y = 0;
+            char prefix = 0;
+            char dot_x = 0;
+            char dot_y = 0;
+            std::string suffix;
+            std::istringstream filename( name );
+            if( !( filename >> prefix >> dot_x >> x >> dot_y >> y ) || prefix != 'o' ||
+                dot_x != '.' || dot_y != '.' ) {
+                continue;
+            }
+            std::getline( filename, suffix );
+            if( suffix != ( compressed ? zzip_suffix : "" ) ) {
+                continue;
+            }
+            const point_abs_om location( x, y );
+            if( find_loaded_overmap( location ) ) {
+                continue;
+            }
+            // This scratch owner intentionally has no terrain/view data and
+            // is never inserted into the resident overmap map.
+            auto candidate = std::make_unique<overmap>( location );
+            bool loaded = false;
+            const auto decode = [&candidate]( std::istream & input ) {
+                candidate->unserialize( input, overmap::monster_owner_decode_mode::existing_actors_only );
+            };
+            if( compressed ) {
+                auto archive = zzip::load( path.get_unrelative_path(),
+                                           ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path() );
+                loaded = archive && read_from_zzip_optional( *archive,
+                         std::filesystem::u8path( terrain_filename( location ) ),
+                [&decode]( std::string_view bytes ) {
+                    std::istringstream input{ std::string( bytes ) };
+                    decode( input );
+                } );
+            } else {
+                loaded = read_from_file_optional( path, decode );
+            }
+            if( loaded ) {
+                confirm_predator_owners( *candidate );
+            }
+        }
+    }
+    world.bootstrapped = true;
+}
+
+bool overmapbuffer::predator_activity_at( horde_entity &entity,
+        const tripoint_abs_ms &position, int *active_turns )
+{
+    if( active_turns ) {
+        *active_turns = 0;
+    }
+    const std::string &type = entity.get_type()->id.str();
+    if( type != "mon_zombie_rider" && type != "mon_writhing_stalker" ) {
+        return true;
+    }
+    bootstrap_predator_positions();
+    auto &world = global_state.predator_activity;
+    const int now = to_turn<int>( calendar::turn );
+    std::string id;
+    std::uint64_t epoch = 0;
+    if( entity.monster_data ) {
+        entity.monster_data->ensure_predator_state();
+        const auto &life = entity.monster_data->predator_state();
+        id = life.actor_id;
+        epoch = life.handoff_epoch;
+        if( !confirm_predator_position( *entity.monster_data,
+                predator_activation::representation::abstract, position ) ) {
+            return false;
+        }
+    } else {
+        const std::string locator = "horde:" + position.to_string() + ":" + type;
+        id = world.legacy_identity( locator, {} );
+        if( id.empty() ) {
+            id = world.legacy_identity( locator, random_string( 32 ) );
+        }
+        if( !world.confirm( id, type, 0, predator_activation::representation::abstract, position, now ) ) {
+            return false;
+        }
+    }
+    if( !world.owns( id, epoch, predator_activation::representation::abstract, position ) ) {
+        return false;
+    }
+    world.refresh( get_player_character().pos_abs_omt().xy(), now, global_state.zombie_rider_bands );
+    const auto &clock = world.find( id )->activity;
+    if( active_turns ) {
+        *active_turns = clock.active_delta;
+    }
+    return clock.active;
+}
+
+std::int64_t overmapbuffer::predator_active_time( const monster &body ) const
+{
+    if( !body.is_caol_predator() ) {
+        return 0;
+    }
+    const auto *actor = global_state.predator_activity.find( body.predator_state().actor_id );
+    return actor && actor->confirmed ? actor->activity.active_at( to_turn<int>( calendar::turn ) ) : 0;
+}
+
+std::int64_t overmapbuffer::predator_pending_pause( const monster &body ) const
+{
+    if( !body.is_caol_predator() ) {
+        return 0;
+    }
+    const auto &life = body.predator_state();
+    const auto *actor = global_state.predator_activity.find( life.actor_id );
+    return actor && actor->confirmed && life.activity_bound &&
+           life.activity_adopted_world == actor->activity.adopted_world ?
+           std::max<std::int64_t>( 0, actor->activity.suspension_at( to_turn<int>( calendar::turn ) ) -
+                                  life.activity_suspension ) : 0;
+}
+
+bool overmapbuffer::predator_light_work_alive( const monster &body ) const
+{
+    return body.is_caol_predator() && !body.predator_state().light_work_sample.empty() &&
+           body.predator_state().light_work_until_active > predator_active_time( body );
+}
+
+void overmapbuffer::retain_predator_light_work( monster &body, const std::string &sample,
+        int observed_world, int duration_turns )
+{
+    const int now = to_turn<int>( calendar::turn );
+    if( !body.is_caol_predator() || sample.empty() || observed_world < 0 || observed_world > now ||
+        duration_turns <= 0 ) {
+        return;
+    }
+    auto &life = body.predator_state();
+    const auto *actor = global_state.predator_activity.find( life.actor_id );
+    const auto active = predator_active_time( body );
+    const bool bound = actor && life.activity_bound &&
+                       life.activity_adopted_world == actor->activity.adopted_world;
+    std::int64_t reference_world = now;
+    if( actor && actor->confirmed && !bound && actor->activity.adopted_world >= 0 ) {
+        // A carried legacy directive predates its first body binding. Only
+        // tracked active elapsed since cold adoption spends that allowance;
+        // the known frozen interval cannot erase it. Already expired at
+        // adoption still yields no work and never becomes fresh evidence.
+        reference_world = std::min<std::int64_t>( now, actor->activity.adopted_world + active );
+    }
+    const auto remaining = static_cast<std::int64_t>( observed_world ) + duration_turns - reference_world;
+    if( remaining > 0 && life.light_work_sample != sample ) {
+        life.light_work_sample = sample;
+        // First binding below rebases this old payload anchor exactly once.
+        life.light_work_until_active = ( bound ? active : life.activity_active_turns ) + remaining;
+    }
+}
+
+// Both eligibility and accepted capture settle the same payload pause boundary.
+// This does not consume the intent owner's earned active-work stamp.
+static void settle_predator_body_pause( monster &body,
+                                       const predator_activation::activity_interval &clock, int now )
+{
+    auto &life = body.predator_state();
+    const bool binding_matches = life.activity_bound &&
+                                 life.activity_adopted_world == clock.adopted_world;
+    const auto suspension = clock.suspension_at( now );
+    const auto active = clock.active_at( now );
+    if( !binding_matches ) {
+        // Native body anchors ignore untracked legacy absence. Already-current
+        // actor work must not inherit that earlier physiological interval.
+        body.adopt_offscreen_time( calendar::turn_zero +
+                                   time_duration::from_turns( clock.adopted_world ) );
+    }
+    const auto tracked_pause = binding_matches ?
+                               std::max<std::int64_t>( 0, suspension - life.activity_suspension ) : suspension;
+    body.suspend_offscreen_time( time_duration::from_turns( tracked_pause ) );
+    const int work_pause = static_cast<int>( std::min<std::int64_t>(
+                               std::numeric_limits<int>::max(), tracked_pause ) );
+    if( !binding_matches && !life.light_work_sample.empty() ) {
+        life.light_work_until_active = active + std::max<std::int64_t>( 0,
+                                       life.light_work_until_active - life.activity_active_turns );
+    }
+    if( body.type->id.str() == "mon_writhing_stalker" ) {
+        auto &state = body.writhing_stalker_state();
+        state.suspend_work( work_pause );
+        if( !binding_matches ) {
+            // Native intent owners consume tracked active time, after taking
+            // their carrier snapshots. Binding only adopts the new interval;
+            // the legacy light anchor above is rebased before resetting it.
+            life.activity_active_turns = 0;
+        }
+    } else {
+        zombie_rider_overmap_ai::suspend_camp_pressure_work( body, work_pause );
+        body.zombie_rider_pursuit_state().suspend_work( work_pause );
+        life.activity_active_turns = active;
+    }
+    life.activity_bound = true;
+    life.activity_adopted_world = clock.adopted_world;
+    life.activity_suspension = suspension;
+}
+
+bool overmapbuffer::predator_activity_for( monster &body,
+        predator_activation::representation owner, const tripoint_abs_ms &position,
+        int *active_turns )
+{
+    if( active_turns ) {
+        *active_turns = 0;
+    }
+    if( !body.is_caol_predator() || body.is_dead() ) {
+        return false;
+    }
+    body.ensure_predator_state();
+    const int now = to_turn<int>( calendar::turn );
+    if( body.predator_state().last_energy_world > now ) {
+        return false;
+    }
+    if( owner == predator_activation::representation::local &&
+        get_creature_tracker().find( position ).get() == &body ) {
+        confirm_predator_position( body, owner, position );
+    }
+    bootstrap_predator_positions();
+    auto &world = global_state.predator_activity;
+    auto &life = body.predator_state();
+    if( !world.owns( life.actor_id, life.handoff_epoch, owner, position ) ) {
+        return false;
+    }
+    world.refresh( get_player_character().pos_abs_omt().xy(), now, global_state.zombie_rider_bands );
+    auto &clock = world.find( life.actor_id )->activity;
+    const bool binding_matches = life.activity_bound &&
+                                 life.activity_adopted_world == clock.adopted_world;
+    if( !clock.active && binding_matches ) {
+        return false; // A bound frozen payload stays byte-for-byte unchanged.
+    }
+    settle_predator_body_pause( body, clock, now );
+    if( active_turns ) {
+        *active_turns = clock.active_delta;
+    }
+    return clock.active;
+}
+
+bool overmapbuffer::prepare_predator_capture( monster &body )
+{
+    if( !body.is_caol_predator() || body.is_dead() ||
+        get_creature_tracker().find( body.pos_abs() ).get() != &body ) {
+        return false;
+    }
+    const int now = to_turn<int>( calendar::turn );
+    const auto &life = body.predator_state();
+    const auto *prior = global_state.predator_activity.find( life.actor_id );
+    if( life.activity_adopted_world > now || life.last_advanced_turn > now ||
+        life.last_native_process_world > now || life.last_energy_world > now ||
+        life.handoff_epoch > std::numeric_limits<std::uint64_t>::max() - 2 ||
+        ( prior && prior->activity.last_world > now ) ) {
+        return false;
+    }
+    bootstrap_predator_positions();
+    if( !confirm_predator_position( body, predator_activation::representation::local, body.pos_abs() ) ) {
+        return false;
+    }
+    auto &world = global_state.predator_activity;
+    auto *actor = world.find( body.predator_state().actor_id );
+    if( !actor || actor->activity.last_world > now ||
+        body.predator_state().handoff_epoch > std::numeric_limits<std::uint64_t>::max() - 2 ) {
+        return false;
+    }
+    world.refresh( get_player_character().pos_abs_omt().xy(), now, global_state.zombie_rider_bands );
+    // Even a frozen body must encode its already suspended interval in the
+    // item snapshot, before the same clock enters the contained interval.
+    settle_predator_body_pause( body, actor->activity, now );
+    return true;
+}
+
+bool overmapbuffer::can_release_captured_predator( const monster &body, std::int64_t item_uid )
+{
+    if( !body.is_caol_predator() || body.is_dead() || item_uid <= 0 ) {
+        return false;
+    }
+    const auto &life = body.predator_state();
+    const int now = to_turn<int>( calendar::turn );
+    if( life.actor_id.empty() || life.handoff_epoch > std::numeric_limits<std::uint64_t>::max() - 2 ||
+        life.activity_adopted_world > now || life.last_advanced_turn > now ||
+        life.last_native_process_world > now || life.last_energy_world > now ) {
+        return false;
+    }
+    // New local bodies can precede their first activation query, even after
+    // cold authentication. Exclude an actual native body, not just a record.
+    for( const monster &other : g->all_monsters() ) {
+        if( other.is_caol_predator() && !other.is_dead() &&
+            other.predator_state().actor_id == life.actor_id ) {
+            return false;
+        }
+    }
+    // The one native cold authentication must exclude genuine competing
+    // owners before an old item without a ledger record can adopt at now.
+    bootstrap_predator_positions();
+    const auto &world = global_state.predator_activity;
+    const auto *actor = world.find( life.actor_id );
+    if( !actor ) {
+        return world.bootstrapped;
+    }
+    return actor->confirmed && actor->owner == predator_activation::representation::captured &&
+           actor->type == body.type->id.str() && actor->epoch == life.handoff_epoch + 1 &&
+           actor->capture_item_uid == item_uid && !actor->position &&
+           actor->activity.last_world <= now && actor->activity.adopted_world <= now;
+}
+
+void overmapbuffer::release_captured_predator( monster &body, std::int64_t item_uid,
+        std::uint64_t snapshot_epoch )
+{
+    auto &world = global_state.predator_activity;
+    auto &life = body.predator_state();
+    const int now = to_turn<int>( calendar::turn );
+    if( !world.find( life.actor_id ) ) {
+        // Prevalidated legacy item: current zero-credit adoption, never a
+        // rebind of a confirmed but missing LOCAL body.
+        const bool confirmed = world.confirm( life.actor_id, body.type->id.str(), snapshot_epoch,
+                               predator_activation::representation::local, body.pos_abs(), now );
+        cata_assert( confirmed );
+        const bool captured = world.capture( life.actor_id, snapshot_epoch, body.pos_abs(), item_uid, now );
+        cata_assert( captured );
+    }
+    const bool accepted = world.release_capture( life.actor_id, snapshot_epoch + 1,
+                          item_uid, body.pos_abs(), now );
+    cata_assert( accepted ); // synchronous acceptance follows a complete preflight
+    life.handoff_epoch = snapshot_epoch + 2;
+    predator_activity_for( body, predator_activation::representation::local, body.pos_abs() );
 }
 
 void overmapbuffer::bootstrap_migo_positions()
@@ -599,7 +1497,8 @@ void overmapbuffer::bootstrap_migo_positions()
                 candidate->unserialize_view( view, input );
             } );
             if( authenticate( *candidate ) ) {
-                overmaps.emplace( p, std::move( candidate ) );
+                const auto inserted = overmaps.emplace( p, std::move( candidate ) );
+                confirm_predator_owners( *inserted.first->second );
             }
         }
     };
@@ -1071,6 +1970,9 @@ void overmapbuffer::move_hordes()
         processed.insert( om );
         om->move_hordes();
     }
+    // A Mi-go-only pass does not service predators or ordinary hordes. Keep
+    // its once-only accounting separate from the complete nearby passes.
+    std::set<overmap *> migo_processed = processed;
     // Follow only already leased operation bodies beyond the ordinary
     // player-near pass. This neither discovers sites nor admits unrelated
     // far hordes, and supplies no catch-up or 40-OMT activation policy.
@@ -1092,18 +1994,63 @@ void overmapbuffer::move_hordes()
                 continue;
             }
             overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
-            if( owner && processed.insert( owner ).second ) {
+            if( owner && migo_processed.insert( owner ).second ) {
                 owner->move_hordes( true );
             }
         }
     }
+    bootstrap_predator_positions();
+    auto &predators = global_state.predator_activity;
+    predators.refresh( get_player_character().pos_abs_omt().xy(), to_turn<int>( calendar::turn ),
+                       global_state.zombie_rider_bands );
+    const auto active_predators = predators.active_actors();
+    for( const auto &id : active_predators ) {
+        const auto *actor = predators.find( id );
+        if( !actor || !actor->confirmed || actor->owner != predator_activation::representation::abstract ||
+            !actor->position ) {
+            continue;
+        }
+        // Eligibility was decided from authenticated metadata. Only now may
+        // the ordinary native owner be loaded for actual work; never generate.
+        overmap *owner = get_existing( project_to<coords::om>( *actor->position ).xy() );
+        if( owner && processed.insert( owner ).second ) {
+            owner->move_hordes( false, true );
+        }
+    }
+
 }
 
 void overmapbuffer::move_nemesis()
 {
-    for( std::pair<const point_abs_om, std::unique_ptr<overmap>> &omp : overmaps ) {
-        omp.second->move_nemesis();
-        fix_nemesis( *omp.second );
+    bootstrap_predator_positions();
+    auto &predators = global_state.predator_activity;
+    predators.refresh( get_player_character().pos_abs_omt().xy(), to_turn<int>( calendar::turn ),
+                       global_state.zombie_rider_bands );
+    const auto active_predators = predators.active_actors();
+    for( const auto &id : active_predators ) {
+        const auto *actor = predators.find( id );
+        if( actor && actor->confirmed && actor->owner == predator_activation::representation::group &&
+            actor->position ) {
+            // Range has already been authenticated without loading maps.
+            // Admit only this existing native owner before the callback's
+            // snapshot; a destination loaded later gets no second turn.
+            get_existing( project_to<coords::om>( *actor->position ).xy() );
+        }
+    }
+    // Native fullbody entries present at callback start receive one movement
+    // opportunity. Relocate them only after every original owner has run, so
+    // neither a later owner nor a newly loaded destination can advance them twice.
+    std::vector<overmap *> initial_owners;
+    initial_owners.reserve( overmaps.size() );
+    for( const auto &entry : overmaps ) {
+        initial_owners.push_back( entry.second.get() );
+    }
+    for( overmap *owner : initial_owners ) {
+        owner->move_nemesis();
+        fix_nemesis( *owner, false ); // Original anonymous recipe branch/cadence.
+    }
+    for( overmap *owner : initial_owners ) {
+        fix_nemesis( *owner, true );
     }
 }
 
@@ -2698,6 +3645,12 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
                 continue;
             }
         }
+        const auto &native_type = entry.node.mapped().get_type()->id.str();
+        if( ( native_type == "mon_zombie_rider" || native_type == "mon_writhing_stalker" ) &&
+            !predator_activity_at( entry.node.mapped(), entry.pos ) ) {
+            om.hordes.insert( std::move( entry.node ) );
+            continue;
+        }
         const tripoint_bub_ms local = here.get_bub( entry.pos );
         if( !spawn_nonlocal ) {
             cata_assert( here.inbounds( local ) );
@@ -2718,6 +3671,12 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             handoff = &*prepared_predator;
         }
         handoff->ensure_predator_payload( entry.pos );
+        if( handoff->monster_data && handoff->monster_data->is_caol_predator() &&
+            !predator_activity_for( *handoff->monster_data,
+                                   predator_activation::representation::abstract, entry.pos ) ) {
+            om.hordes.insert( std::move( entry.node ) );
+            continue;
+        }
         if( handoff->monster_data ) {
             handoff->synchronize_payload( entry.pos );
             if( handoff->monster_data->is_caol_predator() ) {
@@ -2745,7 +3704,16 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
             g->remove_zombie( *placed );
             placed = nullptr;
         }
+        if( placed && placed->is_caol_predator() &&
+            !transfer_predator_owner( *placed, predator_activation::representation::abstract, entry.pos,
+                                     predator_activation::representation::local, placed->pos_abs() ) ) {
+            g->remove_zombie( *placed );
+            placed = nullptr;
+        }
         if( placed ) {
+            if( entry.node.mapped().monster_data ) {
+                entry.node.mapped().monster_data->transfer_owned_items_to( *placed );
+            }
             if( handoff->monster_data ) {
                 // Reapply after spawn has cleared its explicit destination.
                 handoff->synchronize_navigation( *placed );
@@ -2772,6 +3740,16 @@ void overmapbuffer::spawn_mongroup( const tripoint_abs_sm &p, const mongroup_id 
 
 bool overmapbuffer::despawn_monster( monster &critter )
 {
+    if( critter.is_caol_predator() ) {
+        if( get_creature_tracker().find( critter.pos_abs() ).get() != &critter ) {
+            return false;
+        }
+        critter.ensure_predator_state();
+        if( !confirm_predator_position( critter, predator_activation::representation::local,
+                                        critter.pos_abs() ) ) {
+            return false;
+        }
+    }
     if( !migo_population::reconcile_payload( critter, migo_population::representation::local ) ) {
         return false;
     }
@@ -2801,7 +3779,19 @@ bool overmapbuffer::despawn_monster( monster &critter )
         if( inserted && ( *inserted )->second.monster_data->is_caol_predator() ) {
             predator_lifecycle_state &state = ( *inserted )->second.monster_data->predator_state();
             ++state.handoff_epoch;
+            if( !transfer_predator_owner( *( *inserted )->second.monster_data,
+                                         predator_activation::representation::local, critter.pos_abs(),
+                                         predator_activation::representation::abstract, critter.pos_abs() ) ) {
+                point_abs_om ignored;
+                tripoint_om_ms local;
+                std::tie( ignored, local ) = project_remain<coords::om>( critter.pos_abs() );
+                om.hordes.erase( om.hordes.find( local ) );
+                return false;
+            }
             state.last_advanced_turn = to_turn<int>( calendar::turn );
+        }
+        if( inserted ) {
+            critter.transfer_owned_items_to( *( *inserted )->second.monster_data );
         }
         return inserted.has_value();
     }

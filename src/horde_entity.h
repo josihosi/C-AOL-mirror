@@ -11,6 +11,11 @@
 #include "monster.h"
 
 struct mtype;
+enum class light_interest_expiry {
+    native_world,
+    retain_actor_work,
+    exhaust_actor_work
+};
 
 // This represents a single entity that moves around at overmap scale.
 // It needs to spawn the related monster, ideally with any notable details intact.
@@ -31,7 +36,7 @@ struct horde_entity {
     // Heavy entities retain the real monster state.  Lightweight entities can
     // only make the invariant type-level sight decision.
     bool can_perceive_light() const;
-    void expire_light_interest( const time_point &now );
+    void expire_light_interest( const time_point &world_now, light_interest_expiry expiry );
     // Materialize the full native payload only for a predator that actually
     // enters the abstract lifecycle.  The horde key remains its position.
     void ensure_predator_payload( const tripoint_abs_ms &position );

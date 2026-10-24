@@ -8143,27 +8143,54 @@ bool item::release_monster( const tripoint_bub_ms &target, const int radius )
         debugmsg( _( "Error restoring monster: %s" ), e.what() );
         return false;
     }
-    if( !g->place_critter_around( new_monster, target, radius ) ) {
+    const auto clear_contents = [&]() {
+        erase_var( "contained_name" );
+        erase_var( "contained_json" );
+        erase_var( "name" );
+        erase_var( "weight" );
+    };
+    if( !new_monster->is_caol_predator() ) {
+        // Preserve the ordinary placement/gravity/then-item-clear order.
+        if( !g->place_critter_around( new_monster, target, radius ) ) {
+            return false;
+        }
+        clear_contents();
+        return true;
+    }
+    if( !overmap_buffer.can_release_captured_predator( *new_monster, uid().get_value() ) ) {
         return false;
     }
-    erase_var( "contained_name" );
-    erase_var( "contained_json" );
-    erase_var( "name" );
-    erase_var( "weight" );
-    return true;
+    const auto snapshot_epoch = new_monster->predator_state().handoff_epoch;
+    const auto accept = [&]( monster &body ) {
+        overmap_buffer.release_captured_predator( body, uid().get_value(), snapshot_epoch );
+        clear_contents();
+    };
+    return g->place_critter_around( new_monster, target, radius, false, accept ) != nullptr;
 }
 
 // didn't want to drag the monster:: definition into item.h, so just reacquire the monster
 // at target
 int item::contain_monster( const tripoint_bub_ms &target )
 {
-    const monster *const mon_ptr = get_creature_tracker().creature_at<monster>( target );
+    monster *const mon_ptr = get_creature_tracker().creature_at<monster>( target );
     if( !mon_ptr ) {
         return 0;
     }
-    const monster &f = *mon_ptr;
-
-    set_var( "contained_json", ::serialize( f ) );
+    monster &f = *mon_ptr;
+    if( has_var( "contained_json" ) ||
+        ( f.is_caol_predator() && ( uid().get_value() <= 0 ||
+                                  !overmap_buffer.prepare_predator_capture( f ) ) ) ) {
+        return 0;
+    }
+    const std::string snapshot = ::serialize( f );
+    if( f.is_caol_predator() ) {
+        const auto &life = f.predator_state();
+        const bool accepted = overmap_buffer.global_state.predator_activity.capture(
+                                  life.actor_id, life.handoff_epoch, f.pos_abs(), uid().get_value(),
+                                  to_turn<int>( calendar::turn ) );
+        cata_assert( accepted );
+    }
+    set_var( "contained_json", snapshot );
     set_var( "contained_name", f.type->nname() );
     set_var( "name", string_format( _( "%s holding %s" ), type->nname( 1 ),
                                     f.type->nname() ) );

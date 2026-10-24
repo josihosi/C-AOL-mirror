@@ -582,6 +582,9 @@ class monster : public Creature
         tripoint_abs_ms wander_pos; // Wander destination - Just try to move in that direction
         bool provocative_sound = false; // Are we wandering toward something we think is alive?
         int wandf = 0;       // Urge to is_wandering - Increased by sound, decrements each move
+        // Successful same-body native handoff only. Preparation must leave
+        // existing items unchanged; it may append generated inventory.
+        void transfer_owned_items_to( monster &prepared );
         std::vector<item> inv; // Inventory
         std::vector<item> dissectable_inv; // spawned at death, tracked for respawn/dissection
         Character *mounted_player = nullptr; // player that is mounting this creature
@@ -660,6 +663,7 @@ class monster : public Creature
         void on_unload();
         void suspend_offscreen_time( time_duration paused );
         void adopt_offscreen_time();
+        time_duration adopt_offscreen_time( const time_point &through );
         /**
          * Retroactively update monster.
          * Call this after a preexisting monster has been placed on map.

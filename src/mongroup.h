@@ -222,12 +222,12 @@ struct mongroup {
     float avg_speed() const;
 
     template<typename Archive>
-    void io( Archive & );
+    void io( Archive &, bool omit_position = false );
     using archive_type_tag = io::object_archive_tag;
 
     void deserialize( const JsonObject &jo );
     void deserialize_legacy( const JsonObject &jo );
-    void serialize( JsonOut &json ) const;
+    void serialize( JsonOut &json, bool omit_position = false ) const;
 };
 
 template<>

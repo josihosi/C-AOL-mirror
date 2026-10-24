@@ -90,7 +90,8 @@ struct persistent_state {
     // -1 uses ordinary continuously active native time. Explicit elapsed time
     // is the integration seam for REL-AI-ACTIVATION; first admission never
     // charges an untracked old-save backlog.
-    void advance_to( int now_turn, int active_elapsed = -1 );
+    void advance_to( int now_turn, int active_elapsed = -1, bool retained_light_work = false );
+    void suspend_work( int paused_turns );
     // A real attack starts/continues combat and ends older recovery/search authority.
     void record_attack( int now_turn );
     bool owns_waypoint( const tripoint_abs_ms &position ) const;
@@ -120,6 +121,10 @@ struct persistent_state {
 // Shared local/abstract adapters: current physical perception only, and bounded
 // native-route resolution. Neither enumerating a candidate nor a hypothesis
 // writes evidence; only observe_current_target's successful read does.
+// Consume the registry's earned interval only at a native intent owner. The
+// payload's existing activity_active_turns is its once-only consumption stamp;
+// eligibility/body-pause queries do not spend it or advance intent.
+void advance_active_work( monster &stalker, int now_turn );
 Creature *observe_current_target( monster &stalker );
 bool can_observe_actor( const monster &stalker, const Creature &actor );
 std::optional<tripoint_abs_ms> pursuit_destination( monster &stalker, bool abstract_owner );

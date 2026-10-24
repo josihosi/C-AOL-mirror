@@ -25,6 +25,7 @@
 #include "game.h"
 #include "horde_entity.h"
 #include "item.h"
+#include "json.h"
 #include "line.h"
 #include "map.h"
 #include "map_helpers.h"
@@ -42,6 +43,7 @@
 #include "overmap.h"
 #include "overmapbuffer.h"
 #include "point.h"
+#include "player_helpers.h"
 #include "rng.h"
 #include "sounds.h"
 #include "submap.h"
@@ -1081,6 +1083,9 @@ TEST_CASE( "predator duplicate cross overmap handoff retains source authority",
     REQUIRE( destination_om != nullptr );
     const tripoint_abs_ms source = project_combine( source_om_pos,
                                    tripoint_om_ms( OMAPX * 2 * SEEX - 1, 14 * SEEX, 0 ) );
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope restore_avatar( [&]() { get_avatar().setpos( old_avatar, false ); } );
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( source ) - point( 39, 0 ) ), false );
     const tripoint_abs_ms destination = source + point_rel_ms( 1, 0 );
     const tripoint_abs_ms stale_destination_copy = destination + point_rel_ms( 0, 1 );
     REQUIRE_FALSE( get_map().inbounds( destination ) );
@@ -1113,6 +1118,13 @@ TEST_CASE( "predator duplicate cross overmap handoff retains source authority",
         retained->monster_data->predator_state().last_advanced_turn = to_turn<int>( calendar::turn );
         retained->monster_data->predator_state().handoff_epoch = 5;
         const std::string actor_id = retained->monster_data->predator_state().actor_id;
+
+        // Authenticate the real source before adding its deliberately stale
+        // shadow, then earn one actual eligible scheduler interval. Starting
+        // at world0/last_processed0 alone never attempts the first negative.
+        source_om->hordes.expire_light_interest( calendar::turn );
+        calendar::turn += 1_turns;
+        retained->monster_data->predator_state().last_advanced_turn = to_turn<int>( calendar::turn );
 
         // This is deliberately at a different free key: candidate admission
         // succeeds for destination, while map-local ID ownership rejects the
@@ -1384,6 +1396,7 @@ TEST_CASE( "stalker pursuit abstract active-interval seam does not refresh froze
     clear_overmaps();
     clear_map_and_put_player_underground();
     restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
     calendar::turn = calendar::turn_zero + 100_turns;
     const auto position = get_map().get_abs( tripoint_bub_ms( 30, 66, 0 ) );
     monster source( mtype_id( "mon_writhing_stalker" ) );
@@ -1394,15 +1407,40 @@ TEST_CASE( "stalker pursuit abstract active-interval seam does not refresh froze
     original.observe_target( 42, 1, position + point::east * 20, 90 );
     original.advance_to( 100 );
     original.begin_search();
-    horde_entity owner( source );
+    overmap &native_owner = overmap_buffer.get( project_to<coords::om>( position ).xy() );
+    REQUIRE( native_owner.hordes.spawn_entity( position, source ) );
+    horde_entity *const native_entry = overmap_buffer.entity_at( position );
+    REQUIRE( native_entry );
+    horde_entity &owner = *native_entry;
     REQUIRE( owner.monster_data );
     auto &state = owner.monster_data->writhing_stalker_state();
     const auto actor = owner.monster_data->predator_state().actor_id;
+    const auto old_avatar = get_avatar().pos_abs();
+    on_out_of_scope cleanup_owner( [&] {
+        native_owner.release_monster_payload( position, actor );
+        get_avatar().setpos( old_avatar, false );
+    } );
     const int active = state.active_turns;
     const int search_start = state.search_started_active;
     const auto destination = owner.destination;
+    REQUIRE( overmap_buffer.predator_activity_at( owner, position ) );
+    REQUIRE( overmap_buffer.predator_activity_for( *owner.monster_data,
+             predator_activation::representation::abstract, position ) );
+    // Zero elapsed is not itself frozen eligibility. Put the actual owner
+    // outside the native activation boundary for the frozen evidence check.
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( position ) -
+                        point( 41, 0 ) ), false );
+    CHECK_FALSE( overmap_buffer.predator_activity_for( *owner.monster_data,
+                 predator_activation::representation::abstract, position ) );
+    const auto bytes = []( const monster &body ) {
+        std::ostringstream out;
+        { JsonOut json( out ); body.serialize( json ); }
+        return out.str();
+    };
+    const auto frozen = bytes( *owner.monster_data );
     calendar::turn = calendar::turn_zero + 10000_turns;
     REQUIRE( owner.advance_predator_intent( position, 10000, 0 ) );
+    CHECK( bytes( *owner.monster_data ) == frozen );
     CHECK( state.active_turns == active );
     CHECK( state.search_started_active == search_start );
     CHECK( state.evidence_turn == 90 );
@@ -1410,7 +1448,35 @@ TEST_CASE( "stalker pursuit abstract active-interval seam does not refresh froze
     CHECK( owner.destination == destination );
     CHECK( owner.monster_data->predator_state().actor_id == actor );
     CHECK( owner.monster_data->predator_state().handoff_epoch == 4 );
+    // The explicit executor interval is not authority to invent frozen
+    // backlog. Resume at zero credit, then earn the positive interval through
+    // the same native clock query.
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( position ) -
+                        point( 40, 0 ) ), false );
+    REQUIRE( overmap_buffer.predator_activity_for( *owner.monster_data,
+             predator_activation::representation::abstract, position ) );
+    // Now eligible, the same zero-credit native opportunity may project the
+    // existing search. This is distinct from the actual frozen refusal above.
+    const auto moves = owner.monster_data->get_moves();
+    REQUIRE( owner.advance_predator_intent( position, 10000, 0 ) );
+    CHECK( state.has_committed_waypoint );
+    CHECK( owner.destination == state.committed_waypoint );
+    CHECK( owner.destination != destination );
+    CHECK( state.active_turns == active );
+    CHECK( state.search_started_active == search_start );
+    CHECK( state.evidence_turn == 90 );
+    CHECK( state.searched_positions == 0 );
+    CHECK( owner.monster_data->predator_state().activity_active_turns == 0 );
+    CHECK( owner.monster_data->get_moves() == moves );
+    CHECK( owner.monster_data->pos_abs() == position );
+    const auto projected = owner.destination;
+    REQUIRE( owner.advance_predator_intent( position, 10000, 0 ) );
+    CHECK( owner.destination == projected );
+    CHECK( state.active_turns == active );
+    CHECK( owner.monster_data->get_moves() == moves );
     calendar::turn += 1_turns;
+    REQUIRE( overmap_buffer.predator_activity_for( *owner.monster_data,
+             predator_activation::representation::abstract, position ) );
     REQUIRE( owner.advance_predator_intent( position, 10001, 1 ) );
     CHECK( state.active_turns == active + 1 );
     CHECK( state.evidence_turn == 90 );
@@ -2233,4 +2299,172 @@ TEST_CASE( "dormant_zombie_places_corpse_and_trap", "[monster][map]" )
     CHECK( found_corpse );
     // The monster count should have dropped by one since it destroyed itself.
     CHECK( g->num_creatures() == 1 );
+}
+
+// A genuinely new fixture body, not a rewritten token or a copied lease.
+static monster &new_swap_predator_fixture( const mtype_id &type, const tripoint_bub_ms &position )
+{
+    shared_ptr_fast<monster> candidate;
+    for( int attempt = 0; attempt < 256; ++attempt ) {
+        candidate = make_shared_fast<monster>( type );
+        const auto &token = candidate->predator_state().actor_id;
+        bool owned = overmap_buffer.global_state.predator_activity.find( token ) != nullptr;
+        for( const monster &body : g->all_monsters() ) {
+            owned = owned || ( body.is_caol_predator() && body.predator_state().actor_id == token );
+        }
+        if( !owned ) { break; }
+        candidate.reset();
+    }
+    REQUIRE( candidate );
+    candidate->ammo = candidate->type->starting_ammo;
+    monster *body = g->place_critter_at( candidate, position );
+    REQUIRE( body );
+    return *body;
+}
+
+static std::string native_swap_body_bytes( const monster &body )
+{
+    std::ostringstream out;
+    { JsonOut json( out ); body.serialize( json ); }
+    return out.str();
+}
+
+TEST_CASE( "predator_native_swap_commits_both_local_poses_without_new_credit",
+           "[monster][predator_activation][native][swap]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 2000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms a( 65, 65, 0 );
+    const tripoint_bub_ms b = a + point::east;
+    for( const auto &p : here.points_in_radius( a, 4 ) ) { here.ter_set( p, ter_id( "t_floor" ) ); }
+    get_avatar().setpos( here, tripoint_bub_ms( a.xy(), -2 ) );
+    monster &first = new_swap_predator_fixture( mtype_id( "mon_zombie_rider" ), a );
+    monster &second = new_swap_predator_fixture( mtype_id( "mon_writhing_stalker" ), b );
+    const auto first_pos = first.pos_abs();
+    const auto second_pos = second.pos_abs();
+    REQUIRE( overmap_buffer.predator_activity_for( first, predator_activation::representation::local, first_pos ) );
+    REQUIRE( overmap_buffer.predator_activity_for( second, predator_activation::representation::local, second_pos ) );
+    const auto first_id = first.predator_state().actor_id;
+    const auto second_id = second.predator_state().actor_id;
+    const auto first_epoch = first.predator_state().handoff_epoch;
+    const auto second_epoch = second.predator_state().handoff_epoch;
+    first.set_moves( 211 );
+    second.set_moves( 155 );
+    const auto first_hp = first.get_hp();
+    const auto second_hp = second.get_hp();
+    auto &world = overmap_buffer.global_state.predator_activity;
+    const auto first_active = world.find( first_id )->activity.active_at( 2000 );
+    const auto second_active = world.find( second_id )->activity.active_at( 2000 );
+    REQUIRE( g->swap_critters( first, second ) );
+    CHECK( first.pos_abs() == second_pos );
+    CHECK( second.pos_abs() == first_pos );
+    CHECK( world.owns( first_id, first_epoch, predator_activation::representation::local, second_pos ) );
+    CHECK( world.owns( second_id, second_epoch, predator_activation::representation::local, first_pos ) );
+    CHECK( first.get_moves() == 211 );
+    CHECK( second.get_moves() == 155 );
+    CHECK( first.get_hp() == first_hp );
+    CHECK( second.get_hp() == second_hp );
+    CHECK( world.find( first_id )->activity.active_at( 2000 ) == first_active );
+    CHECK( world.find( second_id )->activity.active_at( 2000 ) == second_active );
+    CHECK( overmap_buffer.predator_activity_for( first, predator_activation::representation::local, second_pos ) );
+    CHECK( overmap_buffer.predator_activity_for( second, predator_activation::representation::local, first_pos ) );
+    CHECK( first.move_to( b + point::east, false ) );
+    CHECK( first.get_moves() < 211 );
+    CHECK( world.owns( first_id, first_epoch, predator_activation::representation::local, first.pos_abs() ) );
+    calendar::turn += 1_turns;
+    second.process_turn();
+    CHECK( second.get_moves() > 155 );
+    const auto once = native_swap_body_bytes( second );
+    second.process_turn();
+    CHECK( native_swap_body_bytes( second ) == once );
+}
+
+TEST_CASE( "predator_native_swap_refuses_foreign_identity_before_either_body_changes",
+           "[monster][predator_activation][native][swap]" )
+{
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    const tripoint_bub_ms a( 65, 65, 0 );
+    map &here = get_map();
+    get_avatar().setpos( here, a );
+    monster &first = new_swap_predator_fixture( mtype_id( "mon_zombie_rider" ), a + point::east );
+    monster &second = new_swap_predator_fixture( mtype_id( "mon_writhing_stalker" ), a + point::east * 2 );
+    REQUIRE( overmap_buffer.predator_activity_for( first, predator_activation::representation::local, first.pos_abs() ) );
+    REQUIRE( overmap_buffer.predator_activity_for( second, predator_activation::representation::local, second.pos_abs() ) );
+    // Deliberately foreign negative; NEW positive bodies never rewrite IDs.
+    second.predator_state().actor_id = first.predator_state().actor_id;
+    const auto before_first = native_swap_body_bytes( first );
+    const auto before_second = native_swap_body_bytes( second );
+    std::ostringstream ledger;
+    { JsonOut json( ledger ); overmap_buffer.global_state.predator_activity.serialize( json ); }
+    CHECK_FALSE( g->swap_critters( first, second ) );
+    CHECK( native_swap_body_bytes( first ) == before_first );
+    CHECK( native_swap_body_bytes( second ) == before_second );
+    std::ostringstream after;
+    { JsonOut json( after ); overmap_buffer.global_state.predator_activity.serialize( json ); }
+    CHECK( after.str() == ledger.str() );
+}
+
+TEST_CASE( "native_trample_keeps_authenticated_predator_eligible_and_pays_moves",
+           "[monster][predator_activation][native][swap]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    const auto original_rng = rng_get_engine();
+    on_out_of_scope restore_rng( [&] { rng_get_engine() = original_rng; } );
+    on_out_of_scope cleanup( [] { clear_map_without_vision(); } );
+    clear_avatar();
+    clear_map_without_vision();
+    set_time( calendar::turn_zero + 4000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms a( 65, 65, 0 );
+    const tripoint_bub_ms b = a + point::east;
+    for( const auto &p : here.points_in_radius( b, 2 ) ) { here.ter_set( p, ter_id( "t_wall" ) ); }
+    here.ter_set( a, ter_id( "t_floor" ) );
+    here.ter_set( b, ter_id( "t_floor" ) );
+    get_avatar().setpos( here, tripoint_bub_ms( a.xy(), -2 ) );
+    monster &pusher = spawn_test_monster( "mon_zombie_hulk", a );
+    monster &victim = new_swap_predator_fixture( mtype_id( "mon_writhing_stalker" ), b );
+    REQUIRE( pusher.has_flag( mon_flag_PUSH_MON ) );
+    REQUIRE( overmap_buffer.predator_activity_for( victim, predator_activation::representation::local, victim.pos_abs() ) );
+    const auto pusher_pos = pusher.pos_abs();
+    const auto victim_pos = victim.pos_abs();
+    const auto actor = victim.predator_state().actor_id;
+    const auto epoch = victim.predator_state().handoff_epoch;
+    pusher.set_moves( 1000 );
+    victim.set_moves( 700 );
+    // Select reproducible native rolls that meet the actual trample strength
+    // prerequisite and do not enter the separate recursive push branch.
+    std::optional<unsigned int> seed;
+    for( unsigned int candidate = 1; candidate <= 256 && !seed; ++candidate ) {
+        rng_set_engine_seed( candidate );
+        const int defend = victim.stability_roll();
+        const int attack = pusher.stability_roll();
+        bool recursive = false;
+        for( int n = 0; n < 6; ++n ) {
+            const int x = rng( -1, 1 );
+            const int y = rng( -1, 1 );
+            recursive = recursive || ( x == -1 && y == 0 );
+        }
+        if( attack >= 2 * defend && !recursive ) {
+            seed = candidate;
+        }
+    }
+    REQUIRE( seed );
+    rng_set_engine_seed( *seed );
+    REQUIRE( pusher.push_to( b, 0, 0 ) );
+    CHECK( pusher.pos_abs() == victim_pos );
+    CHECK( victim.pos_abs() == pusher_pos );
+    CHECK( pusher.get_moves() < 1000 );
+    CHECK( victim.get_moves() < 700 );
+    CHECK( overmap_buffer.global_state.predator_activity.owns( actor, epoch,
+           predator_activation::representation::local, victim.pos_abs() ) );
+    CHECK( overmap_buffer.predator_activity_for( victim, predator_activation::representation::local, victim.pos_abs() ) );
 }

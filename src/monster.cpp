@@ -448,8 +448,18 @@ void monster::on_move( const tripoint_abs_ms &old_pos )
             }
         }
     }
-    if( g->update_zombie_pos( *this, old_pos, pos_abs() ) && !population_identity().empty() ) {
-        migo_population::commit_position( *this, migo_population::representation::local, pos_abs() );
+    if( g->update_zombie_pos( *this, old_pos, pos_abs() ) ) {
+        if( !population_identity().empty() ) {
+            migo_population::commit_position( *this, migo_population::representation::local, pos_abs() );
+        }
+        if( is_caol_predator() ) {
+            auto &world = overmap_buffer.global_state.predator_activity;
+            if( !world.move( lifecycle_state.actor_id, lifecycle_state.handoff_epoch,
+                            predator_activation::representation::local, old_pos, pos_abs() ) ) {
+                overmap_buffer.confirm_predator_position( *this,
+                        predator_activation::representation::local, pos_abs() );
+            }
+        }
     }
     if( has_effect( effect_onfire ) ||
         calculate_by_enchantment( type->luminance, enchant_vals::mod::LUMINATION, true ) > 0 ) {
@@ -3113,6 +3123,19 @@ void monster::explode()
 
 void monster::process_turn()
 {
+    const bool predator = is_caol_predator();
+    bool predator_credit_moves = true;
+    if( predator ) {
+        int active_elapsed = 0;
+        const int now = to_turn<int>( calendar::turn );
+        if( !overmap_buffer.predator_activity_for( *this,
+                predator_activation::representation::local, pos_abs(), &active_elapsed ) ||
+            active_elapsed <= 0 || lifecycle_state.last_native_process_world == now ) {
+            return;
+        }
+        predator_credit_moves = lifecycle_state.last_energy_world != now;
+        lifecycle_state.last_native_process_world = now;
+    }
     const bool tagged_migo = !population_identity().empty();
     const bool owned_migo = tagged_migo && migo_population::can_transfer( *this,
                             migo_population::representation::local );
@@ -3135,9 +3158,10 @@ void monster::process_turn()
     if( owned_migo && intent->last_native_process_world == now ) {
         return;
     }
-    const bool credit_moves = !owned_migo || ( intent->last_energy_world != now &&
-                              !( intent->last_refused_world >= 0 && intent->last_refused_world >= intent->last_energy_world &&
-                                 get_moves() > 0 ) );
+    const bool credit_moves = predator_credit_moves &&
+                              ( !owned_migo || ( intent->last_energy_world != now &&
+                                  !( intent->last_refused_world >= 0 && intent->last_refused_world >= intent->last_energy_world &&
+                                     get_moves() > 0 ) ) );
     if( owned_migo ) {
         intent->last_native_process_world = now;
     }
@@ -3256,6 +3280,9 @@ void monster::process_turn()
 
     if( credit_moves ) {
         Creature::process_turn();
+        if( predator ) {
+            lifecycle_state.last_energy_world = now;
+        }
         if( owned_migo ) {
             intent->last_energy_world = now;
         }
@@ -3290,6 +3317,10 @@ void monster::die( map *here, Creature *nkiller )
     if( type->id == mon_zombie_rider && !lifecycle_state.actor_id.empty() ) {
         overmap_buffer.global_state.zombie_rider_bands.record_casualty( lifecycle_state.actor_id,
                 to_turns<int>( calendar::turn - calendar::turn_zero ) );
+    }
+    if( is_caol_predator() && !lifecycle_state.actor_id.empty() ) {
+        overmap_buffer.global_state.predator_activity.record_death(
+            lifecycle_state.actor_id, lifecycle_state.handoff_epoch, to_turn<int>( calendar::turn ) );
     }
     bandit_live_world_probe::record_fixture_monster_lifecycle( *this, "death", "local" );
     set_killer( nkiller );
@@ -3548,6 +3579,24 @@ bool monster::check_mech_powered() const
                  get_name() );
     }
     return true;
+}
+
+void monster::transfer_owned_items_to( monster &prepared )
+{
+    cata_assert( &prepared != this );
+    // Native preparation may append death drops during evolution, but does
+    // not transform the original inventory prefix or the dedicated slots.
+    cata_assert( prepared.inv.size() >= inv.size() );
+    for( std::size_t index = 0; index < inv.size(); ++index ) {
+        prepared.inv[index] = std::move( inv[index] );
+    }
+    inv.clear();
+    prepared.dissectable_inv = std::move( dissectable_inv );
+    prepared.tied_item = std::move( tied_item );
+    prepared.tack_item = std::move( tack_item );
+    prepared.armor_item = std::move( armor_item );
+    prepared.storage_item = std::move( storage_item );
+    prepared.battery_item = std::move( battery_item );
 }
 
 void monster::generate_inventory( bool disableDrops )
@@ -4272,6 +4321,10 @@ float monster::get_mountable_weight_ratio() const
 void monster::hear_sound( const tripoint_bub_ms &source, const int vol, const int dist,
                           bool provocative )
 {
+    if( is_caol_predator() && !overmap_buffer.predator_activity_for( *this,
+            predator_activation::representation::local, pos_abs() ) ) {
+        return;
+    }
     if( !can_hear() ) {
         return;
     }
@@ -4418,11 +4471,22 @@ void monster::suspend_offscreen_time( time_duration paused )
 
 void monster::adopt_offscreen_time()
 {
-    suspend_offscreen_time( calendar::turn - last_updated );
+    adopt_offscreen_time( calendar::turn );
+}
+
+time_duration monster::adopt_offscreen_time( const time_point &through )
+{
+    const time_duration paused = std::max( 0_turns, through - last_updated );
+    suspend_offscreen_time( paused );
+    return paused;
 }
 
 void monster::on_unload()
 {
+    if( is_caol_predator() && !overmap_buffer.predator_activity_for( *this,
+            predator_activation::representation::local, pos_abs() ) ) {
+        return;
+    }
     if( !population_identity().empty() &&
         ( !migo_population::can_transfer( *this, migo_population::representation::local ) ||
           !migo_tower::activity_for( *this, migo_population::representation::local,
@@ -4448,6 +4512,10 @@ void monster::on_load()
     // load boundary, before early returns or live-turn consumers observe it.
     if( is_caol_predator() ) {
         ensure_predator_state();
+        if( !overmap_buffer.predator_activity_for( *this,
+                predator_activation::representation::local, pos_abs() ) ) {
+            return;
+        }
         initialize_predator_ammo_once();
     }
     try_upgrade( false );

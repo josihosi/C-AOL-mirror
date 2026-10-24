@@ -10,6 +10,8 @@
 #include "monster.h"
 #include "migo_tower_native.h"
 #include "mtype.h"
+#include "overmapbuffer.h"
+#include "rng.h"
 
 static const species_id species_FERAL( "FERAL" );
 static const species_id species_ZOMBIE( "ZOMBIE" );
@@ -149,6 +151,21 @@ std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> horde
     bool inserted;
     // The [] operator creates a nested std::map if not present already.
     std::tie( result, inserted ) = target_map[sm].emplace( p, id );
+    if( inserted && ( id.str() == "mon_zombie_rider" || id.str() == "mon_writhing_stalker" ) ) {
+        overmap *owner = overmap_buffer.find_loaded_overmap( location );
+        if( owner && &owner->hordes == this ) {
+            // Register this accepted biological entity without constructing a
+            // payload or running a range/discovery query during worldgen.
+            auto &world = overmap_buffer.global_state.predator_activity;
+            const std::string locator = "horde:" + p.to_string() + ":" + id.str();
+            std::string actor = world.legacy_identity( locator, {} );
+            if( actor.empty() ) {
+                actor = world.legacy_identity( locator, random_string( 32 ) );
+            }
+            world.confirm( actor, id.str(), 0, predator_activation::representation::abstract,
+                           p, to_turn<int>( calendar::turn ) );
+        }
+    }
     return result;
 }
 
@@ -227,6 +244,12 @@ static void signal_sm( const tripoint_abs_ms &origin, const tripoint_abs_sm &sm_
     int scaled_eff_power = eff_power * SEEX;
     for( std::unordered_map<tripoint_abs_ms, horde_entity>::iterator mon = sm_iter->second.begin();
          mon != sm_iter->second.end(); ) {
+        const auto &type = mon->second.get_type()->id.str();
+        if( ( type == "mon_zombie_rider" || type == "mon_writhing_stalker" ) &&
+            !overmap_buffer.predator_activity_at( mon->second, mon->first ) ) {
+            ++mon;
+            continue;
+        }
         if( active && mon->second.tracking_intensity >= scaled_eff_power ) {
             ++mon;
             continue;
@@ -314,6 +337,19 @@ int horde_map::attract_entities_to_light( const tripoint_abs_ms &origin, const i
                 if( candidate_count != nullptr ) {
                     ++*candidate_count;
                 }
+                const auto &type = entity.get_type()->id.str();
+                if( type == "mon_zombie_rider" || type == "mon_writhing_stalker" ) {
+                    if( !overmap_buffer.predator_activity_at( entity, entity_it->first ) ) {
+                        ++entity_it;
+                        continue;
+                    }
+                    entity.ensure_predator_payload( entity_it->first );
+                    if( !overmap_buffer.predator_activity_for( *entity.monster_data,
+                            predator_activation::representation::abstract, entity_it->first ) ) {
+                        ++entity_it;
+                        continue;
+                    }
+                }
                 if( !entity.can_perceive_light() || ( visible && !visible( entity_it->first ) ) ||
                     entity.light_sample_id == sample_id ) {
                     ++entity_it;
@@ -334,6 +370,10 @@ int horde_map::attract_entities_to_light( const tripoint_abs_ms &origin, const i
                                                   intensity ) ) {
                     ++entity_it;
                     continue;
+                }
+                if( entity.monster_data && entity.monster_data->is_caol_predator() ) {
+                    overmap_buffer.retain_predator_light_work( *entity.monster_data, sample_id,
+                            to_turn<int>( observed ), intensity );
                 }
                 entity.destination = origin;
                 entity.tracking_intensity = remaining_interest;
@@ -376,7 +416,39 @@ void horde_map::expire_light_interest( const time_point &now )
     for( auto outer_it = active_monster_map.begin(); outer_it != active_monster_map.end(); ) {
         auto &bucket = outer_it->second;
         for( auto entity_it = bucket.begin(); entity_it != bucket.end(); ) {
-            entity_it->second.expire_light_interest( now );
+            horde_entity &entity = entity_it->second;
+            light_interest_expiry expiry = light_interest_expiry::native_world;
+            const auto &type = entity.get_type()->id.str();
+            if( type == "mon_zombie_rider" || type == "mon_writhing_stalker" ) {
+                const bool eligible = overmap_buffer.predator_activity_at( entity, entity_it->first );
+                if( eligible ) {
+                    entity.ensure_predator_payload( entity_it->first );
+                    monster &body = *entity.monster_data;
+                    if( body.predator_state().light_work_sample.empty() && !entity.light_sample_id.empty() ) {
+                        // Project a legacy carrier before first body binding
+                        // settles its frozen interval and rebases this anchor.
+                        overmap_buffer.retain_predator_light_work( body, entity.light_sample_id,
+                                to_turn<int>( entity.light_observed ),
+                                to_turns<int>( entity.light_expires - entity.light_observed ) );
+                    }
+                    overmap_buffer.predator_activity_for( body,
+                            predator_activation::representation::abstract, entity_it->first );
+                }
+                if( entity.monster_data ) {
+                    monster &body = *entity.monster_data;
+                    if( overmap_buffer.predator_light_work_alive( body ) ) {
+                        expiry = light_interest_expiry::retain_actor_work;
+                    } else if( !body.predator_state().light_work_sample.empty() ) {
+                        expiry = light_interest_expiry::exhaust_actor_work;
+                    }
+                }
+                if( !eligible && expiry == light_interest_expiry::native_world ) {
+                    // No payload construction or observer read just to decide
+                    // range. Authentication/freeze does not erase saved work.
+                    expiry = light_interest_expiry::retain_actor_work;
+                }
+            }
+            entity.expire_light_interest( now, expiry );
             if( entity_it->second.is_active() ) {
                 ++entity_it;
                 continue;

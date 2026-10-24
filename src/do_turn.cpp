@@ -12141,11 +12141,15 @@ int signal_live_writhing_stalkers_from_light_observations(
         const int duration = std::clamp( 90 + signal.horde_signal_power * 4, 90, 300 );
         for( monster &critter : g->all_monsters() ) {
             if( critter.type->id != mon_writhing_stalker || critter.is_dead() || critter.friendly != 0 ||
+                !overmap_buffer.predator_activity_for( critter,
+                        predator_activation::representation::local, critter.pos_abs() ) ||
                 !critter.sees( here, source_bub ) ) {
                 continue;
             }
             writhing_stalker::persistent_state &state = critter.writhing_stalker_state();
             if( state.observe_light_interest( source, signal.sample_id, signal.observed_turn, duration ) ) {
+                overmap_buffer.retain_predator_light_work( critter, signal.sample_id,
+                        signal.observed_turn, duration );
                 observations++;
             }
         }
@@ -12271,8 +12275,10 @@ bool live_camp_has_actionable_opening( map &here, const tripoint_abs_ms &source,
 live_zombie_rider_pressure_summary command_live_zombie_riders_to_light(
     const zombie_rider_overmap_ai::rider_convergence_result &convergence,
     const std::unordered_map<std::string, monster *> &live_riders_by_id,
-    const tripoint_abs_ms &light_source, int memory_turns )
+    const tripoint_abs_ms &light_source,
+    const zombie_rider_overmap_ai::rider_light_memory &memory )
 {
+    const int memory_turns = memory.turns_remaining;
     live_zombie_rider_pressure_summary summary;
     if( !convergence.should_converge ) {
         return summary;
@@ -12312,7 +12318,8 @@ live_zombie_rider_pressure_summary command_live_zombie_riders_to_light(
             zombie_rider_overmap_ai::choose_camp_pressure_posture( pressure_input );
 
         zombie_rider_overmap_ai::set_camp_pressure_intent( rider, pressure.posture,
-                light_source, memory_turns, static_cast<int>( rider_index ) );
+                light_source, memory_turns, static_cast<int>( rider_index ), memory.sample_id,
+                memory.observed_at_turn, memory.expires_at_turn );
         rider.unset_dest();
         if( pressure.posture != zombie_rider_overmap_ai::rider_camp_pressure_posture::withdraw ) {
             rider.anger = std::max( rider.anger, 100 );
@@ -12362,7 +12369,9 @@ int signal_live_zombie_riders_from_light_observations(
     std::unordered_map<std::string, monster *> live_riders_by_id;
     int wounded_riders = 0;
     for( monster &critter : g->all_monsters() ) {
-        if( critter.type->id != mon_zombie_rider || critter.is_dead() ) {
+        if( critter.type->id != mon_zombie_rider || critter.is_dead() ||
+            !overmap_buffer.predator_activity_for( critter,
+                    predator_activation::representation::local, critter.pos_abs() ) ) {
             continue;
         }
         zombie_rider_overmap_ai::rider_overmap_agent rider;
@@ -12447,7 +12456,7 @@ int signal_live_zombie_riders_from_light_observations(
         const tripoint_abs_ms light_source = signal.source_ms.value_or(
                 coords::project_to<coords::ms>( signal.source_omt ) );
         const live_zombie_rider_pressure_summary pressure = command_live_zombie_riders_to_light(
-                    convergence, live_riders_by_id, light_source, memory.turns_remaining );
+                    convergence, live_riders_by_id, light_source, memory );
         // Reservation only prevents this finite light sample from issuing two
         // commands.  It must not become a durable membership write.
         zombie_rider_overmap_ai::reserve_rider_convergence( riders, convergence );
@@ -17981,6 +17990,10 @@ void monmove()
 
     for( monster &critter : g->all_monsters() ) {
         if( !m.inbounds( critter.pos_abs() ) ) {
+            continue;
+        }
+        if( critter.is_caol_predator() && !overmap_buffer.predator_activity_for( critter,
+                predator_activation::representation::local, critter.pos_abs() ) ) {
             continue;
         }
         // process_turn alone cannot suspend a loaded operation: retained

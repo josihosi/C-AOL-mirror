@@ -105,6 +105,7 @@ class rider_band_registry
         std::string band_for( const std::string &actor_id ) const;
         bool in_same_band( const std::string &first_actor_id, const std::string &second_actor_id ) const;
         int living_members( const std::string &actor_id ) const;
+        const std::vector<std::string> &living_actor_ids( const std::string &actor_id ) const;
         std::uint64_t revision_for( const std::string &actor_id ) const;
         void reconcile_cache( const std::string &actor_id, predator_lifecycle_state &state ) const;
         // Read-only serialization for a fixture-gated native harness diagnostic.
@@ -124,6 +125,8 @@ class rider_band_registry
         std::map<std::string, std::uint64_t> revisions;
         std::map<std::string, int> encounter_turns;
         std::map<std::string, rider_band_observation> observations;
+        mutable bool living_index_dirty = true;
+        mutable std::map<std::string, std::vector<std::string>> living_by_band;
 
         std::string root_for( const std::string &actor_id ) const;
         std::vector<std::string> malformed_references() const;
@@ -172,6 +175,9 @@ struct rider_camp_pressure_intent {
     tripoint_abs_ms source = tripoint_abs_ms::zero;
     int formation_slot = 0;
     int turns_remaining = 0;
+    std::string sample_id;
+    int observed_world = -1;
+    int expires_world = -1;
 };
 
 enum class pursuit_phase : std::uint8_t { idle, pursuing, searching };
@@ -191,6 +197,7 @@ struct rider_pursuit_state {
     tripoint_abs_ms movement_waypoint;
     bool has_movement_waypoint = false;
     int search_until_turn = -1;
+    bool retained_observation_work = false;
     bool impact_ready = false;
     int impact_ready_turn = -1;
     // A completed impact yields exactly one player recovery turn before this
@@ -199,6 +206,7 @@ struct rider_pursuit_state {
     int impact_recovery_until_turn = -1;
 
     void advance_to( int now_turn );
+    void suspend_work( int paused_turns );
     bool evidence_valid( int now_turn ) const;
     void observe( std::uint64_t identity, const tripoint_abs_ms &position, int now_turn );
     void relay( const rider_band_observation &observation );
@@ -229,8 +237,10 @@ rider_camp_pressure_result choose_camp_pressure_posture(
 std::string to_string( rider_camp_pressure_posture posture );
 void set_camp_pressure_intent( monster &rider, rider_camp_pressure_posture posture,
                                const tripoint_abs_ms &source, int duration_turns,
-                               int formation_slot = 0 );
+                               int formation_slot = 0, const std::string &sample_id = {},
+                               int observed_world = -1, int expires_world = -1 );
 std::optional<rider_camp_pressure_intent> get_camp_pressure_intent( monster &rider );
 void clear_camp_pressure_intent( monster &rider );
+void suspend_camp_pressure_work( monster &rider, int paused_turns );
 
 } // namespace zombie_rider_overmap_ai

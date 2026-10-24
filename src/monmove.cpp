@@ -954,6 +954,7 @@ void writhing_stalker::record_attack_attempt( monster &stalker )
                 stalker.wander_to( stalker.pos_abs(), 0 );
             }
         }
+        writhing_stalker::advance_active_work( stalker, to_turn<int>( calendar::turn ) );
         state.record_attack( to_turn<int>( calendar::turn ) );
     }
 }
@@ -1265,7 +1266,7 @@ Creature *writhing_stalker::observe_current_target( monster &stalker )
     // Settle the owning interval before assigning an acquisition's active time.
     // An abstract caller has already supplied its effective interval at this
     // same world turn, so the once-only guard prevents a second advance here.
-    stalker.writhing_stalker_state().advance_to( to_turn<int>( calendar::turn ) );
+    advance_active_work( stalker, to_turn<int>( calendar::turn ) );
     scout_observation::site_reader reader;
     Character *seen = nullptr;
     const auto consider = [&]( Character & candidate ) {
@@ -1438,7 +1439,7 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
 {
     writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
     const int now_turn = to_turn<int>( calendar::turn );
-    state.advance_to( now_turn );
+    writhing_stalker::advance_active_work( stalker, now_turn );
     const bool sound_owns_navigation = stalker.provocative_sound && stalker.wandf > 0 &&
                                        stalker.wander_pos != stalker.pos_abs() &&
                                        state.phase != writhing_stalker::lifecycle_phase::retreating &&
@@ -1473,8 +1474,12 @@ static bool apply_writhing_stalker_no_target_plan( monster &stalker, map &here )
 
     // The observation is the goal; committed_waypoint owns only the next
     // executable step. Reaching a short step is not arriving at the light.
+    const auto &life = stalker.predator_state();
+    const bool retained_light_location = overmap_buffer.predator_light_work_alive( stalker ) &&
+                                         !state.light_sample_id.empty() && life.light_work_sample == state.light_sample_id &&
+                                         state.light_observed_turn >= 0 && state.light_observed_turn <= now_turn;
     const bool light_route = state.sighting_active_turn < 0 && state.search_started_active < 0 &&
-                             state.light_interest_active( now_turn ) &&
+                             ( state.light_interest_active( now_turn ) || retained_light_location ) &&
                              ( state.phase == writhing_stalker::lifecycle_phase::shadowing ||
                                state.phase == writhing_stalker::lifecycle_phase::approaching );
     tripoint_abs_ms waypoint;
@@ -1574,7 +1579,7 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
 
     writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
     const int now_turn = to_turn<int>( calendar::turn );
-    state.advance_to( now_turn );
+    writhing_stalker::advance_active_work( stalker, now_turn );
     // A stale target pointer from mon_plan is not proof of current sight.
     scout_observation::site_reader reader;
     const Character *character = target.as_character();
@@ -1809,7 +1814,15 @@ static bool apply_zombie_rider_remembered_plan( monster &rider, map &here )
     zombie_rider_overmap_ai::rider_pursuit_state &state = rider.zombie_rider_pursuit_state();
     const int now_turn = to_turn<int>( calendar::turn );
     state.advance_to( now_turn );
-    if( !state.evidence_valid( now_turn ) ) {
+    // A paused, already-earned location search is not current sight. Native
+    // materialization/capture clears dest, so restore it through this owner
+    // only while the original finite active allowance is still available.
+    const bool retained_location = state.retained_observation_work &&
+                                   state.has_last_observed_position && state.target_identity != 0 &&
+                                   state.last_observed_turn >= 0 && now_turn >= state.last_observed_turn &&
+                                   state.phase == zombie_rider_overmap_ai::pursuit_phase::searching &&
+                                   state.search_until_turn > now_turn;
+    if( !state.evidence_valid( now_turn ) && !retained_location ) {
         return false;
     }
 
@@ -2380,6 +2393,10 @@ static bool apply_targeted_live_plan_adapter( monster &mon, map &here, Creature 
 
 void monster::plan()
 {
+    if( is_caol_predator() && !overmap_buffer.predator_activity_for( *this,
+            predator_activation::representation::local, pos_abs() ) ) {
+        return;
+    }
     // Include native targeting/action work before the species hook. The
     // authenticated prepare_step route remains its separately timed child.
     std::optional<raid_perf_scope> diagnostic;
@@ -2865,6 +2882,10 @@ bool monster::die_if_drowning( const tripoint_bub_ms &at_pos, const int chance )
 // 4) Sound-based tracking
 void monster::move()
 {
+    if( is_caol_predator() && !overmap_buffer.predator_activity_for( *this,
+            predator_activation::representation::local, pos_abs() ) ) {
+        return;
+    }
     // Include native targeting/action work before the species hook. The
     // authenticated prepare_step route remains its separately timed child.
     std::optional<raid_perf_scope> diagnostic;
@@ -4114,6 +4135,10 @@ static tripoint_bub_ms find_closest_stair( const tripoint_bub_ms &near_this,
 bool monster::move_to( const tripoint_bub_ms &p, bool force, bool step_on_critter,
                        const float stagger_adjustment )
 {
+    if( is_caol_predator() && !overmap_buffer.predator_activity_for( *this,
+            predator_activation::representation::local, pos_abs() ) ) {
+        return false;
+    }
     map &here = get_map();
     const tripoint_bub_ms pos = pos_bub( here );
 
@@ -4463,7 +4488,9 @@ bool monster::push_to( const tripoint_bub_ms &p, const int boost, const size_t d
         return false;
     }
 
-    g->swap_critters( *critter, *this );
+    if( !g->swap_critters( *critter, *this ) ) {
+        return false;
+    }
     critter->add_effect( effect_stunned, rng( 0_turns, 2_turns ) );
     Character &player_character = get_player_character();
     // Only print the message when near player or it can get spammy
