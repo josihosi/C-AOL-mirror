@@ -30,6 +30,8 @@ site_record *discover( const tripoint_abs_omt &position, const monster *incoming
                        representation incoming_owner = representation::abstract );
 bool can_transfer( const monster &payload, representation from );
 bool reconcile_payload( const monster &payload, representation observed_owner );
+bool commit_position( const monster &payload, representation owner,
+                      const tripoint_abs_ms &actual_position );
 bool transfer( monster &payload, representation from, representation to );
 bool superseded( const monster &payload );
 void source_changed( const tripoint_abs_ms &position, const std::string &furniture );

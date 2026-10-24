@@ -14,6 +14,7 @@
 #include "raid_sweep.h"
 #include "physical_navigation.h"
 #include "migo_population_identity.h"
+#include "migo_population.h"
 
 class JsonObject;
 class JsonOut;
@@ -154,6 +155,9 @@ struct member_intent {
     int last_combat_world = -1;
     int last_observed_enemy_world = -1;
     int last_refused_world = -1;
+    bool activity_bound = false;
+    std::uint64_t activity_generation = 0;
+    std::int64_t activity_suspension = 0;
     // Disposable routing knowledge follows the actual prepared payload copy.
     // Never serialized; no movement/clock credit or second body owner.
     physical_navigation::segment navigation;
@@ -180,6 +184,7 @@ struct operation_member {
 };
 
 struct operation_record {
+    migo_population::activity_clock activity;
     std::uint64_t generation = 0;
     signal_record source;
     std::vector<operation_member> members;
@@ -228,6 +233,9 @@ struct world_state {
     void clear();
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &json );
+    private:
+        std::size_t indexed_site_count = 0;
+        std::map<std::string, std::size_t> site_index;
 };
 } // namespace migo_tower
 #endif

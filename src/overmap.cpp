@@ -1547,7 +1547,17 @@ horde_entity &overmap::spawn_monster( const tripoint_abs_ms &p, mtype_id id )
 horde_entity *overmap::retain_monster_payload( const tripoint_abs_ms &p, const monster &payload )
 {
     const auto inserted = hordes.spawn_entity( p, payload );
-    return inserted ? &( *inserted )->second : nullptr;
+    if( !inserted ) {
+        return nullptr;
+    }
+    auto &retained = ( *inserted )->second;
+    if( retained.monster_data ) {
+        // Only an already-abstract current lease can publish here. Slot/local
+        // candidates still wait for their separate transfer commit.
+        migo_population::commit_position( *retained.monster_data,
+                                          migo_population::representation::abstract, p );
+    }
+    return &retained;
 }
 
 bool overmap::release_monster_payload( const tripoint_abs_ms &p, const std::string &actor_id )
@@ -1718,6 +1728,21 @@ void overmap::move_hordes( bool migo_operations_only )
             prepared_predator.emplace( mon->second );
             acting = &*prepared_predator;
         }
+        int native_elapsed = 1;
+        if( acting->monster_data && !acting->monster_data->population_identity().empty() ) {
+            // The native container authenticates position before body work.
+            // Pause settlement belongs to the private rollback candidate.
+            acting->monster_data->set_pos_abs_only( mon->first );
+            migo_population::commit_position( *acting->monster_data,
+                                              migo_population::representation::abstract, mon->first );
+            if( !migo_tower::activity_for( *acting->monster_data,
+                                           migo_population::representation::abstract,
+                                           to_turn<int>( calendar::turn ),
+                                           migo_tower::activity_boundary::process, &native_elapsed ) ) {
+                ++mon;
+                continue;
+            }
+        }
         acting->last_processed = calendar::turn;
         if( !predator_transfer && !mon->second.monster_data ) {
             // Evolution can be the operation that turns a lightweight
@@ -1760,8 +1785,9 @@ void overmap::move_hordes( bool migo_operations_only )
             // executable step, so blocked owners retain their energy guard
             // without accumulating a delayed movement budget.
             if( migo_step.next != physical_navigation::action::none &&
-                intent.last_energy_world != now ) {
-                acting->moves = active_time::funded_moves( acting->moves, body.get_speed(), 1 );
+                intent.last_energy_world != now && native_elapsed > 0 ) {
+                acting->moves = active_time::funded_moves( acting->moves, body.get_speed(),
+                    std::min( 1, native_elapsed ) );
                 intent.last_energy_world = now;
             }
             if( acting->moves > 0 && migo_step.next == physical_navigation::action::open_door ) {
@@ -1787,7 +1813,9 @@ void overmap::move_hordes( bool migo_operations_only )
             ( !migo_work && acting->tracking_intensity > 0 && mon->first != acting->destination ) ) {
             if( !migo_work ) {
                 acting->tracking_intensity--;
-                acting->moves += acting->type_id->speed;
+                if( native_elapsed > 0 ) {
+                    acting->moves += acting->type_id->speed;
+                }
             }
             if( acting->moves <= 0 ) {
                 if( prepared_predator ) {
@@ -1972,6 +2000,10 @@ void overmap::move_hordes( bool migo_operations_only )
             continue;
         }
         monster_node.mapped().synchronize_payload( monster_node.key() );
+        if( monster_node.mapped().monster_data ) {
+            migo_population::commit_position( *monster_node.mapped().monster_data,
+                                              migo_population::representation::abstract, monster_node.key() );
+        }
         dest_om->hordes.insert( std::move( monster_node ) );
     }
 }

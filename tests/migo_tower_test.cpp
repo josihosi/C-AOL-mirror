@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -394,6 +395,7 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
     for( const auto &member : population()->members ) {
         if( member.assignment == migo_population::duty::dispatched ) {
             ++leased;
+            REQUIRE( member.current_position );
             CHECK( tower->operation->contains( member.token.member_id ) );
             if( !load_first ) {
                 auto &owner = overmap_buffer.get( project_to<coords::om>( member.home ).xy() );
@@ -402,6 +404,7 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
                     if( entry.second->monster_data && entry.second->monster_data->population_identity().member_id ==
                         member.token.member_id ) {
                         found = true;
+                        CHECK( member.current_position == entry.first );
                         CHECK( entry.second->is_active() );
                         CHECK( entry.second->tracking_intensity == 0 );
                         CHECK( migo_tower::owns_intent( *entry.second->monster_data,
@@ -484,6 +487,9 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
         CHECK( before == after );
     }
     enter_tower();
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    calendar::turn += 1_turns;
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
     for( monster &body : g->all_monsters() ) {
         if( body.population_identity().site_id == geometry->id &&
             tower->operation->contains( body.population_identity().member_id ) ) {
@@ -1204,6 +1210,143 @@ TEST_CASE( "migo_native_settlement_does_not_turn_roster_death_into_loss_knowledg
     CHECK( current->find_source( operation.source.source_omt )->overdue_attempts == 1 );
 }
 
+TEST_CASE( "migo_terminal_home_interval_never_activates_an_away_or_unauthenticated_survivor",
+           "[migo_tower][migo_activation][native][serialization]" )
+{
+    const std::string mode = GENERATE( "active", "frozen", "away", "missing", "divergent" );
+    CAPTURE( mode );
+    clear_avatar();
+    clear_map_without_vision();
+    const auto old_turn = calendar::turn;
+    const auto old_avatar = get_avatar().pos_abs();
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    set_time( calendar::turn_zero + 15000_turns );
+    const auto position = get_map().get_abs( tripoint_bub_ms( 60, 60, 0 ) );
+    const auto anchor = project_to<coords::omt>( position );
+    const auto away = project_to<coords::ms>( anchor + point( 41, 0 ) ) + point( 12, 12 );
+    const std::string id = "terminal-home-interval";
+    overmap *away_owner = nullptr;
+    on_out_of_scope restore( [&]() {
+        if( away_owner ) {
+            away_owner->release_monster_payload( away, "peer" );
+        }
+        clear_map_without_vision();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        get_avatar().setpos( old_avatar, false );
+        set_time( old_turn );
+    } );
+    get_avatar().setpos( position - point( 3, 0 ), false );
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = anchor;
+    std::vector<migo_population::member_record> members;
+    for( const auto &name : {
+             "returnee", "peer", "unseen-loss"
+         } ) {
+        migo_population::member_record member;
+        member.token = {id, name, 1, anchor};
+        member.type = mtype_id( "mon_mi_go" );
+        member.home = position;
+        member.hp = member.type->hp;
+        member.owner = migo_population::representation::local;
+        member.assignment = migo_population::duty::available;
+        if( member.token.member_id == "peer" && mode == "away" ) {
+            member.owner = migo_population::representation::abstract;
+            member.assignment = migo_population::duty::returning;
+        }
+        members.push_back( member );
+    }
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    REQUIRE( population.record_death( members[2].token ) );
+    if( mode == "active" || mode == "frozen" ) {
+        REQUIRE( population.record_death( members[1].token ) );
+    }
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = anchor;
+    site.operation.emplace();
+    auto &operation = *site.operation;
+    operation.generation = 1;
+    operation.source.source_omt = anchor + point( 2, 0 );
+    operation.members = {{"returnee", true, true, position},
+        {"peer", mode != "away", mode != "away"}, {"unseen-loss", true}
+    };
+    operation.sweep.candidates = {{position + point( 3, 0 )}};
+    operation.overdue_after_active = 10;
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    REQUIRE( site.remember_source( operation.source.source_omt ) );
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    monster *returned = g->place_critter_at( members[0].type, get_map().get_bub( position ) );
+    REQUIRE( returned );
+    returned->population_identity() = members[0].token;
+    returned->set_moves( 137 );
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.phase = migo_tower::member_phase::settled;
+    intent.home = position;
+    returned->set_migo_intent( intent );
+    if( mode == "away" ) {
+        monster peer( members[1].type );
+        peer.population_identity() = members[1].token;
+        peer.set_pos_abs_only( away );
+        peer.set_moves( 0 );
+        intent.phase = migo_tower::member_phase::returning;
+        peer.set_migo_intent( intent );
+        away_owner = &overmap_buffer.get( project_to<coords::om>( away ).xy() );
+        REQUIRE( away_owner->retain_monster_payload( away, peer ) );
+    } else if( mode == "divergent" ) {
+        monster *peer = g->place_critter_at( members[1].type, get_map().get_bub( position + point::east ) );
+        REQUIRE( peer );
+        peer->population_identity() = members[1].token;
+        ++peer->population_identity().epoch; // stale saved ledger cannot authenticate this body
+        peer->set_migo_intent( intent );
+    }
+    if( mode == "frozen" ) {
+        get_avatar().setpos( project_to<coords::ms>( anchor - point( 41, 0 ) ), false );
+    }
+    const auto body_state = [&]() {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            returned->serialize( json );
+        }
+        return out.str();
+    };
+    const auto before = body_state();
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+    auto &current = *overmap_buffer.global_state.migo_towers.find( id )->operation;
+    CHECK( current.activity.active == ( mode == "active" ) );
+    CHECK( current.sweep.active_elapsed == 0 );
+    CHECK_FALSE( migo_tower::owns_intent( *returned, migo_population::representation::local ) );
+    CHECK( migo_tower::prepare_step( *returned, migo_population::representation::local ).next ==
+           physical_navigation::action::none );
+    calendar::turn += 10_turns;
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 10 );
+    overmap_buffer.move_hordes();
+    CHECK( current.sweep.active_elapsed == ( mode == "active" ? 10 : 0 ) );
+    CHECK( current.resolved == ( mode == "active" ) );
+    CHECK( current.communicated_losses.empty() );
+    CHECK( current.sweep.pending() == position + point( 3, 0 ) );
+    CHECK( body_state() == before );
+    // Even an inactive home does not disable ordinary available local life.
+    CHECK( migo_tower::activity_for( *returned, migo_population::representation::local,
+                                     to_turn<int>( calendar::turn ) ) );
+    if( away_owner ) {
+        const auto *entry = away_owner->entity_at( project_remain<coords::om>( away ).remainder_tripoint );
+        REQUIRE( entry );
+        CHECK( entry->monster_data->pos_abs() == away );
+        CHECK( entry->monster_data->migo_intent()->last_energy_world == -1 );
+        CHECK( entry->moves == 0 );
+    }
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 10 );
+    CHECK( current.sweep.active_elapsed == ( mode == "active" ? 10 : 0 ) );
+}
+
 TEST_CASE( "migo_source_history_eviction_cannot_restore_a_blind_retry",
            "[migo_tower][serialization]" )
 {
@@ -1498,6 +1641,7 @@ TEST_CASE( "migo_queued_native_migrations_preserve_rejected_source_owners",
     const int permutation = GENERATE( 0, 1, 2, 3, 4, 5 );
     CAPTURE( stairs, permutation );
     const auto old_turn = calendar::turn;
+    const auto activation_avatar = get_avatar().pos_abs();
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
     const auto remote_om = project_to<coords::om>( get_avatar().pos_abs() ).xy() + point( 2, 0 );
@@ -1537,8 +1681,15 @@ TEST_CASE( "migo_queued_native_migrations_preserve_rejected_source_owners",
         overmap_buffer.global_state.migo_populations = old_populations;
         overmap_buffer.global_state.migo_towers = old_towers;
         MAPBUFFER.clear_outside_reality_bubble();
+        get_avatar().setpos( activation_avatar, false );
         set_time( old_turn );
     } );
+    // This is an off-bubble motor control, not an inactive-party control.
+    // Keep the real geometry remote while admitting the entire short journey
+    // within40; the separate activation controls prove the outside boundary.
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( start ) - point( 30, 0 ) ),
+                         false );
+
     // Leases are component setup. The real scheduler prepares overlapping
     // physical moves; a nonparticipating resident blocks the queue's head.
     const std::vector<tripoint_abs_ms> positions = {
@@ -1684,6 +1835,7 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     // A leased native payload is component setup. The public scheduler owns
     // every physical step, cross-overmap insertion and actual home settlement.
     const auto old_turn = calendar::turn;
+    const auto activation_avatar = get_avatar().pos_abs();
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
     const auto first_om = project_to<coords::om>( get_avatar().pos_abs() ).xy() + point( 2, 0 );
@@ -1717,8 +1869,19 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
         overmap_buffer.global_state.migo_populations = old_populations;
         overmap_buffer.global_state.migo_towers = old_towers;
         MAPBUFFER.clear_outside_reality_bubble();
+        get_avatar().setpos( activation_avatar, false );
         set_time( old_turn );
     } );
+    // This is an off-bubble motor control, not an inactive-party control.
+    // Keep the real geometry remote while admitting the entire short journey
+    // within40; the separate activation controls prove the outside boundary.
+    // This start lies at the EAST edge of its overmap. Put the avatar
+    // across that boundary, so the first owner remains fallback-only while
+    // its actual party is within40. A west-side avatar in the same overmap
+    // would admit unrelated hordes through the ordinary nearby owner pass.
+    get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( start ) + point( 30, 0 ) ),
+                         false );
+
     const auto prepare_cell = [&]( const tripoint_abs_omt &cell ) {
         tinymap terrain;
         terrain.load( cell, false );
@@ -2183,6 +2346,273 @@ TEST_CASE( "raid_sweep_requires_arrival_and_observation_and_bounds_obstruction",
     CHECK_FALSE( changed.pending() );
 }
 
+TEST_CASE( "migo_loaded_operation_frozen_scheduler_preserves_budget_fields_and_body",
+           "[migo_tower][migo_activation][native]" )
+{
+    clear_avatar();
+    clear_map_without_vision();
+    const auto previous_time = calendar::turn;
+    const auto previous_avatar = get_avatar().pos_abs();
+    const auto previous_population = overmap_buffer.global_state.migo_populations;
+    const auto previous_towers = overmap_buffer.global_state.migo_towers;
+    const auto previous_bandits = overmap_buffer.global_state.bandit_live_world;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    overmap_buffer.global_state.bandit_live_world = {};
+    set_time( calendar::turn_zero + 100000_turns );
+    map &here = get_map();
+    const tripoint_bub_ms position( 63, 63, 0 );
+    const auto absolute = here.get_abs( position );
+    const auto body_omt = project_to<coords::omt>( absolute );
+    const auto home = body_omt + point( 45, 0 );
+    const std::string id = "loaded-frozen-native-owner";
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = home;
+    migo_population::member_record member;
+    member.token = { id, "native-local", 1, home };
+    member.type = mtype_id( "mon_mi_go" );
+    member.owner = migo_population::representation::local;
+    member.assignment = migo_population::duty::dispatched;
+    member.home = project_to<coords::ms>( home );
+    member.hp = member.type->hp;
+    REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = home;
+    site.operation.emplace();
+    site.operation->generation = 1;
+    site.operation->members.push_back( { member.token.member_id } );
+    site.operation->sweep.begin( body_omt, 1, absolute + point::east );
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    monster *body = g->place_critter_at( member.type, position );
+    REQUIRE( body );
+    body->population_identity() = member.token;
+    body->set_moves( 150 );
+    body->wandf = 10;
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.home = member.home;
+    intent.waypoint = absolute + point::east;
+    body->set_migo_intent( intent );
+    body->set_dest( *intent.waypoint );
+    on_out_of_scope restore( [&]() {
+        std::vector<monster *> remaining;
+        for( monster &candidate : g->all_monsters() ) {
+            if( candidate.population_identity().site_id == id ) {
+                remaining.push_back( &candidate );
+            }
+        }
+        for( const auto *candidate : remaining ) {
+            g->remove_zombie( *candidate );
+        }
+        clear_fields( 0 );
+        overmap_buffer.global_state.migo_populations = previous_population;
+        overmap_buffer.global_state.migo_towers = previous_towers;
+        overmap_buffer.global_state.bandit_live_world = previous_bandits;
+        get_avatar().setpos( previous_avatar, false );
+        set_time( previous_time );
+    } );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    get_avatar().setpos( project_to<coords::ms>( body_omt - point( 41, 0 ) ), false );
+    set_time( calendar::turn + 2_days );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    REQUIRE_FALSE( overmap_buffer.global_state.migo_towers.find( id )->operation->activity.active );
+    here.add_field( position, field_type_id( "fd_fire" ), 1 );
+    const auto serialize = []( const monster & value ) {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            value.serialize( json );
+        }
+        return out.str();
+    };
+    const auto frozen = serialize( *body );
+    process_monsters_and_npcs_turn_for_test(); // actual plan/move/field/daily-biological owner
+    monster *retained = nullptr;
+    for( monster &candidate : g->all_monsters() ) {
+        if( candidate.population_identity().site_id == id ) {
+            retained = &candidate;
+        }
+    }
+    REQUIRE( retained );
+    CHECK( serialize( *retained ) == frozen );
+    CHECK( retained->get_moves() == 150 );
+    CHECK( retained->wandf == 10 );
+    CHECK( retained->pos_abs() == absolute );
+    CHECK( retained->get_hp() == member.hp );
+}
+
+TEST_CASE( "migo_whole_party_interval_gates_real_abstract_owner_and_frozen_reload",
+           "[migo_tower][migo_activation][native]" )
+{
+    using migo_population::representation;
+    clear_avatar();
+    clear_map_without_vision();
+    const auto old_time = calendar::turn;
+    const auto old_avatar = get_avatar().pos_abs();
+    const auto old_population = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    set_time( calendar::turn_zero + 100000_turns );
+    const int inner_distance = GENERATE( 25, 39 );
+    const auto player = project_to<coords::omt>( old_avatar );
+    const tripoint_abs_omt anchor( player.xy() + point( 45, 0 ), 0 );
+    const std::string id = "activation-real-owner";
+    const std::array<tripoint_abs_ms, 2> positions = {
+        project_to<coords::ms>( tripoint_abs_omt( player.xy() + point( inner_distance, 0 ), 0 ) ) + point( 12, 12 ),
+        project_to<coords::ms>( tripoint_abs_omt( player.xy() + point( 41, 0 ), 1 ) ) + point( 12, 12 )
+    };
+    std::vector<migo_population::member_record> members;
+    for( int i = 0; i < 2; ++i ) {
+        migo_population::member_record member;
+        member.token = { id, "member-" + std::to_string( i ), 1, anchor };
+        member.type = mtype_id( "mon_mi_go" );
+        member.owner = representation::abstract;
+        member.assignment = migo_population::duty::dispatched;
+        member.home = project_to<coords::ms>( tripoint_abs_omt( anchor.xy(), i ) ) + point( 12, 12 );
+        member.hp = member.type->hp - 7;
+        members.push_back( member );
+    }
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = anchor;
+    population.production_elapsed = 17;
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = anchor;
+    site.operation.emplace();
+    site.operation->generation = 1;
+    site.operation->source.source_omt = project_to<coords::omt>( positions[0] );
+    site.operation->sweep.begin( site.operation->source.source_omt, 1, positions[0] + point( 3, 0 ) );
+    site.operation->advance( to_turn<int>( calendar::turn ), 0 );
+    for( const auto &member : members ) {
+        site.operation->members.push_back( { member.token.member_id } );
+    }
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    std::array<overmap *, 2> owners;
+    std::array<monster *, 2> bodies;
+    on_out_of_scope restore( [&]() {
+        for( int i = 0; i < 2; ++i ) {
+            if( auto *owner = overmap_buffer.find_loaded_overmap( project_to<coords::om>
+                ( positions[i] ).xy() ) ) {
+                owner->release_monster_payload( positions[i], members[i].token.member_id );
+            }
+        }
+        overmap_buffer.global_state.migo_populations = old_population;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        get_avatar().setpos( old_avatar, false );
+        set_time( old_time );
+    } );
+    const auto serialize = []( const auto & value ) {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            value.serialize( json );
+        }
+        return out.str();
+    };
+    for( int i = 0; i < 2; ++i ) {
+        monster body( members[i].type );
+        body.set_hp( members[i].hp );
+        body.population_identity() = members[i].token;
+        body.set_pos_abs_only( positions[i] );
+        body.set_moves( 0 );
+        migo_tower::member_intent intent;
+        intent.generation = 1;
+        intent.home = members[i].home;
+        body.set_migo_intent( intent );
+        owners[i] = &overmap_buffer.get( project_to<coords::om>( positions[i] ).xy() );
+        auto *entity = owners[i]->retain_monster_payload( positions[i], body );
+        REQUIRE( entity );
+        REQUIRE( entity->monster_data );
+        bodies[i] = entity->monster_data.get();
+    }
+    auto home = [&]() -> auto & { return *overmap_buffer.global_state.migo_populations.find( id ); };
+    auto operation = [&]() -> auto & { return *overmap_buffer.global_state.migo_towers.find( id )->operation; };
+    auto service = [&]() {
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        overmap_buffer.move_hordes();
+    };
+    service(); // legacy interval and native container authentication adopt now
+    REQUIRE( operation().activity.active );
+    CHECK_FALSE( home().activity.active );
+    CHECK( operation().sweep.active_elapsed == 0 );
+    for( int i = 0; i < 2; ++i ) {
+        CHECK( home().members[i].current_position == positions[i] );
+    }
+    set_time( calendar::turn + 1_turns );
+    service();
+    CHECK( operation().sweep.active_elapsed == 1 );
+    CHECK( home().production_elapsed == 17 );
+    for( int i = 0; i < 2; ++i ) {
+        // Unknown physical terrain refuses honestly, never banks movement.
+        auto *entity = owners[i]->entity_at( project_remain<coords::om>
+                                             ( positions[i] ).remainder_tripoint );
+        REQUIRE( entity );
+        CHECK( entity->moves == 0 );
+        bodies[i] = entity->monster_data.get();
+    }
+    const std::array<std::string, 2> frozen_body = { serialize( *bodies[0] ), serialize( *bodies[1] ) };
+    const auto frozen_sweep = serialize( operation().sweep );
+    const auto outside = project_to<coords::ms>( tripoint_abs_omt(
+            player.xy() + point( inner_distance - 41, 0 ), player.z() ) );
+    get_avatar().setpos( outside, false );
+    set_time( calendar::turn + 1_turns );
+    service();
+    REQUIRE_FALSE( operation().activity.active );
+    set_time( calendar::turn + 2_days );
+    service();
+    CHECK( serialize( operation().sweep ) == frozen_sweep );
+    CHECK( serialize( *bodies[0] ) == frozen_body[0] );
+    CHECK( serialize( *bodies[1] ) == frozen_body[1] );
+    CHECK( home().production_elapsed == 17 );
+    const auto saved_population = serialize( overmap_buffer.global_state.migo_populations );
+    const auto saved_towers = serialize( overmap_buffer.global_state.migo_towers );
+    overmap_buffer.global_state.migo_populations.deserialize( json_loader::from_string(
+                saved_population ) );
+    overmap_buffer.global_state.migo_towers.deserialize( json_loader::from_string( saved_towers ) );
+    service();
+    CHECK_FALSE( operation().activity.active );
+    CHECK( serialize( *bodies[0] ) == frozen_body[0] );
+    CHECK( serialize( *bodies[1] ) == frozen_body[1] );
+    get_avatar().setpos( outside + point( 24, 0 ), false ); // exactly40 for the inner living member
+    service();
+    REQUIRE( operation().activity.active );
+    CHECK( operation().sweep.active_elapsed == 1 );
+    CHECK( operation().activity.active_delta_turns == 0 );
+    set_time( calendar::turn + 1_turns );
+    service();
+    CHECK( operation().sweep.active_elapsed == 2 );
+    service();
+    CHECK( operation().sweep.active_elapsed == 2 );
+    CHECK_FALSE( home().activity.active );
+    // A corpse inside cannot activate its still-outside peer. Native payload
+    // authentication records actual health; no body is manufactured by lookup.
+    auto *first = owners[0]->entity_at( project_remain<coords::om>( positions[0] ).remainder_tripoint );
+    REQUIRE( first );
+    first->monster_data->set_hp( 0 );
+    CHECK_FALSE( migo_population::commit_position( *first->monster_data, representation::abstract,
+            positions[0] ) );
+    set_time( calendar::turn + 1_turns );
+    service();
+    CHECK_FALSE( operation().activity.active );
+    CHECK_FALSE( operation().resolved );
+    auto *last = owners[1]->entity_at( project_remain<coords::om>( positions[1] ).remainder_tripoint );
+    REQUIRE( last );
+    last->monster_data->set_hp( 0 );
+    CHECK_FALSE( migo_population::commit_position( *last->monster_data, representation::abstract,
+            positions[1] ) );
+    service();
+    CHECK( operation().resolved );
+    CHECK( operation().communicated_losses.empty() );
+    CHECK( operation().sweep.active_elapsed == 2 );
+}
+
 TEST_CASE( "migo_native_loop_boundary_handoff_yields_released_handle_and_preserves_refusal",
            "[migo_tower][ownership][native]" )
 {
@@ -2320,6 +2750,9 @@ TEST_CASE( "migo_native_loop_boundary_handoff_yields_released_handle_and_preserv
     const auto blocker_position = occupied_receiver ? outside : outside + point( 0, 2 );
     blocking.set_pos_abs_only( blocker_position );
     REQUIRE( owner.retain_monster_payload( blocker_position, blocking ) );
+    // Planning adopted the current interval at zero. Earn one actual native
+    // tick before asking the scheduler to fund this transfer.
+    calendar::turn += 1_turns;
     // Actual acid at the departure would affect a released HP0 handle again
     // if monmove continued native field/death processing after the handoff.
     here.add_field( edge, field_type_id( "fd_acid" ), 1 );
@@ -2407,6 +2840,7 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     clear_map_without_vision();
     get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
     const auto old_turn = calendar::turn;
+    const auto activation_avatar = get_avatar().pos_abs();
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
     const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
@@ -2459,8 +2893,17 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
         overmap_buffer.global_state.bandit_live_world = old_bandits;
         clear_map_without_vision();
         MAPBUFFER.clear_outside_reality_bubble();
+        get_avatar().setpos( activation_avatar, false );
         set_time( old_turn );
     } );
+    // This is an off-bubble motor control, not an inactive-party control.
+    // Keep the real geometry remote while admitting the entire short journey
+    // within40; the separate activation controls prove the outside boundary.
+    if( remote ) {
+        get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( start ) - point( 30, 0 ) ),
+                             false );
+    }
+
     const auto first = project_to<coords::omt>( start );
     if( native_floorplan ) {
         // Use the production north-facing tower, including its irregular
@@ -2860,6 +3303,7 @@ TEST_CASE( "migo_final_sweep_disposition_preserves_a_peers_actual_native_engagem
     REQUIRE( migo_tower::own_capability( *engaged ).ranged_range == 0 );
     // Population leases and corridor/fire are component setup. The actual
     // native planner chooses the visible hostile target; none is injected.
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
     calendar::turn += 1_turns;
     engaged->plan();
     REQUIRE( engaged->get_dest() == get_avatar().pos_abs() );
@@ -3882,15 +4326,6 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     const auto source = project_to<coords::ms>( anchor ) + tripoint( 36, 12, 0 );
     const auto source_omt = project_to<coords::omt>( source );
     std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
-    for( int z = 0; z < 4; ++z ) {
-        const tripoint_abs_omt p( anchor.xy(), z );
-        terrain.emplace_back( p, overmap_buffer.ter( p ) );
-        overmap_buffer.ter_set( p, oter_str_id( "mi-go_scout_tower_" + std::to_string(
-                z + 1 ) + "_north" ) );
-        const tripoint_abs_omt q( source_omt.xy(), z );
-        terrain.emplace_back( q, overmap_buffer.ter( q ) );
-        overmap_buffer.ter_set( q, oter_str_id( "field" ) );
-    }
     on_out_of_scope restore( [&] {
         clear_creatures();
         for( const auto &entry : terrain ) {
@@ -3901,6 +4336,35 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
         get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
         set_time( old_turn );
     } );
+    // Registry reset alone does not isolate this one-observer control:
+    // existing native map markers/carriers remain discoverable. Temporarily
+    // isolate other candidate ground markers in this scan's actual region;
+    // restore all terrain, and leave native actors and receiver work alone.
+    // Valid sections use source_omt or anchor, each with at most40 reach.
+    for( int dx = -41; dx <= 41; ++dx ) {
+        for( int dy = -41; dy <= 41; ++dy ) {
+            const tripoint_abs_omt p( anchor.xy() + point( dx, dy ), 0 );
+            if( p == anchor || p == source_omt ) {
+                continue;
+            }
+            const auto old = overmap_buffer.ter_existing( p );
+            const std::string type = old->get_type_id().str();
+            if( type == "mi-go_scout_tower_1" || type == "mi-go_camp1" ) {
+                terrain.emplace_back( p, old );
+                overmap_buffer.ter_set( p, oter_str_id( "field" ) );
+            }
+        }
+    }
+    for( int z = 0; z < 4; ++z ) {
+        const tripoint_abs_omt p( anchor.xy(), z );
+        terrain.emplace_back( p, overmap_buffer.ter( p ) );
+        overmap_buffer.ter_set( p, oter_str_id( "mi-go_scout_tower_" + std::to_string(
+                z + 1 ) + "_north" ) );
+        const tripoint_abs_omt q( source_omt.xy(), z );
+        terrain.emplace_back( q, overmap_buffer.ter( q ) );
+        overmap_buffer.ter_set( q, oter_str_id( "field" ) );
+    }
+
     const auto geometry = migo_population::geometry_at( anchor );
     REQUIRE( geometry );
     migo_population::site_record population;

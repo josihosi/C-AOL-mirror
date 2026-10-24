@@ -448,7 +448,9 @@ void monster::on_move( const tripoint_abs_ms &old_pos )
             }
         }
     }
-    g->update_zombie_pos( *this, old_pos, pos_abs() );
+    if( g->update_zombie_pos( *this, old_pos, pos_abs() ) && !population_identity().empty() ) {
+        migo_population::commit_position( *this, migo_population::representation::local, pos_abs() );
+    }
     if( has_effect( effect_onfire ) ||
         calculate_by_enchantment( type->luminance, enchant_vals::mod::LUMINATION, true ) > 0 ) {
         map &here = get_map();
@@ -586,7 +588,8 @@ void monster::try_upgrade( bool pin_time )
         return;
     }
 
-    const int current_day = to_days<int>( calendar::turn - calendar::turn_zero );
+    const int current_day = to_days<int>( calendar::turn - calendar::turn_zero -
+                                          suspended_evolution_time );
     //This should only occur when a monster is created or upgraded to a new form
     if( upgrade_time < 0 ) {
         upgrade_time = next_upgrade_time();
@@ -3110,8 +3113,12 @@ void monster::explode()
 
 void monster::process_turn()
 {
-    const bool owned_migo = !population_identity().empty() && migo_population::can_transfer( *this,
+    const bool tagged_migo = !population_identity().empty();
+    const bool owned_migo = tagged_migo && migo_population::can_transfer( *this,
                             migo_population::representation::local );
+    if( tagged_migo && !owned_migo ) {
+        return;
+    }
     if( owned_migo && !migo_intent() ) {
         // Retain the ordinary resident's current native credit even if its
         // first reservation is made later in this same physical turn.
@@ -3119,6 +3126,12 @@ void monster::process_turn()
     }
     migo_tower::member_intent *intent = migo_intent();
     const int now = to_turn<int>( calendar::turn );
+    int active_turns = 1;
+    if( owned_migo && ( !migo_tower::activity_for( *this,
+            migo_population::representation::local, now,
+            migo_tower::activity_boundary::process, &active_turns ) || active_turns <= 0 ) ) {
+        return;
+    }
     if( owned_migo && intent->last_native_process_world == now ) {
         return;
     }
@@ -3269,6 +3282,8 @@ void monster::die( map *here, Creature *nkiller )
         if( migo_population::site_record *site =
             overmap_buffer.global_state.migo_populations.find( population_member.site_id ) ) {
             site->record_death( population_member );
+            overmap_buffer.global_state.migo_populations.refresh_site( site->id );
+            overmap_buffer.global_state.migo_populations.settlement_sites.insert( site->id );
         }
         migo_tower::witness_death( *this );
     }
@@ -4385,13 +4400,49 @@ bool monster::will_join_horde( int size )
     return true;
 }
 
+void monster::suspend_offscreen_time( time_duration paused )
+{
+    if( paused <= 0_turns ) {
+        return;
+    }
+    last_updated += paused;
+    if( baby_timer ) {
+        *baby_timer += paused;
+    }
+    if( biosig_timer ) {
+        *biosig_timer += paused;
+    }
+    udder_timer += paused;
+    suspended_evolution_time += paused;
+}
+
+void monster::adopt_offscreen_time()
+{
+    suspend_offscreen_time( calendar::turn - last_updated );
+}
+
 void monster::on_unload()
 {
+    if( !population_identity().empty() &&
+        ( !migo_population::can_transfer( *this, migo_population::representation::local ) ||
+          !migo_tower::activity_for( *this, migo_population::representation::local,
+                                     to_turn<int>( calendar::turn ), migo_tower::activity_boundary::unload ) ) ) {
+        return;
+    }
     last_updated = calendar::turn;
 }
 
 void monster::on_load()
 {
+    if( !population_identity().empty() && get_creature_tracker().find( pos_abs() ).get() == this ) {
+        migo_population::commit_position( *this, migo_population::representation::local, pos_abs() );
+    }
+    if( !population_identity().empty() &&
+        ( !migo_population::can_transfer( *this, migo_population::representation::local ) ||
+          !migo_tower::activity_for( *this, migo_population::representation::local,
+                                     to_turn<int>( calendar::turn ), migo_tower::activity_boundary::load ) ) ) {
+        return;
+    }
     // Save fixtures and older saves can deserialize a rider before it has
     // lifecycle metadata.  Establish its durable predator identity at the
     // load boundary, before early returns or live-turn consumers observe it.

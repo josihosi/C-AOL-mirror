@@ -42,6 +42,88 @@ migo_population::site_record reload( const migo_population::site_record &site )
 }
 } // namespace
 
+TEST_CASE( "migo_activity_intervals_adopt_freeze_reload_and_resume_without_replay",
+           "[migo_population][migo_activation]" )
+{
+    using namespace migo_population;
+    activity_clock clock;
+    clock.evaluate( 100, true );
+    CHECK( clock.adopted_world_turn == 100 );
+    CHECK( clock.active_delta_turns == 0 );
+    clock.evaluate( 101, true );
+    CHECK( clock.active_delta_turns == 1 );
+    clock.evaluate( 101, true );
+    CHECK( clock.active_delta_turns == 1 ); // same published interval, not additive credit
+    clock.evaluate( 102, false );
+    CHECK( clock.active_delta_turns == 0 );
+    CHECK( clock.suspension_at( 1000 ) == 899 );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        clock.serialize( out );
+    }
+    CHECK( clock.last_world_turn == 102 ); // serialization cannot settle runtime debt
+    activity_clock loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK( loaded.active_delta_turns == 0 );
+    CHECK( loaded.suspension_at( 1000 ) == clock.suspension_at( 1000 ) );
+    loaded.evaluate( 1000, true );
+    CHECK( loaded.active_delta_turns == 0 );
+    CHECK( loaded.suspended_turns == 899 );
+    loaded.evaluate( 1001, true );
+    CHECK( loaded.active_delta_turns == 1 );
+    loaded.evaluate( 1001, false );
+    loaded.evaluate( 1001, true );
+    CHECK( loaded.active_delta_turns == 0 );
+    loaded.evaluate( 999, true );
+    CHECK( loaded.last_world_turn == 1001 );
+    CHECK( loaded.suspended_turns == 899 );
+}
+
+TEST_CASE( "migo_position_index_requires_current_lease_and_preserves_shared_cells",
+           "[migo_population][migo_activation]" )
+{
+    using namespace migo_population;
+    world_state world;
+    world.sites.push_back( tower() );
+    auto &site = world.sites.front();
+    const auto home = site.anchor.xy();
+    for( auto &member : site.members ) {
+        REQUIRE( site.transfer( member.token, representation::slot, representation::abstract ) );
+    }
+    const auto party = site.reserve( 2, []( const member_record & ) {
+        return true;
+    } );
+    REQUIRE( party.size() == 2 );
+    const tripoint_abs_ms shared = project_to<coords::ms>( tripoint_abs_omt( 100, 100, 3 ) );
+    REQUIRE( world.confirm_position( party[0], representation::abstract, shared ) );
+    REQUIRE( world.confirm_position( party[1], representation::abstract, shared ) );
+    CHECK( world.nearby_sites( point_abs_omt( 140, 100 ), 40 ).count( site.id ) == 1 );
+    CHECK( world.nearby_sites( point_abs_omt( 141, 100 ), 40 ).empty() );
+    identity stale = party[0];
+    --stale.epoch;
+    CHECK_FALSE( world.confirm_position( stale, representation::abstract, shared ) );
+    CHECK_FALSE( world.confirm_position( party[0], representation::local, shared ) );
+    REQUIRE( world.confirm_position( party[0], representation::abstract,
+                                     project_to<coords::ms>( tripoint_abs_omt( 200, 200, 0 ) ) ) );
+    CHECK( world.nearby_sites( point_abs_omt( 100, 100 ), 0 ).count( site.id ) == 1 );
+    REQUIRE( world.confirm_position( party[1], representation::abstract,
+                                     project_to<coords::ms>( tripoint_abs_omt( 200, 200, 0 ) ) ) );
+    CHECK( world.nearby_sites( point_abs_omt( 100, 100 ), 0 ).empty() );
+    CHECK( world.nearby_sites( home, 0 ).count( site.id ) == 1 );
+    std::ostringstream bytes;
+    {
+        JsonOut out( bytes );
+        world.serialize( out );
+    }
+    world_state loaded;
+    loaded.deserialize( json_loader::from_string( bytes.str() ) );
+    CHECK_FALSE( loaded.positions_bootstrapped );
+    CHECK( loaded.nearby_sites( point_abs_omt( 200, 200 ), 0 ).count( site.id ) == 1 );
+    CHECK( loaded.sites.front().members[0].current_position ==
+           site.members[0].current_position );
+}
+
 TEST_CASE( "migo_population_seed_and_native_leases_do_not_refill_or_revive",
            "[migo_population]" )
 {

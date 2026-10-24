@@ -11,6 +11,58 @@
 
 namespace migo_population
 {
+void activity_clock::evaluate( int now, bool eligible )
+{
+    if( last_world_turn < 0 ) {
+        adopted_world_turn = last_world_turn = now;
+        active = eligible;
+        active_delta_turns = 0;
+        return;
+    }
+    if( now < last_world_turn ) {
+        return;
+    }
+    if( now == last_world_turn ) {
+        // A same-turn boundary change cannot mint a second interval.
+        active = eligible;
+        if( !active ) {
+            active_delta_turns = 0;
+        }
+        return;
+    }
+    const int elapsed = now - last_world_turn;
+    active_delta_turns = active && eligible ? elapsed : 0;
+    suspended_turns += elapsed - active_delta_turns;
+    last_world_turn = now;
+    active = eligible;
+}
+
+std::int64_t activity_clock::suspension_at( int now ) const
+{
+    return suspended_turns + ( !active && last_world_turn >= 0 ?
+                               std::max( 0, now - last_world_turn ) : 0 );
+}
+
+void activity_clock::serialize( JsonOut &json ) const
+{
+    json.start_object();
+    json.member( "adopted_world_turn", adopted_world_turn );
+    json.member( "last_world_turn", last_world_turn );
+    json.member( "active", active );
+    json.member( "suspended_turns", suspended_turns );
+    json.end_object();
+}
+
+void activity_clock::deserialize( const JsonObject &json )
+{
+    *this = activity_clock();
+    json.read( "adopted_world_turn", adopted_world_turn );
+    json.read( "last_world_turn", last_world_turn );
+    json.read( "active", active );
+    json.read( "suspended_turns", suspended_turns );
+    suspended_turns = std::max<std::int64_t>( 0, suspended_turns );
+}
+
 void identity::serialize( JsonOut &json ) const
 {
     json.start_object();
@@ -39,6 +91,7 @@ void member_record::serialize( JsonOut &json ) const
     json.member( "duty", static_cast<int>( assignment ) );
     json.member( "hp", hp );
     json.member( "birth_sequence", birth_sequence );
+    json.member( "current_position", current_position );
     json.end_object();
 }
 
@@ -51,6 +104,8 @@ void member_record::deserialize( const JsonObject &json )
     assignment = static_cast<duty>( json.get_int( "duty", 0 ) );
     json.read( "hp", hp );
     json.read( "birth_sequence", birth_sequence );
+    current_position.reset();
+    json.read( "current_position", current_position );
 }
 
 bool site_record::commit_seed( const std::vector<member_record> &slots,
@@ -299,6 +354,7 @@ void site_record::serialize( JsonOut &json ) const
     json.member( "production_elapsed", production_elapsed );
     json.member( "birth_sequence", birth_sequence );
     json.member( "last_service_world", last_service_world );
+    json.member( "activity", activity );
     json.member( "members", members );
     json.end_object();
 }
@@ -320,6 +376,8 @@ void site_record::deserialize( const JsonObject &json )
     json.read( "production_elapsed", production_elapsed );
     json.read( "birth_sequence", birth_sequence );
     json.read( "last_service_world", last_service_world );
+    activity = activity_clock();
+    json.read( "activity", activity );
     json.read( "members", members );
     production_elapsed = std::clamp<std::int64_t>( production_elapsed, 0,
                          to_turns<std::int64_t>( 7_days ) );
@@ -327,15 +385,33 @@ void site_record::deserialize( const JsonObject &json )
 
 site_record *world_state::find( const std::string &site_id )
 {
-    const auto it = std::find_if( sites.begin(), sites.end(), [&]( const site_record & s ) {
-        return s.id == site_id;
-    } );
-    return it == sites.end() ? nullptr : &*it;
+    if( indexed_site_count > sites.size() ) {
+        site_index.clear();
+        indexed_site_count = 0;
+    }
+    // Native site IDs are stable and the ledger is append-only until clear.
+    // New discovery updates this ID lookup without walking distant history.
+    while( indexed_site_count < sites.size() ) {
+        site_index.emplace( sites[indexed_site_count].id, indexed_site_count );
+        ++indexed_site_count;
+    }
+    const auto found = site_index.find( site_id );
+    return found == site_index.end() ? nullptr : &sites[found->second];
 }
 
 const site_record *world_state::find( const std::string &site_id ) const
 {
-    return const_cast<world_state *>( this )->find( site_id );
+    // A genuinely const snapshot may read an existing index, but must not
+    // mutate it through the live owner's lazy indexing path.
+    const auto cached = site_index.find( site_id );
+    if( cached != site_index.end() && cached->second < sites.size() &&
+        sites[cached->second].id == site_id ) {
+        return &sites[cached->second];
+    }
+    const auto found = std::find_if( sites.begin(), sites.end(), [&]( const auto &site ) {
+        return site.id == site_id;
+    } );
+    return found == sites.end() ? nullptr : &*found;
 }
 
 void world_state::serialize( JsonOut &json ) const
@@ -347,7 +423,116 @@ void world_state::serialize( JsonOut &json ) const
 
 void world_state::deserialize( const JsonObject &json )
 {
-    sites.clear();
+    clear();
     json.read( "sites", sites );
+}
+
+void world_state::clear()
+{
+    sites.clear();
+    position_index.clear();
+    indexed_positions.clear();
+    positions_dirty = true;
+    positions_bootstrapped = false;
+    activation_initialized = false;
+    active_sites.clear();
+    settlement_sites.clear();
+    indexed_site_count = 0;
+    site_index.clear();
+}
+
+void world_state::invalidate_positions()
+{
+    positions_dirty = true;
+    indexed_site_count = 0;
+    site_index.clear();
+}
+
+void world_state::refresh_site( const std::string &id )
+{
+    if( positions_dirty ) {
+        return; // the single cold rebuild will include this committed state
+    }
+    const auto old = indexed_positions.find( id );
+    if( old != indexed_positions.end() ) {
+        for( const auto &p : old->second ) {
+            index_position( p, id, -1 );
+        }
+        indexed_positions.erase( old );
+    }
+    const auto *site = find( id );
+    if( !site ) {
+        return;
+    }
+    auto &positions = indexed_positions[id];
+    const auto add = [&]( const point_abs_omt & p ) {
+        positions.push_back( p );
+        index_position( p, id, 1 );
+    };
+    add( site->anchor.xy() );
+    for( const member_record &member : site->members ) {
+        if( member.owner != representation::dead && member.hp > 0 &&
+            member.assignment != duty::available && member.current_position ) {
+            add( project_to<coords::omt>( *member.current_position ).xy() );
+        }
+    }
+}
+
+bool world_state::confirm_position( const identity &token, representation owner,
+                                    const tripoint_abs_ms &position )
+{
+    site_record *site = find( token.site_id );
+    member_record *member = site ? site->find( token.member_id ) : nullptr;
+    if( !member || !site->owns( token, owner ) || member->hp <= 0 ) {
+        return false;
+    }
+    if( member->current_position != position ) {
+        member->current_position = position;
+        refresh_site( site->id );
+    }
+    return true;
+}
+
+std::set<std::string> world_state::nearby_sites( const point_abs_omt &center, int radius )
+{
+    if( positions_dirty ) {
+        position_index.clear();
+        indexed_positions.clear();
+        positions_dirty = false;
+        for( const site_record &site : sites ) {
+            refresh_site( site.id );
+        }
+    }
+    std::set<std::string> result;
+    if( radius < 0 ) {
+        return result;
+    }
+    for( auto x = position_index.lower_bound( center.x() - radius );
+         x != position_index.end() && x->first <= center.x() + radius; ++x ) {
+        for( auto y = x->second.lower_bound( center.y() - radius );
+             y != x->second.end() && y->first <= center.y() + radius; ++y ) {
+            for( const auto &site : y->second ) {
+                result.insert( site.first );
+            }
+        }
+    }
+    return result;
+}
+
+void world_state::index_position( const point_abs_omt &p, const std::string &site, int delta )
+{
+    auto &column = position_index[p.x()];
+    auto &cell = column[p.y()];
+    int &count = cell[site];
+    count += delta;
+    if( count <= 0 ) {
+        cell.erase( site );
+    }
+    if( cell.empty() ) {
+        column.erase( p.y() );
+    }
+    if( column.empty() ) {
+        position_index.erase( p.x() );
+    }
 }
 } // namespace migo_population

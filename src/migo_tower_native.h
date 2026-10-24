@@ -50,6 +50,13 @@ receiver_result receive_signals( const std::vector<live_bandit_signal_observatio
 // all selected population leases. A decision estimate alone cannot dispatch.
 bool begin_response( const std::string &site_id, int now_turn );
 bool owns_intent( const monster &body, migo_population::representation owner );
+// Shared geographic interval and native payload pause boundary. Calls never
+// grant movement; the existing native process/energy guards still own credit.
+void refresh_activation( int now_turn );
+enum class activity_boundary { process, load, unload };
+bool activity_for( monster &body, migo_population::representation owner, int now_turn,
+                   activity_boundary boundary = activity_boundary::process,
+                   int *active_turns = nullptr );
 physical_navigation::step_read prepare_step( monster &body,
         migo_population::representation owner );
 bool plan_local( monster &body, bool fleeing, Creature *target );

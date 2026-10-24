@@ -1,4 +1,5 @@
 #include "migo_population_native.h"
+#include "migo_tower_native.h"
 
 #include <algorithm>
 #include <set>
@@ -318,6 +319,7 @@ void tag_generated_slots( map &here, submap &sm, const tripoint_abs_sm &submap_p
         }
         world.sites.push_back( std::move( pending ) );
         site = &world.sites.back();
+        world.refresh_site( site->id );
     }
     if( site->seed_committed ) {
         // Regenerated map data cannot refill established biological residents.
@@ -483,6 +485,7 @@ site_record *discover( const tripoint_abs_omt &position, const monster *incoming
         world.sites.push_back( std::move( candidate ) );
         committed = &world.sites.back();
     }
+    world.refresh_site( committed->id );
     site_record &site = *committed;
     retain_slots( site, parts );
     return &site;
@@ -543,7 +546,10 @@ bool reconcile_payload( const monster &payload, representation observed_owner )
     }
     member->hp = payload.get_hp();
     member->type = payload.type->id;
-    site->returned( token, payload.pos_abs() );
+    if( site->returned( token, payload.pos_abs() ) ) {
+        overmap_buffer.global_state.migo_populations.refresh_site( site->id );
+        overmap_buffer.global_state.migo_populations.settlement_sites.insert( site->id );
+    }
     // Highest committed epoch wins across a partial cross-file save. Retire
     // stale physical carriers without generating a biological death/corpse.
     std::vector<monster *> stale_local;
@@ -575,6 +581,41 @@ bool reconcile_payload( const monster &payload, representation observed_owner )
     return true;
 }
 
+bool commit_position( const monster &payload, representation owner,
+                      const tripoint_abs_ms &actual_position )
+{
+    auto &world = overmap_buffer.global_state.migo_populations;
+    auto *site = world.find( payload.population_identity().site_id );
+    if( !site || !site->owns( payload.population_identity(), owner ) ||
+        !payload.type->in_species( species_MIGO ) ) {
+        return false;
+    }
+    if( payload.is_dead() ) {
+        if( site->record_death( payload.population_identity() ) ) {
+            world.refresh_site( site->id );
+            world.settlement_sites.insert( site->id );
+        }
+        return false;
+    }
+    const bool confirmed = world.confirm_position( payload.population_identity(), owner,
+        actual_position );
+    const auto *tower = overmap_buffer.global_state.migo_towers.find( site->id );
+    const auto *intent = payload.migo_intent();
+    const auto *member = site->find( payload.population_identity().member_id );
+    if( confirmed && tower && tower->operation && !tower->operation->resolved && intent &&
+        intent->generation == tower->operation->generation &&
+        tower->operation->contains( payload.population_identity().member_id ) &&
+        ( intent->phase == migo_tower::member_phase::returning ||
+          intent->phase == migo_tower::member_phase::settled ) &&
+        payload.pos_abs() == actual_position &&
+        project_to<coords::omt>( actual_position ) == project_to<coords::omt>( member->home ) ) {
+        // A native return can need policy reconciliation even outside an
+        // inactive home, including the first authenticated owner after load.
+        world.settlement_sites.insert( site->id );
+    }
+    return confirmed;
+}
+
 bool transfer( monster &payload, representation from, representation to )
 {
     const identity token = payload.population_identity();
@@ -587,7 +628,11 @@ bool transfer( monster &payload, representation from, representation to )
     }
     payload.population_identity() = site->find( token.member_id )->token;
     site->observe_health( payload.population_identity(), payload.get_hp() );
-    site->returned( payload.population_identity(), payload.pos_abs() );
+    if( site->returned( payload.population_identity(), payload.pos_abs() ) ) {
+        overmap_buffer.global_state.migo_populations.refresh_site( site->id );
+        overmap_buffer.global_state.migo_populations.settlement_sites.insert( site->id );
+    }
+    commit_position( payload, to, payload.pos_abs() );
     return true;
 }
 
@@ -613,6 +658,7 @@ void service_loaded()
 {
     map &here = get_map();
     const int now = to_turn<int>( calendar::turn );
+    migo_tower::refresh_activation( now );
     // Settlement/health is independent of a functioning or active brood pod.
     for( monster &m : g->all_monsters() ) {
         const identity &token = m.population_identity();
@@ -622,11 +668,24 @@ void service_loaded()
         if( site_record *site = overmap_buffer.global_state.migo_populations.find( token.site_id ) ) {
             site->observe_health( token, m.get_hp() );
             if( !m.is_dead() ) {
-                site->returned( token, m.pos_abs() );
+                commit_position( m, representation::local, m.pos_abs() );
+                if( site->returned( token, m.pos_abs() ) ) {
+                    overmap_buffer.global_state.migo_populations.refresh_site( site->id );
+                    overmap_buffer.global_state.migo_populations.settlement_sites.insert( site->id );
+                }
             }
         }
     }
-    for( site_record &site : overmap_buffer.global_state.migo_populations.sites ) {
+    const auto active = overmap_buffer.global_state.migo_populations.active_sites;
+    for( const auto &id : active ) {
+        auto *record = overmap_buffer.global_state.migo_populations.find( id );
+        if( !record ) {
+            continue;
+        }
+        site_record &site = *record;
+        if( !site.activity.active ) {
+            continue;
+        }
         if( !site.source || !here.inbounds( *site.source ) ) {
             continue;
         }
@@ -636,7 +695,8 @@ void service_loaded()
         }
         site.ambient_occupancy = ambient_count( *geometry );
         site.occupancy_verified = occupancy_known( *geometry );
-        const int elapsed = site.last_service_world == now - 1 ? 1 : 0;
+        const int elapsed = site.last_service_world == now - 1 ?
+                            std::min( 1, site.activity.active_delta_turns ) : 0;
         const bool source_exists = here.furn( here.get_bub( *site.source ) ).id().str() ==
                                    site.source_furniture;
         std::optional<tripoint_abs_ms> birth_position;
@@ -661,6 +721,9 @@ void service_loaded()
             return false;
         } );
         if( born && birth_position ) {
+            overmap_buffer.global_state.migo_populations.refresh_site( site.id );
+            overmap_buffer.global_state.migo_populations.confirm_position( site.members.back().token,
+                    representation::abstract, *birth_position );
             // The ledger now owns this birth, so ordinary exact materialization
             // can claim it. No separate debug-only population counter exists.
             overmap_buffer.spawn_monster( project_to<coords::sm>( *birth_position ), false );

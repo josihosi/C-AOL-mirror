@@ -671,6 +671,9 @@ void member_intent::serialize( JsonOut &json ) const
     json.member( "last_combat_world", last_combat_world );
     json.member( "last_observed_enemy_world", last_observed_enemy_world );
     json.member( "last_refused_world", last_refused_world );
+    json.member( "activity_bound", activity_bound );
+    json.member( "activity_generation", activity_generation );
+    json.member( "activity_suspension", activity_suspension );
     json.end_object();
 }
 
@@ -688,6 +691,9 @@ void member_intent::deserialize( const JsonObject &json )
     json.read( "last_combat_world", last_combat_world );
     json.read( "last_observed_enemy_world", last_observed_enemy_world );
     json.read( "last_refused_world", last_refused_world );
+    json.read( "activity_bound", activity_bound );
+    json.read( "activity_generation", activity_generation );
+    json.read( "activity_suspension", activity_suspension );
 }
 
 void operation_member::serialize( JsonOut &json ) const
@@ -724,6 +730,7 @@ void operation_record::advance( int world_turn, int active_turns )
 void operation_record::serialize( JsonOut &json ) const
 {
     json.start_object();
+    json.member( "activity", activity );
     json.member( "generation", generation );
     json.member( "source", source );
     json.member( "members", members );
@@ -738,6 +745,7 @@ void operation_record::serialize( JsonOut &json ) const
 void operation_record::deserialize( const JsonObject &json )
 {
     *this = operation_record();
+    json.read( "activity", activity );
     json.read( "generation", generation );
     json.read( "source", source );
     json.read( "members", members );
@@ -867,24 +875,39 @@ void site_state::deserialize( const JsonObject &json )
 
 site_state *world_state::find( const std::string &id )
 {
-    const auto it = std::find_if( sites.begin(), sites.end(), [&]( const auto & site ) {
-        return site.site_id == id;
-    } );
-    return it == sites.end() ? nullptr : &*it;
+    if( indexed_site_count > sites.size() ) {
+        site_index.clear();
+        indexed_site_count = 0;
+    }
+    while( indexed_site_count < sites.size() ) {
+        site_index.emplace( sites[indexed_site_count].site_id, indexed_site_count );
+        ++indexed_site_count;
+    }
+    const auto found = site_index.find( id );
+    return found == site_index.end() ? nullptr : &sites[found->second];
 }
 
 const site_state *world_state::find( const std::string &id ) const
 {
-    const auto it = std::find_if( sites.begin(), sites.end(), [&]( const auto & site ) {
+    // A genuinely const snapshot may read an existing index, but must not
+    // mutate it through the live owner's lazy indexing path.
+    const auto cached = site_index.find( id );
+    if( cached != site_index.end() && cached->second < sites.size() &&
+        sites[cached->second].site_id == id ) {
+        return &sites[cached->second];
+    }
+    const auto found = std::find_if( sites.begin(), sites.end(), [&]( const auto &site ) {
         return site.site_id == id;
     } );
-    return it == sites.end() ? nullptr : &*it;
+    return found == sites.end() ? nullptr : &*found;
 }
 
 void world_state::clear()
 {
     last_signal_scan = -1;
     sites.clear();
+    site_index.clear();
+    indexed_site_count = 0;
 }
 
 void world_state::serialize( JsonOut &json ) const

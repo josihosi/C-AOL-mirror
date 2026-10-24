@@ -17983,6 +17983,16 @@ void monmove()
         if( !m.inbounds( critter.pos_abs() ) ) {
             continue;
         }
+        // process_turn alone cannot suspend a loaded operation: retained
+        // movement, field contact, daily biology and native escape precede or
+        // follow it here. Skip the owning scheduler without spending a frozen
+        // budget. Ordinary available local residents remain native actors.
+        if( !critter.population_identity().empty() &&
+            ( !migo_population::can_transfer( critter, migo_population::representation::local ) ||
+              !migo_tower::activity_for( critter, migo_population::representation::local,
+                                         to_turn<int>( calendar::turn ) ) ) ) {
+            continue;
+        }
         const tripoint_bub_ms critter_pos = critter.pos_bub( m );
 
         // Critters in impassable tiles get pushed away, unless it's not impassable for them

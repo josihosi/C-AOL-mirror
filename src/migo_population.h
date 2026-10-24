@@ -4,7 +4,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -23,6 +25,20 @@ namespace migo_population
 enum class representation : int { slot, local, abstract, dead };
 enum class duty : int { available, dispatched, returning };
 
+// One interval owner per home/expedition. Serialization stores facts, never
+// credits a callback or advances a suspended clock.
+struct activity_clock {
+    int adopted_world_turn = -1;
+    int last_world_turn = -1;
+    bool active = false;
+    std::int64_t suspended_turns = 0;
+    int active_delta_turns = 0; // transient publication for this world turn
+    void evaluate( int now, bool eligible );
+    std::int64_t suspension_at( int now ) const;
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &json );
+};
+
 struct member_record {
     identity token;
     mtype_id type;
@@ -31,6 +47,9 @@ struct member_record {
     duty assignment = duty::available;
     int hp = 0;
     std::uint64_t birth_sequence = 0;
+    // Confirmed by the current native lease/container, never by a home or
+    // operation hint. Transfers publish only after the native commit.
+    std::optional<tripoint_abs_ms> current_position;
     void serialize( JsonOut &json ) const;
     void deserialize( const JsonObject &json );
 };
@@ -55,6 +74,7 @@ struct site_record {
     std::int64_t production_elapsed = 0;
     std::uint64_t birth_sequence = 0;
     int last_service_world = -1;
+    activity_clock activity;
     std::vector<member_record> members;
 
     // The caller first persists the exact identified spawn manifest. Committing
@@ -87,12 +107,29 @@ struct site_record {
 };
 
 struct world_state {
-    std::vector<site_record> sites;
-    site_record *find( const std::string &site_id );
-    const site_record *find( const std::string &site_id ) const;
-    void clear() { sites.clear(); }
-    void serialize( JsonOut &json ) const;
-    void deserialize( const JsonObject &json );
+        std::vector<site_record> sites;
+        site_record *find( const std::string &site_id );
+        const site_record *find( const std::string &site_id ) const;
+        void clear();
+        bool confirm_position( const identity &token, representation owner,
+                               const tripoint_abs_ms &position );
+        void invalidate_positions();
+        void refresh_site( const std::string &site_id );
+        std::set<std::string> nearby_sites( const point_abs_omt &center, int radius );
+        // Cold authentication is once per loaded world, not a steady range query.
+        bool positions_bootstrapped = false;
+        bool activation_initialized = false;
+        std::set<std::string> active_sites;
+        std::set<std::string> settlement_sites;
+        void serialize( JsonOut &json ) const;
+        void deserialize( const JsonObject &json );
+    private:
+        bool positions_dirty = true;
+        std::size_t indexed_site_count = 0;
+        std::map<std::string, std::size_t> site_index;
+        std::map<std::string, std::vector<point_abs_omt>> indexed_positions;
+        void index_position( const point_abs_omt &position, const std::string &site, int delta );
+        std::map<int, std::map<int, std::map<std::string, int>>> position_index;
 };
 } // namespace migo_population
 #endif

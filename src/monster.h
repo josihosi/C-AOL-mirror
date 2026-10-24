@@ -658,6 +658,8 @@ class monster : public Creature
          * Do some cleanup and caching as monster is being unloaded from map.
          */
         void on_unload();
+        void suspend_offscreen_time( time_duration paused );
+        void adopt_offscreen_time();
         /**
          * Retroactively update monster.
          * Call this after a preexisting monster has been placed on map.
@@ -681,6 +683,7 @@ class monster : public Creature
         int next_upgrade_time();
         bool upgrades = false;
         int upgrade_time = -1;
+        time_duration suspended_evolution_time = 0_turns;
         bool reproduces = false;
         std::optional<time_point> baby_timer;
         bool biosignatures = false;

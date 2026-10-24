@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -59,6 +60,7 @@
 #include "translations.h"
 #include "vehicle.h"
 #include "worldfactory.h"
+#include "zzip.h"
 
 static const oter_type_str_id oter_type_bridgehead_ground( "bridgehead_ground" );
 static const oter_type_str_id oter_type_bridgehead_ramp( "bridgehead_ramp" );
@@ -493,6 +495,166 @@ void overmapbuffer::delete_extra( const tripoint_abs_omt &p )
     if( has_extra( p ) ) {
         overmap_with_local_coords om_loc = get_om_global( p );
         om_loc.om->delete_extra( om_loc.local );
+    }
+}
+
+overmap *overmapbuffer::find_loaded_overmap( const point_abs_om &p )
+{
+    const auto found = overmaps.find( p );
+    return found == overmaps.end() ? nullptr : found->second.get();
+}
+
+void overmapbuffer::bootstrap_migo_positions()
+{
+    auto &population = global_state.migo_populations;
+    if( population.positions_bootstrapped ) {
+        return;
+    }
+    population.positions_bootstrapped = true;
+    std::set<point_abs_om> hints;
+    const auto needed = [&]( const migo_population::site_record & home,
+    const migo_population::member_record & member ) {
+        const auto *site = global_state.migo_towers.find( home.id );
+        return member.owner == migo_population::representation::abstract && member.hp > 0 &&
+               ( member.assignment != migo_population::duty::available ||
+                 ( site && site->operation && !site->operation->resolved &&
+                   site->operation->contains( member.token.member_id ) ) );
+    };
+    for( auto &site : population.sites ) {
+        for( auto &member : site.members ) {
+            if( needed( site, member ) ) {
+                if( member.current_position ) {
+                    hints.insert( project_to<coords::om>( *member.current_position ).xy() );
+                }
+                // A coherent saved projection locates its owner, but cold
+                // native authentication also makes that owner resident. It
+                // must not strand a valid saved party behind a resident-only
+                // steady lookup. This happens once per world load.
+                member.current_position.reset();
+            }
+        }
+    }
+    population.invalidate_positions();
+    const auto missing = [&]() {
+        bool result = false;
+        for( const auto &site : population.sites ) {
+            for( const auto &member : site.members ) {
+                if( needed( site, member ) && !member.current_position ) {
+                    hints.insert( project_to<coords::om>( member.home ).xy() );
+                    result = true;
+                }
+            }
+        }
+        return result;
+    };
+    if( !missing() ) {
+        return;
+    }
+    for( const auto &site : global_state.migo_towers.sites ) {
+        if( site.operation && !site.operation->resolved ) {
+            for( const auto &member : site.operation->members ) {
+                if( member.last_position ) {
+                    hints.insert( project_to<coords::om>( *member.last_position ).xy() );
+                }
+            }
+        }
+    }
+    const auto authenticate = [&]( overmap & om ) {
+        bool matched = false;
+        for( const auto &entry : om.horde_entities() ) {
+            if( entry.second->monster_data ) {
+                const monster &body = *entry.second->monster_data;
+                const auto &token = body.population_identity();
+                const auto *home = population.find( token.site_id );
+                const auto *member = home ? home->find( token.member_id ) : nullptr;
+                if( !member || !needed( *home, *member ) ) {
+                    continue;
+                }
+                // The horde container key, not a serialized body pose or hint,
+                // is the actual abstract owner position. Unrelated residents
+                // cannot retain a whole cold archive just by being present.
+                matched |= migo_population::commit_position( body,
+                    migo_population::representation::abstract, entry.first );
+            }
+        }
+        return matched;
+    };
+    // Already resident bodies need no archive read.
+    for( auto &entry : overmaps ) {
+        authenticate( *entry.second );
+    }
+    if( !missing() ) {
+        return;
+    }
+    const bool compressed = world_generator->active_world->has_compression_enabled();
+    const cata_path root = compressed ? PATH_INFO::current_dimension_save_path() /
+                           zzip_overmap_directory : PATH_INFO::current_dimension_save_path();
+    const auto load = [&]( const point_abs_om & p ) {
+        if( find_loaded_overmap( p ) ) {
+            return;
+        }
+        const std::string name = terrain_filename( p );
+        const cata_path path = root / std::filesystem::u8path( name ) +
+                               ( compressed ? zzip_suffix : "" );
+        if( !file_exist( path ) ) {
+            return;
+        }
+        auto candidate = std::make_unique<overmap>( p );
+        bool loaded = false;
+        if( compressed ) {
+            auto archive = zzip::load( path.get_unrelative_path(),
+                                       ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path() );
+            loaded = archive && read_from_zzip_optional( *archive, std::filesystem::u8path( name ),
+            [&]( std::string_view bytes ) {
+                std::istringstream input{ std::string( bytes ) };
+                candidate->unserialize( input );
+            } );
+        } else {
+            loaded = read_from_file_optional( path, [&]( std::istream & input ) {
+                candidate->unserialize( path, input );
+            } );
+        }
+        if( loaded ) {
+            // Preserve ordinary per-player view loading on this native owner.
+            const cata_path view = player_filename( p );
+            read_from_file_optional( view, [&]( std::istream & input ) {
+                candidate->unserialize_view( view, input );
+            } );
+            if( authenticate( *candidate ) ) {
+                overmaps.emplace( p, std::move( candidate ) );
+            }
+        }
+    };
+    for( const auto &p : hints ) {
+        load( p );
+    }
+    if( !missing() ) {
+        return;
+    }
+    // A stale locator is never authority. At most one finite existing-file
+    // rebuild per loaded legacy world can find a committed migrated carrier.
+    // This is not used by steady activation queries, and reads no submaps.
+    for( const auto &path : get_files_from_path( "o.", root, false, false ) ) {
+        const std::string name = path.get_unrelative_path().filename().u8string();
+        int x = 0;
+        int y = 0;
+        char prefix = 0;
+        char dot_x = 0;
+        char dot_y = 0;
+        std::string suffix;
+        std::istringstream filename( name );
+        if( !( filename >> prefix >> dot_x >> x >> dot_y >> y ) || prefix != 'o' ||
+            dot_x != '.' || dot_y != '.' ) {
+            continue;
+        }
+        std::getline( filename, suffix );
+        if( suffix != ( compressed ? zzip_suffix : "" ) ) {
+            continue;
+        }
+        load( point_abs_om( x, y ) );
+        if( !missing() ) {
+            break;
+        }
     }
 }
 
@@ -934,18 +1096,24 @@ void overmapbuffer::move_hordes()
     // Follow only already leased operation bodies beyond the ordinary
     // player-near pass. This neither discovers sites nor admits unrelated
     // far hordes, and supplies no catch-up or 40-OMT activation policy.
-    for( const auto &site : global_state.migo_towers.sites ) {
-        const auto *population = global_state.migo_populations.find( site.site_id );
-        if( !population || !site.operation || site.operation->resolved ) {
+    // Snapshot the already bounded range query: native commits can refresh
+    // activation while this batch runs. No steady all-history range scan.
+    const auto active_sites = global_state.migo_populations.active_sites;
+    for( const auto &id : active_sites ) {
+        const auto *site = global_state.migo_towers.find( id );
+        const auto *population = global_state.migo_populations.find( id );
+        if( !population || !site || !site->operation || site->operation->resolved ||
+            !site->operation->activity.active ) {
             continue;
         }
-        for( const auto &member : site.operation->members ) {
+        for( const auto &member : site->operation->members ) {
             const auto *lease = population->find( member.member_id );
-            if( !member.last_position || member.settled || !lease ||
+            if( member.settled || member.returned || !lease || !lease->current_position ||
+                lease->assignment == migo_population::duty::available ||
                 lease->owner != migo_population::representation::abstract ) {
                 continue;
             }
-            overmap *owner = get_existing( project_to<coords::om>( *member.last_position ).xy() );
+            overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
             if( owner && processed.insert( owner ).second ) {
                 owner->move_hordes( true );
             }

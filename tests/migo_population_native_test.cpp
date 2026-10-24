@@ -1,7 +1,10 @@
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
+#include <memory>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -15,6 +18,7 @@
 #include "debug.h"
 #include "field_type.h"
 #include "field.h"
+#include "filesystem.h"
 #include "game.h"
 #include "horde_entity.h"
 #include "json.h"
@@ -24,11 +28,15 @@
 #include "mapbuffer.h"
 #include "migo_population.h"
 #include "migo_population_native.h"
+#include "migo_tower_ai.h"
+#include "migo_tower_native.h"
 #include "monster.h"
+#include "mtype.h"
 #include "npc.h"
 #include "omdata.h"
 #include "overmap.h"
 #include "overmapbuffer.h"
+#include "options_helpers.h"
 #include "player_helpers.h"
 #include "submap.h"
 #include "path_info.h"
@@ -78,6 +86,341 @@ void release_fixture( const std::string &site_id, const tripoint_abs_omt &anchor
     }
 }
 } // namespace
+
+TEST_CASE( "migo_cold_native_archive_authenticates_legacy_and_saved_projection_without_generation",
+           "[migo_population][migo_activation][savegame]" )
+{
+    using namespace migo_population;
+    clear_map();
+    const auto previous_population = overmap_buffer.global_state.migo_populations;
+    const auto previous_towers = overmap_buffer.global_state.migo_towers;
+    const auto previous_time = calendar::turn;
+    const auto previous_avatar = get_avatar().pos_abs();
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    calendar::turn = calendar::turn_zero + 8_days;
+    const bool saved_projection = GENERATE( false, true );
+    const bool terminal_home = GENERATE( false, true );
+    const point_abs_om owner_key( 271, 273 );
+    const tripoint_abs_omt actual_omt = project_to<coords::omt>( tripoint_abs_om( owner_key,
+        1 ) ) + point( OMAPX - 1, 9 );
+    const tripoint_abs_ms actual = project_to<coords::ms>( actual_omt ) + point( 12, 12 );
+    const tripoint_abs_omt stale_home = actual_omt + point::east;
+    const std::string id = "cold-native-authentication";
+    const bool compressed = world_generator->active_world->has_compression_enabled();
+    const cata_path root = compressed ? PATH_INFO::current_dimension_save_path() /
+                           zzip_overmap_directory : PATH_INFO::current_dimension_save_path();
+    const cata_path archive = root / std::filesystem::u8path( overmapbuffer::terrain_filename(
+            owner_key ) ) +
+                              ( compressed ? zzip_suffix : "" );
+    const cata_path view = overmapbuffer::player_filename( owner_key );
+    REQUIRE_FALSE( file_exist( archive ) );
+    REQUIRE_FALSE( file_exist( view ) );
+    on_out_of_scope restore( [&]() {
+        overmap_buffer.clear();
+        overmap_buffer.global_state.migo_populations = previous_population;
+        overmap_buffer.global_state.migo_towers = previous_towers;
+        get_avatar().setpos( previous_avatar, false );
+        calendar::turn = previous_time;
+        if( file_exist( archive ) ) {
+            CHECK( remove_file( archive ) );
+        }
+        if( file_exist( view ) ) {
+            CHECK( remove_file( view ) );
+        }
+    } );
+    site_record site;
+    site.id = id;
+    site.anchor = stale_home; // locator only; deliberately the wrong native owner
+    member_record member;
+    member.token = { id, "carrier", 7, stale_home };
+    member.type = mtype_id( "mon_mi_go" );
+    member.owner = representation::abstract;
+    member.assignment = terminal_home ? duty::available : duty::returning;
+    member.home = terminal_home ? actual : project_to<coords::ms>( stale_home );
+    member.hp = member.type->hp;
+    if( saved_projection ) {
+        member.current_position = actual;
+    }
+    REQUIRE( site.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( site );
+    migo_tower::site_state tower;
+    tower.site_id = id;
+    tower.anchor = stale_home;
+    tower.operation.emplace();
+    tower.operation->generation = 3;
+    tower.operation->members.push_back( { member.token.member_id, terminal_home, terminal_home, member.home } );
+    overmap_buffer.global_state.migo_towers.sites.push_back( tower );
+    monster body( member.type );
+    body.population_identity() = member.token;
+    body.set_pos_abs_only( actual );
+    migo_tower::member_intent intent;
+    intent.generation = 3;
+    intent.phase = terminal_home ? migo_tower::member_phase::settled :
+                   migo_tower::member_phase::returning;
+    intent.home = member.home;
+    body.set_migo_intent( intent );
+    {
+        // Native empty/unknown terrain is sufficient for body authentication.
+        // Generating a distant scene would exercise unrelated required-special
+        // placement and grant knowledge that this migration does not require.
+        // Match the native buffer's heap ownership of this large grid object.
+        auto owner = std::make_unique<overmap>( owner_key );
+        REQUIRE( owner->retain_monster_payload( actual, body ) );
+        owner->save(); // genuine native writer, not an alternate archive decoder
+    }
+    REQUIRE( file_exist( archive ) );
+    const auto archive_bytes = std::filesystem::file_size( archive.get_unrelative_path() );
+    const auto serialize = []( const auto & value ) {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            value.serialize( json );
+        }
+        return out.str();
+    };
+    const auto saved_population = serialize( overmap_buffer.global_state.migo_populations );
+    const auto saved_towers = serialize( overmap_buffer.global_state.migo_towers );
+    const auto saved_body = serialize( body );
+    overmap_buffer.clear(); // actual owner is now absent, not merely hidden from a test helper
+    overmap_buffer.global_state.migo_populations.deserialize( json_loader::from_string(
+                saved_population ) );
+    overmap_buffer.global_state.migo_towers.deserialize( json_loader::from_string( saved_towers ) );
+    REQUIRE_FALSE( overmap_buffer.find_loaded_overmap( owner_key ) );
+    get_avatar().setpos( project_to<coords::ms>( ( terminal_home ? stale_home : actual_omt ) - point(
+                40, 0 ) ), false );
+    const auto submaps_before = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto begin = std::chrono::steady_clock::now();
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    const auto cold_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - begin ).count();
+    auto *loaded_owner = overmap_buffer.find_loaded_overmap( owner_key );
+    REQUIRE( loaded_owner );
+    auto *loaded = loaded_owner->entity_at( project_remain<coords::om>( actual ).remainder_tripoint );
+    REQUIRE( loaded );
+    REQUIRE( loaded->monster_data );
+    CHECK( serialize( *loaded->monster_data ) == saved_body );
+    auto *home = overmap_buffer.global_state.migo_populations.find( id );
+    REQUIRE( home );
+    CHECK( home->members.front().current_position == actual );
+    CHECK( home->activity.active == terminal_home );
+    CHECK( migo_tower::owns_intent( *loaded->monster_data,
+                                    representation::abstract ) == !terminal_home );
+    auto &operation = *overmap_buffer.global_state.migo_towers.find( id )->operation;
+    CHECK( operation.activity.active );
+    CHECK( operation.activity.active_delta_turns == 0 );
+    CHECK( operation.sweep.active_elapsed == 0 );
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == submaps_before );
+    CHECK_FALSE( overmap_buffer.find_loaded_overmap( project_to<coords::om>( stale_home ).xy() ) );
+    // The now-resident owner remains authoritative without another file read.
+    REQUIRE( remove_file( archive ) );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    CHECK( overmap_buffer.find_loaded_overmap( owner_key ) == loaded_owner );
+    calendar::turn += 1_turns;
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    CHECK( operation.activity.active_delta_turns == 1 );
+    CHECK( serialize( *loaded->monster_data ) == saved_body );
+    std::cout << "migo40 cold native owner auth: saved_projection=" << saved_projection <<
+                 " terminal_home=" << terminal_home << " archive_bytes=" << archive_bytes << " cold_wall_us=" <<
+              cold_us <<
+    " native_owner_object_bytes=" << sizeof( overmap ) <<
+    " submap_delta=0 authenticated_owner=1; component/Mac only\n";
+}
+
+TEST_CASE( "migo_unowned_native_lifecycle_does_not_mutate_a_divergent_payload",
+           "[migo_population][migo_activation][native]" )
+{
+    using namespace migo_population;
+    clear_map();
+    const auto previous_population = overmap_buffer.global_state.migo_populations;
+    const auto previous_time = calendar::turn;
+    overmap_buffer.global_state.migo_populations.clear();
+    calendar::turn = calendar::turn_zero + 8_days;
+    site_record home;
+    home.id = "divergent-lifecycle";
+    home.anchor = project_to<coords::omt>( get_avatar().pos_abs() );
+    member_record member;
+    member.token = {home.id, "resident", 7, home.anchor};
+    member.type = mtype_id( "mon_mi_go" );
+    member.owner = representation::local;
+    member.hp = member.type->hp;
+    REQUIRE( home.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( home );
+    monster *body = g->place_critter_at( member.type, tripoint_bub_ms( 63, 63, 0 ) );
+    REQUIRE( body );
+    on_out_of_scope restore( [&]() {
+        g->remove_zombie( *body );
+        overmap_buffer.global_state.migo_populations = previous_population;
+        calendar::turn = previous_time;
+    } );
+    body->population_identity() = member.token;
+    ++body->population_identity().epoch;
+    const auto serialize = [&]() {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            body->serialize( json );
+        }
+        return out.str();
+    };
+    const auto before = serialize();
+    CHECK_FALSE( can_transfer( *body, representation::local ) );
+    body->process_turn();
+    CHECK( serialize() == before );
+    body->on_load();
+    CHECK( serialize() == before );
+    body->on_unload();
+    CHECK( serialize() == before );
+}
+
+TEST_CASE( "migo_native_pause_settlement_preserves_fractional_day_and_local_residents",
+           "[migo_population][migo_activation][native]" )
+{
+    using namespace migo_population;
+    clear_map();
+    const auto previous_population = overmap_buffer.global_state.migo_populations;
+    const auto previous_towers = overmap_buffer.global_state.migo_towers;
+    const auto previous_time = calendar::turn;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    calendar::turn = calendar::turn_zero + 4_days + 23_hours + 30_minutes;
+    const auto anchor = project_to<coords::omt>( get_avatar().pos_abs() ) + point( 45, 0 );
+    site_record site;
+    site.id = "native-pause";
+    site.anchor = anchor;
+    member_record member;
+    member.token = { site.id, "resident", 1, anchor };
+    member.type = mtype_id( "mon_mi_go" );
+    member.hp = member.type->hp;
+    member.owner = representation::local;
+    member.home = project_to<coords::ms>( anchor );
+    REQUIRE( site.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( site );
+    monster *body = g->place_critter_at( member.type, tripoint_bub_ms( 63, 63, 0 ) );
+    REQUIRE( body );
+    body->population_identity() = member.token;
+    on_out_of_scope restore( [&]() {
+        g->remove_zombie( *body );
+        overmap_buffer.global_state.migo_populations = previous_population;
+        overmap_buffer.global_state.migo_towers = previous_towers;
+        calendar::turn = previous_time;
+    } );
+    const auto snapshot = []( const monster & value ) {
+        std::ostringstream out;
+        {
+            JsonOut json( out );
+            value.serialize( json );
+        }
+        auto result = json_loader::from_string( out.str() ).get_object();
+        result.allow_omitted_members(); // this helper projects selected native fields
+        return result;
+    };
+    body->set_baby_timer( calendar::turn + 3_days );
+    body->on_unload(); // establish a valid native snapshot rather than a fresh-constructor timestamp
+    body->clear_migo_intent(); // old valid payload predates the new binding fields
+    calendar::turn += 1_days;
+    body->on_load(); // zero-credit legacy adoption, ordinary local processing remains enabled
+    auto &home = overmap_buffer.global_state.migo_populations.sites.front();
+    CHECK_FALSE( home.activity.active );
+    REQUIRE( body->migo_intent() );
+    CHECK( body->migo_intent()->activity_bound );
+    body->on_unload(); // exact local departure boundary, no fictitious home work
+    const auto before = snapshot( *body );
+    time_duration adopted = 0_turns;
+    before.read( "suspended_evolution_time", adopted );
+    CHECK( adopted == 1_days );
+    calendar::turn += 2_hours;
+    // The native unload/load boundary settles its home pause once. Actual
+    // cross-representation transactions have separate ownership controls.
+    body->on_load();
+    const auto after = snapshot( *body );
+    time_duration paused = 0_turns;
+    after.read( "suspended_evolution_time", paused );
+    CHECK( paused == adopted + 2_hours );
+    std::optional<time_point> baby_before;
+    std::optional<time_point> baby_after;
+    before.read( "baby_timer", baby_before );
+    after.read( "baby_timer", baby_after );
+    REQUIRE( baby_before );
+    CHECK( baby_after == *baby_before + 2_hours );
+    CHECK( body->get_hp() == member.hp );
+    body->on_load();
+    time_duration repeated = 0_turns;
+    snapshot( *body ).read( "suspended_evolution_time", repeated );
+    CHECK( repeated == paused );
+    calendar::turn += 1_turns;
+    body->set_moves( 0 );
+    body->process_turn();
+    CHECK( body->get_moves() > 0 ); // frozen home cannot disable ordinary loaded life
+    time_duration local = 0_turns;
+    snapshot( *body ).read( "suspended_evolution_time", local );
+    CHECK( local == paused );
+    // Direct native helper preserves sub-day precision across a day boundary,
+    // and serialization/reload never applies the same pause a second time.
+    calendar::turn += 17_minutes;
+    body->suspend_offscreen_time( 17_minutes );
+    time_duration fractional = 0_turns;
+    snapshot( *body ).read( "suspended_evolution_time", fractional );
+    CHECK( fractional == adopted + 2_hours + 17_minutes );
+    std::ostringstream saved;
+    {
+        JsonOut json( saved );
+        body->serialize( json );
+    }
+    monster loaded;
+    loaded.deserialize( json_loader::from_string( saved.str() ) );
+    time_duration retained = 0_turns;
+    snapshot( loaded ).read( "suspended_evolution_time", retained );
+    CHECK( retained == fractional );
+    loaded.suspend_offscreen_time( 0_turns );
+    loaded.suspend_offscreen_time( -1_turns );
+    snapshot( loaded ).read( "suspended_evolution_time", retained );
+    CHECK( retained == fractional );
+}
+
+TEST_CASE( "migo_native_evolution_pause_keeps_fractional_day_on_reload",
+           "[migo_population][migo_activation][native]" )
+{
+    const auto previous_time = calendar::turn;
+    on_out_of_scope restore( [&]() {
+        calendar::turn = previous_time;
+    } );
+    override_option evolution( "EVOLUTION_INVERSE_MULTIPLIER", "1.00" );
+    calendar::turn = calendar::turn_zero + 4_days + 23_hours + 30_minutes;
+    const mtype_id initial( "mon_feral_human_pipe_fungal_infected" );
+    const mtype_id grown( "mon_feral_human_pipe_fungal_corpse" );
+    monster body( initial );
+    body.set_pos_abs_only( get_avatar().pos_abs() );
+    REQUIRE( body.can_upgrade() );
+    body.try_upgrade( true ); // native deterministic four-day growth schedule
+    const int due = body.get_upgrade_time();
+    REQUIRE( due > 4 );
+    calendar::turn = calendar::turn_zero + due * 1_days - 30_minutes;
+    body.on_unload();
+    monster unpaused( body );
+    calendar::turn += 2_hours;
+    unpaused.try_upgrade( false );
+    CHECK( unpaused.type->id == grown ); // same native rule really is due without a pause
+    body.suspend_offscreen_time( 2_hours );
+    body.try_upgrade( false );
+    CHECK( body.type->id == initial );
+    CHECK( body.get_upgrade_time() == due );
+    std::ostringstream saved;
+    {
+        JsonOut json( saved );
+        body.serialize( json );
+    }
+    monster loaded;
+    loaded.deserialize( json_loader::from_string( saved.str() ) );
+    loaded.try_upgrade( false );
+    CHECK( loaded.type->id == initial );
+    CHECK( loaded.get_upgrade_time() == due );
+    calendar::turn += 31_minutes; // effective active date now crosses the native due day
+    body.try_upgrade( false );
+    loaded.try_upgrade( false );
+    CHECK( body.type->id == grown );
+    CHECK( loaded.type->id == grown );
+}
 
 TEST_CASE( "migo_real_tower_mapgen_and_repeated_discovery_share_eight_member_slots",
            "[migo_population][mapgen]" )
@@ -383,6 +726,12 @@ TEST_CASE( "migo_native_brood_service_placement_and_destroyed_source_are_once_on
     auto owner = [&]() -> site_record & {
         return *overmap_buffer.global_state.migo_populations.find( geometry->id );
     };
+    // A persisted nearly-due event does not establish an old active range.
+    // Adopt at zero credit first, then earn the final native interval.
+    service_loaded();
+    CHECK( owner().members.empty() );
+    CHECK( owner().production_elapsed == to_turns<int>( 7_days ) - 1 );
+    calendar::turn += 1_turns;
     SECTION( "safe_birth_and_reload_do_not_repeat_or_catch_up" ) {
         service_loaded();
         REQUIRE( owner().members.size() == 1 );

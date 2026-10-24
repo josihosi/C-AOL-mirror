@@ -2734,6 +2734,9 @@ void monster::load( const JsonObject &data )
 
     upgrades = data.get_bool( "upgrades", type->upgrades );
     upgrade_time = data.get_int( "upgrade_time", -1 );
+    suspended_evolution_time = 0_turns;
+    data.read( "suspended_evolution_time", suspended_evolution_time );
+    suspended_evolution_time = std::max( 0_turns, suspended_evolution_time );
 
     reproduces = data.get_bool( "reproduces", type->reproduces );
     baby_timer.reset();
@@ -2857,6 +2860,7 @@ void monster::store( JsonOut &json ) const
     json.member( "underwater", underwater );
     json.member( "upgrades", upgrades );
     json.member( "upgrade_time", upgrade_time );
+    json.member( "suspended_evolution_time", suspended_evolution_time );
     json.member( "reproduces", reproduces );
     json.member( "baby_timer", baby_timer );
     json.member( "biosignatures", biosignatures );

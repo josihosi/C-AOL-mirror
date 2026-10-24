@@ -520,6 +520,11 @@ class overmapbuffer
          * (x,y) are global overmap coordinates (same as @ref get).
          */
         overmap *get_existing( const point_abs_om &p );
+        // Exact resident lookup: no file probes, loading, or generation.
+        overmap *find_loaded_overmap( const point_abs_om &p );
+        // One cold legacy authentication pass through native deserialization.
+        // Never calls populate/open (whose error fallback can generate).
+        void bootstrap_migo_positions();
         /**
          * Returns whether or not the location has been generated (e.g. mapgen has run).
          * @param loc is in world-global omt coordinates.
