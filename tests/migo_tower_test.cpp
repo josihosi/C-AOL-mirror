@@ -3862,3 +3862,397 @@ TEST_CASE( "retained positive segments complete actual outward and home journeys
         CHECK( warm.steps < 240 );
     }
 }
+
+TEST_CASE( "receiver observation records only a genuine bounded native scan",
+           "[migo_tower][receiver_observation][physical_light][native]" )
+{
+    clear_avatar();
+    clear_map_with_vision( -1, 4, false );
+    clear_creatures();
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    set_time_to_day();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    const auto anchor = project_to<coords::omt>( here.get_abs( tripoint_bub_ms( 60, 60, 0 ) ) );
+    const auto source = project_to<coords::ms>( anchor ) + tripoint( 36, 12, 0 );
+    const auto source_omt = project_to<coords::omt>( source );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
+    for( int z = 0; z < 4; ++z ) {
+        const tripoint_abs_omt p( anchor.xy(), z );
+        terrain.emplace_back( p, overmap_buffer.ter( p ) );
+        overmap_buffer.ter_set( p, oter_str_id( "mi-go_scout_tower_" + std::to_string(
+                z + 1 ) + "_north" ) );
+        const tripoint_abs_omt q( source_omt.xy(), z );
+        terrain.emplace_back( q, overmap_buffer.ter( q ) );
+        overmap_buffer.ter_set( q, oter_str_id( "field" ) );
+    }
+    on_out_of_scope restore( [&] {
+        clear_creatures();
+        for( const auto &entry : terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        set_time( old_turn );
+    } );
+    const auto geometry = migo_population::geometry_at( anchor );
+    REQUIRE( geometry );
+    migo_population::site_record population;
+    population.id = geometry->id;
+    population.anchor = anchor;
+    const auto position = project_to<coords::ms>( anchor ) + tripoint( 6, 12, 1 );
+    here.ter_set( here.get_bub( position ), ter_str_id( "t_floor" ) );
+    monster *body = g->place_critter_at( mtype_id( "mon_mi_go" ), here.get_bub( position ) );
+    REQUIRE( body );
+    migo_population::member_record member;
+    member.token = {population.id, "observed-resident", 1, anchor};
+    member.type = body->type->id;
+    member.home = position;
+    member.owner = migo_population::representation::local;
+    member.hp = body->get_hp();
+    body->population_identity() = member.token;
+    REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    for( int z = 0; z < 4; ++z ) {
+        here.build_map_cache( z );
+    }
+    live_bandit_signal_observation sample;
+    sample.sample_id = "exact-current-source";
+    sample.mark.kind = "smoke";
+    sample.source_ms = source;
+    sample.source_omt = source_omt;
+    sample.smoke_observable_ms = source + tripoint( 0, 0, 1 );
+    sample.smoke_support_reason = "actual-test-plume";
+    sample.range_cap_omt = 40;
+    const int now = to_turn<int>( calendar::turn );
+    sample.observed_turn = now;
+    std::string expected = "received";
+    std::vector<live_bandit_signal_observation> samples = {sample, sample};
+    samples[1].sample_id = "not-reached-after-success";
+    SECTION( "positive and early success" ) {}
+    SECTION( "full native token epoch remains exact" ) {
+        auto &resident = overmap_buffer.global_state.migo_populations.sites.back().members.front();
+        resident.token.epoch = std::numeric_limits<std::uint64_t>::max();
+        body->population_identity() = resident.token;
+    }
+    SECTION( "first invalid input gates" ) {
+        const std::string gate = GENERATE( "kind", "id", "turn", "range0", "range41", "projection", "smoke",
+                                           "light" );
+        if( gate == "kind" ) {
+            samples[0].mark.kind = "noise";
+            expected = "unsupported_kind";
+        }
+        if( gate == "id" ) {
+            samples[0].sample_id.clear();
+            expected = "empty_id";
+        }
+        if( gate == "turn" ) {
+            --samples[0].observed_turn;
+            expected = "observed_turn";
+        }
+        if( gate == "range0" ) {
+            samples[0].range_cap_omt = 0;
+            expected = "range_nonpositive";
+        }
+        if( gate == "range41" ) {
+            samples[0].range_cap_omt = 41;
+            expected = "range_above40";
+        }
+        if( gate == "projection" ) {
+            samples[0].source_omt += point( 1, 0 );
+            expected = "source_projection";
+        }
+        if( gate == "smoke" ) {
+            samples[0].smoke_observable_ms.reset();
+            expected = "smoke_support";
+        }
+        if( gate == "light" ) {
+            samples[0].mark.kind = "light";
+            expected = "light_support";
+        }
+        samples.resize( 1 );
+    }
+    SECTION( "actual resident first rejects" ) {
+        const std::string gate = GENERATE( "unavailable", "saved_dead", "owner", "missing_body",
+                                           "cannot_see", "friendly", "not_upper", "narcosis", "stunned", "downed", "onfire", "fleeing",
+                                           "outside", "dead_body" );
+        auto &resident = overmap_buffer.global_state.migo_populations.sites.back().members.front();
+        if( gate == "unavailable" ) {
+            resident.assignment = migo_population::duty::dispatched;
+        }
+        if( gate == "saved_dead" ) {
+            resident.hp = 0;
+        }
+        if( gate == "owner" ) {
+            resident.owner = migo_population::representation::dead;
+        }
+        if( gate == "missing_body" ) {
+            body->population_identity().member_id = "different-owner";
+        }
+        if( gate == "cannot_see" ) {
+            body->add_effect( efftype_id( "blind" ), 1_hours );
+        }
+        if( gate == "friendly" ) {
+            body->friendly = 1;
+        }
+        if( gate == "not_upper" ) {
+            body->setpos( here, here.get_bub( position + tripoint( 0, 0, -1 ) ) );
+        }
+        for( const std::string effect : {
+                 "narcosis", "stunned", "downed", "onfire"
+             } ) {
+            if( gate == effect ) {
+                body->add_effect( efftype_id( effect ), 1_hours );
+            }
+        }
+        if( gate == "fleeing" ) {
+            body->add_effect( efftype_id( "run" ), 1_hours );
+            body->morale = -200;
+        }
+        if( gate == "outside" ) {
+            const auto outside = position + tripoint( 48, 0, 0 );
+            here.ter_set( here.get_bub( outside ), ter_str_id( "t_floor" ) );
+            body->setpos( here, here.get_bub( outside ) );
+        }
+        if( gate == "dead_body" ) {
+            body->set_hp( 0 );
+        }
+        // all_monsters is the native non-dead range: a dead local body is
+        // absent from this lookup, rather than reaching the defensive dead check.
+        expected = gate == "dead_body" ? "missing_body" : gate;
+    }
+    SECTION( "native blocked exit ray" ) {
+        here.ter_set( here.get_bub( position + tripoint( 1, 0, 0 ) ), ter_str_id( "t_wall" ) );
+        here.build_map_cache( 1 );
+        expected = "exit_ray_refused";
+    }
+    SECTION( "contained light is not exposed" ) {
+        samples.resize( 1 );
+        samples[0].mark.kind = "light";
+        samples[0].has_light_projection = true;
+        samples[0].light_projection.packet.exposure =
+            bandit_mark_generation::light_exposure_band::contained;
+        expected = "light_support";
+    }
+    SECTION( "actual overmap reach refusal" ) {
+        samples.resize( 1 );
+        samples[0].range_cap_omt = 1;
+        // Zero remaining brightness is visible. A real positive native see
+        // cost above that budget supplies a refusal, rather than assuming >0.
+        overmap_buffer.ter_set( tripoint_abs_omt( source_omt.xy(), 1 ), oter_str_id( "forest_thick" ) );
+        expected = "detection_refused";
+    }
+    SECTION( "unknown existing corridor is not a ray failure" ) {
+        overmap_buffer.ter_set( tripoint_abs_omt( source_omt.xy(), 1 ), oter_str_id::NULL_ID() );
+        expected = "unknown_corridor";
+    }
+    SECTION( "source inside is skipped before optical work" ) {
+        samples[0].source_ms = position + tripoint( 0, 0, -1 );
+        samples[0].source_omt = anchor;
+        expected = "source_inside";
+    }
+    SECTION( "remembered site no longer has native geometry" ) {
+        // geometry_at is anchored by ground type, not by every upper floor.
+        // An actual retained signal keeps the old anchor in the candidate set.
+        migo_tower::site_state former;
+        former.site_id = population.id;
+        former.anchor = anchor;
+        former.signal = migo_tower::signal_record{ sample.sample_id, sample.mark.kind,
+            sample.source_omt, sample.source_ms, member.token.member_id, position, now - 300 };
+        overmap_buffer.global_state.migo_towers.sites.push_back( former );
+        overmap_buffer.ter_set( anchor, oter_str_id( "field" ) );
+        expected = "no_geometry";
+    }
+    SECTION( "escaped output bound is enforced before copying" ) {
+        samples.assign( 3, sample );
+        for( auto &item : samples ) {
+            item.mark.kind = "noise";
+            item.sample_id.assign( 8000, '\x01' );
+        }
+        expected = "truncated";
+    }
+    SECTION( "bounded long identities are omitted whole" ) {
+        samples[0].sample_id.assign( 100000, '\\' );
+        expected = "truncated";
+    }
+    SECTION( "long support reason is omitted whole without changing receipt" ) {
+        samples[0].smoke_support_reason.assign( 100000, 'q' );
+        expected = "truncated";
+    }
+    SECTION( "sample count overflow does not stop receiver" ) {
+        samples.assign( 100, sample );
+        for( auto &item : samples ) {
+            item.observed_turn = now - 1;
+            item.source_ms.reset();
+            item.smoke_observable_ms.reset();
+        }
+        expected = "truncated";
+    }
+    const auto before_towers = overmap_buffer.global_state.migo_towers;
+    const auto before_populations = overmap_buffer.global_state.migo_populations;
+    const auto snapshot = [&] {
+        std::ostringstream out;
+        JsonOut js( out );
+        overmap_buffer.global_state.migo_towers.serialize( js );
+        return out.str();
+    };
+    const auto body_snapshot = [&] {
+        std::ostringstream out;
+        JsonOut js( out );
+        body->serialize( js );
+        return out.str();
+    };
+    const auto original_body = body_snapshot();
+    const auto original_position = get_avatar().pos_abs();
+    const auto original_time = calendar::turn;
+    const auto plain = migo_tower::receive_signals( samples, now );
+    const auto plain_state = snapshot();
+    overmap_buffer.global_state.migo_towers = before_towers;
+    overmap_buffer.global_state.migo_populations = before_populations;
+    migo_tower::receiver_observation observed;
+    const auto measured = migo_tower::receive_signals( samples, now, &observed );
+    REQUIRE( observed.entered() );
+    CHECK( plain.received == measured.received );
+    CHECK( plain.eligible_observers == measured.eligible_observers );
+    CHECK( plain.actual_sites == measured.actual_sites );
+    CHECK( plain.committed_populations == measured.committed_populations );
+    CHECK( snapshot() == plain_state );
+    CHECK( body_snapshot() == original_body );
+    CHECK( get_avatar().pos_abs() == original_position );
+    CHECK( calendar::turn == original_time );
+    std::ostringstream output;
+    {
+        JsonOut js( output );
+        observed.serialize( js );
+    }
+    const auto report = output.str();
+    INFO( "expected=" << expected << " report=" << report );
+    CHECK( report.size() <= 65536 );
+    std::istringstream in( report );
+    TextJsonIn jsin( in );
+    const auto object = jsin.get_object();
+    object.allow_omitted_members();
+    CHECK( object.get_int( "turn" ) == now );
+    CHECK( object.get_int( "retained_storage_bytes" ) <= 65536 );
+    CHECK( object.get_int( "capture_memory_bound" ) <= 65536 );
+    CHECK_FALSE( object.get_bool( "storage_unavailable" ) );
+    CHECK( object.get_bool( "result_available" ) );
+    CHECK( report.size() <= static_cast<std::size_t>( object.get_int( "byte_bound" ) ) );
+    bool saw_expected = expected == "truncated" && object.get_bool( "truncated" );
+    for( const auto value : object.get_array( "records" ) ) {
+        const auto record = value.get_object();
+        record.allow_omitted_members();
+        const std::string kind = record.get_string( "kind" );
+        if( kind == "sample" ) {
+            const auto index = static_cast<std::size_t>( record.get_int( "sample" ) );
+            REQUIRE( index < samples.size() );
+            CHECK( record.get_string( "id" ) == samples[index].sample_id );
+            CHECK( record.get_string( "smoke_support" ) == samples[index].smoke_support_reason );
+        }
+        if( kind == "member" ) {
+            const auto &resident = before_populations.sites.back().members.front();
+            CHECK( record.get_string( "site" ) == population.id );
+            CHECK( record.get_string( "member" ) == resident.token.member_id );
+            CHECK( record.get_int( "member_owner" ) == static_cast<int>( resident.owner ) );
+            CHECK( record.get_int( "member_duty" ) == static_cast<int>( resident.assignment ) );
+            CHECK( record.get_int( "member_hp" ) == resident.hp );
+            std::uint64_t epoch = 0;
+            REQUIRE( record.read( "member_epoch", epoch ) );
+            CHECK( epoch == resident.token.epoch );
+            const std::string rejection = record.get_string( "first_rejection", "" );
+            const bool matched = rejection != "unavailable" && rejection != "saved_dead" &&
+                                 rejection != "owner" && rejection != "missing_body";
+            CHECK( record.has_member( "matched_site" ) == matched );
+            CHECK( record.has_member( "matched_member" ) == matched );
+            CHECK( record.has_member( "matched_epoch" ) == matched );
+            if( matched ) {
+                const auto &token = body->population_identity();
+                CHECK( record.get_string( "matched_site" ) == token.site_id );
+                CHECK( record.get_string( "matched_member" ) == token.member_id );
+                REQUIRE( record.read( "matched_epoch", epoch ) );
+                CHECK( epoch == token.epoch );
+                CHECK( record.get_int( "matched_anchor_x" ) == token.site_anchor.x() );
+                CHECK( record.get_int( "matched_anchor_y" ) == token.site_anchor.y() );
+                CHECK( record.get_int( "matched_anchor_z" ) == token.site_anchor.z() );
+            }
+            const bool reached_position = matched && rejection != "dead_body" &&
+                                          rejection != "cannot_see" && rejection != "friendly";
+            CHECK( record.has_member( "body_x" ) == reached_position );
+            CHECK( record.has_member( "body_y" ) == reached_position );
+            CHECK( record.has_member( "body_z" ) == reached_position );
+            if( reached_position ) {
+                CHECK( record.get_int( "body_x" ) == body->pos_abs().x() );
+                CHECK( record.get_int( "body_y" ) == body->pos_abs().y() );
+                CHECK( record.get_int( "body_z" ) == body->pos_abs().z() );
+            }
+        }
+        if( record.get_string( "outcome" ) == expected ) { saw_expected = true; }
+        if( kind == "member" && record.get_string( "first_rejection", "" ) == expected ) {
+            saw_expected = true;
+            CHECK( record.get_int( expected ) == 1 );
+            CHECK( measured.eligible_observers == 0 );
+            CHECK( measured.received == 0 );
+        }
+        if( kind == "attempt" && record.get_string( "outcome" ) == expected ) {
+            if( expected == "exit_ray_refused" ) { CHECK( record.get_int( "ray_visible" ) == 0 ); }
+            if( expected == "detection_refused" ) {
+                CHECK( record.get_int( "detect_visible" ) == 0 );
+                CHECK_FALSE( record.has_member( "ray_visible" ) );
+            }
+            if( expected == "source_inside" || expected == "unknown_corridor" ) {
+                CHECK_FALSE( record.has_member( "ray_visible" ) );
+                CHECK_FALSE( record.has_member( "detect_visible" ) );
+            }
+        }
+    }
+    CHECK( saw_expected );
+    if( expected == "received" ) {
+        REQUIRE( measured.received == 1 );
+        int attempts = 0;
+        for( const auto value : object.get_array( "records" ) ) {
+            const auto record = value.get_object();
+            record.allow_omitted_members();
+            if( record.get_string( "kind" ) == "attempt" ) {
+                ++attempts;
+                CHECK( record.get_int( "sample" ) == 0 );
+            }
+        }
+        CHECK( attempts == 1 );
+    }
+    if( expected == "truncated" ) {
+        CHECK( object.get_bool( "truncated" ) );
+    }
+    migo_tower::receiver_observation skipped;
+    CHECK( migo_tower::receive_signals( samples, now, &skipped ).received == 0 );
+    CHECK_FALSE( skipped.entered() );
+    CHECK( snapshot() == plain_state );
+    // Reusing a populated sink cannot rewrite its source turn or identity.
+    migo_tower::receive_signals( samples, now + 300, &observed );
+    std::ostringstream again;
+    {
+        JsonOut js( again );
+        observed.serialize( js );
+    }
+    CHECK( again.str() == report );
+    observed = migo_tower::receiver_observation();
+    CHECK_FALSE( observed.entered() );
+    samples[0].observed_turn = now + 600;
+    migo_tower::receive_signals( samples, now + 600, &observed );
+    REQUIRE( observed.entered() );
+    std::ostringstream reset;
+    {
+        JsonOut js( reset );
+        observed.serialize( js );
+    }
+    std::istringstream reset_in( reset.str() );
+    TextJsonIn reset_json( reset_in );
+    const auto reset_object = reset_json.get_object();
+    reset_object.allow_omitted_members();
+    CHECK( reset_object.get_int( "turn" ) == now + 600 );
+}

@@ -1,6 +1,12 @@
 #include "migo_tower_native.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
+#include <optional>
+#include <new>
+#include <string_view>
+#include <cstdint>
 #include <cmath>
 #include <set>
 #include <limits>
@@ -15,6 +21,7 @@
 #include "game.h"
 #include "horde_entity.h"
 #include "line.h"
+#include "json.h"
 #include "live_light.h"
 #include "migo_population_native.h"
 #include "migo_tower_ai.h"
@@ -35,6 +42,163 @@ namespace migo_tower
 {
 namespace
 {
+// Receiver-only bounded value storage. Strings are admitted before copying;
+// the same conservative budget covers worst-case JSON escaping and framing.
+// No formatting, filesystem output or diagnostic native reads occur here.
+enum class observation_kind : std::size_t { sample, site, member, attempt, count };
+constexpr std::array<const char *, 4> observation_names = { "sample", "site", "member", "attempt" };
+struct observation_input {
+    const char *key;
+    bool text;
+    union {
+        std::int64_t number = 0;
+        std::uint64_t epoch;
+    };
+    bool unsigned_number = false;
+    std::string_view string;
+    observation_input() : key( "" ), text( false ) {}
+    observation_input( const char *key, std::int64_t value ) : key( key ), text( false ),
+        number( value ) {}
+    observation_input( const char *key, std::uint64_t value, bool ) : key( key ), text( false ),
+        epoch( value ), unsigned_number( true ) {}
+    observation_input( const char *key, std::string_view value ) : key( key ), text( true ),
+        string( value ) {}
+};
+struct observation_buffer {
+    struct field {
+        const char *key = nullptr;
+        union {
+            std::int64_t number = 0;
+            std::uint64_t epoch;
+        };
+        bool unsigned_number = false;
+        std::uint16_t offset = 0;
+        std::uint16_t length = 0;
+        bool text = false;
+    };
+    struct record {
+        std::uint16_t first = 0;
+        std::uint16_t count = 0;
+        observation_kind kind = observation_kind::sample;
+    };
+    // Fixed pools bound retained memory, including all string capacities.
+    std::array<field, 1280> fields{};
+    std::array<record, 464> records{};
+    std::array<char, 16384> strings{};
+    std::array<std::size_t, 4> admitted{};
+    std::array<std::size_t, 4> omitted{};
+    std::size_t field_count = 0, record_count = 0, string_bytes = 0;
+    std::size_t json_bound = 2048; // outer metadata, aggregate counts and omissions
+    int turn = 0;
+    receiver_result result;
+    bool result_available = false;
+
+    static std::size_t escaped_size( std::string_view text ) {
+        std::size_t size = 2;
+        for( unsigned char c : text ) {
+            size += c < 0x20 ? 6 : c == '"' || c == '\\' ? 2 : 1;
+        }
+        return size;
+    }
+    void add( observation_kind kind, const observation_input *values, std::size_t count ) {
+        const auto index = static_cast<std::size_t>( kind );
+        constexpr std::array<std::size_t, 4> limits = { 64, 16, 128, 256 };
+        std::size_t bytes = 0, json = 64;
+        for( std::size_t i = 0; i < count; ++i ) {
+            if( values[i].text ) {
+                if( values[i].string.size() > strings.size() - string_bytes - bytes ) {
+                    ++omitted[index];
+                    return;
+                }
+                bytes += values[i].string.size();
+            }
+            json += std::strlen( values[i].key ) + 5 +
+                    ( values[i].text ? escaped_size( values[i].string ) : 24 );
+        }
+        if( admitted[index] >= limits[index] || record_count == records.size() ||
+            count > fields.size() - field_count || bytes > strings.size() - string_bytes ||
+            json > 65536 - json_bound ) {
+            ++omitted[index];
+            return;
+        }
+        auto &entry = records[record_count++];
+        entry = { static_cast<std::uint16_t>( field_count ), static_cast<std::uint16_t>( count ), kind };
+        for( std::size_t i = 0; i < count; ++i ) {
+            auto &target = fields[field_count++];
+            target.key = values[i].key;
+            target.text = values[i].text;
+            target.unsigned_number = values[i].unsigned_number;
+            if( target.unsigned_number ) {
+                target.epoch = values[i].epoch;
+            } else {
+                target.number = values[i].number;
+            }
+            if( target.text ) {
+                target.offset = string_bytes;
+                target.length = values[i].string.size();
+                if( target.length ) {
+                    std::memcpy( strings.data() + string_bytes, values[i].string.data(), target.length );
+                }
+                string_bytes += target.length;
+            }
+        }
+        ++admitted[index];
+        json_bound += json;
+    }
+};
+static_assert( sizeof( observation_buffer ) < 65536 - 64,
+               "Receiver retained storage, not just logical strings, must fit 64KiB" );
+// Stack references live only until add: no identity/reason is copied before its
+// complete record passes both memory and escaped-output admission.
+struct observation_entry {
+    observation_buffer *sink;
+    observation_kind kind;
+    std::array<observation_input, 32> values;
+    std::size_t count = 0;
+    bool overflow = false;
+    observation_entry( observation_buffer *sink, observation_kind kind ) : sink( sink ), kind( kind ),
+        values{ observation_input( "", 0 ) } {}
+    void append( const observation_input &value ) {
+        if( !sink ) {
+            return;
+        }
+        if( count == values.size() ) {
+            overflow = true;
+            return;
+        }
+        values[count++] = value;
+    }
+    void number( const char *key, std::int64_t value ) {
+        append( observation_input( key, value ) );
+    }
+    void epoch( const char *key, std::uint64_t value ) {
+        append( observation_input( key, value, true ) );
+    }
+    void text( const char *key, std::string_view value ) {
+        append( observation_input( key, value ) );
+    }
+    void point( const char *x, const char *y, const char *z, const tripoint_abs_ms &p ) {
+        number( x, p.x() );
+        number( y, p.y() );
+        number( z, p.z() );
+    }
+    void finish( std::string_view reason ) {
+        text( "outcome", reason );
+        if( sink ) {
+            // Never publish a partial record if a later field exhausts the
+            // fixed builder, including its final outcome. Current member
+            // provenance and every reached guard use at most 31 fields.
+            if( overflow ) {
+                ++sink->omitted[static_cast<std::size_t>( kind )];
+            } else {
+                sink->add( kind, values.data(), count );
+            }
+        }
+    }
+};
+static_assert( sizeof( observation_buffer ) + sizeof( receiver_observation ) +
+               3 * sizeof( observation_entry ) < 65536,
+               "Retained pools and simultaneous receiver record builders fit 64KiB" );
 constexpr int sensing_interval = 5 * 60;
 physical_navigation::step_read read_owned_step( monster &body,
         const tripoint_abs_ms &goal, migo_population::representation owner,
@@ -300,18 +464,34 @@ bool immediate_attack( const monster &body, Creature &target )
            rl_dist( body.pos_abs(), target.pos_abs() ) <= capability.ranged_range;
 }
 
-bool valid_sample( const live_bandit_signal_observation &sample, int now )
+bool valid_sample( const live_bandit_signal_observation &sample, int now,
+                   std::string_view *reason = nullptr )
 {
     const bool smoke = sample.mark.kind == "smoke";
     const bool light = sample.mark.kind == "light" || sample.mark.kind == "searchlight";
-    if( ( !smoke && !light ) || sample.sample_id.empty() || sample.observed_turn != now ||
-        sample.range_cap_omt <= 0 || sample.range_cap_omt > 40 ||
-        ( sample.source_ms && project_to<coords::omt>( *sample.source_ms ) != sample.source_omt ) ) {
+    const auto reject = [&]( bool value, std::string_view why ) {
+        if( value && reason ) {
+            *reason = why;
+        }
+        return value;
+    };
+    if( reject( !smoke && !light, "unsupported_kind" ) ||
+        reject( sample.sample_id.empty(), "empty_id" ) ||
+        reject( sample.observed_turn != now, "observed_turn" ) ||
+        reject( sample.range_cap_omt <= 0, "range_nonpositive" ) ||
+        reject( sample.range_cap_omt > 40, "range_above40" ) ||
+        reject( sample.source_ms && project_to<coords::omt>( *sample.source_ms ) != sample.source_omt,
+                "source_projection" ) ) {
         return false;
     }
-    return smoke ? sample.smoke_observable_ms.has_value() || sample.smoke_source_exposed_to_sky :
-           sample.has_light_projection && sample.light_projection.packet.exposure !=
-           bandit_mark_generation::light_exposure_band::contained;
+    const bool accepted = smoke ? sample.smoke_observable_ms.has_value() ||
+                          sample.smoke_source_exposed_to_sky :
+                          sample.has_light_projection && sample.light_projection.packet.exposure !=
+                          bandit_mark_generation::light_exposure_band::contained;
+    if( reason ) {
+        *reason = accepted ? "valid" : smoke ? "smoke_support" : "light_support";
+    }
+    return accepted;
 }
 
 bool inside( const migo_population::site_geometry &geometry, const tripoint_abs_ms &p )
@@ -325,39 +505,79 @@ bool inside( const migo_population::site_geometry &geometry, const tripoint_abs_
 
 monster *home_body( const migo_population::site_record &site,
                     const migo_population::site_geometry &geometry,
-                    const migo_population::member_record &member, bool require_upper )
+                    const migo_population::member_record &member, bool require_upper,
+                    observation_entry *observation = nullptr )
 {
-    if( member.assignment != migo_population::duty::available || member.hp <= 0 ||
-        ( member.owner != migo_population::representation::local &&
-          member.owner != migo_population::representation::abstract ) ) {
+    const auto rejected = [&]( bool failed, const char *predicate ) {
+        if( observation ) {
+            observation->number( predicate, failed );
+            if( failed ) {
+                observation->text( "first_rejection", predicate );
+            }
+        }
+        return failed;
+    };
+    if( rejected( member.assignment != migo_population::duty::available, "unavailable" ) ||
+        rejected( member.hp <= 0, "saved_dead" ) ||
+        rejected( member.owner != migo_population::representation::local &&
+                  member.owner != migo_population::representation::abstract, "owner" ) ) {
         return nullptr;
     }
     monster *found = nullptr;
+    const auto matched = [&]( const migo_population::identity &identity ) {
+        if( observation ) {
+            // Exact authenticated native population token; monsters have no
+            // separate stable body ID supplied by this lookup.
+            observation->text( "matched_site", identity.site_id );
+            observation->text( "matched_member", identity.member_id );
+            observation->epoch( "matched_epoch", identity.epoch );
+            observation->number( "matched_anchor_x", identity.site_anchor.x() );
+            observation->number( "matched_anchor_y", identity.site_anchor.y() );
+            observation->number( "matched_anchor_z", identity.site_anchor.z() );
+        }
+    };
     if( member.owner == migo_population::representation::local ) {
         for( monster &m : g->all_monsters() ) {
-            if( site.owns( m.population_identity(), member.owner ) &&
+            const auto &identity = m.population_identity();
+            if( site.owns( identity, member.owner ) &&
                 m.population_identity().member_id == member.token.member_id ) {
                 found = &m;
+                matched( identity );
                 break;
             }
         }
     } else {
         for( const auto &entry : overmap_buffer.get( project_to<coords::om>( site.anchor ).xy() ).
              horde_entities() ) {
-            if( entry.second->monster_data &&
-                site.owns( entry.second->monster_data->population_identity(), member.owner ) &&
-                entry.second->monster_data->population_identity().member_id == member.token.member_id ) {
-                found = entry.second->monster_data.get();
-                break;
+            if( entry.second->monster_data ) {
+                const auto &identity = entry.second->monster_data->population_identity();
+                if( site.owns( identity, member.owner ) &&
+                    entry.second->monster_data->population_identity().member_id == member.token.member_id ) {
+                    found = entry.second->monster_data.get();
+                    matched( identity );
+                    break;
+                }
             }
         }
     }
-    if( !found || found->is_dead() || !found->can_see() || found->friendly != 0 ||
-        ( require_upper && found->pos_abs().z() < 1 ) || !inside( geometry, found->pos_abs() ) ||
-        found->has_effect( efftype_id( "narcosis" ) ) ||
-        found->has_effect( efftype_id( "stunned" ) ) ||
-        found->has_effect( efftype_id( "downed" ) ) ||
-        found->has_effect( efftype_id( "onfire" ) ) || found->attitude() == MATT_FLEE ) {
+    bool recorded_position = false;
+    const auto position = [&]() {
+        const auto p = found->pos_abs();
+        if( observation && !recorded_position ) {
+            observation->point( "body_x", "body_y", "body_z", p );
+            recorded_position = true;
+        }
+        return p;
+    };
+    if( rejected( !found, "missing_body" ) || rejected( found->is_dead(), "dead_body" ) ||
+        rejected( !found->can_see(), "cannot_see" ) || rejected( found->friendly != 0, "friendly" ) ||
+        rejected( require_upper && position().z() < 1, "not_upper" ) ||
+        rejected( !inside( geometry, position() ), "outside" ) ||
+        rejected( found->has_effect( efftype_id( "narcosis" ) ), "narcosis" ) ||
+        rejected( found->has_effect( efftype_id( "stunned" ) ), "stunned" ) ||
+        rejected( found->has_effect( efftype_id( "downed" ) ), "downed" ) ||
+        rejected( found->has_effect( efftype_id( "onfire" ) ), "onfire" ) ||
+        rejected( found->attitude() == MATT_FLEE, "fleeing" ) ) {
         return nullptr;
     }
     return found;
@@ -447,13 +667,18 @@ void assess_response( site_state &state, const migo_population::site_record &pop
 }
 
 bool receives( const monster &observer, const migo_population::site_geometry &geometry,
-               const live_bandit_signal_observation &sample, scout_observation::site_reader &reader )
+               const live_bandit_signal_observation &sample, scout_observation::site_reader &reader,
+               observation_entry *observation = nullptr )
 {
     const auto origin = observer.pos_abs();
     // An absent exact source remains absent in the record. The OMT centre is
     // only a bearing hypothesis for an uncertain signal, never actor knowledge.
     const tripoint_abs_ms bearing = sample.smoke_observable_ms.value_or(
                                         sample.source_ms.value_or( project_to<coords::ms>( sample.source_omt ) + point( 12, 12 ) ) );
+    if( observation ) {
+        observation->point( "origin_x", "origin_y", "origin_z", origin );
+        observation->point( "bearing_x", "bearing_y", "bearing_z", bearing );
+    }
     physical_light::route route;
     route.distance_omt = rl_dist( project_to<coords::omt>( origin ).xy(), sample.source_omt.xy() );
     route.vertical_offset = bearing.z() - origin.z();
@@ -464,11 +689,28 @@ bool receives( const monster &observer, const migo_population::site_geometry &ge
                                   project_to<coords::omt>( bearing ) ) ) {
         const oter_id &terrain = overmap_buffer.ter_existing( p );
         if( terrain == oter_str_id::NULL_ID().id() ) {
+            if( observation ) {
+                observation->number( "unknown_omt_x", p.x() );
+                observation->number( "unknown_omt_y", p.y() );
+                observation->number( "unknown_omt_z", p.z() );
+                observation->finish( "unknown_corridor" );
+            }
             return false;
         }
         route.terrain_see_costs.push_back( static_cast<int>( terrain->get_see_cost() ) );
     }
-    if( !physical_light::detect( route ).visible ) {
+    const auto detection = physical_light::detect( route );
+    if( observation ) {
+        observation->number( "distance_omt", route.distance_omt );
+        observation->number( "vertical_offset", route.vertical_offset );
+        observation->number( "range", route.brightness_range_omt );
+        observation->number( "detect_visible", detection.visible );
+        observation->number( "remaining_brightness", detection.remaining_brightness );
+    }
+    if( !detection.visible ) {
+        if( observation ) {
+            observation->finish( "detection_refused" );
+        }
         return false;
     }
     // A distant packet cannot let an observer see through its own tower wall.
@@ -488,18 +730,95 @@ bool receives( const monster &observer, const migo_population::site_geometry &ge
         }
         exit = point;
     }
-    return reader.read_ray( origin, exit ).visible;
+    const auto ray = reader.read_ray( origin, exit );
+    if( observation ) {
+        observation->point( "exit_x", "exit_y", "exit_z", exit );
+        observation->number( "ray_known", ray.known );
+        observation->number( "ray_visible", ray.visible );
+        observation->text( "ray_reason", ray.reason );
+        observation->finish( ray.visible ? "received" : "exit_ray_refused" );
+    }
+    return ray.visible;
 }
 } // namespace
 
+struct receiver_observation::implementation : observation_buffer {};
+receiver_observation::receiver_observation() = default;
+receiver_observation::~receiver_observation() = default;
+receiver_observation::receiver_observation( receiver_observation && ) noexcept = default;
+receiver_observation &receiver_observation::operator=( receiver_observation && ) noexcept = default;
+bool receiver_observation::entered() const
+{
+    return entered_;
+}
+void receiver_observation::serialize( JsonOut &js ) const
+{
+    js.start_object();
+    js.member( "entered", entered() );
+    js.member( "storage_unavailable", entered() && !data_ );
+    if( data_ ) {
+        js.member( "turn", data_->turn );
+        js.member( "scope",
+                   "First actual cadence scan. Sample records copy immutable input metadata; body/optical outcomes are consulted branches only. Downstream missing records are NOT_REACHED, not refusals. Truncation leaves omitted evaluations unobserved. Cannot reconstruct previous scans." );
+        js.member( "byte_bound", data_->json_bound );
+        js.member( "retained_storage_bytes", sizeof( implementation ) + sizeof( receiver_observation ) );
+        js.member( "record_kinds", observation_names );
+        js.member( "capture_memory_bound", sizeof( implementation ) + sizeof( receiver_observation ) +
+                   3 * sizeof( observation_entry ) );
+        js.member( "admitted", data_->admitted );
+        js.member( "omitted", data_->omitted );
+        js.member( "truncated", std::any_of( data_->omitted.begin(), data_->omitted.end(), []( auto n ) {
+            return n != 0;
+        } ) );
+        js.member( "result_available", data_->result_available );
+        if( data_->result_available ) {
+            js.member( "actual_sites", data_->result.actual_sites );
+            js.member( "committed_populations", data_->result.committed_populations );
+            js.member( "eligible_observers", data_->result.eligible_observers );
+            js.member( "received", data_->result.received );
+        }
+        js.member( "records" );
+        js.start_array();
+        for( std::size_t i = 0; i < data_->record_count; ++i ) {
+            const auto &record = data_->records[i];
+            js.start_object();
+            js.member( "kind", observation_names[static_cast<std::size_t>( record.kind )] );
+            for( std::size_t j = record.first; j < record.first + record.count; ++j ) {
+                const auto &field = data_->fields[j];
+                if( field.text ) {
+                    js.member( field.key, std::string( data_->strings.data() + field.offset, field.length ) );
+                } else if( field.unsigned_number ) {
+                    js.member( field.key, field.epoch );
+                } else {
+                    js.member( field.key, field.number );
+                }
+            }
+            js.end_object();
+        }
+        js.end_array();
+    }
+    js.end_object();
+}
+
 receiver_result receive_signals( const std::vector<live_bandit_signal_observation> &samples,
-                                 int now_turn )
+                                 int now_turn, receiver_observation *observation )
 {
     receiver_result result;
     auto &state = overmap_buffer.global_state.migo_towers;
     if( state.last_signal_scan >= 0 && ( now_turn <= state.last_signal_scan ||
                                          now_turn - state.last_signal_scan < sensing_interval ) ) {
         return result;
+    }
+    // Reusing a sink never overwrites an earlier actual scan. The caller arms
+    // one value per existing diagnostic batch, not a second receiver owner.
+    observation_buffer *capture = nullptr;
+    if( observation && !observation->entered() ) {
+        observation->entered_ = true;
+        observation->data_.reset( new( std::nothrow ) receiver_observation::implementation );
+        if( observation->data_ ) {
+            observation->data_->turn = now_turn;
+            capture = observation->data_.get();
+        }
     }
     state.last_signal_scan = now_turn;
     std::set<tripoint_abs_omt> candidates;
@@ -508,8 +827,34 @@ receiver_result receive_signals( const std::vector<live_bandit_signal_observatio
             candidates.insert( site.anchor );
         }
     }
+    std::size_t sample_index = 0;
     for( const auto &sample : samples ) {
-        if( !valid_sample( sample, now_turn ) ) {
+        std::string_view reason;
+        const bool valid = valid_sample( sample, now_turn, capture ? &reason : nullptr );
+        if( capture ) {
+            observation_entry entry( capture, observation_kind::sample );
+            entry.number( "sample", sample_index );
+            entry.text( "id", sample.sample_id );
+            entry.text( "signal_kind", sample.mark.kind );
+            entry.number( "source_omt_x", sample.source_omt.x() );
+            entry.number( "source_omt_y", sample.source_omt.y() );
+            entry.number( "source_omt_z", sample.source_omt.z() );
+            if( sample.source_ms ) {
+                entry.point( "source_x", "source_y", "source_z", *sample.source_ms );
+            }
+            entry.number( "observed_turn", sample.observed_turn );
+            entry.number( "range_cap_omt", sample.range_cap_omt );
+            entry.number( "smoke_exposed", sample.smoke_source_exposed_to_sky );
+            if( sample.smoke_observable_ms ) {
+                entry.point( "plume_x", "plume_y", "plume_z", *sample.smoke_observable_ms );
+            }
+            entry.text( "smoke_support", sample.smoke_support_reason );
+            entry.number( "has_light_projection", sample.has_light_projection );
+            entry.number( "light_exposure", static_cast<int>( sample.light_projection.packet.exposure ) );
+            entry.finish( reason );
+        }
+        ++sample_index;
+        if( !valid ) {
             continue;
         }
         for( int dx = -sample.range_cap_omt; dx <= sample.range_cap_omt; ++dx ) {
@@ -526,14 +871,31 @@ receiver_result receive_signals( const std::vector<live_bandit_signal_observatio
         }
     }
     for( const auto &anchor : candidates ) {
+        std::optional<observation_entry> site_entry;
+        if( capture ) {
+            site_entry.emplace( capture, observation_kind::site );
+            site_entry->number( "anchor_x", anchor.x() );
+            site_entry->number( "anchor_y", anchor.y() );
+            site_entry->number( "anchor_z", anchor.z() );
+        }
         const auto geometry = migo_population::geometry_at( anchor );
         if( !geometry ) {
+            if( site_entry ) {
+                site_entry->finish( "no_geometry" );
+            }
             continue;
         }
         ++result.actual_sites;
         auto *population = migo_population::discover( anchor );
         if( !population || !population->seed_committed ) {
+            if( site_entry ) {
+                site_entry->finish( population ? "uncommitted" : "no_population" );
+            }
             continue;
+        }
+        if( site_entry ) {
+            site_entry->text( "site", population->id );
+            site_entry->finish( "committed" );
         }
         ++result.committed_populations;
         auto *site = state.find( population->id );
@@ -546,15 +908,49 @@ receiver_result receive_signals( const std::vector<live_bandit_signal_observatio
         }
         scout_observation::site_reader reader;
         for( const auto &member : population->members ) {
-            monster *observer = home_body( *population, *geometry, member, true );
+            std::optional<observation_entry> member_entry;
+            if( capture ) {
+                member_entry.emplace( capture, observation_kind::member );
+                member_entry->text( "site", population->id );
+                member_entry->text( "member", member.token.member_id );
+                member_entry->number( "member_owner", static_cast<int>( member.owner ) );
+                member_entry->number( "member_duty", static_cast<int>( member.assignment ) );
+                member_entry->number( "member_hp", member.hp );
+                member_entry->epoch( "member_epoch", member.token.epoch );
+            }
+            monster *observer = home_body( *population, *geometry, member, true,
+                                           member_entry ? &*member_entry : nullptr );
+            if( member_entry ) {
+                member_entry->finish( observer ? "eligible" : "body_refused" );
+            }
             if( !observer ) {
                 continue;
             }
             ++result.eligible_observers;
+            sample_index = 0;
             for( const auto &sample : samples ) {
-                if( !valid_sample( sample, now_turn ) ||
-                    ( sample.source_ms && inside( *geometry, *sample.source_ms ) ) ||
-                    !receives( *observer, *geometry, sample, reader ) ) {
+                std::optional<observation_entry> attempt;
+                if( capture ) {
+                    attempt.emplace( capture, observation_kind::attempt );
+                    attempt->text( "site", population->id );
+                    attempt->text( "member", member.token.member_id );
+                    attempt->number( "sample", sample_index );
+                }
+                ++sample_index;
+                std::string_view reason;
+                if( !valid_sample( sample, now_turn, capture ? &reason : nullptr ) ) {
+                    if( attempt ) {
+                        attempt->finish( reason );
+                    }
+                    continue;
+                }
+                if( sample.source_ms && inside( *geometry, *sample.source_ms ) ) {
+                    if( attempt ) {
+                        attempt->finish( "source_inside" );
+                    }
+                    continue;
+                }
+                if( !receives( *observer, *geometry, sample, reader, attempt ? &*attempt : nullptr ) ) {
                     continue;
                 }
                 site->signal = signal_record{ sample.sample_id, sample.mark.kind, sample.source_omt,
@@ -571,6 +967,10 @@ receiver_result receive_signals( const std::vector<live_bandit_signal_observatio
                 observe_extinction( *site, *site->signal, *observer, reader );
             }
         }
+    }
+    if( capture ) {
+        capture->result = result;
+        capture->result_available = true;
     }
     return result;
 }

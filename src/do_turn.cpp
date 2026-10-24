@@ -313,10 +313,12 @@ struct raid_perf_row {
     std::size_t watch_record_view_eligible_calls = 0;
     std::size_t watch_cached_views = 0;
     live_channel_output_statistics channel_output;
+    migo_tower::receiver_observation receiver_scan;
 };
 static raid_perf_row *raid_perf_current = nullptr;
 static std::vector<raid_perf_row> raid_perf_rows;
 static std::string raid_perf_mode = "off";
+static bool raid_perf_receiver_captured = false;
 
 static std::size_t raid_perf_wait_generation()
 {
@@ -427,6 +429,10 @@ static void raid_perf_flush_after_wait()
         js.member( "wait_begin", row.wait_begin );
         js.member( "wait_end", row.wait_end );
         js.member( "simulation_seconds", row.simulation_seconds );
+        if( row.receiver_scan.entered() ) {
+            js.member( "migo_receiver_scan" );
+            row.receiver_scan.serialize( js );
+        }
         js.member( "process_cpu_seconds", row.cpu_seconds );
         js.member( "input_seconds", row.input_seconds );
         js.member( "save_seconds", row.save_seconds );
@@ -503,6 +509,9 @@ static void raid_perf_flush_after_wait()
     js.end_object();
     write_native_diagnostic_event( stream.str() );
     raid_perf_rows.clear();
+    // A scan in the currently open row has not been emitted with these older
+    // completed rows. It already owns the first-scan slot of the next batch.
+    raid_perf_receiver_captured = raid_perf_current && raid_perf_current->receiver_scan.entered();
 }
 
 static openclaw_harness_turn_trace *active_turn_trace = nullptr;
@@ -531,6 +540,7 @@ class openclaw_harness_turn_trace
             }
             if( !enabled_ || raid_perf_mode == "off" ) {
                 raid_perf_rows.clear();
+                raid_perf_receiver_captured = false;
             }
         }
 
@@ -562,7 +572,7 @@ class openclaw_harness_turn_trace
                                          sink_end.flushes - sink_started_.flushes,
                                          sink_end.replacements - sink_started_.replacements,
                                          sink_end.replacement_nanoseconds - sink_started_.replacement_nanoseconds };
-                    raid_perf_rows.push_back( diagnostic_ );
+                    raid_perf_rows.push_back( std::move( diagnostic_ ) );
                     raid_perf_current = nullptr;
                 }
                 openclaw_harness_write_turn_trace( "turn", "end", "simulation", turn_id_,
@@ -14193,7 +14203,12 @@ void sample_and_deliver_live_light_for_advancing_turn()
     };
     callbacks.deliver_migo = []( const std::vector<live_bandit_signal_observation> &samples ) {
         const int now = to_turn<int>( calendar::turn );
-        migo_tower::receive_signals( samples, now );
+        auto *observation = raid_perf_current && !raid_perf_receiver_captured ?
+                            &raid_perf_current->receiver_scan : nullptr;
+        migo_tower::receive_signals( samples, now, observation );
+        if( observation && observation->entered() ) {
+            raid_perf_receiver_captured = true;
+        }
         for( const auto &site : overmap_buffer.global_state.migo_towers.sites ) {
             if( site.last_sense_turn == now ) {
                 migo_tower::begin_response( site.site_id, now );

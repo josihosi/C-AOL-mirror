@@ -3,6 +3,7 @@
 #define CATA_SRC_MIGO_TOWER_NATIVE_H
 
 #include <vector>
+#include <memory>
 #include <string>
 
 #include "migo_population.h"
@@ -11,6 +12,7 @@
 struct live_bandit_signal_observation;
 class monster;
 class Creature;
+class JsonOut;
 
 namespace migo_tower
 {
@@ -21,11 +23,29 @@ struct receiver_result {
     int received = 0;
 };
 
+// Optional value sink for one real receiver scan. Storage is allocated only
+// after the cadence gate; it retains values, never native object pointers.
+class receiver_observation
+{
+        struct implementation;
+        std::unique_ptr<implementation> data_;
+        bool entered_ = false;
+        friend receiver_result receive_signals(
+            const std::vector<live_bandit_signal_observation> &, int, receiver_observation * );
+    public:
+        receiver_observation();
+        ~receiver_observation();
+        receiver_observation( receiver_observation && ) noexcept;
+        receiver_observation &operator=( receiver_observation && ) noexcept;
+        bool entered() const;
+        void serialize( JsonOut &js ) const;
+};
+
 // Production recipient of the shared, current physical emitter packet. It
 // discovers existing site content before selecting a real home observer. This
 // is independent of every human scout/report/dispatch prerequisite.
 receiver_result receive_signals( const std::vector<live_bandit_signal_observation> &samples,
-                                 int now_turn );
+                                 int now_turn, receiver_observation *observation = nullptr );
 // Revalidate the received evidence and exact current bodies before committing
 // all selected population leases. A decision estimate alone cannot dispatch.
 bool begin_response( const std::string &site_id, int now_turn );

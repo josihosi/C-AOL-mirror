@@ -4717,7 +4717,8 @@ TEST_CASE( "bodygraph Close owns the concrete modal across timeout and nested re
 TEST_CASE( "performance interval output preserves the real World successor",
            "[semantic_surface][raid_performance_output_route]" )
 {
-    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "normal" );
+    const std::string mode = GENERATE( "normal", "quiet_signal" );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", mode );
     override_option autosave( "AUTOSAVE", "false" );
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     clear_avatar();
@@ -4780,6 +4781,10 @@ TEST_CASE( "performance interval output preserves the real World successor",
     const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
     REQUIRE( pause );
     REQUIRE( pause->size() == 1 );
+    const int old_scan = overmap_buffer.global_state.migo_towers.last_signal_scan;
+    on_out_of_scope restore_scan( [&] { overmap_buffer.global_state.migo_towers.last_signal_scan = old_scan; } );
+    overmap_buffer.global_state.migo_towers.last_signal_scan = -1;
+    reset_live_light_sample_cache();
     for( int turn = 0; turn < 3; ++turn ) {
         REQUIRE( ungetch( pause->front() ) != -1 );
         u.set_moves( 100 );
@@ -4802,6 +4807,7 @@ TEST_CASE( "performance interval output preserves the real World successor",
     }
 
     int intervals = 0;
+    int receiver_scans = 0;
     std::ifstream input( trace );
     std::string line;
     while( std::getline( input, line ) ) {
@@ -4814,10 +4820,12 @@ TEST_CASE( "performance interval output preserves the real World successor",
         TextJsonIn jsin( record );
         const TextJsonObject object = jsin.get_object();
         object.allow_omitted_members();
-        CHECK( object.get_string( "mode" ) == "normal" );
+        CHECK( object.get_string( "mode" ) == mode );
         CHECK( object.get_string( "run_id" ) == run );
         const auto names = object.get_string_array( "stage_names" );
-        for( const std::string name : { "npc_site_bootstrap", "npc_signal_copy", "npc_channel_audit" } ) {
+        for( const std::string name : {
+                 "npc_site_bootstrap", "npc_signal_copy", "npc_channel_audit"
+             } ) {
             CHECK( std::count( names.begin(), names.end(), name ) == 1 );
         }
         CHECK_FALSE( object.get_array( "rows" ).empty() );
@@ -4825,9 +4833,21 @@ TEST_CASE( "performance interval output preserves the real World successor",
             const TextJsonObject row = row_value.get_object();
             row.allow_omitted_members();
             CHECK( row.get_array( "stages_seconds" ).size() == names.size() );
+            if( row.has_member( "migo_receiver_scan" ) ) {
+                ++receiver_scans;
+                const auto scan = row.get_object( "migo_receiver_scan" );
+                scan.allow_omitted_members();
+                CHECK( scan.get_bool( "entered" ) );
+                CHECK( scan.get_bool( "result_available" ) );
+                CHECK( scan.get_int( "turn" ) == row.get_int( "turn" ) );
+                CHECK( scan.get_int( "byte_bound" ) <= 65536 );
+                CHECK( scan.get_int( "retained_storage_bytes" ) <= 65536 );
+                CHECK( scan.has_array( "records" ) );
+            }
         }
     }
     CHECK( intervals >= 1 );
+    CHECK( receiver_scans == 1 );
 }
 #endif
 
