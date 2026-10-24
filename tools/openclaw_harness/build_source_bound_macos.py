@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import startup_harness  # noqa: E402
+from build_recovery_helpers import build_failure_payload, remove_owned_pch_files
 
 
 def pch_recovery_paths(root: Path, build_prefix: str, *, tiles: bool) -> tuple[Path, ...]:
@@ -43,13 +44,7 @@ def incompatible_pch_diagnostic(text: str) -> bool:
 
 def invalidate_owned_pch(root: Path, build_prefix: str, *, tiles: bool) -> list[dict[str, str]]:
     """Remove the exact generated PCH pair for this configuration, if present."""
-    removed = []
-    for path in pch_recovery_paths(root, build_prefix, tiles=tiles):
-        if path.is_file():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            path.unlink()
-            removed.append({'path': str(path), 'sha256': digest})
-    return removed
+    return remove_owned_pch_files(pch_recovery_paths(root, build_prefix, tiles=tiles))
 
 
 def main() -> int:
@@ -113,17 +108,7 @@ def main() -> int:
 
     def emit_failure(phase: dict[str, object], *, source: dict[str, object] | None = None,
                      pch_recovery: dict[str, object] | None = None) -> int:
-        payload: dict[str, object] = {
-            "ok": False,
-            "phase": phase["label"],
-            "exit_status": phase["exit_status"],
-            "diagnostic": phase["diagnostic"],
-            "logs": phase,
-        }
-        if source is not None:
-            payload["source"] = source
-        if pch_recovery is not None:
-            payload['pch_recovery'] = pch_recovery
+        payload: dict[str, object] = build_failure_payload(phase, source=source, pch_recovery=pch_recovery)
         print(json.dumps(payload, sort_keys=True), file=sys.stderr)
         return int(phase["exit_status"] or 1)
     # The direct product target does not depend on Makefile's phony ``version``
