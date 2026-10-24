@@ -1,4 +1,9 @@
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -21,11 +26,19 @@
 #include "mongroup.h"
 #include "monster.h"
 #include "mtype.h"
+#include "overmap.h"
+#include "overmapbuffer.h"
+#include "path_info.h"
 #include "pathfinding.h"
 #include "player_helpers.h"
 #include "type_id.h"
 #include "vehicle.h"
+#include "worldfactory.h"
 #include "zombie_rider_overmap_ai.h"
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/resource.h>
+#endif
 
 static const efftype_id effect_run( "run" );
 static const efftype_id effect_downed( "downed" );
@@ -2122,4 +2135,243 @@ TEST_CASE( "zombie_rider_band_equal_turn_observations_choose_identified_direct_e
     REQUIRE( reverse_selected );
     CHECK( reverse_selected->source_actor_id == "alpha" );
     CHECK( reverse_selected->position == direct.position );
+}
+
+TEST_CASE( "rider encounter preparation leaves resident abstract history untouched",
+           "[zombie_rider][overmap][band][resident_history]" )
+{
+    // The optional measurement is confined to this component fixture. Cold
+    // native file construction/loading is never part of repeated owner work.
+    const bool measure = std::getenv( "CAOL_RESIDENT_HISTORY_MEASURE" ) != nullptr;
+    for( const int history : {
+             0, 16, 64
+         } ) {
+        CAPTURE( history );
+        clear_avatar();
+        clear_map_without_vision();
+        overmap_buffer.clear();
+        std::vector<std::filesystem::path> created_files;
+        on_out_of_scope cleanup( [&] {
+            clear_map_without_vision();
+            overmap_buffer.clear();
+            for( const auto &path : created_files ) {
+                std::filesystem::remove( path );
+            }
+        } );
+        restore_on_out_of_scope<time_point> restore_clock( calendar::turn );
+        set_time_to_day();
+        map &here = get_map();
+        get_player_character().setpos( here, tripoint_bub_ms( 100, 100, 0 ) );
+        monster &first = spawn_test_monster( mon_zombie_rider.str(), { 60, 60, 0 } );
+        monster &second = spawn_test_monster( mon_zombie_rider.str(), { 64, 60, 0 } );
+        refresh_pathing_cache( here );
+        REQUIRE( first.sees( here, second ) );
+        REQUIRE( second.sees( here, first ) );
+        REQUIRE_FALSE( here.route( first,
+                                   pathfinding_target::point( second.pos_bub() ) ).empty() );
+        const std::string first_id = first.predator_state().actor_id;
+        const std::string second_id = second.predator_state().actor_id;
+        const int now = to_turn<int>( calendar::turn );
+        first.zombie_rider_pursuit_state().observe( get_player_character().get_identity(),
+                get_player_character().pos_abs(), now );
+        const auto first_pos = first.pos_abs();
+        const auto second_pos = second.pos_abs();
+        const int first_moves = first.get_moves();
+        const int second_moves = second.get_moves();
+        const int first_hp = first.get_hp();
+        const int second_hp = second.get_hp();
+        const auto first_ammo = first.ammo;
+        const auto second_ammo = second.ammo;
+        const auto original_time = calendar::turn;
+        const auto make_resident = [&]( const point_abs_om & address ) -> overmap & {
+            if( overmap *existing = overmap_buffer.get_existing( address ) ) {
+                existing->hordes.clear(); // RAM-only fixture; existing files are not rewritten.
+                return *existing;
+            }
+            const auto terrain = world_generator->active_world->has_compression_enabled() ?
+                                 PATH_INFO::current_dimension_save_path() / zzip_overmap_directory /
+                                 overmapbuffer::terrain_filename( address ) + zzip_suffix :
+                                 PATH_INFO::current_dimension_save_path() /
+                                 overmapbuffer::terrain_filename( address );
+            created_files.push_back( terrain.get_unrelative_path() );
+            created_files.push_back( overmapbuffer::player_filename( address ).get_unrelative_path() );
+            // Native serialization/load, no world generation. get_existing
+            // cached the prior absence; get opens the exact file just saved.
+            auto empty = std::make_unique<overmap>( address );
+            empty->save();
+            return overmap_buffer.get( address );
+        };
+        const auto serialize_owner = []( const overmap & owner ) {
+            std::ostringstream out;
+            owner.serialize( out );
+            return out.str();
+        };
+        const auto report = [&]( const char *phase, const auto & work, const int calls ) {
+            const auto wall = std::chrono::steady_clock::now();
+            const auto cpu = std::clock();
+            work();
+            const double cpu_s = static_cast<double>( std::clock() - cpu ) / CLOCKS_PER_SEC;
+            const double wall_s = std::chrono::duration<double>(
+                                      std::chrono::steady_clock::now() - wall ).count();
+            if( measure ) {
+                std::cout << "resident_history_measurement maps=" << history << " phase=" << phase
+                          << " calls=" << calls << " wall_s=" << wall_s;
+#if defined(_WIN32)
+                std::cout << " crt_elapsed_s=" << cpu_s;
+#else
+                std::cout << " process_cpu_s=" << cpu_s;
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+                rusage usage {};
+                if( getrusage( RUSAGE_SELF, &usage ) == 0 ) {
+                    // ru_maxrss is a process lifetime high-water value, not an
+                    // allocation delta or the memory of this owner alone.
+                    std::cout << " process_maxrss_native=" << usage.ru_maxrss;
+                }
+#endif
+                std::cout << '\n';
+            }
+        };
+        std::vector<overmap *> distant;
+        overmap *near = nullptr;
+        const auto near_address = coords::project_to<coords::om>( first.pos_abs() ).xy();
+        report( "cold_native_fixture", [&] {
+            near = &make_resident( near_address );
+            for( int i = 0; i < history; ++i )
+            {
+                overmap &owner = make_resident( point_abs_om( 1000 + i, 1000 ) );
+                const auto p = coords::project_to<coords::ms>( tripoint_abs_om( owner.pos(), 0 ) ) +
+                tripoint_rel_ms( 24, 24, 0 );
+                if( i % 2 == 0 ) {
+                    REQUIRE( owner.hordes.spawn_entity( p, mon_zombie_rider ) );
+                } else {
+                    monster body( mon_zombie_rider );
+                    body.predator_state().band_reference = "old_projection";
+                    body.predator_state().band_revision_cache = 77;
+                    REQUIRE( owner.hordes.spawn_entity( p, body ) );
+                }
+                distant.push_back( &owner );
+            }
+        }, history + 1 );
+        REQUIRE( near != nullptr );
+        // A genuine existing band peer is abstract, even though its actual
+        // position is in the loaded map. Encounter preparation cannot update
+        // its payload. Native transfer below owns its later local adoption.
+        const auto peer_pos = here.get_abs( tripoint_bub_ms( 72, 72, 0 ) );
+        monster peer( mon_zombie_rider );
+        const std::string peer_id = peer.predator_state().actor_id;
+        REQUIRE( near->hordes.spawn_entity( peer_pos, peer ) );
+        auto &bands = overmap_buffer.global_state.zombie_rider_bands;
+        REQUIRE( bands.register_encounter( { first_id, peer_id, now - 1, true, true } ) );
+        std::vector<std::string> before;
+        for( const overmap *owner : distant ) {
+            before.push_back( serialize_owner( *owner ) );
+        }
+        const std::string near_before = serialize_owner( *near );
+        const int map_count = overmap_buffer.global_state.overmap_count;
+        report( "first_encounter", [&] {
+            overmap_buffer.reconcile_rider_band_encounters();
+        }, 1 );
+        REQUIRE( bands.in_same_band( first_id, second_id ) );
+        CHECK( bands.in_same_band( first_id, peer_id ) );
+        CHECK( bands.living_members( first_id ) == 3 );
+        REQUIRE( bands.observation_for( second_id, now ) );
+        CHECK( bands.observation_for( second_id, now )->observed_turn == now );
+        CHECK( bands.observation_for( second_id, now )->source_actor_id == first_id );
+        const std::string registry = bands.diagnostic_json();
+        report( "repeated_encounter", [&] {
+            for( int i = 0; i < 100; ++i )
+            {
+                overmap_buffer.reconcile_rider_band_encounters();
+            }
+        }, 100 );
+        CHECK( bands.diagnostic_json() == registry );
+        report( "resident_query", [&] {
+            for( int i = 0; i < 2000; ++i )
+            {
+                const auto found = overmap_buffer.get_loaded_overmaps_near(
+                    coords::project_to<coords::sm>( first_pos ).xy(), 4 );
+                REQUIRE( found.size() == 1 );
+                REQUIRE( found.front() == near );
+            }
+        }, 2000 );
+        CHECK( serialize_owner( *near ) == near_before );
+        for( std::size_t i = 0; i < distant.size(); ++i ) {
+            CHECK( serialize_owner( *distant[i] ) == before[i] );
+        }
+        CHECK( overmap_buffer.global_state.overmap_count == map_count );
+        CHECK( calendar::turn == original_time );
+        CHECK( first.pos_abs() == first_pos );
+        CHECK( second.pos_abs() == second_pos );
+        CHECK( first.get_moves() == first_moves );
+        CHECK( second.get_moves() == second_moves );
+        CHECK( first.get_hp() == first_hp );
+        CHECK( second.get_hp() == second_hp );
+        CHECK( first.ammo == first_ammo );
+        CHECK( second.ammo == second_ammo );
+
+        zombie_rider_overmap_ai::rider_band_registry reloaded;
+        reloaded.deserialize( json_loader::from_string( registry ).get_object() );
+        CHECK( reloaded.in_same_band( second_id, peer_id ) );
+        bands = std::move( reloaded );
+        overmap_buffer.spawn_monster( coords::project_to<coords::sm>( peer_pos ) );
+        monster *returned = nullptr;
+        for( monster &body : g->all_monsters() ) {
+            if( body.predator_state().actor_id == peer_id ) {
+                returned = &body;
+            }
+        }
+        REQUIRE( returned != nullptr );
+        CHECK( overmap_buffer.entity_at( peer_pos ) == nullptr );
+        overmap_buffer.reconcile_rider_band_encounters();
+        CHECK( returned->predator_state().band_reference == bands.band_for( peer_id ) );
+        CHECK( returned->predator_state().band_revision_cache == bands.revision_for( peer_id ) );
+        CHECK( bands.living_members( peer_id ) == 3 );
+        returned->die( &here, &first );
+        CHECK( bands.living_members( first_id ) == 2 );
+        CHECK( bands.band_for( peer_id ).empty() );
+        const std::string after_death = bands.diagnostic_json();
+        overmap_buffer.reconcile_rider_band_encounters();
+        CHECK( bands.diagnostic_json() == after_death );
+    }
+}
+
+TEST_CASE( "native rider encounters require reciprocal sight",
+           "[zombie_rider][overmap][band][resident_history]" )
+{
+    const bool blind = GENERATE( false, true );
+    CAPTURE( blind );
+    clear_avatar();
+    clear_map_without_vision();
+    overmap_buffer.clear();
+    on_out_of_scope cleanup( [] {
+        clear_map_without_vision();
+        overmap_buffer.clear();
+    } );
+    restore_on_out_of_scope<time_point> restore_clock( calendar::turn );
+    set_time_to_day();
+    map &here = get_map();
+    get_player_character().setpos( here, tripoint_bub_ms( 100, 100, 0 ) );
+    monster &first = spawn_test_monster( mon_zombie_rider.str(), { 60, 60, 0 } );
+    monster &second = spawn_test_monster( mon_zombie_rider.str(), { 64, 60, 0 } );
+    if( blind ) {
+        second.add_effect( efftype_id( "blind" ), 1_hours );
+    } else {
+        for( int dx = -1; dx <= 1; ++dx ) {
+            for( int dy = -1; dy <= 1; ++dy ) {
+                if( dx != 0 || dy != 0 ) {
+                    here.ter_set( second.pos_bub() + tripoint( dx, dy, 0 ), ter_id( "t_rock" ) );
+                }
+            }
+        }
+    }
+    refresh_pathing_cache( here );
+    CHECK( first.sees( here, second ) == blind );
+    REQUIRE_FALSE( second.sees( here, first ) );
+    auto &bands = overmap_buffer.global_state.zombie_rider_bands;
+    const auto before = bands.diagnostic_json();
+    overmap_buffer.reconcile_rider_band_encounters();
+    CHECK_FALSE( bands.in_same_band( first.predator_state().actor_id,
+                                     second.predator_state().actor_id ) );
+    CHECK( bands.diagnostic_json() == before );
 }

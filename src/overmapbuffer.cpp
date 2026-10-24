@@ -327,12 +327,10 @@ void overmapbuffer::reconcile_rider_band_encounters()
         std::string actor_id;
         monster *rider = nullptr;
         tripoint_abs_ms position = tripoint_abs_ms::zero;
-        bool local = false;
     };
     std::vector<rider_snapshot> riders;
     std::set<std::string> seen_actor_ids;
-    const auto add_rider = [&riders, &seen_actor_ids, this]( monster & rider,
-    const tripoint_abs_ms & position, const bool local ) {
+    const auto add_rider = [&riders, &seen_actor_ids, this]( monster & rider ) {
         if( rider.type->id.str() != "mon_zombie_rider" || rider.is_dead() ) {
             return;
         }
@@ -346,24 +344,15 @@ void overmapbuffer::reconcile_rider_band_encounters()
             return;
         }
         global_state.zombie_rider_bands.reconcile_cache( actor_id, rider.predator_state() );
-        riders.push_back( { actor_id, &rider, position, local } );
+        riders.push_back( { actor_id, &rider, rider.pos_abs() } );
     };
 
+    // Only local bodies can supply the reciprocal sight and native route
+    // required below. Abstract endpoint proximity establishes no encounter;
+    // do not prepare distant payloads or their projected band caches here.
+    // The registry retains membership; this local pass refreshes projections.
     for( monster &rider : g->all_monsters() ) {
-        add_rider( rider, rider.pos_abs(), true );
-    }
-    // Abstract riders retain their heavy payload (and therefore stable actor
-    // ID) in the horde container; this never materializes a local body.
-    for( const std::pair<const point_abs_om, std::unique_ptr<overmap>> &entry : overmaps ) {
-        for( const std::pair<tripoint_abs_ms, horde_entity *> &entity : entry.second->horde_entities() ) {
-            if( entity.second->get_type()->id.str() != "mon_zombie_rider" ) {
-                continue;
-            }
-            entity.second->ensure_predator_payload( entity.first );
-            if( entity.second->monster_data ) {
-                add_rider( *entity.second->monster_data, entity.first, false );
-            }
-        }
+        add_rider( rider );
     }
 
     const int now = to_turns<int>( calendar::turn - calendar::turn_zero );
@@ -389,22 +378,11 @@ void overmapbuffer::reconcile_rider_band_encounters()
             const bool same_z = first->position.z() == second->position.z();
             bool reciprocal = false;
             bool reachable = false;
-            if( same_z && first->local && second->local ) {
+            if( same_z ) {
                 reciprocal = first->rider->sees( here, *second->rider ) &&
                              second->rider->sees( here, *first->rider );
                 reachable = reciprocal && !here.route( *first->rider,
                                                        pathfinding_target::point( second->rider->pos_bub() ) ).empty();
-            } else if( same_z ) {
-                // An abstract horde position has neither a creature LOS test
-                // nor a size-aware native route.  Coarse distance and two
-                // passable endpoints do not prove reciprocal perception or a
-                // traversable intervening route (they may span a sealed or
-                // unloaded screen), so this branch deliberately fails closed.
-                // The local/local branch above is the sole authority that may
-                // establish a new encounter until equivalent route evidence
-                // exists for abstract riders.
-                reciprocal = false;
-                reachable = false;
             }
             if( !global_state.zombie_rider_bands.register_encounter( {
             first->actor_id, second->actor_id, now, reciprocal, reachable } ) ) {
@@ -2152,11 +2130,14 @@ std::vector<overmap *> overmapbuffer::get_loaded_overmaps_near( const point_abs_
     const point_abs_om start = project_to<coords::om>( p + point( -radius, -radius ) );
     const point_abs_om end = project_to<coords::om>( p + point( radius, radius ) );
     std::vector<overmap *> result;
-    for( const std::pair<const point_abs_om, std::unique_ptr<overmap>> &entry : overmaps ) {
-        const point_abs_om &position = entry.first;
-        if( position.x() >= start.x() && position.x() <= end.x() && position.y() >= start.y() &&
-            position.y() <= end.y() ) {
-            result.push_back( entry.second.get() );
+    // Query the exact native rectangle, not every resident history entry.
+    // Unlike get_existing, this lookup never probes disk or loads an owner.
+    for( int x = start.x(); x <= end.x(); ++x ) {
+        for( int y = start.y(); y <= end.y(); ++y ) {
+            const auto found = overmaps.find( point_abs_om( x, y ) );
+            if( found != overmaps.end() ) {
+                result.push_back( found->second.get() );
+            }
         }
     }
     const point_abs_om center = project_to<coords::om>( p );

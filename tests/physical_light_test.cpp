@@ -37,6 +37,7 @@
 #include "pocket_type.h"
 #include "vehicle.h"
 #include "veh_type.h"
+#include "worldfactory.h"
 
 namespace
 {
@@ -84,6 +85,108 @@ class scoped_transition_environment
         std::optional<std::string> previous_event_path;
         std::optional<std::string> previous_run_id;
 };
+
+TEST_CASE( "resident light queries preserve exact seams without loading saved owners",
+           "[physical_light][hordes][resident_history]" )
+{
+    clear_avatar();
+    clear_map_without_vision();
+    overmap_buffer.clear();
+    std::vector<std::filesystem::path> created_files;
+    on_out_of_scope cleanup( [&] {
+        clear_map_without_vision();
+        overmap_buffer.clear();
+        for( const auto &path : created_files ) {
+            std::filesystem::remove( path );
+        }
+    } );
+    const auto save_blank = [&]( const point_abs_om & address ) {
+        const auto terrain = world_generator->active_world->has_compression_enabled() ?
+                             PATH_INFO::current_dimension_save_path() / zzip_overmap_directory /
+                             overmapbuffer::terrain_filename( address ) + zzip_suffix :
+                             PATH_INFO::current_dimension_save_path() /
+                             overmapbuffer::terrain_filename( address );
+        if( std::filesystem::exists( terrain.get_unrelative_path() ) ) {
+            return;
+        }
+        created_files.push_back( terrain.get_unrelative_path() );
+        created_files.push_back( overmapbuffer::player_filename( address ).get_unrelative_path() );
+        auto empty = std::make_unique<overmap>( address );
+        empty->save();
+    };
+    std::set<point_abs_om> addresses;
+    for( int x = -1; x <= 0; ++x ) {
+        for( int y = -1; y <= 0; ++y ) {
+            const point_abs_om address( x, y );
+            save_blank( address );
+            overmap_buffer.get( address ).hordes.clear();
+            addresses.insert( address );
+        }
+    }
+    // An actual serialized owner exists here, but the resident-only query
+    // must leave it unopened, just like a genuinely missing key.
+    const point_abs_om saved_only( 1, 1 );
+    save_blank( saved_only );
+    REQUIRE( overmap_buffer.find_loaded_overmap( saved_only ) == nullptr );
+    const auto map_count = overmap_buffer.global_state.overmap_count;
+    const auto found = overmap_buffer.get_loaded_overmaps_near( point_abs_sm( -1, -1 ), 1 );
+    std::set<point_abs_om> actual;
+    for( const overmap *owner : found ) {
+        actual.insert( owner->pos() );
+    }
+    CHECK( actual == addresses );
+    CHECK( found.size() == actual.size() );
+    REQUIRE( found.size() == 4 );
+    CHECK( found.front()->pos() == point_abs_om( -1, -1 ) );
+    // Nearest remains nearest. Equal-distance entries have no extra actor,
+    // target or cardinal-direction priority in the native query contract.
+    CHECK( std::is_sorted( found.begin(), found.end(), []( const overmap * a, const overmap * b ) {
+        return trig_dist( point_abs_om( -1, -1 ), a->pos() ) <
+               trig_dist( point_abs_om( -1, -1 ), b->pos() );
+    } ) );
+    const auto exact_negative = overmap_buffer.get_loaded_overmaps_near( point_abs_sm( -1, -1 ), 0 );
+    REQUIRE( exact_negative.size() == 1 );
+    CHECK( exact_negative.front()->pos() == point_abs_om( -1, -1 ) );
+    const auto exact_zero = overmap_buffer.get_loaded_overmaps_near( point_abs_sm(), 0 );
+    REQUIRE( exact_zero.size() == 1 );
+    CHECK( exact_zero.front()->pos() == point_abs_om() );
+    CHECK( overmap_buffer.get_loaded_overmaps_near(
+               coords::project_to<coords::sm>( saved_only ), 0 ).empty() );
+    CHECK( overmap_buffer.get_loaded_overmaps_near(
+               coords::project_to<coords::sm>( point_abs_om( 2, 2 ) ), 0 ).empty() );
+    CHECK( overmap_buffer.find_loaded_overmap( saved_only ) == nullptr );
+
+    const tripoint_abs_ms source( 24, 24, 0 );
+    const tripoint_abs_ms near( 36, 24, 0 );
+    const tripoint_abs_ms blind( 24, 36, 0 );
+    const tripoint_abs_ms friendly( 36, 36, 0 );
+    overmap_buffer.ter_set( coords::project_to<coords::omt>( source ), oter_id( "field" ) );
+    overmap &owner = *overmap_buffer.find_loaded_overmap( point_abs_om() );
+    REQUIRE( owner.hordes.spawn_entity( near, mtype_id( "mon_zombie" ) ) );
+    monster blind_body( mtype_id( "mon_zombie" ) );
+    blind_body.add_effect( efftype_id( "blind" ), 1_hours );
+    REQUIRE( owner.hordes.spawn_entity( blind, blind_body ) );
+    monster friendly_body( mtype_id( "mon_zombie" ) );
+    friendly_body.friendly = 1;
+    REQUIRE( owner.hordes.spawn_entity( friendly, friendly_body ) );
+    const auto time = calendar::turn;
+    int candidates = 0;
+    CHECK( overmap_buffer.attract_hordes_to_light( source, 6, 4, 40, true,
+            "resident-history-light", calendar::turn, &candidates ) == 1 );
+    CHECK( candidates == 3 );
+    REQUIRE( overmap_buffer.entity_at( near ) != nullptr );
+    CHECK( overmap_buffer.entity_at( near )->destination == source );
+    CHECK( overmap_buffer.entity_at( near )->light_sample_id == "resident-history-light" );
+    CHECK( overmap_buffer.entity_at( blind )->light_sample_id.empty() );
+    CHECK( overmap_buffer.entity_at( friendly )->light_sample_id.empty() );
+    const auto expiry = overmap_buffer.entity_at( near )->light_expires;
+    CHECK( overmap_buffer.attract_hordes_to_light( source, 6, 4, 40, true,
+            "resident-history-light", calendar::turn ) == 0 );
+    CHECK( overmap_buffer.entity_at( near )->light_expires == expiry );
+    CHECK( overmap_buffer.global_state.overmap_count == map_count );
+    CHECK( calendar::turn == time );
+    CHECK( overmap_buffer.find_loaded_overmap( saved_only ) == nullptr );
+}
 
 item powered_flashlight( const int charges = 56 )
 {
