@@ -6391,6 +6391,21 @@ bool structural_frontier_arrival_order_is_current(
                          outing.local_handoff.cohesion_assembled && !outing.local_handoff.cohesion_abort_return ) );
 }
 
+bool structural_watch_arrival_order_is_current(
+    const site_record &site, const simulation_advance_cursor &expected_cursor,
+    const int current_minutes )
+{
+    const active_outing_state &outing = site.active_outing;
+    const camp_map_lead *lead = site.intelligence_map.find_lead( outing.target_lead_id );
+    return !structural_outing_uses_frontier_route( outing ) && !site.retired_empty_site &&
+           !outing.local_projection_reconciliation_rejected && lead != nullptr &&
+           structural_watch_lead_is_current( site, outing, *lead ) &&
+           structural_route_is_canonical_for_outing( outing, site.anchor, *lead ) &&
+           simulation_cursor_matches( outing, expected_cursor ) &&
+           outing.phase == scout_phase::observing && current_minutes >= 0 &&
+           current_minutes >= outing.last_advanced_minutes;
+}
+
 local_handoff_commit_result complete_structural_frontier_arrival(
     site_record &site, const simulation_advance_cursor &expected_cursor,
     const int current_minutes, const std::vector<local_route_arrival_member_read> &member_reads )

@@ -10292,10 +10292,10 @@ void record_live_bandit_scout_motor_service( const npc &member,
 }
 
 // Only the current unique abstract assignment owns this completed destination.
-// Recovery may restore the order consumed by the old frontier motor, but only
+// Recovery recognizes the order consumed by the native motor, but only
 // for the complete authenticated pair at that order's target, never a new route.
 bool pending_abstract_scout_arrival_order( const npc &member,
-        const bool recover_completed_frontier = false )
+        const bool recover_completed_order = false )
 {
     if( member.is_active() || member.is_dead() ||
         overmap_buffer.find_npc( member.getID() ).get() != &member ) {
@@ -10354,7 +10354,9 @@ bool pending_abstract_scout_arrival_order( const npc &member,
             outing.waypoint_index != approach || outing.actor_route_waypoint != approach ) {
             return false;
         }
-    } else if( outing.schema_version < 10 || recover_completed_frontier ||
+    } else if( outing.schema_version < 10 ||
+               ( recover_completed_order && !bandit_live_world::structural_watch_arrival_order_is_current(
+                     *owner, *cursor, live_bandit_current_minutes() ) ) ||
                outing.waypoint_index != 1 || outing.actor_route_waypoint != 1 ||
                outing.selected_watch_kind == bandit_live_world::structural_watch_kind::none ||
                outing.shared_route.size() != 5 || outing.shared_route[2] != destination ||
@@ -10371,20 +10373,26 @@ bool pending_abstract_scout_arrival_order( const npc &member,
         }
         const bool assigned = actor->is_travelling() && actor->goal == destination &&
                               ( !frontier || ( actor->omt_path.empty() ? actor->pos_abs_omt() == destination :
-                                actor->omt_path.front() == destination &&
-                                actor->omt_path.back() == actor->pos_abs_omt() ) );
+                                               actor->omt_path.front() == destination &&
+                                               actor->omt_path.back() == actor->pos_abs_omt() ) );
         // reach_omt_destination leaves precisely this ordinary guard order.
-        // A foreign destination/mission/path is not a completed frontier order.
-        const bool consumed_frontier = recover_completed_frontier && frontier &&
-                                       actor->pos_abs_omt() == destination &&
-                                       actor->goal == npc::no_goal_point && actor->omt_path.empty() &&
-                                       actor->mission == NPC_MISSION_GUARD && actor->guard_pos == actor->pos_abs();
-        if( !assigned && !consumed_frontier ) {
+        // A foreign destination/mission/path is not a completed owned order.
+        const bool consumed_order = recover_completed_order &&
+                                    actor->pos_abs_omt() == destination &&
+                                    actor->goal == npc::no_goal_point && actor->omt_path.empty() &&
+                                    actor->mission == NPC_MISSION_GUARD && actor->guard_pos == actor->pos_abs() &&
+                                    ( frontier || actor->previous_mission == NPC_MISSION_TRAVELLING );
+        if( !assigned && !consumed_order ) {
             return false;
         }
-        if( recover_completed_frontier &&
+        if( recover_completed_order &&
             ( !live_bandit_member_can_take_homeward_step( *actor ) ||
               actor->get_attitude() == NPCATT_FLEE || actor->get_attitude() == NPCATT_FLEE_TEMP ) ) {
+            return false;
+        }
+        if( recover_completed_order && !frontier &&
+            ( !actor->activity.is_null() || actor->has_activity() ||
+              actor->get_attitude() == NPCATT_KILL || actor->get_attitude() == NPCATT_MUG ) ) {
             return false;
         }
         for( const npc *copy : bandit_live_world_projection_lease_copies( *actor ) ) {
@@ -10392,7 +10400,7 @@ bool pending_abstract_scout_arrival_order( const npc &member,
                 return false;
             }
         }
-        if( frontier ) {
+        if( frontier || recover_completed_order ) {
             for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
                 const auto contains = [id]( const auto & ids ) {
                     return std::find( ids.begin(), ids.end(), id ) != ids.end();
@@ -10605,6 +10613,14 @@ std::set<character_id> prepare_live_bandit_abstract_scout_travel()
                         }
                     }
                 }
+                // The generic native destination callback may already have consumed
+                // a signal watch's orders. Authenticate the complete current pair;
+                // do not rewrite its guard goal or borrow a foreign assignment.
+                const bool completed_watch_order =
+                    !bandit_live_world::structural_outing_uses_frontier_route( outing ) &&
+                std::all_of( members.begin(), members.end(), []( const npc * actor ) {
+                    return pending_abstract_scout_arrival_order( *actor, true );
+                } );
                 const auto cursor = bandit_live_world::current_external_simulation_cursor( site );
                 auto arrival_result = bandit_live_world::local_handoff_commit_result::rejected;
                 if( cursor ) {
@@ -10612,7 +10628,7 @@ std::set<character_id> prepare_live_bandit_abstract_scout_travel()
                     for( const npc *member : members ) {
                         const auto &lease = member->get_bandit_live_world_projection_lease();
                         reads.push_back( { member->getID(), true, false,
-                                           member->goal == destination
+                                           ( member->goal == destination || completed_watch_order )
                                            && !lease.present &&
                                            live_bandit_member_can_take_homeward_step( *member ) &&
                                            member->get_attitude() != NPCATT_FLEE &&

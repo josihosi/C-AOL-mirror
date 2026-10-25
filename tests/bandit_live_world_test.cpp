@@ -73840,3 +73840,193 @@ TEST_CASE( "response_zero_claim_renews_only_a_released_source_episode",
             reads ).scheduler_replay_suppressed );
     CHECK( serialize_world( world ) == committed );
 }
+
+TEST_CASE( "owned signal scout consumed native arrival starts its finite watch once",
+           "[bandit_live_world][consumed_watch_arrival]" )
+{
+    using namespace bandit_live_world;
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    const bool cannibal = GENERATE( false, true );
+    CAPTURE( cannibal );
+    r067_fresh_scout_journey journey;
+    journey.start( cannibal );
+    const auto ids = journey.members();
+    const auto watch = journey.site().active_outing.selected_watch_omt;
+    const int deadline = journey.site().active_outing.expected_return_minutes + 60;
+    const auto arrived = [&]() {
+        return std::all_of( ids.begin(), ids.end(), [&]( const auto id ) {
+            return overmap_buffer.find_npc( id )->pos_abs_omt() == watch;
+        } );
+    };
+    while( journey.site().active_outing.actor_route_waypoint < 1 &&
+           journey.minute() <= deadline ) {
+        journey.next_minute();
+    }
+    // Whole overmap_npc_move also calls prepare after its motor. Stop at the
+    // real approach, then exercise the existing structural owner without that
+    // later motor/recorder pass, so the consumed-arrival boundary is observable.
+    while( journey.site().active_outing.phase != scout_phase::observing &&
+           journey.minute() <= deadline ) {
+        set_time( calendar::start_of_cataclysm +
+                  time_duration::from_minutes( ( journey.minute() / 60 + 1 ) * 60 ) );
+        refresh_live_bandit_activation();
+        maintain_live_bandit_structural_bounty_for_test( {} );
+    }
+    auto &site = journey.site();
+    REQUIRE( site.active_outing.owner == simulation_owner::abstract );
+    REQUIRE( site.active_outing.phase == scout_phase::observing );
+    REQUIRE( site.active_outing.waypoint_index == 1 );
+    REQUIRE( site.active_outing.actor_route_waypoint == 1 );
+    REQUIRE( site.active_outing.actor_departure_observed );
+    REQUIRE( site.active_outing.assessment.observation_started_minutes == -1 );
+    prepare_live_bandit_abstract_scout_travel_for_test();
+    // Isolate the arrival recorder, not a full journey/cadence benchmark. The
+    // current native route producer supplies each adjacent step; do not run the
+    // whole service again, which can commit arrival before this control sees it.
+    for( const auto id : ids ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        for( int step = 0; actor->pos_abs_omt() != watch && step < 64; ++step ) {
+            REQUIRE( actor->is_travelling() );
+            REQUIRE( actor->goal == watch );
+            if( !actor->omt_path.empty() && actor->omt_path.back() == actor->pos_abs_omt() ) {
+                actor->omt_path.pop_back();
+            }
+            REQUIRE_FALSE( actor->omt_path.empty() );
+            REQUIRE( rl_dist( actor->pos_abs_omt(), actor->omt_path.back() ) <= 1 );
+            actor->travel_overmap( actor->omt_path.back() );
+        }
+    }
+    REQUIRE( arrived() );
+    for( const auto id : ids ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( actor );
+        REQUIRE_FALSE( actor->is_active() );
+        REQUIRE( actor->is_travelling() );
+        REQUIRE( actor->goal == watch );
+        actor->reach_omt_destination(); // Genuine generic native completion, not a goal rewrite.
+        REQUIRE( actor->guard_pos == actor->pos_abs() );
+        REQUIRE( actor->mission == NPC_MISSION_GUARD );
+        REQUIRE( actor->previous_mission == NPC_MISSION_TRAVELLING );
+        REQUIRE( actor->goal == npc::no_goal_point );
+        REQUIRE( actor->omt_path.empty() );
+        REQUIRE_FALSE( actor->get_bandit_live_world_projection_lease().present );
+    }
+    std::string refusal;
+    bool load_after_arrival = false;
+    SECTION( "native consumed pair commits once without restoring generic goals" ) {}
+    SECTION( "native consumed pair survives value serialization before arrival" ) {
+        const auto saved_world = round_trip_world( journey.world() );
+        journey.world() = saved_world;
+        for( const auto id : ids ) {
+            auto actor = overmap_buffer.find_npc( id );
+            npc saved;
+            saved.deserialize( json_loader::from_string( r054_actor_bytes( *actor ) ).get_object() );
+            *actor = std::move( saved );
+        }
+    }
+    SECTION( "stale lead cannot authenticate a consumed arrival" ) {
+        ++site.intelligence_map.find_lead( site.active_outing.target_lead_id )->revision;
+        refusal = "lead revision";
+    }
+    SECTION( "foreign live assignment cannot lend this completed pair" ) {
+        auto foreign = site;
+        foreign.site_id = "foreign-consumed-watch-owner";
+        journey.world().sites.push_back( std::move( foreign ) );
+        refusal = "duplicate assignment";
+    }
+    SECTION( "foreign lease cannot lend this completed pair" ) {
+        auto actor = overmap_buffer.find_npc( ids[1] );
+        auto lease = actor->get_bandit_live_world_projection_lease();
+        lease.present = true;
+        lease.site_id = "foreign-consumed-watch-owner";
+        actor->set_bandit_live_world_projection_lease( lease );
+        refusal = "lease";
+    }
+    SECTION( "stale guard position is not native completion at this watch" ) {
+        overmap_buffer.find_npc( ids[1] )->guard_pos.reset();
+        refusal = "guard position";
+    }
+    SECTION( "ordinary guard without prior travel is not a consumed route" ) {
+        overmap_buffer.find_npc( ids[1] )->previous_mission = NPC_MISSION_NULL;
+        refusal = "previous mission";
+    }
+    SECTION( "foreign goal cannot be replaced by arrival recovery" ) {
+        overmap_buffer.find_npc( ids[1] )->goal = watch + point( 1, 0 );
+        refusal = "foreign goal";
+    }
+    SECTION( "new native care retains priority over consumed arrival" ) {
+        overmap_buffer.find_npc( ids[1] )->activity = player_activity( activity_id( "ACT_FIRSTAID" ) );
+        refusal = "care";
+    }
+    SECTION( "current native combat retains priority over consumed arrival" ) {
+        overmap_buffer.find_npc( ids[1] )->set_attitude( NPCATT_KILL );
+        refusal = "combat";
+    }
+    SECTION( "incapacity retains the pair without invented readiness" ) {
+        overmap_buffer.find_npc( ids[1] )->add_effect( efftype_id( "narcosis" ), 1_days );
+        refusal = "incapacity";
+    }
+    SECTION( "generic loading defers to paired arrival then native local handoff" ) {
+        journey.move_player( watch );
+        g->load_npcs();
+        // game::load_npcs intentionally refuses an abstract scout assignment.
+        // The paired native handoff, after arrival, owns local admission.
+        REQUIRE_FALSE( overmap_buffer.find_npc( ids[0] )->is_active() );
+        REQUIRE_FALSE( overmap_buffer.find_npc( ids[1] )->is_active() );
+        load_after_arrival = true;
+    }
+    SECTION( "local representation cannot be admitted as abstract arrival" ) {
+        site.active_outing.owner = simulation_owner::local;
+        refusal = "local owner";
+    }
+    SECTION( "future owner clock cannot authenticate current completion" ) {
+        site.active_outing.last_advanced_minutes = journey.minute() + 1;
+        refusal = "future clock";
+    }
+    const auto before_world = serialize_world( journey.world() );
+    const auto before_time = calendar::turn;
+    std::vector<std::string> bodies;
+    for( const auto id : ids ) {
+        bodies.push_back( r054_actor_bytes( *overmap_buffer.find_npc( id ) ) );
+    }
+    prepare_live_bandit_abstract_scout_travel_for_test();
+    auto &after = journey.site();
+    if( !refusal.empty() ) {
+        CAPTURE( refusal );
+        CHECK( serialize_world( journey.world() ) == before_world );
+        CHECK( after.active_outing.assessment.observation_started_minutes == -1 );
+    } else {
+        CHECK( after.active_outing.waypoint_index == 2 );
+        CHECK( after.active_outing.actor_route_waypoint == 2 );
+        CHECK( after.active_outing.assessment.observation_started_minutes == journey.minute() );
+    }
+    CHECK( calendar::turn == before_time );
+    for( std::size_t i = 0; i < ids.size(); ++i ) {
+        CHECK( r054_actor_bytes( *overmap_buffer.find_npc( ids[i] ) ) == bodies[i] );
+    }
+    const auto committed = serialize_world( journey.world() );
+    prepare_live_bandit_abstract_scout_travel_for_test();
+    CHECK( serialize_world( journey.world() ) == committed );
+    CHECK_FALSE( after.current_scout_report.is_present() );
+    CHECK( after.active_outing.member_return_receipts.empty() );
+    if( load_after_arrival ) {
+        REQUIRE( materialize_live_bandit_structural_handoffs_for_test() );
+        REQUIRE( journey.site().active_outing.owner == simulation_owner::local );
+        std::vector<std::string> local_bodies;
+        for( const auto id : ids ) {
+            const auto actor = overmap_buffer.find_npc( id );
+            REQUIRE( actor->is_active() );
+            REQUIRE( actor->get_bandit_live_world_projection_lease().present );
+            local_bodies.push_back( r054_actor_bytes( *actor ) );
+        }
+        const auto local_world = serialize_world( journey.world() );
+        prepare_live_bandit_abstract_scout_travel_for_test();
+        CHECK( serialize_world( journey.world() ) == local_world );
+        for( std::size_t i = 0; i < ids.size(); ++i ) {
+            CHECK( r054_actor_bytes( *overmap_buffer.find_npc( ids[i] ) ) == local_bodies[i] );
+        }
+        CHECK( calendar::turn == before_time );
+    }
+}
