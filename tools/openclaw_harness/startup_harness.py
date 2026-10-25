@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Patte
 
 from harness_log_window import semantic_trace_identity, semantic_trace_path_identity
 from bandit_live_world_audit import load_special_placements as load_bandit_special_placements
+from bandit_live_world_audit import RELEVANT_SPECIAL_IDS as BANDIT_HOME_SPECIAL_IDS
 from scenario_registry import (
     CHECKPOINT_CHAIN_MANIFEST_VERSION,
     ManifestValidationError,
@@ -25078,6 +25079,34 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
         kind = str(raw.get("kind", "")).strip().lower()
         player_save = str(raw.get("player_save", "")).strip()
 
+        if kind == "representative_human_source_geometry":
+            allowed = {"kind", "player_save", "source_area_omt", "expected_home_site_ids",
+                       "minimum_distance_omt", "expected_source_terrain_id"}
+            source_area = raw.get("source_area_omt")
+            expected_homes = raw.get("expected_home_site_ids")
+            minimum = raw.get("minimum_distance_omt", 15)
+            expected_terrain = raw.get("expected_source_terrain_id")
+            if (set(raw) - allowed or not player_save or
+                    not isinstance(expected_terrain, str) or not expected_terrain.strip() or
+                    isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 10 or
+                    not isinstance(source_area, list) or not source_area or
+                    any(not isinstance(point, list) or len(point) != 3 or any(
+                        isinstance(value, bool) or not isinstance(value, int) for value in point
+                    ) for point in source_area) or
+                    not isinstance(expected_homes, list) or not expected_homes or any(
+                        not isinstance(value, str) or not value.strip() for value in expected_homes)):
+                raise SystemExit(
+                    f"Fixture save_transforms[{index}] representative human geometry needs "
+                    f"integer source_area_omt, expected_source_terrain_id, expected_home_site_ids "
+                    f"and distance >= 10: {manifest_path}"
+                )
+            transforms.append({"kind": kind, "player_save": player_save,
+                               "source_area_omt": copy.deepcopy(source_area),
+                               "expected_home_site_ids": list(expected_homes),
+                               "expected_source_terrain_id": expected_terrain,
+                               "minimum_distance_omt": minimum})
+            continue
+
         if kind == "bandit_active_sortie_clock":
             site_id = str(raw.get("site_id", "")).strip()
             active_job_type = str(raw.get("active_job_type", "scout")).strip() or "scout"
@@ -26617,7 +26646,7 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
 
         raise SystemExit(
             f"Unsupported fixture save_transforms[{index}].kind '{kind}' in {manifest_path}; "
-            "supported kinds: player_mutations, player_remove_addiction, clear_avatar_auto_move, clear_avatar_activity, player_items, player_worn_items, player_condition, player_location_offset_ms, player_basecamp_at_omt, player_near_overmap_special, "
+            "supported kinds: representative_human_source_geometry, player_mutations, player_remove_addiction, clear_avatar_auto_move, clear_avatar_activity, player_items, player_worn_items, player_condition, player_location_offset_ms, player_basecamp_at_omt, player_near_overmap_special, "
             "overmap_terrain_id_at_abs_omt, player_view_seen_omt, seed_overmap_special_near_player, map_fields_near_player, map_terrain_near_player, map_furniture_near_player, "
             "map_items_near_player, source_firewood_zone_near_player, remove_overmap_npcs, "
             "overmap_npcs_near_player, repair_basecamp_npc_assignments, basecamp_npc_patrol_priority, basecamp_assigned_npc_items, npc_llm_panic_state, "
@@ -26640,6 +26669,8 @@ def validate_fixture_save_transform_chain(
     for index, transform in enumerate(transforms):
         kind = str(transform.get("kind", "") or "").strip().lower()
         player_save = str(transform.get("player_save", "") or "").strip()
+        if kind == "representative_human_source_geometry" and index != len(transforms) - 1:
+            raise SystemExit("Representative human source geometry must follow all inherited save transforms")
         if kind == "remove_overmap_npcs":
             if transform.get("npc_ids"):
                 # A selective removal does not prove that the target overmap
@@ -28042,6 +28073,82 @@ def apply_seed_overmap_special_near_player_transform(world_dir: Path, transform:
         "approx_range_omt": max(abs(offset_omt[0]), abs(offset_omt[1]), abs(offset_omt[2])),
     }
 
+
+
+def audit_representative_human_source_geometry(
+    world_dir: Path, transform: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Measure setup geometry, including inherited homes; never assert emission or readiness.
+
+    Use horizontal Chebyshev distance to every occupied OMT in the footprint,
+    so a roof/z difference cannot manufacture remote separation. This is a
+    conservative lower bound for either native distance option.
+    """
+    player_omt, _ = load_player_abs_omt(world_dir, transform["player_save"])
+    source_area = [tuple(point) for point in transform["source_area_omt"]]
+    if tuple(player_omt) not in source_area:
+        raise SystemExit("Representative setup player must remain in the declared source area")
+    source_terrain = []
+    for point in source_area:
+        terrain = saved_overmap_terrain_id(world_dir, point)
+        if terrain != transform["expected_source_terrain_id"]:
+            raise SystemExit(f"Representative source {point} terrain is {terrain}, not "
+                             f"{transform['expected_source_terrain_id']}")
+        source_terrain.append({"omt": list(point), "terrain_id": terrain})
+
+    homes: Dict[str, Set[Tuple[int, int, int]]] = {}
+    placements = load_bandit_special_placements(
+        repo_root(), world_dir, set(BANDIT_HOME_SPECIAL_IDS) | {"cannibal_camp"},
+    )
+    for placement in placements:
+        match = re.fullmatch(r"o\.(-?\d+)\.(-?\d+)(?:\.zzip)?", placement.overmap_file)
+        if match is None or not placement.points:
+            raise SystemExit("Representative setup cannot authenticate a home placement's coordinates")
+        ox, oy = (int(value) for value in match.groups())
+        points = {(x + ox * OMAPX, y + oy * OMAPY, z) for x, y, z in placement.points}
+        anchor = anchor_from_special_points(sorted(point for point in points if point[2] == 0) or sorted(points))
+        site_id = f"overmap_special:{placement.special_id}@{anchor[0]},{anchor[1]},{anchor[2]}"
+        homes.setdefault(site_id, set()).update(points)
+
+    dimension_path = world_dir / "dimension_data.gsav"
+    serialized = dimension_path.read_text(encoding="utf-8")
+    payload = json.loads("\n".join(line for line in serialized.splitlines()
+                                  if not line.lstrip().startswith("#")))
+    sites = payload.get("overmapbuffer", {}).get("bandit_live_world", {}).get("sites")
+    if not isinstance(sites, list):
+        raise SystemExit("Representative setup lacks the native human home registry")
+    for site in sites:
+        if not isinstance(site, dict) or not isinstance(site.get("site_id"), str):
+            raise SystemExit("Representative setup has an unauthenticated registered home")
+        footprint = site.get("footprint")
+        if not isinstance(footprint, list) or not footprint or any(
+                not isinstance(point, list) or len(point) != 3 or any(
+                    isinstance(value, bool) or not isinstance(value, int) for value in point
+                ) for point in footprint):
+            raise SystemExit("Representative setup has a registered home with unknown footprint")
+        # Include registered/mapped-extra homes as well as still-unregistered
+        # placements; neither source may hide an additional participating home.
+        homes.setdefault(site["site_id"], set()).update(tuple(point) for point in footprint)
+    missing = set(transform["expected_home_site_ids"]) - homes.keys()
+    if missing:
+        raise SystemExit(f"Representative setup is missing expected homes: {sorted(missing)}")
+
+    minimum = transform["minimum_distance_omt"]
+    rows = []
+    for site_id, footprint in sorted(homes.items()):
+        distance = min(max(abs(source[0] - home[0]), abs(source[1] - home[1]))
+                       for source in source_area for home in footprint)
+        if distance < minimum:
+            raise SystemExit(f"Representative source area is only {distance} OMT from {site_id}; needs {minimum}")
+        rows.append({"site_id": site_id, "footprint_omt": [list(point) for point in sorted(footprint)],
+                     "nearest_footprint_distance_omt": distance})
+    return {"kind": "representative_human_source_geometry", "world": world_dir.name,
+            "player_omt": list(player_omt), "source_area_omt": [list(point) for point in source_area],
+            "source_overmap_terrain": source_terrain,
+            "minimum_distance_omt": minimum, "distance_metric": "horizontal_chebyshev_omt",
+            "homes": rows, "evidence_class": "setup", "gameplay_credit": False,
+            "native_qualification_required": ["usable terrain", "actual source and emission",
+                                               "measured native reach", "saved World adoption"]}
 
 
 def apply_player_near_overmap_special_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
@@ -32222,9 +32329,14 @@ def apply_world_option_overrides_transform(
 
 
 def apply_fixture_save_transforms(world_dir: Path, transforms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if any(transform.get("kind") == "representative_human_source_geometry" for transform in transforms):
+        validate_fixture_save_transform_chain(transforms)
     reports: List[Dict[str, Any]] = []
     for transform in transforms:
         kind = str(transform.get("kind", "")).strip().lower()
+        if kind == "representative_human_source_geometry":
+            reports.append(audit_representative_human_source_geometry(world_dir, transform))
+            continue
         if kind == "bandit_active_sortie_clock":
             reports.append(apply_bandit_active_sortie_clock_transform(world_dir, transform))
             continue

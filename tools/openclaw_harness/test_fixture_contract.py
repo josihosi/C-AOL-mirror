@@ -58,6 +58,7 @@ from startup_harness import (  # noqa: E402
     apply_bandit_clone_site_transform,
     apply_bandit_hostile_operation_bootstrap_transform,
     apply_fixture_save_transforms,
+    audit_representative_human_source_geometry,
     apply_game_turn_to_payload,
     apply_overmap_terrain_id_at_abs_omt_transform,
     apply_option_overrides_to_file,
@@ -11376,6 +11377,170 @@ class ScenarioFixtureContractTest(unittest.TestCase):
             "Scenario fixtures whose final staged world has no tracked .sav or .sav.zzip:\n"
             + "\n".join(f"- {failure}" for failure in failures),
         )
+
+
+class RepresentativeHumanSourceGeometryTest(unittest.TestCase):
+    camp = "overmap_special:bandit_camp@129,149,0"
+    cabin = "overmap_special:bandit_cabin@103,167,0"
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="representative-human-geometry-")
+        self.addCleanup(temporary.cleanup)
+        self.world = Path(temporary.name) / "World"
+        self.world.mkdir()
+        self.guard = {
+            "kind": "representative_human_source_geometry", "player_save": "player.sav.zzip",
+            "source_area_omt": [[129, 134, 0]], "minimum_distance_omt": 15,
+            "expected_source_terrain_id": "field",
+            "expected_home_site_ids": [self.camp, self.cabin],
+        }
+        self.placements = [
+            SimpleNamespace(special_id="bandit_camp", overmap_file="o.0.0.zzip", points=[
+                (129, 149, 0), (130, 149, 0), (129, 150, 0), (130, 150, 0), (129, 149, 1)]),
+            SimpleNamespace(special_id="bandit_cabin", overmap_file="o.0.0.zzip", points=[(103, 167, 0)]),
+        ]
+        self.dimension = self.world / "dimension_data.gsav"
+        self.write_sites([{"site_id": self.cabin, "footprint": [[103, 167, 0]],
+                           "members": [{"npc_id": 7, "hp": 66}], "clock": 123,
+                           "history": ["old genuine lead"]}])
+        self.player = self.world / "player.sav.zzip"
+        self.player.write_text(json.dumps({"turn": 5216234, "om_x": 0, "om_y": 0,
+                                          "levx": 262, "levy": 286, "levz": 1,
+                                          "player": {"location": [3156, 3444, 1],
+                                                     "inv": [{"typeid": "lighter", "uid": 771}],
+                                                     "hp": 90}}))
+
+    def write_sites(self, sites: List[Dict[str, Any]]) -> None:
+        self.dimension.write_text("# version 37\n" + json.dumps({
+            "overmapbuffer": {"bandit_live_world": {"sites": sites}}, "weather": {"seed": 88}}))
+
+    def audit(self, *, player: tuple = (129, 134, 0)) -> Dict[str, Any]:
+        with mock.patch("startup_harness.load_player_abs_omt", return_value=(player, [0, 0, 0])), \
+                mock.patch("startup_harness.load_bandit_special_placements", return_value=self.placements), \
+                mock.patch("startup_harness.saved_overmap_terrain_id", return_value="field"):
+            return audit_representative_human_source_geometry(self.world, self.guard)
+
+    def test_resolved_derivative_reuses_payload_without_cloning_or_changing_homes(self) -> None:
+        resolved = resolve_fixture_payload("r050_rural_bandit_remote_v1", "live-debug")
+        self.assertEqual(resolved["payload_fixture"], "r050_rural_roof_bandit_only_v1")
+        self.assertEqual(resolved["save_src"], HARNESS_DIR / "fixtures/saves/live-debug/r050_rural_roof_bandit_only_v1/save")
+        self.assertEqual([row[1] for row in resolved["source_chain"]],
+                         ["r050_rural_bandit_remote_v1", "r050_rural_roof_bandit_only_v1"])
+        self.assertEqual([row["kind"] for row in resolved["save_transforms"]],
+                         ["player_near_overmap_special", "representative_human_source_geometry"])
+        self.assertEqual(resolved["save_transforms"][-1]["minimum_distance_omt"], 15)
+        self.assertEqual(resolved["save_transforms"][-1]["source_area_omt"], [[145, 149, 0]])
+        self.assertFalse((resolved["fixture_dir"] / "save").exists())
+        original = resolve_fixture_payload("r050_rural_roof_bandit_only_v1", "live-debug")
+        self.assertEqual(original["save_transforms"], [])
+
+    def test_actual_transform_pipeline_moves_only_initial_player_and_preserves_native_state(self) -> None:
+        before = json.loads(self.player.read_text())
+        dimension_before = self.dimension.read_bytes()
+        resolved = resolve_fixture_payload("r050_rural_bandit_remote_v1", "live-debug")
+        transforms = json.loads(json.dumps(resolved["save_transforms"]))
+        for transform in transforms:
+            transform["player_save"] = self.player.name
+        with mock.patch("startup_harness.run_zzip", side_effect=PlayerMutationsTransformContractTest.fake_zzip), \
+                mock.patch("startup_harness.load_bandit_special_placements", return_value=self.placements), \
+                mock.patch("startup_harness.saved_overmap_terrain_id", return_value="field"):
+            reports = apply_fixture_save_transforms(self.world, transforms)
+        after = json.loads(self.player.read_text())
+        expected = json.loads(json.dumps(before))
+        expected["player"]["location"] = [145 * 24 + 12, 149 * 24 + 12, 0]
+        expected.update({"levx": 290, "levy": 298, "levz": 0})
+        self.assertEqual(after, expected)
+        self.assertEqual(self.dimension.read_bytes(), dimension_before)
+        self.assertFalse(self.player.with_suffix("").exists())
+        geometry = reports[-1]
+        self.assertEqual([row["nearest_footprint_distance_omt"] for row in geometry["homes"]], [42, 15])
+        self.assertEqual(geometry["evidence_class"], "setup")
+        self.assertFalse(geometry["gameplay_credit"])
+        self.assertIn("actual source and emission", geometry["native_qualification_required"])
+
+    def test_source_terrain_binding_refuses_different_saved_terrain(self) -> None:
+        with mock.patch("startup_harness.load_player_abs_omt", return_value=((129, 134, 0), [0, 0, 0])), \
+                mock.patch("startup_harness.saved_overmap_terrain_id", return_value="forest_thick"):
+            with self.assertRaisesRegex(SystemExit, "terrain is forest_thick, not field"):
+                audit_representative_human_source_geometry(self.world, self.guard)
+
+    def test_full_footprint_edge_overrides_good_anchor_distance_and_z(self) -> None:
+        self.placements[0].points.append((129, 143, 20))
+        with self.assertRaisesRegex(SystemExit, "only 9 OMT"):
+            self.audit()
+
+    def test_additional_registered_home_cannot_hide_behind_expected_home_filter(self) -> None:
+        self.write_sites([{"site_id": "map-extra:additional", "footprint": [[128, 135, 0]],
+                           "members": [{"npc_id": 22}]}])
+        before = self.dimension.read_bytes()
+        with self.assertRaisesRegex(SystemExit, "only 1 OMT.*map-extra:additional"):
+            self.audit()
+        self.assertEqual(self.dimension.read_bytes(), before)
+
+    def test_absolute_neighbor_overmap_placement_cannot_hide_additional_home(self) -> None:
+        self.placements.append(SimpleNamespace(special_id="bandit_camp", overmap_file="o.-1.0.zzip",
+                                               points=[(179, 134, 0)]))
+        self.guard["source_area_omt"] = [[0, 134, 0]]
+        with self.assertRaisesRegex(SystemExit, "only 1 OMT.*@-1,134,0"):
+            self.audit(player=(0, 134, 0))
+
+    def test_source_area_and_player_both_must_be_remote(self) -> None:
+        self.guard["source_area_omt"].append([129, 145, 0])
+        with self.assertRaisesRegex(SystemExit, "only 4 OMT"):
+            self.audit()
+        self.guard["source_area_omt"] = [[129, 134, 0]]
+        with self.assertRaisesRegex(SystemExit, "player must remain"):
+            self.audit(player=(140, 134, 0))
+
+    def test_explicit_ten_boundary_is_allowed_but_never_below_ten(self) -> None:
+        self.guard.update({"source_area_omt": [[129, 139, 0]], "minimum_distance_omt": 10})
+        self.assertEqual(self.audit(player=(129, 139, 0))["minimum_distance_omt"], 10)
+        for invalid in (9, True, "15"):
+            with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
+                normalize_fixture_save_transforms([{**self.guard, "minimum_distance_omt": invalid}],
+                                                  manifest_path=Path("manifest.json"))
+
+    def test_missing_or_malformed_native_home_is_not_silently_accepted(self) -> None:
+        self.placements.pop()
+        self.write_sites([])
+        with self.assertRaisesRegex(SystemExit, "missing expected homes"):
+            self.audit()
+        self.write_sites([{"site_id": self.cabin, "footprint": []}])
+        with self.assertRaisesRegex(SystemExit, "unknown footprint"):
+            self.audit()
+        self.dimension.write_text("# version 37\n{}")
+        with self.assertRaisesRegex(SystemExit, "lacks the native"):
+            self.audit()
+
+    def test_inherited_later_mutation_is_rejected_before_any_write(self) -> None:
+        transforms = [self.guard, {"kind": "player_location_offset_ms", "player_save": self.player.name,
+                                   "offset_ms": [0, 24, 0]}]
+        before = self.player.read_bytes()
+        with self.assertRaisesRegex(SystemExit, "follow all inherited"):
+            apply_fixture_save_transforms(self.world, transforms)
+        self.assertEqual(self.player.read_bytes(), before)
+
+    def test_resolver_checks_after_the_whole_inherited_transform_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ScenarioFixtureContractTest.write_resolved_fixture_chain(
+                temporary, [self.guard],
+                [{"kind": "player_location_offset_ms", "player_save": self.player.name,
+                  "offset_ms": [0, 24, 0]}],
+            )
+            with mock.patch("startup_harness.profile_fixture_root", return_value=Path(temporary) / "live-debug"):
+                with self.assertRaisesRegex(SystemExit, "follow all inherited"):
+                    resolve_fixture_payload("derived", "live-debug")
+
+    def test_focused_registered_and_clone_families_keep_original_geometry(self) -> None:
+        registered = resolve_fixture_payload("r033_bandit_registered_smoke_observer_v2", "live-debug")
+        self.assertIn([0, -1, -1], [row.get("offset_omt") for row in registered["save_transforms"]])
+        self.assertTrue(any(row["kind"] == "bandit_registered_staffed_observer_bootstrap"
+                            for row in registered["save_transforms"]))
+        observer = resolve_fixture_payload("bandit_scout_to_decision_observer_v0_2026-08-06", "live-debug")
+        self.assertIn([2, 4, 0], [row.get("offset_omt") for row in observer["save_transforms"]])
+        for resolved in (registered, observer):
+            self.assertNotIn("representative_human_source_geometry",
+                             [row["kind"] for row in resolved["save_transforms"]])
 
 
 if __name__ == "__main__":
