@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <exception>
 #include <filesystem>
+#include <variant>
 #include <functional>
 #include <optional>
 #include <set>
@@ -60,11 +61,14 @@ static cata_path find_dirname( const tripoint_abs_omt &om_addr )
     return PATH_INFO::current_dimension_save_path() / "maps" / segment;
 }
 
-// No borrowed submaps or failed results live here. At most one successful
-// archive/footer is held, only for the caller's synchronous preparation.
+// No borrowed submaps live here. One normal-or-checked archive/footer and
+// bounded terrain metadata live only for the synchronous preparation. A failed
+// checked open is remembered only until this path group/decision ends.
 struct mapbuffer::existing_read_context {
     std::filesystem::path path;
-    std::optional<zzip> archive;
+    std::optional<std::variant<zzip, zzip::checked_reader>> archive;
+    bool checked_attempted = false;
+    overmapbuffer::existing_terrain_reader terrain{ overmap_buffer };
 };
 
 mapbuffer::existing_submap_reader::existing_submap_reader( mapbuffer &source ) :
@@ -77,6 +81,74 @@ mapbuffer::existing_submap_reader::~existing_submap_reader() = default;
 submap *mapbuffer::existing_submap_reader::lookup( const tripoint_abs_sm &p )
 {
     return source.lookup_submap_existing( p, context.get() );
+}
+
+std::unique_ptr<submap> mapbuffer::existing_submap_reader::read_omitted_uniform(
+    const tripoint_abs_sm &p, bool *read_error )
+{
+    if( read_error ) {
+        *read_error = false;
+    }
+    // A resident override wins even when its coarse overmap tile is uniform.
+    if( source.lookup_submap_cached( p ) ) {
+        return nullptr;
+    }
+    const tripoint_abs_omt omt = project_to<coords::omt>( p );
+    try {
+        const cata_path directory = find_dirname( omt );
+        const bool compressed = world_generator->active_world->has_compression_enabled();
+        const auto path = ( compressed ? directory + zzip_suffix :
+                            directory / quad_file_name( omt ) ).get_unrelative_path();
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status( path, error );
+        if( error && error != std::errc::no_such_file_or_directory ) {
+            throw std::runtime_error( error.message() );
+        }
+        if( std::filesystem::exists( status ) ) {
+            // A broken link/directory/special file is not clean absence.
+            if( !std::filesystem::is_regular_file( status ) ) {
+                throw std::runtime_error( "existing submap data is not a regular file" );
+            }
+            if( !compressed ) {
+                return nullptr; // Any existing plain quad overrides uniform metadata.
+            }
+            // This must precede ordinary lookup: zzip::load can repair a damaged
+            // archive. Recovery is not evidence of clean serialized absence.
+            if( context->path != path || !context->checked_attempted ) {
+                context->archive.reset();
+                context->path = path;
+                context->checked_attempted = true;
+                auto checked = zzip::checked_reader::open( path );
+                if( checked ) {
+                    context->archive.emplace( std::in_place_type<zzip::checked_reader>, std::move( *checked ) );
+                }
+            }
+            if( !context->archive || !std::holds_alternative<zzip::checked_reader>( *context->archive ) ) {
+                throw std::runtime_error( "unreadable or malformed existing archive" );
+            }
+            if( std::get<zzip::checked_reader>( *context->archive ).has_file(
+                    std::filesystem::u8path( quad_file_name( omt ) ) ) ) {
+                return nullptr; // Existing quads override, including omitted siblings.
+            }
+        }
+    } catch( const std::exception &error ) {
+        if( read_error ) {
+            *read_error = true;
+        }
+        debugmsg( "Failed to read uniform submap metadata %s: %s", p.to_string(), error.what() );
+        return nullptr;
+    }
+    const auto terrain = context->terrain.read( omt );
+    if( !terrain ) {
+        return nullptr;
+    }
+    const auto uniform = ( *terrain )->get_uniform_terrain();
+    if( !uniform ) {
+        return nullptr;
+    }
+    auto result = std::make_unique<submap>();
+    result->set_all_ter( uniform->id(), true );
+    return result;
 }
 
 mapbuffer MAPBUFFER;
@@ -516,37 +588,55 @@ submap *mapbuffer::unserialize_submaps( const tripoint_abs_sm &p, const bool gen
         {
             cata_path zzip_name = dirname;
             zzip_name += zzip_suffix;
-            std::optional<zzip> opened;
-            zzip *z = nullptr;
             const auto path = zzip_name.get_unrelative_path();
-            if( context && context->archive && context->path == path ) {
-                z = &*context->archive;
+            std::vector<std::byte> contents;
+            if( context && context->archive && context->path == path &&
+                std::holds_alternative<zzip::checked_reader>( *context->archive ) ) {
+                const auto &reader = std::get<zzip::checked_reader>( *context->archive );
+                if( !reader.has_file( file_name_path ) ) {
+                    raid_perf_note_nav( raid_perf_nav_event::missing_quad );
+                    return false;
+                }
+                auto bytes = reader.get_file( file_name_path,
+                             ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+                if( !bytes ) {
+                    throw std::runtime_error( "unreadable checked submap archive entry" );
+                }
+                contents = std::move( *bytes );
             } else {
-                if( !file_exist( zzip_name ) ) {
-                    raid_perf_note_nav( raid_perf_nav_event::missing_archive );
-                    return false;
-                }
-                raid_perf_note_nav( raid_perf_nav_event::archive_load_calls );
-                opened = zzip::load( path,
-                                     ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
-                if( !opened ) {
-                    debugmsg( _fmt( "Failed to load submaps from {0}, could not open zzip.", zzip_name ) );
-                    return false;
-                }
-                if( context ) {
-                    context->archive.reset();
-                    context->path = path;
-                    context->archive = std::move( opened );
-                    z = &*context->archive;
+                std::optional<zzip> opened;
+                zzip *z = nullptr;
+                if( context && context->archive && context->path == path &&
+                    std::holds_alternative<zzip>( *context->archive ) ) {
+                    z = &std::get<zzip>( *context->archive );
                 } else {
-                    z = &*opened;
+                    if( !file_exist( zzip_name ) ) {
+                        raid_perf_note_nav( raid_perf_nav_event::missing_archive );
+                        return false;
+                    }
+                    raid_perf_note_nav( raid_perf_nav_event::archive_load_calls );
+                    opened = zzip::load( path,
+                                         ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+                    if( !opened ) {
+                        debugmsg( _fmt( "Failed to load submaps from {0}, could not open zzip.", zzip_name ) );
+                        return false;
+                    }
+                    if( context ) {
+                        context->archive.reset();
+                        context->path = path;
+                        context->checked_attempted = false;
+                        context->archive.emplace( std::in_place_type<zzip>, std::move( *opened ) );
+                        z = &std::get<zzip>( *context->archive );
+                    } else {
+                        z = &*opened;
+                    }
                 }
+                if( !z->has_file( file_name_path ) ) {
+                    raid_perf_note_nav( raid_perf_nav_event::missing_quad );
+                    return false;
+                }
+                contents = z->get_file( file_name_path );
             }
-            if( !z->has_file( file_name_path ) ) {
-                raid_perf_note_nav( raid_perf_nav_event::missing_quad );
-                return false;
-            }
-            std::vector<std::byte> contents = z->get_file( file_name_path );
             std::string_view string_contents{ reinterpret_cast<char *>( contents.data() ), contents.size() };
             JsonValue jsin = json_loader::from_string( std::string( string_contents ) );
             try {

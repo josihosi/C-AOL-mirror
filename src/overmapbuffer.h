@@ -224,6 +224,21 @@ class overmapbuffer
     public:
         overmapbuffer();
 
+        /** One synchronous, failure-preserving projection of existing terrain.
+         * Resident values win. Cold reads never load/install an overmap, decode
+         * actors, migrate, mark seen or generate. End before native/file changes. */
+        class existing_terrain_reader
+        {
+            public:
+                explicit existing_terrain_reader( overmapbuffer &source );
+                ~existing_terrain_reader();
+                std::optional<oter_id> read( const tripoint_abs_omt &position );
+            private:
+                struct context;
+                overmapbuffer &source;
+                std::unique_ptr<context> state;
+        };
+
         bool externally_set_args = false;
         overmap_global_state global_state;
         dimension_region_layout regions;

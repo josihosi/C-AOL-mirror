@@ -34,6 +34,14 @@ class mapbuffer
                 existing_submap_reader( const existing_submap_reader & ) = delete;
                 existing_submap_reader &operator=( const existing_submap_reader & ) = delete;
                 submap *lookup( const tripoint_abs_sm &p );
+                /** Exact native uniform terrain only after checked serialized
+                 * quad absence. Resident/serialized overrides, unknown terrain
+                 * and read failures refuse. Caller owns the temporary value;
+                 * this never inserts, saves, generates or simulates a submap.
+                 * read_error distinguishes refusal from an existing override;
+                 * callers must not attempt ordinary archive lookup after error. */
+                std::unique_ptr<submap> read_omitted_uniform( const tripoint_abs_sm &p,
+                        bool *read_error = nullptr );
             private:
                 mapbuffer &source;
                 std::unique_ptr<existing_read_context> context;

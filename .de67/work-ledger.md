@@ -207,6 +207,8 @@ Owner-selected work in Phase2 order. Assignments and supported task routes admit
 
 - [ ] R-REL-EXPEDITION-REACH — Camps can undertake useful30–40-OMT trips through mixed terrain without starvation admission or premature missing/return expiry.
   - DFS slices: `R-REL-EXPEDITION-REACH-S001`
+  - Subtasks:
+    - [active] remote-approach-lighting-independence :: Diagnose/fix player-independent remote route/watch admission with bounded candidate/sightline/lighting reads; matched observer/target/time/terrain player-near/far and resident/saved controls; isolate irrelevant upper geometry from necessary roof/light dependencies; actual useful watch position/arrival and finite alternatives/refusal, night/occlusion negatives, human and shared Mi-go callers. No global mapgen, hidden actor knowledge, forced visibility, player-visit prerequisite or near-brazier workaround. Same Source custody R-REL-RAID-SWEEP-exploration-001/tasks/clocks; current source/save/native checkpoints preserved. Owner clarification remote-observation-amendment.current.json validated; FS and AI-map updated by mutator, implementation/acceptance pending.
 
 - [ ] R-REL-AI-ACTIVATION — A bounded player-centered overmap AI bubble suspends inactive work and clocks without breaking an independently active party.
   - DFS slices: `R-REL-AI-ACTIVATION-S001`

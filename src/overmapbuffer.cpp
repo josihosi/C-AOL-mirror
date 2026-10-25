@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -36,6 +37,7 @@
 #include "migo_tower_native.h"
 #include "imgui/imgui.h"
 #include "json.h"
+#include "json_loader.h"
 #include "line.h"
 #include "map.h"
 #include "mapgendata.h"
@@ -2290,6 +2292,158 @@ const oter_id &overmapbuffer::ter( const tripoint_abs_omt &p )
 {
     const overmap_with_local_coords om_loc = get_om_global( p );
     return om_loc.om->ter( om_loc.local );
+}
+
+struct overmapbuffer::existing_terrain_reader::context {
+    // A MAPSIZE-wide physical view intersects at most four overmap owners.
+    // Cache only their saved layer documents, not actor sections/native grids.
+    std::map<point_abs_om, std::optional<JsonValue>> layers;
+};
+
+overmapbuffer::existing_terrain_reader::existing_terrain_reader( overmapbuffer &source ) :
+    source( source ), state( std::make_unique<context>() ) {}
+overmapbuffer::existing_terrain_reader::~existing_terrain_reader() = default;
+
+std::optional<oter_id> overmapbuffer::existing_terrain_reader::read( const tripoint_abs_omt &position )
+{
+    if( position.z() < -OVERMAP_DEPTH || position.z() > OVERMAP_HEIGHT ) {
+        return std::nullopt;
+    }
+    point_abs_om owner;
+    point_om_omt local;
+    std::tie( owner, local ) = project_remain<coords::om>( position.xy() );
+    if( const overmap *resident = source.find_loaded_overmap( owner ) ) {
+        const auto &terrain = resident->ter( tripoint_om_omt( local, position.z() ) );
+        return terrain == oter_str_id::NULL_ID().id() ? std::nullopt : std::optional<oter_id>( terrain );
+    }
+    auto found = state->layers.find( owner );
+    if( found == state->layers.end() ) {
+        if( state->layers.size() == 4 ) {
+            state->layers.erase( state->layers.begin() );
+        }
+        const auto read_layers = [&]() -> std::optional<JsonValue> {
+            const bool compressed = world_generator->active_world->has_compression_enabled();
+            const std::string name = overmapbuffer::terrain_filename( owner );
+            const auto path = ( compressed ? PATH_INFO::current_dimension_save_path() /
+                                zzip_overmap_directory / name + zzip_suffix :
+                                PATH_INFO::current_dimension_save_path() / name ).get_unrelative_path();
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status( path, error );
+            if( error == std::errc::no_such_file_or_directory ||
+                ( !error && !std::filesystem::exists( status ) ) ) {
+                return std::nullopt;
+            }
+            if( error || !std::filesystem::is_regular_file( status ) ) {
+                throw std::runtime_error( "unreadable existing terrain owner" );
+            }
+            std::unique_ptr<std::istream> input;
+            if( compressed ) {
+                auto archive = zzip::checked_reader::open( path );
+                auto bytes = archive ? archive->get_file( std::filesystem::u8path( name ),
+                             ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path() ) :
+                             std::nullopt;
+                if( !bytes ) {
+                    throw std::runtime_error( "unreadable existing terrain archive entry" );
+                }
+                input = std::make_unique<std::istringstream>( std::string(
+                            reinterpret_cast<const char *>( bytes->data() ), bytes->size() ) );
+            } else {
+                input = std::make_unique<std::ifstream>( path, std::ios::binary );
+                if( !*input ) {
+                    throw std::runtime_error( "unreadable existing terrain file" );
+                }
+            }
+            // Recognize the native optional header without changing the global
+            // loading-version owner. No native actor/overmap deserializer runs.
+            if( input->peek() == '#' ) {
+                std::string header;
+                std::getline( *input, header );
+                std::istringstream version( header );
+                std::string marker;
+                std::string label;
+                int number = -1;
+                if( !( version >> marker >> label >> number ) || marker != "#" ||
+                    label != "version" || number < 0 || number > savegame_version ) {
+                    throw std::runtime_error( "invalid terrain version header" );
+                }
+                version >> std::ws;
+                if( !version.eof() ) {
+                    throw std::runtime_error( "invalid terrain version header suffix" );
+                }
+            }
+            TextJsonIn json( *input, path.string() );
+            std::optional<JsonValue> result;
+            json.start_object();
+            while( !json.end_object() ) {
+                const auto member = json.get_member_name();
+                if( member == "layers" ) {
+                    if( result || !json.test_array() ) {
+                        throw std::runtime_error( "invalid or duplicate terrain layers" );
+                    }
+                    auto layers = json.get_array();
+                    result = json_loader::from_string( layers.str() );
+                    layers.finish();
+                } else {
+                    json.skip_value(); // lexical validation only, no actor payload decoding
+                }
+            }
+            *input >> std::ws;
+            if( input->bad() || input->peek() != std::char_traits<char>::eof() || !result ||
+                !result->test_array() || result->get_array().size() != OVERMAP_LAYERS ) {
+                throw std::runtime_error( "incomplete terrain metadata" );
+            }
+            return result;
+        };
+        std::optional<JsonValue> layers;
+        try {
+            layers = read_layers();
+        } catch( const std::exception &error ) {
+            debugmsg( "Failed to read existing terrain metadata %s: %s", position.to_string(), error.what() );
+        }
+        found = state->layers.emplace( owner, std::move( layers ) ).first;
+    }
+    if( !found->second ) {
+        return std::nullopt;
+    }
+    try {
+        const auto layers = found->second->get_array();
+        const size_t z = position.z() + OVERMAP_DEPTH;
+        if( !layers.has_array( z ) ) {
+            return std::nullopt;
+        }
+        const auto layer = layers.get_array( z );
+        const int wanted = local.y() * OMAPX + local.x();
+        int filled = 0;
+        std::optional<oter_id> answer;
+        // Native saved terrain is row-major RLE. Validate the chosen layer's
+        // extent, not unrelated terrain/actors, and materialize no native grid.
+        for( size_t i = 0; i < layer.size(); ++i ) {
+            if( !layer.has_array( i ) ) {
+                return std::nullopt;
+            }
+            const auto run = layer.get_array( i );
+            if( run.size() != 2 || !run.has_string( 0 ) || !run.has_int( 1 ) ) {
+                return std::nullopt;
+            }
+            const int64_t count = run[1].get_int64();
+            if( count <= 0 || count > OMAPX * OMAPY - filled ) {
+                return std::nullopt;
+            }
+            if( wanted >= filled && wanted < filled + count ) {
+                const auto id = run.get_string( 0 );
+                if( overmap::is_oter_id_obsolete( id ) || !oter_str_id( id ).is_valid() ||
+                    oter_str_id( id ) == oter_str_id::NULL_ID() ) {
+                    return std::nullopt;
+                }
+                answer = oter_id( id );
+            }
+            filled += count;
+        }
+        return filled == OMAPX * OMAPY ? answer : std::nullopt;
+    } catch( const std::exception &error ) {
+        debugmsg( "Invalid existing terrain metadata %s: %s", position.to_string(), error.what() );
+        return std::nullopt;
+    }
 }
 
 const oter_id &overmapbuffer::ter_existing( const tripoint_abs_omt &p )

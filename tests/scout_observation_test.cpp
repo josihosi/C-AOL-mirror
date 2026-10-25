@@ -1,5 +1,11 @@
 #include <algorithm>
+#include <array>
+#include <flatbuffers/flexbuffers.h>
+#include <zstd/zstd.h>
+#include <zstd/common/mem.h>
+#include <zstd/common/xxhash.h>
 #include <cmath>
+#include <chrono>
 #include <memory>
 #include "lightmap.h"
 #include "level_cache.h"
@@ -47,6 +53,7 @@
 #include "weather_type.h"
 #include "worldfactory.h"
 #include "zzip.h"
+#include "rng.h"
 
 std::vector<tripoint_abs_omt> live_bandit_member_route_to_for_test(
     const npc &member, const bandit_live_world::site_record &site,
@@ -1675,4 +1682,784 @@ TEST_CASE( "existing-only archive reuse ends with one geometry preparation",
     }
     CHECK( calendar::turn == before_turn );
     CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == global_count );
+}
+
+TEST_CASE( "remote site lighting is independent of player proximity and irrelevant upper availability",
+           "[binocular_056][remote_lighting_player_independence]" )
+{
+    const bool roof = GENERATE( false, true );
+    CAPTURE( roof );
+    clear_avatar();
+    clear_npcs();
+    clear_map_with_vision( -1, 1, false );
+    const auto old_turn = calendar::turn;
+    const auto old_origin = get_map().get_abs_sub();
+    const auto old_player = get_avatar().pos_abs();
+    std::vector<std::pair<tripoint_abs_sm, std::unique_ptr<submap>>> withheld;
+    const auto restore_upper = [&]() {
+        for( auto &[position, body] : withheld ) {
+            if( body ) {
+                const auto wanted_position = position;
+                const auto slot = std::find_if( MAPBUFFER.begin(), MAPBUFFER.end(),
+                [&]( const auto & entry ) { return entry.first == wanted_position; } );
+                REQUIRE( slot != MAPBUFFER.end() );
+                REQUIRE_FALSE( slot->second );
+                slot->second = std::move( body );
+            }
+        }
+    };
+    on_out_of_scope restore( [&]() {
+        restore_upper();
+        get_map().load( old_origin, false, false );
+        get_avatar().setpos( old_player, false );
+        clear_map_with_vision( -1, 1, false );
+        set_time( old_turn );
+    } );
+    set_time_to_day();
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    map &here = get_map();
+    npc observer;
+    observer.normalize();
+    observer.set_fake( true );
+    observer.recalc_sight_limits();
+    observer.setpos( here.get_abs( tripoint_bub_ms( 70, 66, 0 ) ), false );
+    const auto target = here.get_abs( tripoint_bub_ms( 84, 66, 0 ) );
+    const auto fixed_observer = observer.pos_abs();
+    const auto fixed_time = calendar::turn;
+    const std::vector<tripoint_abs_omt> footprint = { project_to<coords::omt>( target ) };
+    const auto first = project_to<coords::sm>( footprint.front() );
+    double read_seconds = 0;
+    size_t read_calls = 0;
+    const auto read_current = [&]() {
+        // Each decision ends before native geometry/time/file changes.
+        const auto start = std::chrono::steady_clock::now();
+        const auto result = [&]() {
+            scout_observation::site_reader reader;
+            return reader.read_signal( observer, fixed_observer, target, footprint );
+        }();
+        read_seconds += std::chrono::duration<double>( std::chrono::steady_clock::now() - start ).count();
+        ++read_calls;
+        return result;
+    };
+    std::set<tripoint_abs_sm> upper;
+    for( int z = 0; z <= OVERMAP_HEIGHT; ++z ) {
+        for( int x = 0; x < 2; ++x ) {
+            for( int y = 0; y < 2; ++y ) {
+                const tripoint_abs_sm cell( first.x() + x, first.y() + y, z );
+                submap *sm = MAPBUFFER.lookup_submap_cached( cell );
+                REQUIRE( sm );
+                REQUIRE( sm->vehicles.empty() );
+                if( z == OVERMAP_HEIGHT ) {
+                    // Expanded native storage need not carry the uniform flag.
+                    // Prove the actual physical sky cells instead of assuming it.
+                    for( int sx = 0; sx < SEEX; ++sx ) {
+                        for( int sy = 0; sy < SEEY; ++sy ) {
+                            REQUIRE( sm->get_ter( point_sm_ms( sx, sy ) ) == ter_str_id( "t_open_air" ) );
+                        }
+                    }
+                    upper.insert( cell );
+                }
+            }
+        }
+    }
+    const auto corner = project_to<coords::ms>( footprint.front() );
+    for( int x = 0; x < 2 * SEEX; ++x ) {
+        for( int y = 0; y < 2 * SEEY; ++y ) {
+            const auto tile = here.get_bub( corner + point( x, y ) );
+            here.ter_set( tile, ter_str_id( "t_grass" ) );
+            here.ter_set( tile + tripoint::above,
+                          ter_str_id( roof ? "t_flat_roof" : "t_open_air" ) );
+        }
+    }
+    // A native non-carried field source keeps the roofed exterior meaningful.
+    // This is a focused illumination control, not a distant source admission story.
+    here.add_field( here.get_bub( target ), field_type_id( "fd_biolum" ), 3 );
+    here.invalidate_map_cache( 0 );
+    here.invalidate_map_cache( 1 );
+    here.build_map_cache( 0 );
+    REQUIRE( here.is_outside( here.get_bub( target ) ) );
+    const auto near_full = read_current();
+    REQUIRE( near_full.known );
+    REQUIRE( near_full.visible );
+    const float near_ambient = here.ambient_light_at( here.get_bub( target ) );
+    for( auto it = MAPBUFFER.begin(); it != MAPBUFFER.end(); ++it ) {
+        if( upper.count( it->first ) ) {
+            withheld.emplace_back( it->first, std::move( it->second ) );
+        }
+    }
+    REQUIRE( withheld.size() == 4 );
+    // Retain the real objects while withholding only their lookup ownership.
+    // The live map's existing pointers remain valid; no unknown cell becomes air.
+    const auto near_sparse = read_current();
+    CHECK( near_sparse.known == near_full.known );
+    CHECK( near_sparse.visible == near_full.visible );
+    here.load( old_origin + point( 20, 20 ), false, false );
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    REQUIRE_FALSE( here.inbounds( target ) );
+    REQUIRE_FALSE( here.inbounds( fixed_observer ) );
+    for( const auto &cell : upper ) {
+        REQUIRE( MAPBUFFER.lookup_submap_cached( cell ) == nullptr );
+    }
+    const auto resident_count_before_read = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto seen_before_read = here.get_cache_ref( 0 ).seen_cache;
+    const auto memory_before_read = here.get_cache_ref( 0 ).map_memory_cache_ter;
+    const auto far_sparse = read_current();
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == resident_count_before_read );
+    CHECK( here.get_cache_ref( 0 ).map_memory_cache_ter == memory_before_read );
+    for( size_t x = 0; x < decltype( seen_before_read )::size_x; ++x ) {
+        CHECK( here.get_cache_ref( 0 ).seen_cache[x] == seen_before_read[x] );
+    }
+    restore_upper();
+    const auto far_full = read_current();
+    std::cout << "REMOTE_LIGHTING_CAUSAL roof=" << roof
+              << " observer=" << fixed_observer << " target=" << target
+              << " missing_z=" << OVERMAP_HEIGHT << " missing_cells=" << upper.size()
+              << " near_ambient=" << near_ambient
+              << " near_full=" << near_full.known << '/' << near_full.visible << ':' << near_full.reason
+              << " near_sparse=" << near_sparse.known << '/' << near_sparse.visible << ':' << near_sparse.reason
+              << " far_sparse=" << far_sparse.known << '/' << far_sparse.visible << ':' << far_sparse.reason
+              << " far_full=" << far_full.known << '/' << far_full.visible << ':' << far_full.reason
+              << std::endl;
+    CHECK( observer.pos_abs() == fixed_observer );
+    CHECK( calendar::turn == fixed_time );
+    CHECK( far_full.known == near_full.known );
+    CHECK( far_full.visible == near_full.visible );
+    // Product contract: changing player proximity must not change the same read.
+    // The roofed arm also makes the withheld high sky physically irrelevant.
+    CHECK( far_sparse.known == near_sparse.known );
+    CHECK( far_sparse.visible == near_sparse.visible );
+
+    // The same reconstruction must retain genuine native darkness. Remove the
+    // actual source through its loaded map owner, then compare the same actors
+    // and sky omission with the player near/far at the same night-time instant.
+    here.load( old_origin, false, false );
+    here.remove_field( here.get_bub( target ), field_type_id( "fd_biolum" ) );
+    set_time( calendar::turn_zero );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    const auto dark_near = read_current();
+    CAPTURE( here.ambient_light_at( here.get_bub( target ) ),
+             g->natural_light_level( 0 ),
+             here.get_field_intensity( here.get_bub( target ), field_type_id( "fd_biolum" ) ),
+             observer.sight_range( here.ambient_light_at( here.get_bub( target ) ),
+                                   g->natural_light_level( 0 ) ) );
+    REQUIRE( dark_near.known );
+    CHECK( is_night( calendar::turn ) );
+    CHECK( here.get_field_intensity( here.get_bub( target ), field_type_id( "fd_biolum" ) ) == 0 );
+    CHECK( here.ambient_light_at( here.get_bub( target ) ) < near_ambient );
+    // The native signal policy may classify rounded moonlight (4 vs 3.7)
+    // as lit. Preserve that existing decision rather than inventing a new
+    // darkness/range rule here; reconstruction must give the same result.
+    for( auto &[position, body] : withheld ) {
+        const auto wanted_position = position;
+        const auto slot = std::find_if( MAPBUFFER.begin(), MAPBUFFER.end(),
+        [&]( const auto &entry ) { return entry.first == wanted_position; } );
+        REQUIRE( slot != MAPBUFFER.end() );
+        REQUIRE( slot->second );
+        body = std::move( slot->second );
+    }
+    here.load( old_origin + point( 20, 20 ), false, false );
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    const auto dark_far = read_current();
+    CHECK( dark_far.known == dark_near.known );
+    CHECK( dark_far.visible == dark_near.visible );
+
+    // Exercise the real observer constructor's preflight: ordinary zzip::load
+    // would repair this archive. An observation must instead refuse unchanged.
+    REQUIRE( world_generator->active_world );
+    WORLD &world = *world_generator->active_world;
+    const bool old_compression = world.has_compression_enabled();
+    const tripoint_abs_omt sky( footprint.front().xy(), OVERMAP_HEIGHT );
+    const auto segment = project_to<coords::seg>( sky );
+    const auto archive_path = ( PATH_INFO::current_dimension_save_path() / "maps" /
+                               string_format( "%d.%d.%d.zzip", segment.x(), segment.y(), segment.z() ) ).get_unrelative_path();
+    REQUIRE_FALSE( std::filesystem::exists( archive_path ) );
+    on_out_of_scope restore_archive( [&]() {
+        std::filesystem::remove( archive_path );
+        CHECK( world.set_compression_enabled( old_compression ) );
+    } );
+    REQUIRE( world.set_compression_enabled( true ) );
+    std::filesystem::create_directories( archive_path.parent_path() );
+    const std::string corrupt_bytes = "not-an-archive";
+    {
+        std::ofstream out( archive_path, std::ios::binary );
+        out << corrupt_bytes;
+        REQUIRE( out.good() );
+    }
+    const auto corrupt_mtime = std::filesystem::last_write_time( archive_path );
+    const auto corrupt_warning = capture_debugmsg_during( [&]() {
+        const auto corrupt_read = read_current();
+        CHECK_FALSE( corrupt_read.known );
+        CHECK_FALSE( corrupt_read.visible );
+        CHECK( corrupt_read.reason == "lighting_geometry_unavailable" );
+    } );
+    CHECK_FALSE( corrupt_warning.empty() );
+    std::ifstream input( archive_path, std::ios::binary );
+    CHECK( std::string( std::istreambuf_iterator<char>( input ), {} ) == corrupt_bytes );
+    CHECK( ( std::filesystem::last_write_time( archive_path ) == corrupt_mtime ) );
+    std::cout << "REMOTE_LIGHTING_COST roof=" << roof << " actual_reads=" << read_calls
+              << " read_wall_seconds=" << read_seconds << std::endl;
+}
+
+TEST_CASE( "observation uniform reconstruction requires authoritative metadata and clean absence",
+           "[binocular_056][existing_geometry][observation_uniform_data]" )
+{
+    const bool compressed = GENERATE( false, true );
+    CAPTURE( compressed );
+    REQUIRE( world_generator->active_world );
+    WORLD &world = *world_generator->active_world;
+    const bool previous_compression = world.has_compression_enabled();
+    const tripoint_abs_sm absent( 142, 142, 9 );
+    const auto existing = absent + point( 2, 0 );
+    const auto sibling = existing + point( 1, 0 );
+    const auto corrupt = absent + point( 4, 0 );
+    const auto other_level = absent + tripoint_rel_sm( 0, 0, -1 );
+    const auto missing_level = absent + tripoint_rel_sm( 0, 0, -2 );
+    const auto directory_for = [&]( const tripoint_abs_sm & p ) {
+        const auto seg = project_to<coords::seg>( project_to<coords::omt>( p ) );
+        return PATH_INFO::current_dimension_save_path() / "maps" /
+               string_format( "%d.%d.%d", seg.x(), seg.y(), seg.z() );
+    };
+    const auto name_for = [&]( const tripoint_abs_sm & p ) {
+        const auto omt = project_to<coords::omt>( p );
+        return string_format( "%d.%d.%d.map", omt.x(), omt.y(), omt.z() );
+    };
+    std::map<tripoint_abs_omt, oter_id> previous_terrain;
+    std::set<std::filesystem::path> paths;
+    on_out_of_scope restore( [&]() {
+        for( const auto &p : paths ) {
+            std::filesystem::remove_all( p );
+        }
+        for( const auto &[position, terrain] : previous_terrain ) {
+            overmap_buffer.ter_set( position, terrain );
+        }
+        CHECK( world.set_compression_enabled( previous_compression ) );
+    } );
+    REQUIRE( world.set_compression_enabled( compressed ) );
+    for( const auto &p : {absent, existing, corrupt, other_level, missing_level} ) {
+        const auto omt = project_to<coords::omt>( p );
+        previous_terrain.emplace( omt, overmap_buffer.ter( omt ) );
+        overmap_buffer.ter_set( omt, oter_id( "open_air" ) );
+    }
+    for( const auto &p : {absent, other_level, missing_level} ) {
+        const auto dir = directory_for( p );
+        REQUIRE_FALSE( std::filesystem::exists( dir.get_unrelative_path() ) );
+        REQUIRE_FALSE( std::filesystem::exists( ( dir + ".zzip" ).get_unrelative_path() ) );
+        paths.insert( dir.get_unrelative_path() );
+        paths.insert( ( dir + ".zzip" ).get_unrelative_path() );
+    }
+    const auto global_count = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto before_time = calendar::turn;
+    const auto player_position = get_avatar().pos_abs();
+    const auto write_quad = [&]( const tripoint_abs_sm & p, const std::string & bytes ) {
+        const auto dir = directory_for( p );
+        std::filesystem::create_directories( dir.get_unrelative_path() );
+        if( compressed ) {
+            auto archive = zzip::load( ( dir + ".zzip" ).get_unrelative_path(),
+                                      ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+            REQUIRE( archive );
+            REQUIRE( archive->add_file( name_for( p ), bytes ) );
+        } else {
+            std::ofstream out( ( dir / name_for( p ) ).get_unrelative_path() );
+            out << bytes;
+            REQUIRE( out.good() );
+        }
+    };
+    const auto native_quad = [&]( const tripoint_abs_sm & p ) {
+        submap stored;
+        stored.set_all_ter( ter_str_id( "t_flat_roof" ) );
+        std::ostringstream bytes;
+        JsonOut js( bytes );
+        js.start_array();
+        js.start_object();
+        js.member( "version", savegame_version );
+        js.member( "coordinates", p.raw() );
+        stored.store( js );
+        js.end_object();
+        js.end_array();
+        return bytes.str();
+    };
+    mapbuffer data;
+    {
+        mapbuffer::existing_submap_reader reader( data );
+        const auto check_uniform = [&]( const tripoint_abs_sm & p ) {
+            auto value = reader.read_omitted_uniform( p );
+            REQUIRE( value );
+            CHECK( value->is_uniform() );
+            CHECK( value->get_ter( point_sm_ms::zero ) == ter_str_id( "t_open_air" ) );
+            CHECK( value->field_count == 0 );
+            CHECK( value->vehicles.empty() );
+            CHECK_FALSE( data.lookup_submap_cached( p ) );
+            CHECK( std::distance( data.begin(), data.end() ) == 0 );
+            CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == global_count );
+        };
+        check_uniform( absent ); // missing archive/plain directory
+        check_uniform( missing_level );
+    }
+    overmap_buffer.ter_set( project_to<coords::omt>( absent ), oter_id( "forest" ) );
+    REQUIRE_FALSE( oter_id( "forest" )->get_uniform_terrain() );
+    {
+        mapbuffer::existing_submap_reader reader( data );
+        CHECK_FALSE( reader.read_omitted_uniform( absent ) );
+    }
+    overmap_buffer.ter_set( project_to<coords::omt>( absent ), oter_id() );
+    {
+        mapbuffer::existing_submap_reader reader( data );
+        CHECK_FALSE( reader.read_omitted_uniform( absent ) );
+    }
+    overmap_buffer.ter_set( project_to<coords::omt>( absent ), oter_id( "open_air" ) );
+    write_quad( existing, native_quad( existing ) );
+    write_quad( corrupt, "not-json" );
+    if( compressed ) {
+        CHECK( zzip::has_file_checked( ( directory_for( existing ) + ".zzip" ).get_unrelative_path(),
+                                      name_for( existing ) ) == true );
+        CHECK( zzip::has_file_checked( ( directory_for( existing ) + ".zzip" ).get_unrelative_path(),
+                                      name_for( absent ) ) == false );
+    }
+    {
+        mapbuffer::existing_submap_reader reader( data );
+        auto uniform = reader.read_omitted_uniform( absent );
+        REQUIRE( uniform ); // checked missing quad in an otherwise present archive
+        CHECK( uniform->get_ter( point_sm_ms::zero ) == ter_str_id( "t_open_air" ) );
+        CHECK_FALSE( reader.read_omitted_uniform( existing ) );
+        CHECK_FALSE( reader.read_omitted_uniform( sibling ) ); // conservative partial quad
+        CHECK_FALSE( reader.read_omitted_uniform( corrupt ) ); // no hiding invalid override
+        const auto warning = capture_debugmsg_during( [&]() {
+            CHECK_FALSE( reader.lookup( corrupt ) );
+        } );
+        CHECK_FALSE( warning.empty() );
+        submap *override = reader.lookup( existing );
+        REQUIRE( override );
+        CHECK( override->get_ter( point_sm_ms::zero ) == ter_str_id( "t_flat_roof" ) );
+        CHECK_FALSE( reader.read_omitted_uniform( existing ) );
+        CHECK( data.lookup_submap_cached( existing ) == override );
+        CHECK( std::distance( data.begin(), data.end() ) == 1 );
+    }
+    // A real resident value wins independently of an absent serialized quad.
+    auto resident = std::make_unique<submap>();
+    resident->set_all_ter( ter_str_id( "t_wall" ) );
+    submap *resident_identity = resident.get();
+    REQUIRE( data.add_submap( absent, resident ) );
+    {
+        mapbuffer::existing_submap_reader reader( data );
+        CHECK_FALSE( reader.read_omitted_uniform( absent ) );
+        CHECK( reader.lookup( absent ) == resident_identity );
+    }
+    const auto damaged = compressed ? directory_for( other_level ) + ".zzip" :
+                         directory_for( other_level ) / name_for( other_level );
+    std::filesystem::create_directories( damaged.get_unrelative_path().parent_path() );
+    if( compressed ) {
+        const auto read_bytes = [&]() {
+            std::ifstream input( damaged.get_unrelative_path(), std::ios::binary );
+            return std::string( std::istreambuf_iterator<char>( input ), {} );
+        };
+        const auto write_bytes = [&]( const std::string &bytes ) {
+            std::ofstream out( damaged.get_unrelative_path(), std::ios::binary | std::ios::trunc );
+            out.write( bytes.data(), bytes.size() );
+            REQUIRE( out.good() );
+        };
+        // The native footer encoder produces both a valid empty index and
+        // deliberately malformed structures with a genuinely matching checksum.
+        const auto archive_with_footer = []( const std::vector<uint8_t> &footer ) {
+            std::array<uint64_t, 2> metadata;
+            MEM_writeLE64( &metadata[0], footer.size() );
+            MEM_writeLE64( &metadata[1], XXH64( footer.data(), footer.size(), 0x1337C0DE ) );
+            std::string bytes( ZSTD_SKIPPABLEHEADERSIZE + sizeof( metadata ), '\0' );
+            REQUIRE( ZSTD_writeSkippableFrame( bytes.data(), bytes.size(), metadata.data(),
+                                              sizeof( metadata ), 15 ) == bytes.size() );
+            bytes.append( reinterpret_cast<const char *>( footer.data() ), footer.size() );
+            return bytes;
+        };
+        flexbuffers::Builder valid_builder;
+        const auto root = valid_builder.StartMap();
+        const auto entries = valid_builder.StartMap( "entries" );
+        valid_builder.EndMap( entries );
+        const auto meta = valid_builder.StartMap( "meta" );
+        valid_builder.UInt( "content_end", 24 );
+        valid_builder.UInt( "total_content_size", 0 );
+        valid_builder.EndMap( meta );
+        valid_builder.EndMap( root );
+        valid_builder.Finish();
+        const auto valid = archive_with_footer( valid_builder.GetBuffer() );
+        CHECK( zzip::has_file_checked( damaged.get_unrelative_path(), "missing.map" ) == std::nullopt );
+        CHECK_FALSE( std::filesystem::exists( damaged.get_unrelative_path() ) );
+        write_bytes( valid );
+        REQUIRE( zzip::has_file_checked( damaged.get_unrelative_path(), "missing.map" ) == false );
+        std::vector<std::pair<std::string, std::string>> broken;
+        broken.emplace_back( "garbage", "not-an-archive" );
+        broken.emplace_back( "truncated", valid.substr( 0, valid.size() - 1 ) );
+        auto bad_checksum = valid;
+        bad_checksum.back() ^= 1;
+        broken.emplace_back( "wrong-checksum", bad_checksum );
+        auto bad_length = valid;
+        MEM_writeLE64( bad_length.data() + ZSTD_SKIPPABLEHEADERSIZE, valid.size() + 1 );
+        broken.emplace_back( "footer-bounds", bad_length );
+        flexbuffers::Builder wrong_shape;
+        wrong_shape.UInt( 7 );
+        wrong_shape.Finish();
+        broken.emplace_back( "footer-not-map", archive_with_footer( wrong_shape.GetBuffer() ) );
+        flexbuffers::Builder missing_entries;
+        const auto empty_map = missing_entries.StartMap();
+        missing_entries.EndMap( empty_map );
+        missing_entries.Finish();
+        broken.emplace_back( "missing-native-members", archive_with_footer( missing_entries.GetBuffer() ) );
+        auto invalid_offset = valid_builder.GetBuffer();
+        const auto root_width = invalid_offset.back();
+        std::fill_n( invalid_offset.end() - 2 - root_width, root_width, 0xff );
+        broken.emplace_back( "footer-invalid-offset", archive_with_footer( invalid_offset ) );
+        for( const auto &[reason, bytes] : broken ) {
+            CAPTURE( reason );
+            write_bytes( bytes );
+            const auto before_bytes = read_bytes();
+            const auto before_mtime = std::filesystem::last_write_time( damaged.get_unrelative_path() );
+            CHECK( zzip::has_file_checked( damaged.get_unrelative_path(), "missing.map" ) == std::nullopt );
+            mapbuffer::existing_submap_reader reader( data );
+            bool read_error = false;
+            const auto warning = capture_debugmsg_during( [&]() {
+                CHECK_FALSE( reader.read_omitted_uniform( other_level, &read_error ) );
+            } );
+            CHECK( read_error );
+            CHECK_FALSE( warning.empty() );
+            CHECK( read_bytes() == before_bytes );
+            CHECK( ( std::filesystem::last_write_time( damaged.get_unrelative_path() ) == before_mtime ) );
+        }
+    } else {
+        // An existing non-regular path is not evidence of absent terrain.
+        REQUIRE( std::filesystem::create_directory( damaged.get_unrelative_path() ) );
+        mapbuffer::existing_submap_reader reader( data );
+        const auto warning = capture_debugmsg_during( [&]() {
+            CHECK_FALSE( reader.read_omitted_uniform( other_level ) );
+        } );
+        CHECK_FALSE( warning.empty() );
+    }
+    CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == global_count );
+    CHECK( calendar::turn == before_time );
+    CHECK( get_avatar().pos_abs() == player_position );
+}
+
+TEST_CASE( "checked archive footer refuses missing required native members",
+           "[binocular_056][observation_footer_required]" )
+{
+    const int malformed = GENERATE( 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 );
+    CAPTURE( malformed );
+    const auto path = ( PATH_INFO::current_dimension_save_path() /
+                        "observation-required-footer.zzip" ).get_unrelative_path();
+    REQUIRE_FALSE( std::filesystem::exists( path ) );
+    on_out_of_scope cleanup( [&]() { std::filesystem::remove( path ); } );
+    flexbuffers::Builder builder;
+    const auto root = builder.StartMap();
+    const auto entries = builder.StartMap( "entries" );
+    if( malformed >= 3 ) {
+        if( malformed == 5 ) {
+            builder.UInt( "present.map", 0 );
+        } else {
+            const auto entry = builder.StartMap( "present.map" );
+            if( malformed != 3 ) {
+                if( malformed == 11 ) {
+                    builder.String( "offset", "24" );
+                } else {
+                    builder.UInt( "offset", malformed == 7 ? ( uint64_t( 1 ) << 32 ) + 24 : 24 );
+                }
+            }
+            if( malformed != 4 ) {
+                if( malformed == 12 ) {
+                    builder.Int( "len", -1 );
+                } else {
+                    builder.UInt( "len", 0 );
+                }
+            }
+            builder.EndMap( entry );
+        }
+    }
+    builder.EndMap( entries );
+    const auto meta = builder.StartMap( "meta" );
+    if( malformed != 0 && malformed != 2 ) {
+        if( malformed == 8 ) {
+            builder.Int( "content_end", -1 );
+        } else if( malformed == 9 ) {
+            builder.Bool( "content_end", true );
+        } else {
+            builder.UInt( "content_end", malformed == 6 ? UINT64_MAX : 24 );
+        }
+    }
+    if( malformed != 0 && malformed != 1 ) {
+        if( malformed == 10 ) {
+            builder.String( "total_content_size", "0" );
+        } else {
+            builder.UInt( "total_content_size", 0 );
+        }
+    }
+    builder.EndMap( meta );
+    builder.EndMap( root );
+    builder.Finish();
+    const auto &footer = builder.GetBuffer();
+    std::array<uint64_t, 2> metadata;
+    MEM_writeLE64( &metadata[0], footer.size() );
+    MEM_writeLE64( &metadata[1], XXH64( footer.data(), footer.size(), 0x1337C0DE ) );
+    std::string bytes( ZSTD_SKIPPABLEHEADERSIZE + sizeof( metadata ), '\0' );
+    REQUIRE( ZSTD_writeSkippableFrame( bytes.data(), bytes.size(), metadata.data(),
+                                      sizeof( metadata ), 15 ) == bytes.size() );
+    bytes.append( reinterpret_cast<const char *>( footer.data() ), footer.size() );
+    {
+        std::ofstream out( path, std::ios::binary );
+        out << bytes;
+        REQUIRE( out.good() );
+    }
+    const auto mtime = std::filesystem::last_write_time( path );
+    CHECK( zzip::has_file_checked( path, "missing.map" ) == std::nullopt );
+    std::ifstream input( path, std::ios::binary );
+    CHECK( std::string( std::istreambuf_iterator<char>( input ), {} ) == bytes );
+    CHECK( ( std::filesystem::last_write_time( path ) == mtime ) );
+}
+
+TEST_CASE( "uniform observation refuses damaged cold overmap without loading or repair",
+           "[binocular_056][observation_cold_owner]" )
+{
+    REQUIRE( world_generator->active_world );
+    WORLD &world = *world_generator->active_world;
+    const bool old_compression = world.has_compression_enabled();
+    const point_abs_om owner( 37, 41 );
+    const tripoint_abs_omt requested( project_to<coords::omt>( owner ) + point( 4, 5 ),
+                                     OVERMAP_HEIGHT );
+    const auto path = ( PATH_INFO::current_dimension_save_path() / "overmaps" /
+                        ( overmapbuffer::terrain_filename( owner ) + ".zzip" ) ).get_unrelative_path();
+    REQUIRE_FALSE( overmap_buffer.find_loaded_overmap( owner ) );
+    REQUIRE_FALSE( std::filesystem::exists( path ) );
+    on_out_of_scope cleanup( [&]() {
+        std::filesystem::remove( path );
+        CHECK( world.set_compression_enabled( old_compression ) );
+    } );
+    REQUIRE( world.set_compression_enabled( true ) );
+    std::filesystem::create_directories( path.parent_path() );
+    const std::string bytes = "broken-cold-overmap";
+    {
+        std::ofstream out( path, std::ios::binary );
+        out << bytes;
+        REQUIRE( out.good() );
+    }
+    const auto mtime = std::filesystem::last_write_time( path );
+    const auto turn = calendar::turn;
+    mapbuffer data;
+    mapbuffer::existing_submap_reader reader( data );
+    capture_debugmsg_during( [&]() {
+        CHECK_FALSE( reader.read_omitted_uniform( project_to<coords::sm>( requested ) ) );
+    } );
+    CHECK_FALSE( overmap_buffer.find_loaded_overmap( owner ) );
+    std::ifstream input( path, std::ios::binary );
+    CHECK( std::string( std::istreambuf_iterator<char>( input ), {} ) == bytes );
+    CHECK( ( std::filesystem::last_write_time( path ) == mtime ) );
+    CHECK( calendar::turn == turn );
+}
+
+TEST_CASE( "cold terrain projection reads native layers without native owner side effects",
+           "[binocular_056][observation_cold_projection]" )
+{
+    const bool compressed = GENERATE( false, true );
+    CAPTURE( compressed );
+    REQUIRE( world_generator->active_world );
+    WORLD &world = *world_generator->active_world;
+    const bool old_compression = world.has_compression_enabled();
+    const point_abs_om owner( 38, 42 );
+    const std::string name = overmapbuffer::terrain_filename( owner );
+    const auto plain = ( PATH_INFO::current_dimension_save_path() / name ).get_unrelative_path();
+    const auto packed = ( PATH_INFO::current_dimension_save_path() / "overmaps" /
+                          ( name + ".zzip" ) ).get_unrelative_path();
+    REQUIRE_FALSE( std::filesystem::exists( plain ) );
+    REQUIRE_FALSE( std::filesystem::exists( packed ) );
+    REQUIRE_FALSE( overmap_buffer.find_loaded_overmap( owner ) );
+    on_out_of_scope cleanup( [&]() {
+        std::filesystem::remove( plain );
+        std::filesystem::remove( packed );
+        CHECK( world.set_compression_enabled( old_compression ) );
+    } );
+    REQUIRE( world.set_compression_enabled( compressed ) );
+    const auto path = compressed ? packed : plain;
+    std::filesystem::create_directories( path.parent_path() );
+    const tripoint_om_omt local( 4, 5, 9 );
+    const tripoint_abs_omt target = project_combine( owner, local );
+    auto stored = std::make_unique<overmap>( owner ); // fixture only: never installed/published
+    stored->ter_set( local, oter_id( "open_air" ) );
+    const auto body_at = project_to<coords::ms>( target );
+    monster original( mtype_id( "mon_zombie" ) );
+    original.add_item( item( itype_id( "rock" ) ) );
+    REQUIRE( stored->hordes.spawn_entity( body_at, original ) );
+    std::ostringstream saved;
+    stored->serialize( saved ); // genuine native format, includes full body/item payload
+    size_t last_entry_byte = 0;
+    const auto write = [&]( const std::string &bytes ) {
+        if( compressed ) {
+            auto archive = zzip::load( path,
+                                      ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path() );
+            REQUIRE( archive );
+            REQUIRE( archive->add_file( std::filesystem::u8path( name ), bytes ) );
+            for( const auto &entry : archive->get_layout() ) {
+                if( entry.path == std::filesystem::u8path( name ) ) {
+                    REQUIRE( entry.len > 0 );
+                    last_entry_byte = entry.offset + entry.len - 1;
+                }
+            }
+        } else {
+            std::ofstream out( path, std::ios::binary | std::ios::trunc );
+            out << bytes;
+            REQUIRE( out.good() );
+        }
+    };
+    const auto file_bytes = [&]() {
+        std::ifstream input( path, std::ios::binary );
+        return std::string( std::istreambuf_iterator<char>( input ), {} );
+    };
+    const auto dimension = [&]() {
+        std::ostringstream bytes;
+        JsonOut json( bytes );
+        overmap_buffer.global_state.serialize( json );
+        return bytes.str();
+    };
+    write( saved.str() );
+    const auto original_file = file_bytes();
+    const auto original_mtime = std::filesystem::last_write_time( path );
+    // Two consecutive public allocations bracket each read. The control itself
+    // consumes one UID; a hidden full-body decode/copy would create a gap.
+    int64_t last_uid = g->assign_item_uid();
+    const auto check_uid_unchanged = [&]() {
+        const int64_t next = g->assign_item_uid();
+        CHECK( next == last_uid + 1 );
+        last_uid = next;
+    };
+    const auto original_dimension = dimension();
+    const auto original_rng = rng_get_engine();
+    const auto original_time = calendar::turn;
+    const int original_loading_version = savegame_loading_version;
+    overmapbuffer cold;
+    {
+        overmapbuffer::existing_terrain_reader reader( cold );
+        const auto first_start = std::chrono::steady_clock::now();
+        REQUIRE( reader.read( target ) == oter_id( "open_air" ) );
+        const auto warm_start = std::chrono::steady_clock::now();
+        for( int repeat = 0; repeat < 3; ++repeat ) {
+            REQUIRE( reader.read( target ) == oter_id( "open_air" ) );
+        }
+        const auto finish = std::chrono::steady_clock::now();
+        std::cout << "REMOTE_LIGHTING_COLD compressed=" << compressed
+                  << " saved_entry_bytes=" << saved.str().size()
+                  << " first_read_wall_seconds="
+                  << std::chrono::duration<double>( warm_start - first_start ).count()
+                  << " repeated_reads=3 repeated_read_wall_seconds="
+                  << std::chrono::duration<double>( finish - warm_start ).count() << std::endl;
+        CHECK_FALSE( cold.find_loaded_overmap( owner ) );
+    }
+    {
+        mapbuffer data;
+        mapbuffer::existing_submap_reader reader( data );
+        const auto first = project_to<coords::sm>( target );
+        for( const point offset : { point( 0, 0 ), point( 0, 1 ), point( 1, 0 ), point( 1, 1 ) } ) {
+            auto uniform = reader.read_omitted_uniform( first + offset );
+            REQUIRE( uniform );
+            CHECK( uniform->get_ter( point_sm_ms::zero ) == ter_str_id( "t_open_air" ) );
+            CHECK_FALSE( data.lookup_submap_cached( first + offset ) );
+        }
+        CHECK( std::distance( data.begin(), data.end() ) == 0 );
+    }
+    CHECK_FALSE( overmap_buffer.find_loaded_overmap( owner ) );
+    CHECK( file_bytes() == original_file );
+    CHECK( ( std::filesystem::last_write_time( path ) == original_mtime ) );
+    check_uid_unchanged();
+    CHECK( dimension() == original_dimension );
+    CHECK( rng_get_engine() == original_rng );
+    CHECK( calendar::turn == original_time );
+    CHECK( savegame_loading_version == original_loading_version );
+
+    if( compressed ) {
+        // Keep the footer genuine/valid and damage only this actual native
+        // entry. A checked index is not evidence that its payload is readable.
+        REQUIRE( last_entry_byte < original_file.size() );
+        auto damaged = original_file;
+        damaged[last_entry_byte] ^= 1;
+        const auto write_raw = [&]( const std::string &bytes ) {
+            std::ofstream out( path, std::ios::binary | std::ios::trunc );
+            out << bytes;
+            REQUIRE( out.good() );
+        };
+        write_raw( damaged );
+        const auto damaged_mtime = std::filesystem::last_write_time( path );
+        {
+            auto archive = zzip::checked_reader::open( path );
+            REQUIRE( archive );
+            CHECK( archive->has_file( std::filesystem::u8path( name ) ) );
+            CHECK_FALSE( archive->get_file( std::filesystem::u8path( name ),
+                                           ( PATH_INFO::world_base_save_path() / "overmaps.dict" ).get_unrelative_path() ) );
+            overmapbuffer::existing_terrain_reader reader( cold );
+            capture_debugmsg_during( [&]() { CHECK_FALSE( reader.read( target ) ); } );
+        }
+        CHECK( file_bytes() == damaged );
+        CHECK( ( std::filesystem::last_write_time( path ) == damaged_mtime ) );
+        CHECK_FALSE( cold.find_loaded_overmap( owner ) );
+        check_uid_unchanged();
+        CHECK( dimension() == original_dimension );
+        CHECK( rng_get_engine() == original_rng );
+        CHECK( calendar::turn == original_time );
+        CHECK( savegame_loading_version == original_loading_version );
+        write_raw( original_file );
+    }
+
+    // Same scope never spans file changes; new scope sees a new native value.
+    stored->ter_set( local, oter_id( "forest" ) );
+    std::ostringstream changed;
+    stored->serialize( changed );
+    write( changed.str() );
+    {
+        overmapbuffer::existing_terrain_reader reader( cold );
+        REQUIRE( reader.read( target ) == oter_id( "forest" ) );
+    }
+    std::vector<std::pair<std::string, std::string>> malformed = {
+        { "invalid-json", "{broken" }, { "missing-layers", "{}" },
+        { "wrong-layer-shape", "{\"layers\":[7]}" }
+    };
+    const auto rle_layers = [&]( const std::string &run ) {
+        std::ostringstream result;
+        result << "# version 1\n{\"layers\":[";
+        for( int z = 0; z < OVERMAP_LAYERS; ++z ) {
+            result << ( z ? "," : "" ) << "[" << run << "]";
+        }
+        result << "]}";
+        return result.str();
+    };
+    malformed.emplace_back( "zero-run", rle_layers( "[\"open_air\",0]" ) );
+    malformed.emplace_back( "oversize-run", rle_layers( "[\"open_air\",999999999]" ) );
+    malformed.emplace_back( "short-layer", rle_layers( "[\"open_air\",1]" ) );
+    malformed.emplace_back( "unknown-terrain", rle_layers( "[\"not_a_native_oter\",32400]" ) );
+    REQUIRE( overmap::is_oter_id_obsolete( "horse_farm_1" ) );
+    malformed.emplace_back( "obsolete-terrain", rle_layers( "[\"horse_farm_1\",32400]" ) );
+    std::string future_version = rle_layers( "[\"open_air\",32400]" );
+    future_version.replace( 0, std::string( "# version 1" ).size(),
+                            "# version " + std::to_string( savegame_version + 1 ) );
+    malformed.emplace_back( "unknown-version", future_version );
+    for( const auto &[reason, bytes] : malformed ) {
+        CAPTURE( reason );
+        write( bytes );
+        const auto before_file = file_bytes();
+        const auto before_mtime = std::filesystem::last_write_time( path );
+        overmapbuffer::existing_terrain_reader reader( cold );
+        capture_debugmsg_during( [&]() {
+            CHECK_FALSE( reader.read( target ) );
+        } );
+        CHECK_FALSE( cold.find_loaded_overmap( owner ) );
+        CHECK( file_bytes() == before_file );
+        CHECK( ( std::filesystem::last_write_time( path ) == before_mtime ) );
+        check_uid_unchanged();
+        CHECK( dimension() == original_dimension );
+        CHECK( rng_get_engine() == original_rng );
+        CHECK( calendar::turn == original_time );
+        CHECK( savegame_loading_version == original_loading_version );
+    }
+    std::filesystem::remove( path );
+    {
+        overmapbuffer::existing_terrain_reader reader( cold );
+        CHECK_FALSE( reader.read( target ) );
+        CHECK_FALSE( std::filesystem::exists( path ) );
+    }
+    // Real resident terrain beats even damaged backing, without inspecting it.
+    const auto resident_target = project_to<coords::omt>( get_map().get_abs_sub() );
+    REQUIRE( overmap_buffer.find_loaded_overmap( project_to<coords::om>( resident_target.xy() ) ) );
+    overmapbuffer::existing_terrain_reader resident( overmap_buffer );
+    CHECK( resident.read( resident_target ) == overmap_buffer.ter( resident_target ) );
 }

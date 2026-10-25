@@ -39,6 +39,12 @@ condition earns no proof of the bypassed natural stage, but subsequent native be
 prove the downstream question. Use [setup and interactions](references/setup-and-interactions.md)
 for mutation effects and [scenario composition](GAME-MANUAL.md#compose-a-useful-scenario) for examples.
 
+For camp/tower signal and response stories, use meaningful home-to-source separation and real
+travel, not an adjacent brazier as the default. Record actual OMT distance and choose it against
+the source's measured reach and the scenario's purpose. Near-contact fixtures prove only their
+focused boundary; they cannot supply the sole distant discovery/journey proof. Follow
+[representative source placement](references/smoke-light-visibility.md#representative-source-placement).
+
 ## Starting a game
 
 Work from the game checkout on the machine that will run it. Reuse a ready source-bound product

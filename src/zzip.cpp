@@ -7,6 +7,7 @@
 #include <exception>
 #include <iosfwd>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -39,9 +40,9 @@ namespace
 // to use flexbuffers/JsonObject with zzips.
 
 struct zzip_flexbuffer_storage : flexbuffer_storage {
-    std::shared_ptr<mmap_file> mmap_handle_;
+    std::shared_ptr<const mmap_file> mmap_handle_;
 
-    explicit zzip_flexbuffer_storage( std::shared_ptr<mmap_file> mmap_handle )
+    explicit zzip_flexbuffer_storage( std::shared_ptr<const mmap_file> mmap_handle )
         : mmap_handle_{ std::move( mmap_handle ) } {
     }
 
@@ -243,7 +244,7 @@ struct zzip_footer {
     }
 };
 
-std::pair<uint64_t, uint64_t> read_footer_len_and_checksum( void *base, size_t len )
+std::pair<uint64_t, uint64_t> read_footer_len_and_checksum( const void *base, size_t len )
 {
     std::array<uint64_t, 2> buf;
 
@@ -264,6 +265,72 @@ std::pair<uint64_t, uint64_t> read_footer_len_and_checksum( void *base, size_t l
     uint64_t footer_checksum = MEM_readLE64( &buf[1] );
 
     return { footer_len, footer_checksum };
+}
+
+// The bundled FlexBuffers reader trusts offsets. Check the exact map/integer
+// tree emitted by update_footer before giving an untrusted footer to that reader.
+// All offsets are relative to the footer, so corrupt pointers cannot reach data
+// frames or escape the mapping. This is not an alternative archive decoder.
+bool checked_footer_value( const uint8_t *data, size_t size, size_t at,
+                           uint8_t parent_width, uint8_t packed_type, unsigned depth,
+                           size_t &remaining )
+{
+    const auto valid_width = []( uint64_t width ) {
+        return width == 1 || width == 2 || width == 4 || width == 8;
+    };
+    if( !valid_width( parent_width ) || at > size || parent_width > size - at ||
+        remaining == 0 ) {
+        return false;
+    }
+    --remaining;
+    const auto type = static_cast<flexbuffers::Type>( packed_type >> 2 );
+    if( type == flexbuffers::FBT_UINT || type == flexbuffers::FBT_INT ) {
+        return true;
+    }
+    if( type != flexbuffers::FBT_MAP || depth == 0 ) {
+        return false;
+    }
+    const size_t width = 1U << ( packed_type & 3 );
+    const uint64_t offset = flexbuffers::ReadUInt64( data + at, parent_width );
+    if( offset > at ) {
+        return false;
+    }
+    const size_t values = at - offset;
+    if( values < 3 * width ) {
+        return false;
+    }
+    const uint64_t count = flexbuffers::ReadUInt64( data + values - width, width );
+    if( count > ( size - values ) / ( width + 1 ) ) {
+        return false;
+    }
+    const size_t keys_offset = values - 3 * width;
+    const uint64_t keys_back = flexbuffers::ReadUInt64( data + keys_offset, width );
+    const uint64_t keys_width = flexbuffers::ReadUInt64( data + keys_offset + width, width );
+    if( !valid_width( keys_width ) || keys_back > keys_offset ) {
+        return false;
+    }
+    const size_t keys = keys_offset - keys_back;
+    if( keys < keys_width || count > ( size - keys ) / keys_width ||
+        flexbuffers::ReadUInt64( data + keys - keys_width, keys_width ) != count ) {
+        return false;
+    }
+    const char *previous = nullptr;
+    for( size_t i = 0; i < count; ++i ) {
+        const size_t key_at = keys + i * keys_width;
+        const uint64_t key_back = flexbuffers::ReadUInt64( data + key_at, keys_width );
+        if( key_back == 0 || key_back > key_at ) {
+            return false;
+        }
+        const char *key = reinterpret_cast<const char *>( data + key_at - key_back );
+        if( !std::memchr( key, 0, size - ( key_at - key_back ) ) ||
+            ( previous && std::strcmp( previous, key ) >= 0 ) ||
+            !checked_footer_value( data, size, values + i * width, width,
+                                   data[values + count * width + i], depth - 1, remaining ) ) {
+            return false;
+        }
+        previous = key;
+    }
+    return true;
 }
 
 bool write_footer_len_and_checksum( void *base, uint64_t frame_len, uint64_t footer_len,
@@ -290,13 +357,13 @@ bool write_footer_len_and_checksum( void *base, uint64_t frame_len, uint64_t foo
 // Given a pointer and length of an encoded entry, reads or skips the metadata
 // and returns a pointer to the beginning of any content after the metadata frames.
 // Returns { nullptr, 0 } on any detected errors.
-std::pair<void *, size_t> read_and_skip_entry_metadata(
-    void *entry_base,
+std::pair<const void *, size_t> read_and_skip_entry_metadata(
+    const void *entry_base,
     size_t entry_len,
     std::optional<std::string> *filename_out = nullptr,
     std::optional<uint64_t> *checksum_out = nullptr )
 {
-    char *base = static_cast<char *>( entry_base );
+    const char *base = static_cast<const char *>( entry_base );
     while( entry_len > 0 && ZSTD_isSkippableFrame( base, entry_len ) ) {
         ZSTD_FrameHeader header;
         if( ZSTD_getFrameHeader( &header, base, entry_len ) == 0 ) {
@@ -331,6 +398,36 @@ std::pair<void *, size_t> read_and_skip_entry_metadata(
     return { base, entry_len };
 }
 
+struct checked_entry_payload {
+    const void *base;
+    size_t len;
+    size_t size;
+};
+
+std::optional<checked_entry_payload> read_checked_entry_payload( const void *base, size_t len )
+{
+    std::optional<uint64_t> checksum;
+    std::tie( base, len ) = read_and_skip_entry_metadata( base, len, nullptr, &checksum );
+    if( !base || !checksum || XXH64( base, len, kCheckumSeed ) != *checksum ) {
+        return std::nullopt;
+    }
+    const size_t size = ZSTD_decompressBound( base, len );
+    if( ZSTD_isError( size ) ) {
+        return std::nullopt;
+    }
+    return checked_entry_payload{ base, len, size };
+}
+
+std::optional<size_t> decompress_entry_to( ZSTD_DCtx *context, const checked_entry_payload &payload,
+        std::byte *destination, size_t capacity )
+{
+    if( capacity < payload.size ) {
+        return std::nullopt;
+    }
+    const size_t actual = ZSTD_decompressDCtx( context, destination, capacity, payload.base, payload.len );
+    return ZSTD_isError( actual ) ? std::nullopt : std::optional<size_t>( actual );
+}
+
 } // namespace
 
 struct zzip::context {
@@ -356,6 +453,168 @@ zzip::~zzip() noexcept
 
 zzip::zzip( zzip && ) noexcept = default;
 zzip &zzip::operator=( zzip && ) noexcept = default;
+
+namespace
+{
+std::optional<JsonObject> checked_archive_footer( const std::shared_ptr<const mmap_file> &file )
+{
+    try {
+        if( !file || file->len() < kFooterChecksumFrameSize + 3 ) {
+            return std::nullopt;
+        }
+        const auto [footer_len, checksum] = read_footer_len_and_checksum( file->base(), file->len() );
+        if( footer_len < 3 || footer_len > file->len() - kFooterChecksumFrameSize ) {
+            return std::nullopt;
+        }
+        const auto *footer_data = static_cast<const uint8_t *>( file->base() ) + file->len() - footer_len;
+        if( XXH64( footer_data, footer_len, kCheckumSeed ) != checksum ) {
+            return std::nullopt;
+        }
+        const uint8_t width = footer_data[footer_len - 1];
+        if( ( width != 1 && width != 2 && width != 4 && width != 8 ) ||
+            width > footer_len - 2 || footer_data[footer_len - 2] >> 2 != flexbuffers::FBT_MAP ) {
+            return std::nullopt;
+        }
+        size_t remaining = footer_len;
+        if( !checked_footer_value( footer_data, footer_len, footer_len - 2 - width,
+                                   width, footer_data[footer_len - 2], 3, remaining ) ) {
+            return std::nullopt;
+        }
+        auto storage = std::make_shared<zzip_flexbuffer_storage>( file );
+        const auto root = flexbuffer_root_from_storage( storage );
+        const auto root_map = root.AsMap();
+        const auto meta_ref = root_map[kMetaKey.data()];
+        const auto entries_ref = root_map[kEntriesKey.data()];
+        const auto native_integer = []( const flexbuffers::Reference &v ) {
+            return v.IsIntOrUint() && ( !v.IsInt() || v.AsInt64() >= 0 ) &&
+                   v.AsUInt64() <= static_cast<uint64_t>( std::numeric_limits<int>::max() );
+        };
+        // Native Json accessors require these members, and their error source
+        // is unavailable for a binary footer. Never invoke them on bad shape,
+        // missing values, negative values or values outside their native range.
+        if( !meta_ref.IsMap() || !entries_ref.IsMap() ||
+            !native_integer( meta_ref.AsMap()[kMetaContentEndKey.data()] ) ||
+            !native_integer( meta_ref.AsMap()[kMetaTotalContentSizeKey.data()] ) ) {
+            return std::nullopt;
+        }
+        const auto values = entries_ref.AsMap().Values();
+        for( size_t i = 0; i < values.size(); ++i ) {
+            const auto entry_ref = values[i];
+            if( !entry_ref.IsMap() ||
+                !native_integer( entry_ref.AsMap()[kEntryOffsetKey.data()] ) ||
+                !native_integer( entry_ref.AsMap()[kEntryLenKey.data()] ) ) {
+                return std::nullopt;
+            }
+        }
+        auto parsed = std::make_shared<zzip_flexbuffer>( storage );
+        JsonObject footer = JsonValue( std::move( parsed ), root, nullptr, 0 );
+        footer.allow_omitted_members();
+        if( !footer.has_object( kMetaKey ) || !footer.has_object( kEntriesKey ) ) {
+            return std::nullopt;
+        }
+        const zzip_footer native_footer( footer );
+        const auto meta = native_footer.get_meta();
+        if( meta.content_end < kFooterChecksumFrameSize ||
+            meta.content_end > file->len() - footer_len || meta.total_content_size > meta.content_end ) {
+            return std::nullopt;
+        }
+        for( size_t i = 0; i < values.size(); ++i ) {
+            const auto stored = values[i].AsMap();
+            const auto offset = stored[kEntryOffsetKey.data()].AsUInt64();
+            const auto len = stored[kEntryLenKey.data()].AsUInt64();
+            if( offset < kFooterChecksumFrameSize || offset > meta.content_end ||
+                len > meta.content_end - offset ) {
+                return std::nullopt;
+            }
+        }
+        return footer;
+    } catch( const std::exception & ) {
+        return std::nullopt;
+    }
+}
+
+} // namespace
+
+struct zzip::checked_reader::impl {
+    std::shared_ptr<const mmap_file> file;
+    JsonObject footer;
+    ~impl() {
+        footer.allow_omitted_members();
+    }
+};
+
+zzip::checked_reader::checked_reader( std::unique_ptr<impl> value ) : value( std::move( value ) ) {}
+zzip::checked_reader::~checked_reader() = default;
+zzip::checked_reader::checked_reader( checked_reader && ) noexcept = default;
+zzip::checked_reader &zzip::checked_reader::operator=( checked_reader && ) noexcept = default;
+
+std::optional<zzip::checked_reader> zzip::checked_reader::open( const std::filesystem::path &path )
+{
+    try {
+        auto file = mmap_file::map_file( path );
+        auto footer = checked_archive_footer( file );
+        if( !footer ) {
+            return std::nullopt;
+        }
+        auto value = std::make_unique<impl>();
+        value->file = std::move( file );
+        value->footer = std::move( *footer );
+        return checked_reader( std::move( value ) );
+    } catch( const std::exception & ) {
+        return std::nullopt;
+    }
+}
+
+bool zzip::checked_reader::has_file( const std::filesystem::path &entry ) const
+{
+    return zzip_footer( value->footer ).get_entry( entry ).has_value();
+}
+
+std::optional<bool> zzip::has_file_checked( const std::filesystem::path &path,
+        const std::filesystem::path &entry )
+{
+    auto reader = checked_reader::open( path );
+    return reader ? std::optional<bool>( reader->has_file( entry ) ) : std::nullopt;
+}
+
+std::optional<std::vector<std::byte>> zzip::checked_reader::get_file(
+    const std::filesystem::path &entry, const std::filesystem::path &dictionary ) const
+{
+    try {
+        const auto params = zzip_footer( value->footer ).get_entry( entry );
+        if( !params ) {
+            return std::nullopt;
+        }
+        const auto payload = read_checked_entry_payload(
+                                 static_cast<const char *>( value->file->base() ) + params->offset, params->len );
+        if( !payload ) {
+            return std::nullopt;
+        }
+        // Same native dictionary/decompression API; this reader never obtains
+        // a mutable file mapping or invokes the normal recovery loader.
+        std::shared_ptr<const mmap_file> dict;
+        if( !dictionary.empty() ) {
+            dict = mmap_file::map_file( dictionary );
+            if( !dict ) {
+                return std::nullopt;
+            }
+        }
+        std::unique_ptr<ZSTD_DCtx, decltype( &ZSTD_freeDCtx )> context( ZSTD_createDCtx(), ZSTD_freeDCtx );
+        if( !context || ( dict && ZSTD_isError( ZSTD_DCtx_loadDictionary_byReference(
+                context.get(), dict->base(), dict->len() ) ) ) ) {
+            return std::nullopt;
+        }
+        std::vector<std::byte> result( payload->size );
+        const auto actual = decompress_entry_to( context.get(), *payload, result.data(), result.size() );
+        if( !actual ) {
+            return std::nullopt;
+        }
+        result.resize( *actual );
+        return result;
+    } catch( const std::exception & ) {
+        return std::nullopt;
+    }
+}
 
 std::optional<zzip> zzip::load( std::filesystem::path const &path,
                                 std::filesystem::path const &dictionary_path )
@@ -560,7 +819,7 @@ size_t zzip::get_file_size( std::filesystem::path const &zzip_relative_path ) co
     if( !fparams.has_value() ) {
         return 0;
     }
-    void *base = file_base_plus( fparams->offset );
+    const void *base = file_base_plus( fparams->offset );
     size_t len = fparams->len;
     std::tie( base, len ) = read_and_skip_entry_metadata( base, len );
     size_t size = ZSTD_decompressBound( base, len );
@@ -600,33 +859,13 @@ size_t zzip::get_file_to( std::filesystem::path const &zzip_relative_path, std::
         return 0;
     }
     size_t file_len = fparams->len;
-    void *file_base = file_base_plus( fparams->offset );
+    const void *file_base = file_base_plus( fparams->offset );
     if( file_len > file_capacity_at( fparams->offset ) ) {
         return 0;
     }
 
-    std::optional<uint64_t> checksum_opt;
-    std::tie( file_base, file_len ) = read_and_skip_entry_metadata(
-                                          file_base,
-                                          file_len,
-                                          nullptr,
-                                          &checksum_opt );
-    if( !checksum_opt.has_value() ) {
-        return 0;
-    }
-    uint64_t checksum = XXH64( file_base, file_len, kCheckumSeed );
-    if( checksum != *checksum_opt ) {
-        return 0;
-    }
-    unsigned long long file_size = ZSTD_decompressBound( file_base, file_len );
-    if( dest_len < file_size ) {
-        return 0;
-    }
-    size_t actual = ZSTD_decompressDCtx( ctx_->dctx, dest, dest_len, file_base, file_len );
-    if( ZSTD_isError( actual ) ) {
-        return 0;
-    }
-    return actual;
+    const auto payload = read_checked_entry_payload( file_base, file_len );
+    return payload ? decompress_entry_to( ctx_->dctx, *payload, dest, dest_len ).value_or( 0 ) : 0;
 }
 
 size_t zzip::get_content_size() const
@@ -923,7 +1162,7 @@ bool zzip::rewrite_footer( bool shrink_to_fit )
         size_t zzip_remaining = zzip_len - scan_offset;
 
         // For each entry we expect at least a filename and checksum header.
-        void *file_ptr = nullptr;
+        const void *file_ptr = nullptr;
         std::tie( file_ptr, zzip_remaining ) = read_and_skip_entry_metadata(
                 file_base_plus( scan_offset ),
                 zzip_remaining,

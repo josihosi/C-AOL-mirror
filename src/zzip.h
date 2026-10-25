@@ -53,6 +53,23 @@ class zzip
         zzip( std::shared_ptr<mmap_file> file, JsonObject footer );
 
     public:
+        /** One immutable, checked native archive mapping. No recovery/write API. */
+        class checked_reader
+        {
+            public:
+                static std::optional<checked_reader> open( const std::filesystem::path &path );
+                ~checked_reader();
+                checked_reader( checked_reader && ) noexcept;
+                checked_reader &operator=( checked_reader && ) noexcept;
+                bool has_file( const std::filesystem::path &entry ) const;
+                std::optional<std::vector<std::byte>> get_file( const std::filesystem::path &entry,
+                        const std::filesystem::path &dictionary = {} ) const;
+            private:
+                struct impl;
+                explicit checked_reader( std::unique_ptr<impl> value );
+                std::unique_ptr<impl> value;
+        };
+
         static void invalidate_world_cache( const std::filesystem::path &world );
         ~zzip() noexcept;
 
@@ -66,6 +83,11 @@ class zzip
          * See https://github.com/facebook/zstd/blob/dev/programs/README.md#dictionary-builder-in-command-line-interface
          * for more details.
          */
+        /** Read-only index probe. False means checked absence; malformed or
+         * unreadable archives return nullopt. Never creates or repairs a file. */
+        static std::optional<bool> has_file_checked( const std::filesystem::path &path,
+                const std::filesystem::path &entry );
+
         static std::optional<zzip> load( std::filesystem::path const &path,
                                          std::filesystem::path const &dictionary = {} );
 

@@ -5,6 +5,35 @@ production adapter inspected 2026-09-28; a source-bound run's measured packet is
 The standard indoor brazier is [3159,3449,0], roof brazier [3156,3447,1]. Verify the selected
 save's actual furniture, fuel, fire, windows and source positions.
 
+## Representative source placement
+
+Owner clarification, 2026-10-25: full camp/tower stories should resemble a separated home and
+survivor activity site. Normally choose several OMTs of meaningful travel, outside immediate
+home/contact geometry, with a plausible approach and observation opportunity. An adjacent or
+one-OMT brazier is a labelled close-range control, not the default for every faction or the sole
+proof of distant sensing, scouting and return. Do not impose one universal minimum: native source
+strength, weather, terrain and the intended branch determine a useful distance. Record home,
+source and observer coordinates/z, actual OMT distance and measured source reach in the existing
+setup note. Do not treat the historical example coordinates/formulas below as current calibration.
+
+Across the selected signal/journey recipes, include useful separated positive cases and meaningful
+near-reach or beyond-reach/occluded negatives. Reuse existing variants; this does not order a full
+suite replay or a new run matrix. Keep near-contact, combat, hazard and other deliberately short
+controls when their purpose calls for them. Source receipt, scene recognition, selection of a
+watching position and physical travel are separate outcomes; a distant signal need not reveal
+nearby actors or permit a remote observer to inspect interior details.
+
+Missing remote lighting is a separate diagnosis, not a reason to keep moving the brazier next to
+the camp. AI observation must not require the player to see or explore the target. Distinguish
+player visibility/history from loaded-map lighting, existing saved geometry and actually missing
+physical inputs. At a demonstrated discrepancy, compare matched observer/target/time/terrain with
+player near versus far and isolate which geometry the lighting calculation requires. Preserve real
+darkness, roofs, occlusion and observer capability; unavailable data is neither proof of darkness
+nor permission to declare visibility. Moving the player nearby may be a diagnostic comparison,
+not evidence that the original remote behavior is correct. Fix a demonstrated dependency at its
+owner rather than bypass it with easier placement. Coordinate any live setup change with the
+existing input owner and preserve the first divergence and its reproduction context.
+
 ## Do not conclude from the first puff
 
 Ignition, smoke fields, a viable signal, observer admission and dispatch are different events.

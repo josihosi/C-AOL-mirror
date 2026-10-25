@@ -77,6 +77,7 @@ class existing_view : public map
         bool remote_vehicle_parts = false;
         tripoint_abs_sm lighting_center;
         std::set<tripoint_abs_sm> available;
+        std::vector<std::unique_ptr<submap>> omitted_uniform;
         std::vector<tripoint_abs_omt> lighting_footprint;
     public:
         existing_view( vehicle_footprint_index &vehicles, const tripoint_abs_ms &origin,
@@ -104,6 +105,7 @@ class existing_view : public map
             low = std::max( -OVERMAP_DEPTH, std::min( origin.z(), target.z() ) - 1 );
             observed_high = std::min( OVERMAP_HEIGHT, std::max( origin.z(), target.z() ) );
             high = native_lighting ? OVERMAP_HEIGHT : observed_high;
+            mapbuffer::existing_submap_reader existing( MAPBUFFER );
             for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
                 for( int x = 0; x < size; ++x ) {
                     for( int y = 0; y < size; ++y ) {
@@ -113,8 +115,17 @@ class existing_view : public map
                         [&]( const auto & tile ) {
                             return tile.xy() == omt.xy();
                         } );
-                        submap *sm = in_site && z >= low && z <= high ?
-                                     MAPBUFFER.lookup_submap_existing( pos ) : nullptr;
+                        submap *sm = nullptr;
+                        if( in_site && z >= low && z <= high ) {
+                            bool read_error = false;
+                            auto uniform = existing.read_omitted_uniform( pos, &read_error );
+                            if( uniform ) {
+                                sm = uniform.get();
+                                omitted_uniform.push_back( std::move( uniform ) );
+                            } else if( !read_error ) {
+                                sm = existing.lookup( pos );
+                            }
+                        }
                         // Geometry admission indexes physical vehicle parts independently of
                         // this view, including overhangs from excluded resident owners.
                         if( sm ) {
