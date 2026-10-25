@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -19732,6 +19733,111 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
     return result;
 }
 
+// Only a report-authorized response can renew this zero-valued permission.
+// The release watermark is administrative authority, not a physical return receipt.
+static void stage_released_response_source_claim( world_state &claims,
+        const site_record &previous, const site_record &candidate )
+{
+    const auto &report = previous.current_scout_report;
+    const auto &operation = candidate.active_hostile_operation;
+    const auto &reservation = operation.reservation;
+    auto claim = std::find_if( claims.hostile_target_opportunities.begin(),
+    claims.hostile_target_opportunities.end(), [&]( const auto & entry ) {
+        return entry.target_id == report.target_id && entry.target_omt == report.target_omt;
+    } );
+    if( claim == claims.hostile_target_opportunities.end() ||
+        operation.operation_kind != hostile_operation_kind::raid ||
+        previous.has_active_outside_pressure() || previous.site_id != candidate.site_id ||
+        claim->goods_value != 0 || claim->population != 0 || claim->activity != 0 ||
+        claim->consumed_generation <= 0 ||
+        claim->consumed_generation > previous.applied_return_generation ||
+        claim->consumed_generation >= report.source_generation ||
+        reservation.generation != previous.next_outing_generation ||
+        reservation.generation <= previous.applied_return_generation ||
+        claim->consumed_operation_id != previous.site_id + "#hostile:" +
+        std::to_string( claim->consumed_generation ) ||
+        claim->consumed_report_key.size() > max_operation_application_key_length ||
+        report.source_activity_id.rfind( previous.site_id + "#", 0 ) != 0 ||
+        report.application_key != bandit_pursuit_handoff::make_operation_component_key(
+            report.source_activity_id, report.source_generation, "report" ) ) {
+        return;
+    }
+    const std::string &old_key = claim->consumed_report_key;
+    const auto separator = old_key.rfind( ":report:" );
+    if( separator == std::string::npos ) {
+        return;
+    }
+    const std::string old_activity = old_key.substr( 0, separator );
+    const std::string suffix = old_key.substr( separator + 8 );
+    int old_report_generation = 0;
+    const auto parsed = std::from_chars( suffix.data(), suffix.data() + suffix.size(),
+                                         old_report_generation );
+    if( parsed.ec != std::errc() || parsed.ptr != suffix.data() + suffix.size() ||
+        old_report_generation <= 0 || old_report_generation >= claim->consumed_generation ||
+        suffix != std::to_string( old_report_generation ) ||
+        ( old_activity != previous.site_id + "#structural" &&
+          old_activity != previous.site_id + "#scout:" + std::to_string( old_report_generation ) ) ||
+        old_key != bandit_pursuit_handoff::make_operation_component_key(
+            old_activity, old_report_generation, "report" ) ) {
+        return;
+    }
+    const auto *source = previous.raid_sources.find( report.target_omt );
+    const auto *next_source = candidate.raid_sources.find( report.target_omt );
+    const int signal_world = raid_signal_world( report );
+    if( source == nullptr || next_source == nullptr ||
+        source->generation != static_cast<std::uint64_t>( claim->consumed_generation ) ||
+        source->source_active || source->absent_world < 0 ||
+        source->episode == 0 || source->episode == std::numeric_limits<std::uint64_t>::max() ||
+        signal_world <= source->absent_world ||
+        ( source->outcome != "searched" && source->outcome != "hazard_blocked" &&
+          source->outcome != "incomplete_sweep" ) ||
+        source->evidence.empty() || source->finished_active < 0 ||
+        source->finished_active > previous.raid_sources.active_elapsed ||
+        next_source->episode != source->episode + 1 || !next_source->source_active ||
+        operation.sweep_source_evidence != raid_source_evidence( report, next_source->episode ) ||
+        operation.sweep_source_evidence == source->evidence ) {
+        return;
+    }
+    scout_report_record typed_receipts;
+    typed_receipts.target_omt = report.target_omt;
+    std::copy_if( report.observations.begin(), report.observations.end(),
+                  std::back_inserter( typed_receipts.observations ),
+    [&]( const sortie_observation & observation ) {
+        return typed_sortie_observation_is_valid( observation ) &&
+               observation.share_state == sortie_observation_share_state::reported &&
+               observation.kind == sortie_observation_kind::certainty &&
+               observation.source_omt == report.target_omt &&
+               observation.target_revision == report.target_lead_revision &&
+               observation.observed_minutes <= report.delivered_minutes &&
+               observation.expiry_minutes >= report.delivered_minutes &&
+               std::find( report.carrier_ids.begin(), report.carrier_ids.end(),
+                          observation.observer_id ) != report.carrier_ids.end();
+    } );
+    if( typed_receipts.observations.empty() || raid_signal_world( typed_receipts ) != signal_world ) {
+        return;
+    }
+    auto expected_sources = previous.raid_sources;
+    expected_sources.adopt_signal( report.target_omt, signal_world );
+    const auto binding = []( const scout_report_record & value,
+    const raid_sweep::source_memory & sources ) {
+        std::ostringstream out;
+        JsonOut json( out );
+        json.start_array();
+        json.write( value );
+        json.write( sources );
+        json.end_array();
+        return out.str();
+    };
+    if( binding( report, expected_sources ) !=
+        binding( candidate.current_scout_report, candidate.raid_sources ) ) {
+        return;
+    }
+    claim->revision = report.target_lead_revision;
+    claim->consumed_operation_id.clear();
+    claim->consumed_report_key.clear();
+    claim->consumed_generation = 0;
+}
+
 structural_bounty_maintenance_result advance_structural_bounty_maintenance( world_state &state,
         const int now_minutes, const int scan_budget, const int dispatch_cap,
         const std::function<std::optional<std::string>( const tripoint_abs_omt & )> &terrain_lookup,
@@ -19965,6 +20071,26 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                                static_cast<int>( site.camp_decision.state ) ) );
                 continue;
             }
+            const auto response_site_bytes = []( const site_record & value ) {
+                std::ostringstream out;
+                JsonOut json( out );
+                value.serialize( json );
+                return out.str();
+            };
+            const std::string response_site_before = response_site_bytes( site );
+            const auto response_claims_before = state.hostile_target_opportunities;
+            const auto response_snapshot_is_current = [&]() {
+                return response_site_bytes( site ) == response_site_before &&
+                       response_claims_before.size() == state.hostile_target_opportunities.size() &&
+                       std::equal( response_claims_before.begin(), response_claims_before.end(),
+                                   state.hostile_target_opportunities.begin(),
+                []( const auto & a, const auto & b ) {
+                    return std::tie( a.target_id, a.target_omt, a.goods_value, a.population, a.activity,
+                                     a.revision, a.consumed_operation_id, a.consumed_report_key, a.consumed_generation ) ==
+                           std::tie( b.target_id, b.target_omt, b.goods_value, b.population, b.activity,
+                                     b.revision, b.consumed_operation_id, b.consumed_report_key, b.consumed_generation );
+                } );
+            };
             const std::vector<response_member_power_read> reads =
                 response_member_read_lookup( site );
             const scout_report_effective_state effective = evaluate_scout_report_at(
@@ -20041,7 +20167,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                 // A physical carrier report identifies a place, even without
                 // measured goods or population. Its zero-valued claim is only
                 // permission for this exact report-bound response. Existing
-                // conflicting or consumed opportunities are never overwritten.
+                // finite or conflicting opportunities remain authoritative. A
+                // released zero-valued source episode is staged separately below.
                 const camp_map_lead *lead = candidate.intelligence_map.find_lead( report.target_lead_id );
                 const bool authenticated_physical_report =
                     ( report.assessment.threshold_class == scout_assessment_threshold_class::normal ||
@@ -20062,7 +20189,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                 // Stage just the claim ledger alongside the already staged site.
                 // Route/application/claim failures leave both durable owners intact.
                 world_state claim_candidate;
-                claim_candidate.hostile_target_opportunities = state.hostile_target_opportunities;
+                claim_candidate.hostile_target_opportunities = response_claims_before;
                 if( ( report.assessment.threshold_class == scout_assessment_threshold_class::site_signal ||
                       authenticated_physical_report ) &&
                     claim_candidate.find_hostile_target_opportunity( reservation.target_id,
@@ -20072,6 +20199,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                         reservation.target_lead_revision, "", "", 0
                     } );
                 }
+                stage_released_response_source_claim( claim_candidate, site, candidate );
                 const hostile_target_claim_result claim_result = claim_hostile_target_opportunity(
                             claim_candidate, reservation.target_id, reservation.target_omt,
                             reservation.target_lead_revision, reservation.activity_id,
@@ -20087,7 +20215,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                     continue;
                 }
                 const auto commit_reads = response_member_read_lookup( site );
-                if( !evaluate_response_authorization( site, now_minutes, selection,
+                if( !response_snapshot_is_current() ||
+                    !evaluate_response_authorization( site, now_minutes, selection,
                                                       commit_reads ).authorized ) {
                     result.response_operation_rejections++;
                     continue;

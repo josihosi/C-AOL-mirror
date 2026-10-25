@@ -73560,3 +73560,283 @@ TEST_CASE( "raid_signal_world_refuses_invalid_time_or_provenance", "[bandit_live
         CHECK( raid_signal_world( report ) == 1080300 );
     }
 }
+
+TEST_CASE( "response_zero_claim_renews_only_a_released_source_episode",
+           "[bandit_live_world][response_claim_episode][home_rally]" )
+{
+    using namespace bandit_live_world;
+    const std::string condition = GENERATE( "released", "reload", "same_episode", "no_absence",
+                                            "no_release", "foreign_operation", "foreign_report", "malformed_operation",
+                                            "malformed_report", "zero_report", "overflow_report", "leading_zero_report",
+                                            "report_not_older", "generation_mismatch", "unknown_source", "wrong_area",
+                                            "uncompleted", "pending", "future_finish", "episode_overflow", "active_owner",
+                                            "goods", "population", "activity", "before_absence", "equal_absence",
+                                            "future_receipt", "missing_typed", "route_missing", "apply_failure",
+                                            "candidate_episode", "candidate_evidence", "commit_member", "stale_prepare_source",
+                                            "stale_apply_source", "stale_commit_claim", "stale_commit_rally" );
+    CAPTURE( condition );
+    const auto old_start = calendar::start_of_cataclysm;
+    const auto old_turn = calendar::turn;
+    on_out_of_scope restore( [&]() {
+        calendar::start_of_cataclysm = old_start;
+        calendar::turn = old_turn;
+    } );
+    calendar::start_of_cataclysm = time_point::from_turn( 4752000 );
+    calendar::turn = time_point::from_turn( 5835600 ); // Actual 18060-minute owner opportunity.
+    world_state world;
+    add_scheduler_test_site( world, 0, true, 92600 );
+    auto &site = world.sites.front();
+    site.site_id = "overmap_special:cannibal_camp@135,137,0";
+    site.anchor = tripoint_abs_omt( 135, 137, 0 );
+    site.footprint = { site.anchor };
+    // This response fixture is an already active home, as in the native save.
+    // Ordinary routine activation later in maintenance is not a response commit.
+    site.routine_activated_minutes = 18060;
+    site.spawn_tiles.clear();
+    for( std::size_t i = 0; i < site.members.size(); ++i ) {
+        site.members[i].home_spawn_tile = project_to<coords::ms>( site.anchor ) + point( i, 0 );
+        site.spawn_tiles.push_back( { site.members[i].home_spawn_tile, 1 } );
+    }
+    const tripoint_abs_omt target( 138, 139, 0 );
+    auto &report = site.current_scout_report;
+    report.revision = 1;
+    report.action_policy = camp_report_policy::cannibal_night_raid;
+    report.source_activity_id = site.site_id + "#structural";
+    report.source_generation = 10;
+    report.source_job_type = "scout";
+    report.target_id = "camp-light@(138,139,0)";
+    report.target_omt = target;
+    report.target_lead_id = "current-returned-source";
+    report.target_lead_revision = 1133;
+    report.application_key = report.source_activity_id + ":report:10";
+    report.carrier_ids = { site.members[0].npc_id, site.members[1].npc_id };
+    report.delivered_minutes = 17940;
+    report.assessment.certainty = 20;
+    report.assessment.readiness_latched = true;
+    report.assessment.threshold_class = scout_assessment_threshold_class::site_signal;
+    report.assessment.danger_high = 9;
+    report.assessment.observation_started_minutes = 17760;
+    report.assessment.last_progress_minutes = 17880; // Retained actual watch prerequisite.
+    report.assessment.site_signal_observed_minutes = 17875;
+    report.assessment.site_signal_source_id = "structural-smoke@(138,139,0)";
+    sortie_observation optical;
+    optical.record_schema_version = 1;
+    optical.kind = sortie_observation_kind::certainty;
+    optical.sense = sortie_observation_sense::smoke;
+    optical.share_state = sortie_observation_share_state::reported;
+    optical.source_omt = target;
+    optical.receiver_omt = tripoint_abs_omt( 135, 139, 0 );
+    optical.emitter_ms = tripoint_abs_ms( 3319, 3345, 0 );
+    optical.observable_ms = optical.emitter_ms;
+    optical.source_id = report.assessment.site_signal_source_id;
+    optical.fact_key = "structural-signal:" + optical.source_id;
+    optical.state_key = "structural-smoke-signal";
+    optical.observer_id = report.carrier_ids.front();
+    optical.observed_minutes = 17875;
+    optical.bucket_start_minutes = 17850;
+    optical.simultaneity_start_minutes = optical.simultaneity_end_minutes = 17875;
+    optical.expiry_minutes = 20000;
+    optical.target_revision = 1133;
+    report.observations = { optical };
+    camp_map_lead lead;
+    lead.lead_id = report.target_lead_id;
+    lead.target_id = report.target_id;
+    lead.omt = target;
+    lead.revision = 1133;
+    lead.kind = camp_lead_kind::smoke_signal;
+    lead.first_seen_minutes = 17000;
+    lead.last_seen_minutes = 17875;
+    site.intelligence_map.leads.push_back( lead );
+    site.applied_report_generation = 10;
+    site.applied_return_generation = 10; // Administrative release, not a gen5 physical receipt.
+    site.next_outing_generation = 11;
+    REQUIRE( site.raid_sources.finish( target, 5, raid_source_evidence( report, 1 ), "searched" ) );
+    site.raid_sources.active_elapsed = 609970;
+    site.raid_sources.find( target )->finished_active = 300725;
+    site.raid_sources.find( target )->retry_after_active = 387125;
+    site.raid_sources.observe_absence( target, 5516753 );
+    world.hostile_target_opportunities.push_back( { report.target_id, target, 0, 0, 0, 568,
+            site.site_id + "#hostile:5", site.site_id + "#structural:report:4", 5 } );
+    REQUIRE( accept_current_scout_report_for_assessment( site ) ==
+             camp_decision_transition_result::applied );
+    const auto reads = []( const site_record & value ) {
+        std::vector<response_member_power_read> result;
+        for( const auto &member : value.members ) {
+            result.push_back( { member.npc_id, true, true, true, 10 } );
+        }
+        return result;
+    };
+    const auto selected = select_capable_response_party( site, report.action_policy, 9, reads( site ) );
+    INFO( evaluate_response_authorization( site, 18060, selected, reads( site ) ).rejection_reason );
+    REQUIRE( evaluate_response_authorization( site, 18060, selected, reads( site ) ).authorized );
+    REQUIRE( site.raid_sources.next_episode( target, raid_signal_world( report ) ) == 2 );
+    REQUIRE( world.hostile_target_opportunities.front().revision == 568 );
+    REQUIRE( site.raid_sources.find( target )->evidence == "14125333515900007403" );
+    const auto record_bytes = []( const auto & value ) {
+        std::ostringstream out;
+        JsonOut json( out );
+        value.serialize( json );
+        return out.str();
+    };
+    const auto boundary_bytes = [&]() {
+        world_state values;
+        values.sites.push_back( site );
+        values.hostile_target_opportunities = world.hostile_target_opportunities;
+        return serialize_world( values );
+    };
+    // The generic API is deliberately unchanged, even at the newer lead revision.
+    const auto before_generic = serialize_world( world );
+    CHECK( claim_hostile_target_opportunity( world, report.target_id, target, 1133,
+            site.site_id + "#hostile:11", report.application_key, 11 ) ==
+           hostile_target_claim_result::rejected );
+    CHECK( serialize_world( world ) == before_generic );
+    auto &claim = world.hostile_target_opportunities.front();
+    auto *source = site.raid_sources.find( target );
+    REQUIRE( source );
+    if( condition == "reload" ) {
+        auto loaded = round_trip_world( world );
+        site = std::move( loaded.sites.front() );
+        world.hostile_target_opportunities = std::move( loaded.hostile_target_opportunities );
+        source = site.raid_sources.find( target );
+        REQUIRE( source );
+    } else if( condition == "same_episode" ) {
+        source->source_active = true;
+    } else if( condition == "no_absence" ) {
+        source->absent_world = -1;
+    } else if( condition == "no_release" ) {
+        site.applied_return_generation = 4;
+    } else if( condition == "foreign_operation" ) {
+        claim.consumed_operation_id = "foreign#hostile:5";
+    } else if( condition == "foreign_report" ) {
+        claim.consumed_report_key = "foreign#structural:report:4";
+    } else if( condition == "malformed_operation" ) {
+        claim.consumed_operation_id = site.site_id + "#hostile:05";
+    } else if( condition == "malformed_report" ) {
+        claim.consumed_report_key += "junk";
+    } else if( condition == "zero_report" ) {
+        claim.consumed_report_key = site.site_id + "#structural:report:0";
+    } else if( condition == "overflow_report" ) {
+        claim.consumed_report_key = site.site_id + "#structural:report:999999999999999999999";
+    } else if( condition == "leading_zero_report" ) {
+        claim.consumed_report_key = site.site_id + "#structural:report:04";
+    } else if( condition == "report_not_older" ) {
+        claim.consumed_report_key = site.site_id + "#structural:report:10";
+    } else if( condition == "generation_mismatch" ) {
+        claim.consumed_generation = 6;
+        claim.consumed_operation_id = site.site_id + "#hostile:6";
+    } else if( condition == "unknown_source" ) {
+        site.raid_sources.outcomes.clear();
+    } else if( condition == "wrong_area" ) {
+        source->area += point( 1, 0 );
+    } else if( condition == "uncompleted" ) {
+        source->generation = 0;
+    } else if( condition == "pending" ) {
+        source->outcome = "pending";
+    } else if( condition == "future_finish" ) {
+        source->finished_active = site.raid_sources.active_elapsed + 1;
+    } else if( condition == "episode_overflow" ) {
+        source->episode = std::numeric_limits<std::uint64_t>::max();
+    } else if( condition == "active_owner" ) {
+        // Even an inconsistent runtime release watermark cannot override a
+        // still-held prior owner. No physical settlement is fabricated here.
+        auto &held = site.active_hostile_operation;
+        held.operation_kind = hostile_operation_kind::raid;
+        held.phase = hostile_operation_phase::returning_home;
+        held.reservation.kind = outing_kind::hostile_operation;
+        held.reservation.activity_id = site.site_id + "#hostile:5";
+        held.reservation.camp_id = site.site_id;
+        held.reservation.generation = 5;
+        held.reservation.member_ids = report.carrier_ids;
+    } else if( condition == "goods" ) {
+        claim.goods_value = 1;
+    } else if( condition == "population" ) {
+        claim.population = 1;
+    } else if( condition == "activity" ) {
+        claim.activity = 1;
+    } else if( condition == "before_absence" || condition == "equal_absence" ) {
+        source->absent_world = raid_signal_world( report ) + ( condition == "before_absence" ? 1 : 0 );
+    } else if( condition == "future_receipt" ) {
+        report.observations.front().observed_minutes = 18061;
+    } else if( condition == "missing_typed" ) {
+        report.observations.clear();
+    }
+    const auto old_claim_bytes = record_bytes( world.hostile_target_opportunities.front() );
+    std::string response_boundary;
+    int read_calls = 0;
+    const auto checked_reads = [&]( const site_record & value ) {
+        auto result = reads( value );
+        if( ++read_calls == 1 ) {
+            response_boundary = boundary_bytes(); // After ordinary maintenance, before response staging.
+        } else if( read_calls == 2 ) {
+            if( condition == "commit_member" ) {
+                result.front().ready = false;
+            } else if( condition == "stale_commit_claim" ) {
+                ++world.hostile_target_opportunities.front().revision;
+                response_boundary = boundary_bytes();
+            } else if( condition == "stale_commit_rally" ) {
+                auto *current = site.raid_sources.find( target );
+                REQUIRE( current );
+                current->rally_episode = current->episode;
+                current->rally_outcomes["92600"] = static_cast<int>( raid_sweep::home_rally_outcome::expired );
+                response_boundary = boundary_bytes();
+            }
+        }
+        return result;
+    };
+    const auto result = advance_structural_bounty_maintenance(
+                            world, 18060, 0, 0, {}, {}, {}, {}, {}, {}, checked_reads, {},
+    [&]( const site_record & value ) -> std::optional<canonical_hostile_operation_route> {
+        if( condition == "route_missing" )
+        {
+            return std::nullopt;
+        }
+        if( condition == "stale_prepare_source" )
+        {
+            ++site.raid_sources.find( target )->absent_world;
+            response_boundary = boundary_bytes();
+        }
+        return canonical_hostile_operation_route{
+            { value.anchor, value.anchor + point( 1, 0 ), value.current_scout_report.target_omt },
+            value.anchor + point( 1, 0 ) };
+    }, [&]( site_record & value, const authorized_hostile_operation_plan & plan ) {
+        const bool applied = apply_hostile_operation_plan_with_authorized_response( value, plan );
+        if( condition == "candidate_episode" ) {
+            ++value.raid_sources.find( target )->episode;
+        } else if( condition == "candidate_evidence" ) {
+            value.raid_sources.find( target )->evidence = "forged replacement";
+        } else if( condition == "stale_apply_source" ) {
+            ++site.raid_sources.find( target )->absent_world;
+            response_boundary = boundary_bytes();
+        }
+        return applied && condition != "apply_failure";
+    } );
+    INFO( render_structural_bounty_maintenance_report( result ) );
+    const bool positive = condition == "released" || condition == "reload";
+    if( positive ) {
+        CHECK( result.response_operations_planned == 1 );
+    }
+    CHECK( result.response_operations_applied == ( positive ? 1 : 0 ) );
+    if( !positive || result.response_operations_applied == 0 ) {
+        CHECK( !response_boundary.empty() );
+        CHECK( boundary_bytes() == response_boundary );
+        // Legitimate external changes at the last boundary stay current;
+        // the stale candidate must not overwrite them or publish its claim.
+        if( condition != "stale_commit_claim" ) {
+            CHECK( record_bytes( world.hostile_target_opportunities.front() ) == old_claim_bytes );
+        }
+        if( positive ) {
+            CHECK( site.raid_sources.find( target )->episode == 1 );
+        }
+        return;
+    }
+    CHECK( site.active_hostile_operation.reservation.generation == 11 );
+    CHECK( site.raid_sources.find( target )->episode == 2 );
+    CHECK( world.hostile_target_opportunities.front().revision == 1133 );
+    CHECK( world.hostile_target_opportunities.front().consumed_generation == 11 );
+    CHECK( world.hostile_target_opportunities.front().consumed_report_key == report.application_key );
+    const auto committed = serialize_world( world );
+    CHECK( serialize_world( round_trip_world( world ) ) == committed );
+    CHECK( advance_structural_bounty_maintenance( world, 18060, 0, 0, {}, {}, {}, {}, {}, {},
+            reads ).scheduler_replay_suppressed );
+    CHECK( serialize_world( world ) == committed );
+}
