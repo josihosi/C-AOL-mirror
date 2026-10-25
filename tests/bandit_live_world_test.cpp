@@ -73331,7 +73331,7 @@ TEST_CASE( "native_home_rally_uses_an_individual_body_interval_and_real_arrival"
         REQUIRE( recalled().outcome == raid_sweep::home_rally_outcome::expired );
         away.remove_effect( efftype_id( "stunned" ) );
         const int minute = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
-        site().raid_sources.observe_absence( target, ( minute - 2 ) * 60 );
+        site().raid_sources.observe_absence( target, to_turn<int>( calendar::turn - 2_minutes ) );
         auto deliver = [&]( int observed ) {
             auto &fresh = site().current_scout_report;
             ++fresh.revision;
@@ -73424,5 +73424,139 @@ TEST_CASE( "native_home_rally_uses_an_individual_body_interval_and_real_arrival"
         process_overmap_npc_move_for_test();
         CHECK( recalled().active_turns == active + 300 );
         CHECK( away.pos_abs_omt() == site().anchor );
+    }
+}
+
+TEST_CASE( "raid_signal_world_uses_absolute_native_calendar", "[bandit_live_world][home_rally_native][raid_signal_world]" )
+{
+    using namespace bandit_live_world;
+    const auto old_start = calendar::start_of_cataclysm;
+    const auto old_turn = calendar::turn;
+    on_out_of_scope restore( [&]() {
+        calendar::start_of_cataclysm = old_start;
+        calendar::turn = old_turn;
+    } );
+    calendar::start_of_cataclysm = time_point::from_turn( 4752000 );
+    calendar::turn = time_point::from_turn( 5832340 );
+    scout_report_record report;
+    report.target_omt = tripoint_abs_omt( 138, 139, 0 );
+    sortie_observation optical;
+    optical.record_schema_version = 1;
+    optical.sense = sortie_observation_sense::smoke;
+    optical.emitter_ms = tripoint_abs_ms( 3319, 3345, 0 );
+    optical.observed_minutes = 17875;
+    report.observations = { optical };
+    raid_sweep::source_memory memory;
+    const auto old_evidence = raid_source_evidence( report, 1 );
+    REQUIRE( old_evidence == "14125333515900007403" );
+    REQUIRE( memory.finish( report.target_omt, 1, old_evidence, "searched" ) );
+    memory.active_elapsed = 606371; // Declared saved native source-memory facts.
+    memory.find( report.target_omt )->retry_after_active = 387125;
+    memory.observe_absence( report.target_omt, 5516753 );
+    // The original relative value reproduces the actual native guard refusal.
+    CHECK( memory.next_episode( report.target_omt, 17875 * 60 ) == 1 );
+    CHECK_FALSE( memory.ready( report.target_omt, raid_source_evidence( report,
+                              memory.next_episode( report.target_omt, 17875 * 60 ) ) ) );
+    const auto bytes = []( const raid_sweep::source_memory &value ) {
+        std::ostringstream buffer;
+        JsonOut out( buffer );
+        value.serialize( out );
+        return buffer.str();
+    };
+    const auto original = bytes( memory );
+    REQUIRE( raid_signal_world( report ) == 5824500 );
+    CHECK( memory.next_episode( report.target_omt, raid_signal_world( report ) ) == 2 );
+    CHECK( memory.ready( report.target_omt, raid_source_evidence( report,
+                            memory.next_episode( report.target_omt, raid_signal_world( report ) ) ) ) );
+    CHECK( bytes( memory ) == original ); // Reads do not adopt an episode or grant work.
+    memory.adopt_signal( report.target_omt, raid_signal_world( report ) );
+    auto *entry = memory.find( report.target_omt );
+    REQUIRE( entry != nullptr );
+    entry->rally_episode = 2;
+    entry->rally_outcomes["6"] = static_cast<int>( raid_sweep::home_rally_outcome::expired );
+    const auto adopted = bytes( memory );
+    raid_sweep::source_memory loaded;
+    loaded.deserialize( json_loader::from_string( adopted ).get_object() );
+    for( int repeat = 0; repeat < 3; ++repeat ) {
+        CHECK( raid_signal_world( report ) == 5824500 );
+        CHECK( loaded.next_episode( report.target_omt, raid_signal_world( report ) ) == 2 );
+        loaded.adopt_signal( report.target_omt, raid_signal_world( report ) );
+        CHECK( bytes( loaded ) == adopted );
+        CHECK( loaded.find( report.target_omt )->rally_outcomes.count( "6" ) == 1 );
+    }
+}
+
+TEST_CASE( "raid_signal_world_refuses_invalid_time_or_provenance", "[bandit_live_world][raid_signal_world]" )
+{
+    using namespace bandit_live_world;
+    const auto old_start = calendar::start_of_cataclysm;
+    const auto old_turn = calendar::turn;
+    on_out_of_scope restore( [&]() {
+        calendar::start_of_cataclysm = old_start;
+        calendar::turn = old_turn;
+    } );
+    calendar::start_of_cataclysm = time_point::from_turn( 4752000 );
+    calendar::turn = time_point::from_turn( 5832340 );
+    scout_report_record report;
+    report.target_omt = tripoint_abs_omt( 138, 139, 0 );
+    sortie_observation optical;
+    optical.record_schema_version = 1;
+    optical.sense = sortie_observation_sense::light;
+    optical.emitter_ms = tripoint_abs_ms( 3319, 3345, 0 );
+    optical.observed_minutes = 17875;
+    report.observations = { optical };
+    SECTION( "stale before and equal absence cannot reopen a source" ) {
+        raid_sweep::source_memory memory;
+        REQUIRE( memory.reserve( report.target_omt ) );
+        memory.observe_absence( report.target_omt, 5824500 );
+        for( const int minute : { 12745, 17874, 17875 } ) {
+            report.observations.front().observed_minutes = minute;
+            CHECK( memory.next_episode( report.target_omt, raid_signal_world( report ) ) == 1 );
+            memory.adopt_signal( report.target_omt, raid_signal_world( report ) );
+            CHECK_FALSE( memory.find( report.target_omt )->source_active );
+        }
+    }
+    SECTION( "future and wide arithmetic overflow remain unknown" ) {
+        for( const int minute : { -1, 18006, std::numeric_limits<int>::max() / 60,
+                                 std::numeric_limits<int>::max() } ) {
+            report.observations.front().observed_minutes = minute;
+            CHECK( raid_signal_world( report ) == -1 );
+        }
+        calendar::turn = time_point::from_turn( std::numeric_limits<int>::max() );
+        report.observations.front().observed_minutes = std::numeric_limits<int>::max() / 60;
+        CHECK( raid_signal_world( report ) == -1 ); // Offset addition, not only multiply overflow.
+        calendar::start_of_cataclysm = time_point::from_turn( -120 );
+        report.observations.front().observed_minutes = 1;
+        CHECK( raid_signal_world( report ) == -1 ); // A negative absolute result is not a world fact.
+    }
+    SECTION( "only genuine matching typed optical observations qualify" ) {
+        const std::string invalid = GENERATE( "missing", "legacy", "no-emitter", "foreign", "visual" );
+        CAPTURE( invalid );
+        if( invalid == "missing" ) {
+            report.observations.clear();
+        } else if( invalid == "legacy" ) {
+            report.observations.front().record_schema_version = 0;
+        } else if( invalid == "no-emitter" ) {
+            report.observations.front().emitter_ms.reset();
+        } else if( invalid == "foreign" ) {
+            *report.observations.front().emitter_ms += point( 24, 0 );
+        } else {
+            report.observations.front().sense = sortie_observation_sense::visual;
+        }
+        CHECK( raid_signal_world( report ) == -1 );
+    }
+    SECTION( "zero origin and latest valid observation remain compatible" ) {
+        calendar::start_of_cataclysm = calendar::turn_zero;
+        calendar::turn = time_point::from_turn( 1080300 );
+        CHECK( raid_signal_world( report ) == 1072500 );
+        auto future = optical;
+        future.observed_minutes = 18006;
+        report.observations.push_back( future );
+        auto older = optical;
+        older.observed_minutes = 17874;
+        report.observations.push_back( older );
+        CHECK( raid_signal_world( report ) == 1072500 );
+        report.observations.back().observed_minutes = 18005;
+        CHECK( raid_signal_world( report ) == 1080300 );
     }
 }

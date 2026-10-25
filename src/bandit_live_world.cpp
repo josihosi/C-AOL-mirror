@@ -21413,8 +21413,16 @@ int raid_signal_world( const scout_report_record &report )
             project_to<coords::omt>( *observation.emitter_ms ) == report.target_omt &&
             ( observation.sense == sortie_observation_sense::smoke ||
               observation.sense == sortie_observation_sense::light ) &&
-            observation.observed_minutes >= 0 && observation.observed_minutes <= INT_MAX / 60 ) {
-            latest = std::max( latest, observation.observed_minutes * 60 );
+            observation.observed_minutes >= 0 ) {
+            // Reports use minutes since the cataclysm; source absence and
+            // episode ownership use absolute native world turns. Normalize
+            // once here, before any source-memory comparison or adoption.
+            const std::int64_t observed_world = to_turn<std::int64_t>( calendar::start_of_cataclysm ) +
+                                                static_cast<std::int64_t>( observation.observed_minutes ) * 60;
+            if( observed_world >= 0 && observed_world <= INT_MAX &&
+                observed_world <= to_turn<std::int64_t>( calendar::turn ) ) {
+                latest = std::max( latest, static_cast<int>( observed_world ) );
+            }
         }
     }
     return latest;
