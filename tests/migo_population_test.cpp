@@ -306,3 +306,40 @@ TEST_CASE( "migo_exact_party_reservation_authenticates_all_members_and_keeps_def
     CHECK( site.members[4].assignment == duty::available );
     CHECK( site.members[5].assignment == duty::available );
 }
+
+TEST_CASE( "migo_response_fallback_reservation_is_atomic_and_policy_local",
+           "[migo_population][home_rally]" )
+{
+    using namespace migo_population;
+    site_record site = tower();
+    for( const auto &member : site.members ) {
+        REQUIRE( site.transfer( member.token, representation::slot, representation::abstract ) );
+    }
+    const auto healthy = [&]( const member_record &member ) {
+        return member.token.member_id == site.members[0].token.member_id ||
+               member.token.member_id == site.members[1].token.member_id ||
+               member.token.member_id == site.members[2].token.member_id;
+    };
+    const std::vector<identity> selected = { site.members[0].token, site.members[1].token,
+                                          site.members[2].token };
+    CHECK( site.reserve_exact( selected, healthy ).empty() );
+    CHECK( site.defensive_reserve == 2 );
+    CHECK( site.reserve_exact( selected, healthy, 1 ).empty() );
+    auto stale = selected;
+    ++stale.back().epoch;
+    CHECK( site.reserve_exact( stale, healthy, 0 ).empty() );
+    CHECK( site.reserve_exact( { selected[0], selected[0], selected[2] }, healthy, 0 ).empty() );
+    CHECK( site.reserve_exact( selected, [&]( const member_record &member ) {
+        return healthy( member ) && member.token.member_id != selected.back().member_id;
+    }, 0 ).empty() );
+    CHECK( std::all_of( site.members.begin(), site.members.end(), []( const auto &member ) {
+        return member.assignment == duty::available;
+    } ) );
+    REQUIRE( site.reserve_exact( selected, healthy, 0 ).size() == 3 );
+    CHECK( site.defensive_reserve == 2 );
+    site = reload( site );
+    CHECK( site.reserve_exact( selected, healthy, 0 ).empty() );
+    for( const auto &token : selected ) {
+        CHECK( site.find( token.member_id )->assignment == duty::dispatched );
+    }
+}

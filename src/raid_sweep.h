@@ -20,6 +20,53 @@ class map;
 // actors, perception, hostility, dispatch permission or transport.
 namespace raid_sweep
 {
+// A finite individual trip to an existing home. This value owns elapsed
+// allowance and pause debt only; callers authenticate the actual native body,
+// range, footprint and duty before evaluating or recording an arrival.
+enum class home_rally_outcome : int { homeward, arrived, transferred, unavailable, expired };
+struct home_rally_member {
+    std::string member_id;
+    home_rally_outcome outcome = home_rally_outcome::homeward;
+    int last_world = -1;
+    bool active = false;
+    std::int64_t active_turns = 0;
+    std::int64_t suspended_turns = 0;
+    int active_delta_turns = 0; // transient, never reload credit
+    int body_anchor = -1;
+    std::int64_t body_pause = 0;
+    std::int64_t allowance_turns = 0;
+    std::int64_t no_progress_turns = 0;
+    std::int64_t last_progress = 0;
+    std::int64_t motor_active = 0;
+    std::optional<tripoint_abs_ms> last_position;
+
+    bool working() const;
+    void evaluate( int world_turn, bool eligible, int native_body_anchor = -1 );
+    std::int64_t suspension_at( int world_turn ) const;
+    std::int64_t suspended_body_turns( int native_body_anchor ) const;
+    void settle_body( int native_body_anchor );
+    // Read/planning never claims a motor interval. The existing movement owner
+    // claims once, including failed/blocked opportunities: no banked catch-up.
+    int claim_motor_turns();
+    void observe( const tripoint_abs_ms &actual_position, bool physically_home );
+    bool exhausted() const;
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &json );
+};
+
+struct home_rally {
+    tripoint_abs_omt source;
+    std::uint64_t episode = 0;
+    std::uint64_t generation = 0;
+    std::vector<home_rally_member> members;
+    home_rally_member *find( const std::string &member_id );
+    const home_rally_member *find( const std::string &member_id ) const;
+    bool pending() const;
+    bool add( home_rally_member member );
+    void serialize( JsonOut &json ) const;
+    void deserialize( const JsonObject &json );
+};
+
 enum class disposition : int { pending, searched, hazardous, unreachable };
 
 // Actual field cells, including an uncontained adjacent fire. A contained
@@ -87,6 +134,10 @@ struct source_outcome {
     std::uint64_t episode = 1;
     bool source_active = true;
     int absent_world = -1;
+    // Compact spent facts for this source's current recall episode. The
+    // active rally remains the sole interval/body owner.
+    std::uint64_t rally_episode = 0;
+    std::map<std::string, int> rally_outcomes;
     std::string evidence;
     std::string outcome;
     std::int64_t finished_active = 0;
@@ -106,6 +157,9 @@ struct source_memory {
     void advance( int world_turn, int active_turns );
     bool ready( const tripoint_abs_omt &area, const std::string &evidence ) const;
     bool reserve( const tripoint_abs_omt &area );
+    source_outcome *find( const tripoint_abs_omt &area );
+    const source_outcome *find( const tripoint_abs_omt &area ) const;
+    bool rally_history_known( const tripoint_abs_omt &area, std::uint64_t episode ) const;
     std::uint64_t next_episode( const tripoint_abs_omt &area, int signal_world ) const;
     void adopt_signal( const tripoint_abs_omt &area, int signal_world );
     void observe_absence( const tripoint_abs_omt &area, int observed_world );

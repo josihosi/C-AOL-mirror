@@ -36080,28 +36080,53 @@ TEST_CASE( "bandit_live_world_response_selection_leaves_a_named_capable_home_res
         CHECK( reversed_bandit.party_power == bandit.party_power );
     }
 
-    SECTION( "anonymous or ineligible members never satisfy the reserve" ) {
+    SECTION( "anonymous or ineligible members never satisfy a preferred reserve or a real party" ) {
         bandit_live_world::world_state world = make_world( 4, 7, 54100 );
         bandit_live_world::site_record &site = world.sites.front();
         std::vector<response_member_power_read> reads = make_reads(
                     site, { 10, 10, 10, 10 } );
         const std::string before = serialize_world( world );
-        CHECK_FALSE( bandit_live_world::select_capable_response_party(
-                         site, camp_report_policy::bandit_shakedown, 1, reads ).eligible );
+        const auto fallback = bandit_live_world::select_capable_response_party(
+                                  site, camp_report_policy::bandit_shakedown, 1, reads );
+        REQUIRE( fallback.eligible );
+        CHECK( fallback.required_local_reserve == 0 );
+        CHECK( fallback.member_ids.size() == 2 );
+        CHECK( fallback.reserve_member_ids.empty() );
+        for( const auto id : fallback.member_ids ) {
+            REQUIRE( site.find_member( id ) );
+        }
         CHECK( serialize_world( world ) == before );
 
         site.living_total = 4;
         reads[0].at_source_camp = false;
-        CHECK_FALSE( bandit_live_world::select_capable_response_party(
-                         site, camp_report_policy::bandit_shakedown, 1, reads ).eligible );
+        const auto away = bandit_live_world::select_capable_response_party(
+                              site, camp_report_policy::bandit_shakedown, 1, reads );
+        REQUIRE( away.eligible );
+        CHECK( away.required_local_reserve == 0 );
+        CHECK( std::find( away.member_ids.begin(), away.member_ids.end(), reads[0].npc_id ) ==
+               away.member_ids.end() );
         reads[0].at_source_camp = true;
         reads[0].ready = false;
-        CHECK_FALSE( bandit_live_world::select_capable_response_party(
-                         site, camp_report_policy::bandit_shakedown, 1, reads ).eligible );
+        const auto unready = bandit_live_world::select_capable_response_party(
+                                 site, camp_report_policy::bandit_shakedown, 1, reads );
+        REQUIRE( unready.eligible );
+        CHECK( std::find( unready.member_ids.begin(), unready.member_ids.end(), reads[0].npc_id ) ==
+               unready.member_ids.end() );
         reads[0].ready = true;
         site.members[0].wounded_or_unready = true;
+        const auto wounded = bandit_live_world::select_capable_response_party(
+                                 site, camp_report_policy::bandit_shakedown, 1, reads );
+        REQUIRE( wounded.eligible );
+        CHECK( std::find( wounded.member_ids.begin(), wounded.member_ids.end(), reads[0].npc_id ) ==
+               wounded.member_ids.end() );
+        reads[2].ready = false;
+        reads[3].ready = false;
         CHECK_FALSE( bandit_live_world::select_capable_response_party(
                          site, camp_report_policy::bandit_shakedown, 1, reads ).eligible );
+        auto anonymous = make_world( 1, 7, 54110 );
+        CHECK_FALSE( bandit_live_world::select_capable_response_party( anonymous.sites.front(),
+                     camp_report_policy::bandit_shakedown, 1,
+                     make_reads( anonymous.sites.front(), { 10 } ) ).eligible );
     }
 
     SECTION( "malformed snapshots and impossible bounded power fail closed" ) {
@@ -38829,6 +38854,37 @@ TEST_CASE( "bandit_live_world_scheduler_commits_authorized_response_as_assemblin
         } );
     }
 
+    SECTION( "a native readiness change at final commit cannot publish duty or target claims" ) {
+        auto candidate = awaiting;
+        const auto decision = serialize_record( candidate.sites.front().camp_decision );
+        const auto operation = serialize_record( candidate.sites.front().active_hostile_operation );
+        bandit_live_world::world_state claims;
+        claims.hostile_target_opportunities = candidate.hostile_target_opportunities;
+        const auto before_claims = serialize_world( claims );
+        int read_count = 0;
+        const auto fresh_reads = [&]( const bandit_live_world::site_record &current ) {
+            auto current_reads = capable_reads( current );
+            if( ++read_count == 2 ) {
+                current_reads.front().ready = false; // The selected real ID changed before commit.
+            }
+            return current_reads;
+        };
+        const auto result = bandit_live_world::advance_structural_bounty_maintenance(
+                                candidate, now_minutes, 0, 0, {}, {}, {}, {}, {}, {}, fresh_reads, materialize_one,
+        [rally, target]( const bandit_live_world::site_record &current ) {
+            return std::optional<bandit_live_world::canonical_hostile_operation_route>(
+            bandit_live_world::canonical_hostile_operation_route{ { current.anchor, rally, target }, rally } );
+        } );
+        CHECK( read_count == 2 );
+        CHECK( result.response_operations_planned == 1 );
+        CHECK( result.response_operations_applied == 0 );
+        CHECK( result.response_operation_rejections == 1 );
+        CHECK( serialize_record( candidate.sites.front().camp_decision ) == decision );
+        CHECK( serialize_record( candidate.sites.front().active_hostile_operation ) == operation );
+        claims.hostile_target_opportunities = candidate.hostile_target_opportunities;
+        CHECK( serialize_world( claims ) == before_claims );
+        return;
+    }
     int materialize_calls = 0;
     int reads_calls = 0;
     int route_calls = 0;
@@ -38871,7 +38927,7 @@ TEST_CASE( "bandit_live_world_scheduler_commits_authorized_response_as_assemblin
     CHECK( result.response_operations_planned == 1 );
     CHECK( result.response_operations_applied == 1 );
     CHECK( materialize_calls == 1 );
-    CHECK( reads_calls == 1 );
+    CHECK( reads_calls == 2 );
     CHECK( route_calls == 1 );
     CHECK( site.camp_decision.state == bandit_live_world::camp_decision_state::preparing_follow_on );
     REQUIRE( site.active_hostile_operation.is_active() );
@@ -38900,7 +38956,7 @@ TEST_CASE( "bandit_live_world_scheduler_commits_authorized_response_as_assemblin
     }, route );
     CHECK( replay.scheduler_replay_suppressed );
     CHECK( materialize_calls == 1 );
-    CHECK( reads_calls == 1 );
+    CHECK( reads_calls == 2 );
     CHECK( route_calls == 1 );
     CHECK( serialize_world( world ) == before_replay );
 
@@ -38950,7 +39006,7 @@ TEST_CASE( "bandit_live_world_scheduler_commits_authorized_response_as_assemblin
     CHECK( departure.hostile_departures_applied == 1 );
     CHECK( departure.hostile_departure_rejections == 0 );
     CHECK( materialize_calls == 1 );
-    CHECK( reads_calls == 1 );
+    CHECK( reads_calls == 2 );
     CHECK( route_calls == 1 );
     CHECK( site.active_hostile_operation.phase ==
            bandit_live_world::hostile_operation_phase::outbound );
@@ -38977,7 +39033,7 @@ TEST_CASE( "bandit_live_world_scheduler_commits_authorized_response_as_assemblin
     CHECK( departure_replay.scheduler_replay_suppressed );
     CHECK( departure_replay.hostile_departures_applied == 0 );
     CHECK( materialize_calls == 1 );
-    CHECK( reads_calls == 1 );
+    CHECK( reads_calls == 2 );
     CHECK( route_calls == 1 );
     CHECK( serialize_world( world ) == before_departure_replay );
 }
@@ -43849,16 +43905,24 @@ TEST_CASE( "minute 9060 saved cannibal response uses actual home NPC power",
               << " report_current=" << authorization.report_current
               << " report_unexpired=" << authorization.report_unexpired
               << " assessment_ready=" << authorization.assessment_ready << '\n';
-    CHECK_FALSE( selection.eligible );
-    CHECK( selection.rejection_reason == "no bounded response party clears the faction power margin" );
+    REQUIRE( selection.eligible );
+    CHECK( selection.party_size == 4 );
+    CHECK( selection.party_power == 19 ); // Actual saved strongest four: 6 + 5 + 4 + 4.
+    CHECK( selection.required_power == 18 );
+    CHECK( selection.required_local_reserve == 0 );
+    CHECK( selection.reserve_member_ids.empty() );
     CHECK( authorization.valid );
-    CHECK_FALSE( authorization.authorized );
+    CHECK( authorization.authorized );
     CHECK( authorization.report_current );
     CHECK( authorization.report_unexpired );
     CHECK( authorization.assessment_ready );
-    // The old native denial remains valid for its danger-12 report.  Reuse the
-    // same five physical hunters to bound the newly authorized three-unknown
-    // calculation; native report/authorization still belongs to Luna.
+    // The old three-member danger-12 denial remains measured above. The
+    // selected fallback can instead use the fourth real hunter. It still
+    // cannot clear an overwhelming danger on the same unchanged bodies.
+    CHECK_FALSE( bandit_live_world::select_capable_response_party(
+                     site, site.current_scout_report.action_policy, 200, reads ).eligible );
+    // Reuse the same five physical hunters for the preferred-reserve case;
+    // this source fixture is component proof, not a new native observation.
     const auto revised_selection = bandit_live_world::select_capable_response_party(
                                        site, site.current_scout_report.action_policy, 9, reads );
     CHECK( revised_selection.eligible );
@@ -72509,5 +72573,856 @@ TEST_CASE( "owned Fight withdrawal retains native urgent care and incapacity",
         CHECK( actor.get_moves() < 100 );
         CHECK( actor.goal == site.anchor );
         CHECK( site.active_hostile_operation.reservation.resolved_member_ids.empty() );
+    }
+}
+
+TEST_CASE( "response_reserve_fallback_keeps_power_and_real_readiness",
+           "[bandit][live_world][home_rally]" )
+{
+    using namespace bandit_live_world;
+    world_state world;
+    add_bandit_camp_member( world, 0, 56500 );
+    add_bandit_camp_member( world, 1, 56500 );
+    site_record &site = world.sites.front();
+    site.living_total = 2; // Exactly the two genuine members in this tiny-home fixture.
+    std::vector<response_member_power_read> reads;
+    for( const character_id id : site.roster().physically_present_ids ) {
+        response_member_power_read read;
+        read.npc_id = id;
+        read.authoritative_present = true;
+        read.at_source_camp = true;
+        read.ready = true;
+        read.normalized_power = 10;
+        reads.push_back( read );
+    }
+    REQUIRE( reads.size() == 2 );
+    const std::string before = serialize_world( world );
+    const auto selected = select_capable_response_party(
+                              site, camp_report_policy::bandit_shakedown, 1, reads );
+    REQUIRE( selected.eligible );
+    CHECK( selected.party_size == 2 );
+    CHECK( selected.required_local_reserve == 0 );
+    CHECK( selected.reserve_member_ids.empty() );
+    CHECK( serialize_world( world ) == before );
+    CHECK_FALSE( select_capable_response_party(
+                     site, camp_report_policy::bandit_shakedown, 200, reads ).eligible );
+    reads.back().at_source_camp = false;
+    CHECK_FALSE( select_capable_response_party(
+                     site, camp_report_policy::bandit_shakedown, 1, reads ).eligible );
+    reads.back().at_source_camp = true;
+    reads.back().ready = false;
+    CHECK_FALSE( select_capable_response_party(
+                     site, camp_report_policy::bandit_shakedown, 1, reads ).eligible );
+}
+
+TEST_CASE( "authorized_response_fallback_survives_assembly_and_reload",
+           "[bandit][live_world][home_rally]" )
+{
+    using namespace bandit_live_world;
+    world_state world;
+    for( int i = 0; i < 2; ++i ) {
+        add_bandit_camp_member( world, i, 56520 );
+    }
+    auto &site = world.sites.front();
+    site.living_total = 2;
+    const tripoint_abs_omt rally = site.anchor + point( 1, 0 );
+    const tripoint_abs_omt target = site.anchor + point( 3, 0 );
+    prepare_hostile_follow_on( site, 9, 4, "fallback-target", target, 900 );
+    std::vector<response_member_power_read> reads;
+    for( const auto &member : site.members ) {
+        reads.push_back( { member.npc_id, true, true, true, 10 } );
+    }
+    const auto selection = select_capable_response_party(
+                               site, site.current_scout_report.action_policy,
+                               site.current_scout_report.assessment.danger_high, reads );
+    REQUIRE( selection.eligible );
+    REQUIRE( selection.required_local_reserve == 0 );
+    CHECK_FALSE( plan_hostile_operation( site, hostile_operation_kind::shakedown,
+                 { site.anchor, rally, target }, rally, 902 ).valid );
+    const auto plan = plan_hostile_operation_with_authorized_response(
+                          site, hostile_operation_kind::shakedown, selection,
+                          { site.anchor, rally, target }, rally, 902 );
+    REQUIRE( plan.plan.valid );
+    CHECK( plan.plan.operation.response_home_reserve == 0 );
+    auto tampered = plan;
+    tampered.plan.operation.response_home_reserve = 1;
+    const auto before = serialize_world( world );
+    CHECK_FALSE( apply_hostile_operation_plan_with_authorized_response( site, tampered ) );
+    CHECK( serialize_world( world ) == before );
+    site.find_member( selection.member_ids.back() )->wounded_or_unready = true;
+    const auto stale_before = serialize_world( world );
+    CHECK_FALSE( apply_hostile_operation_plan_with_authorized_response( site, plan ) );
+    CHECK( serialize_world( world ) == stale_before );
+    site.find_member( selection.member_ids.back() )->wounded_or_unready = false;
+    REQUIRE( apply_hostile_operation_plan_with_authorized_response( site, plan ) );
+    auto loaded = round_trip_world( world );
+    auto &restored = loaded.sites.front();
+    REQUIRE( restored.active_hostile_operation.is_active() );
+    CHECK( restored.active_hostile_operation.response_home_reserve == 0 );
+    CHECK( transition_test_hostile_operation( restored, hostile_operation_phase::assembling,
+           hostile_operation_phase::outbound, 903, "fallback actual departure" ) ==
+           hostile_operation_transition_result::applied );
+    CHECK( restored.active_hostile_operation.reservation.member_ids == selection.member_ids );
+    CHECK( std::none_of( restored.members.begin(), restored.members.end(), []( const auto &member ) {
+        return member.state == member_state::at_home;
+    } ) );
+    hostile_operation_state ordinary;
+    std::ostringstream bytes;
+    { JsonOut out( bytes ); ordinary.serialize( out ); }
+    CHECK( bytes.str().find( "response_home_reserve" ) == std::string::npos );
+}
+
+TEST_CASE( "native_home_rally_uses_an_individual_body_interval_and_real_arrival",
+           "[bandit][live_world][home_rally_native]" )
+{
+    using namespace bandit_live_world;
+    const bool sufficient_present = GENERATE( false, true );
+    CAPTURE( sufficient_present );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_npcs();
+    clear_avatar();
+    clear_map_with_vision( -1, 1, false );
+    const auto old_turn = calendar::turn;
+    const auto old_avatar = get_avatar().pos_abs();
+    const auto old_world = overmap_buffer.global_state.bandit_live_world;
+    on_out_of_scope restore( [&]() {
+        get_avatar().setpos( old_avatar, false );
+        clear_npcs();
+        overmap_buffer.global_state.bandit_live_world = old_world;
+        clear_avatar();
+        set_time( old_turn );
+    } );
+    set_time( calendar::start_of_cataclysm + 121_minutes );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    npc &away = spawn_npc( { 85, 60 }, "bandit" );
+    npc &resident = spawn_npc( { 61, 60 }, "bandit" );
+    clear_character( away, true );
+    clear_character( resident, true );
+    // clear_character strips native personality traits. Native reload derives
+    // them again, so retain that ordinary saved-body prerequisite here.
+    away.generate_personality_traits();
+    resident.generate_personality_traits();
+    away.setpos( here, tripoint_bub_ms( 85, 60, 0 ), false );
+    resident.setpos( here, tripoint_bub_ms( 61, 60, 0 ), false );
+    away.set_attitude( NPCATT_NULL );
+    resident.set_attitude( NPCATT_NULL );
+    std::vector<npc *> native_members{ &away, &resident };
+    if( sufficient_present ) {
+        npc &third = spawn_npc( { 62, 60 }, "bandit" );
+        clear_character( third, true );
+        third.generate_personality_traits();
+        third.setpos( here, tripoint_bub_ms( 62, 60, 0 ), false );
+        third.set_attitude( NPCATT_NULL );
+        native_members.push_back( &third );
+    }
+    for( npc *body : native_members ) {
+        body->set_mission( NPC_MISSION_NULL );
+        body->goal = npc::no_goal_point;
+        body->guard_pos.reset();
+        body->clear_ai_guard_pos();
+    }
+    REQUIRE( g->find_npc( away.getID() ) == &away );
+    REQUIRE( overmap_buffer.find_npc( away.getID() ).get() == &away );
+    world_state world;
+    const auto home_omt = project_to<coords::omt>( resident.pos_abs() );
+    const auto native_home_lookup = [&]( const tripoint_abs_omt &p ) -> std::optional<std::string> {
+        return p == home_omt ? std::optional<std::string>( "bandit_camp" ) : std::nullopt;
+    };
+    int home_index = 0;
+    for( const npc *body : native_members ) {
+        REQUIRE( claim_tracked_spawn( world, "bandit", body->getID(),
+                 here.get_abs( tripoint_bub_ms( 60 + home_index++, 60, 0 ) ),
+                 std::string( "bandit_camp" ), std::nullopt, native_home_lookup ) );
+    }
+    auto &fixture_site = world.sites.front();
+    REQUIRE( fixture_site.anchor == home_omt );
+    fixture_site.living_total = native_members.size(); // Exactly the controlled native bodies.
+    auto &report = fixture_site.current_scout_report;
+    report.revision = 1;
+    report.action_policy = camp_report_policy::bandit_shakedown;
+    report.source_activity_id = fixture_site.site_id + "#scout:1";
+    report.source_generation = 1;
+    report.source_job_type = "scout";
+    report.target_id = "home-rally-native-opportunity";
+    report.target_omt = fixture_site.anchor + point( 3, 0 );
+    report.target_lead_revision = 1;
+    report.application_key = report.source_activity_id + ":report:1";
+    report.delivered_minutes = 121;
+    report.assessment.certainty = 95; // Native current-schema upper bound.
+    report.assessment.readiness_latched = true;
+    report.assessment.threshold_class = scout_assessment_threshold_class::normal;
+    report.assessment.danger_high = 1;
+    report.assessment.bounty_estimate = 1; // Native bounded grade, not the separate goods receipt.
+    fixture_site.applied_report_generation = 1;
+    fixture_site.next_outing_generation = 2;
+    REQUIRE( observe_authoritative_hostile_target_opportunity(
+                 world, report.target_id, report.target_omt, { 100, 3, 1 } ) );
+    REQUIRE( accept_current_scout_report_for_assessment( fixture_site ) ==
+             camp_decision_transition_result::applied );
+    world = round_trip_world( world ); // A valid native saved-owner premise before any rally work.
+    overmap_buffer.global_state.bandit_live_world = world;
+    auto site = [&]() -> site_record & {
+        return overmap_buffer.global_state.bandit_live_world.sites.front();
+    };
+    // The ordinary five-minute native owner moves the persistent body; loaded
+    // turns remain a separate native motor and never receive this coarse step.
+    away.on_unload();
+    g->remove_npc( away.getID() );
+    REQUIRE_FALSE( away.is_active() );
+    REQUIRE( away.pos_abs_omt() != site().anchor );
+    REQUIRE( resident.pos_abs_omt() == site().anchor );
+    process_overmap_npc_move_for_test();
+    REQUIRE( site().response_home_rally );
+    auto recalled = [&]() -> raid_sweep::home_rally_member & {
+        return *site().response_home_rally->find( std::to_string( away.getID().get_value() ) );
+    };
+    REQUIRE( site().response_home_rally->find( std::to_string( away.getID().get_value() ) ) );
+    REQUIRE( recalled().working() );
+    REQUIRE( away.has_omt_destination() );
+    CHECK( away.goal == site().anchor );
+    CHECK( recalled().active_turns == 0 );
+    CHECK_FALSE( site().active_hostile_operation.is_active() );
+    if( sufficient_present ) {
+        // The response owner must not await a third body that is still
+        // genuinely away when two present capable members already suffice.
+        const auto reads = live_response_member_power_reads( site() );
+        const auto selected = select_capable_response_party( site(),
+                              site().current_scout_report.action_policy, 1, reads );
+        REQUIRE( selected.eligible );
+        REQUIRE( selected.member_ids.size() == 2 );
+        CHECK( std::find( selected.member_ids.begin(), selected.member_ids.end(), away.getID() ) ==
+               selected.member_ids.end() );
+        CHECK( selected.required_local_reserve == 0 );
+        REQUIRE( evaluate_response_authorization( site(), 121, selected, reads ).authorized );
+        REQUIRE( transition_camp_decision_state( site(), camp_decision_state::report_awaiting_assessment,
+                 camp_decision_state::preparing_follow_on, 1, 1, 121, -1,
+                 "present party need not await recall" ) == camp_decision_transition_result::applied );
+        const auto home = site().anchor;
+        const auto plan = plan_hostile_operation_with_authorized_response( site(),
+                          hostile_operation_kind::shakedown, selected,
+                          { home, home + point( 1, 0 ), home + point( 3, 0 ) }, home + point( 1, 0 ), 121 );
+        REQUIRE( plan.plan.valid );
+        REQUIRE( apply_hostile_operation_plan_with_authorized_response( site(), plan ) );
+        CHECK( recalled().working() );
+        CHECK( away.goal == home );
+        CHECK( std::find( site().active_hostile_operation.reservation.member_ids.begin(),
+                         site().active_hostile_operation.reservation.member_ids.end(), away.getID() ) ==
+               site().active_hostile_operation.reservation.member_ids.end() );
+        CHECK( round_trip_world( overmap_buffer.global_state.bandit_live_world ).sites.front().
+               response_home_rally->find( std::to_string( away.getID().get_value() ) )->working() );
+        return;
+    }
+    const auto body_bytes = []( const npc &body ) {
+        std::ostringstream out;
+        { JsonOut json( out ); body.serialize( json ); }
+        return out.str();
+    };
+    const auto body_contents = [&]( const npc &body ) {
+        // The enclosing array keeps TextJson's object boundary distinct from
+        // end-of-stream. It is not part of the native body being compared.
+        std::istringstream input( "[" + body_bytes( body ) + "]" );
+        TextJsonIn text( input );
+        auto bodies = text.get_array();
+        const auto object = bodies.next_object();
+        // Consume the complete native body representation, not a selected
+        // projection. Only equal-time queue ordering is normalized below.
+        std::string result = object.str();
+        auto queue = object.get_array( "queued_effect_on_conditions" );
+        const auto queue_text = queue.str();
+        std::vector<std::string> entries;
+        for( const TextJsonObject entry : queue ) {
+            // Validate each native field and retain the full context and
+            // record bytes in the comparison, without discarding any values.
+            ( void )entry.get_int( "time" );
+            ( void )entry.get_string( "eoc" );
+            ( void )entry.get_object( "context" ).str();
+            std::string record = entry.str();
+            // TextJson spans include a consumed separator, not body data.
+            if( !record.empty() && record.back() == ',' ) {
+                record.pop_back();
+            }
+            entries.push_back( std::move( record ) );
+        }
+        // Native EOCs are a priority queue ordered only by time. Compare
+        // every complete record as a multiset, preserving duplicates.
+        std::sort( entries.begin(), entries.end() );
+        std::string sorted = "[";
+        for( const auto &entry : entries ) {
+            sorted += ( sorted.size() > 1 ? "," : "" ) + entry;
+        }
+        sorted += "]";
+        if( !queue_text.empty() && queue_text.back() == ',' ) {
+            sorted += ',';
+        }
+        const auto at = result.find( queue_text );
+        REQUIRE( at != std::string::npos );
+        result.replace( at, queue_text.size(), sorted );
+        return result;
+    };
+    SECTION( "remote rally physiology keeps native effect death and cargo at its actual body" ) {
+        const bool fatal = GENERATE( false, true );
+        CAPTURE( fatal );
+        r067_monster_damage_witness witness( static_cast<const monster *>( nullptr ) );
+        const auto retained_body = overmap_buffer.find_npc( away.getID() );
+        REQUIRE( retained_body.get() == &away );
+        const auto remote_omt = site().anchor + point( 10, 0 );
+        const auto position = project_to<coords::ms>( remote_omt ) + point( 12, 12 );
+        tinymap physical;
+        physical.load( remote_omt, false );
+        away.setpos( position, false );
+        REQUIRE_FALSE( here.inbounds( position ) );
+        REQUIRE_FALSE( away.is_active() );
+        refresh_live_bandit_activation();
+        REQUIRE( recalled().active );
+        away.add_effect( efftype_id( "stunned" ), 30_minutes );
+        const std::string cargo_key = std::to_string( away.getID().get_value() );
+        item cargo( itype_id( "rock" ) );
+        cargo.set_var( "rally_remote_cargo", cargo_key );
+        const auto cargo_uid = away.i_add( std::move( cargo ) )->uid().get_value();
+        const auto carries_cargo = [&]( const item &value ) {
+            bool found = false;
+            value.visit_items( [&]( const item *entry, const item * ) {
+                if( entry->get_var( "rally_remote_cargo" ) == cargo_key ) {
+                    found = true;
+                }
+                return VisitResponse::NEXT;
+            } );
+            return found;
+        };
+        const auto erase_cargo = [&]( map &owner ) {
+            for( const auto &tile : owner.points_on_zlevel( position.z() ) ) {
+                std::vector<item *> owned;
+                for( item &value : owner.i_at( tile ) ) {
+                    if( carries_cargo( value ) ) {
+                        owned.push_back( &value );
+                    }
+                }
+                for( item *value : owned ) {
+                    owner.i_rem( tile, value );
+                }
+            }
+        };
+        on_out_of_scope cleanup_cargo( [&]() {
+            erase_cargo( here );
+            erase_cargo( *physical.cast_to_map() );
+            physical.save();
+        } );
+        std::optional<bool> native_death_preserves_uid;
+        const auto corpse_receipts = [&]() {
+            std::vector<std::pair<std::int64_t, std::int64_t>> result;
+            map &body_map = *physical.cast_to_map();
+            for( const item &value : body_map.i_at( body_map.get_bub( position ) ) ) {
+                if( !value.is_corpse() ) {
+                    continue;
+                }
+                value.visit_items( [&]( const item *entry, const item * ) {
+                    if( entry->get_var( "rally_remote_cargo" ) == cargo_key ) {
+                        CHECK( entry->typeId() == itype_id( "rock" ) );
+                        if( native_death_preserves_uid ) {
+                            CHECK( ( entry->uid().get_value() == cargo_uid ) == *native_death_preserves_uid );
+                        }
+                        result.emplace_back( value.uid().get_value(), entry->uid().get_value() );
+                    }
+                    return VisitResponse::NEXT;
+                } );
+            }
+            return result;
+        };
+        if( fatal ) {
+            // Character::place_corpse is the ordinary native inventory owner:
+            // currently it copies gear. Compare that real policy rather than
+            // requiring a new UID policy from the rally interval adapter.
+            const auto before_reference = body_bytes( away );
+            {
+                swap_map current( *physical.cast_to_map() );
+                away.place_corpse( physical.cast_to_map() );
+            }
+            const auto reference = corpse_receipts();
+            REQUIRE( reference.size() == 1 );
+            native_death_preserves_uid = reference.front().second == cargo_uid;
+            CHECK( body_bytes( away ) == before_reference );
+            CHECK( witness.deaths[away.getID()] == 0 );
+            erase_cargo( *physical.cast_to_map() ); // Consume only this explicit native reference.
+            // Native effects, not a direct death callback, own the casualty.
+            // add_effect applies its first native tick immediately. Remain
+            // alive for the actual later service opportunity being tested.
+            swap_map current( *physical.cast_to_map() );
+            away.set_part_hp_cur( bodypart_id( "torso" ), 20 );
+            away.add_effect( efftype_id( "bleed" ), 30_minutes, bodypart_id( "arm_l" ) );
+            away.add_effect( efftype_id( "onfire" ), 30_minutes, bodypart_id( "torso" ) );
+            REQUIRE_FALSE( away.is_dead() );
+        }
+        const auto remaining = away.get_effect_dur( efftype_id( "stunned" ) );
+        const auto moves = away.get_moves();
+        set_time( calendar::start_of_cataclysm + 125_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() == position );
+        CHECK( away.get_moves() == moves );
+        CHECK( away.get_last_updated() == calendar::turn );
+        if( fatal ) {
+            REQUIRE( away.is_dead() );
+            CHECK( witness.deaths[away.getID()] == 1 );
+            CHECK( recalled().outcome == raid_sweep::home_rally_outcome::unavailable );
+            CHECK( corpse_receipts().size() == 1 );
+            for( const auto &tile : here.points_on_zlevel( position.z() ) ) {
+                for( const item &value : here.i_at( tile ) ) {
+                    CHECK_FALSE( carries_cargo( value ) );
+                }
+            }
+        } else {
+            CHECK_FALSE( away.is_dead() );
+            CHECK( witness.deaths[away.getID()] == 0 );
+            CHECK( away.get_effect_dur( efftype_id( "stunned" ) ) < remaining );
+            CHECK( recalled().working() );
+        }
+        const auto actual_corpse_receipts = corpse_receipts();
+        const auto once = body_contents( away );
+        process_overmap_npc_move_for_test();
+        CHECK( body_contents( away ) == once );
+        CHECK( corpse_receipts() == actual_corpse_receipts );
+        CHECK( witness.deaths[away.getID()] == ( fatal ? 1 : 0 ) );
+        if( fatal ) {
+            // A dead retained native body remains in the geographic query;
+            // replacing its terminal recall must not grant ordinary travel.
+            const auto retained_nearby = overmap_buffer.get_npcs_near_omt( away.pos_abs_omt(), 0 );
+            REQUIRE( std::any_of( retained_nearby.begin(), retained_nearby.end(), [&]( const auto &body ) {
+                return body.get() == &away;
+            } ) );
+            const auto source_a = site().response_home_rally->source;
+            const auto episode_a = site().response_home_rally->episode;
+            resident.on_unload();
+            g->remove_npc( resident.getID() );
+            resident.setpos( project_to<coords::ms>( site().anchor + point( 2, 0 ) ) + point( 12, 12 ),
+                             false );
+            REQUIRE_FALSE( resident.is_active() );
+            REQUIRE( resident.pos_abs_omt() != site().anchor );
+            REQUIRE( std::find( site().footprint.begin(), site().footprint.end(), resident.pos_abs_omt() ) ==
+                     site().footprint.end() );
+            auto &fresh = site().current_scout_report;
+            ++fresh.revision;
+            fresh.application_key = fresh.source_activity_id + ":report:" + std::to_string( fresh.revision );
+            fresh.target_omt = source_a + point( 0, 2 );
+            fresh.target_id = "after-native-death-rally-source";
+            fresh.delivered_minutes = 125;
+            REQUIRE( observe_authoritative_hostile_target_opportunity(
+                         overmap_buffer.global_state.bandit_live_world, fresh.target_id, fresh.target_omt,
+                         {100, 3, 1} ) );
+            REQUIRE( accept_current_scout_report_for_assessment( site() ) ==
+                     camp_decision_transition_result::applied );
+            set_time( calendar::start_of_cataclysm + 130_minutes );
+            process_overmap_npc_move_for_test();
+            REQUIRE( site().response_home_rally );
+            REQUIRE( site().response_home_rally->source != source_a );
+            REQUIRE( site().response_home_rally->find( std::to_string( resident.getID().get_value() ) ) );
+            CHECK_FALSE( site().response_home_rally->find( std::to_string( away.getID().get_value() ) ) );
+            CHECK( site().raid_sources.next_episode( source_a, -1 ) == episode_a );
+            CHECK( body_contents( away ) == once );
+            CHECK( away.pos_abs() == position );
+            CHECK( corpse_receipts() == actual_corpse_receipts );
+            CHECK( witness.deaths[away.getID()] == 1 );
+            overmap_buffer.global_state.bandit_live_world = round_trip_world(
+                        overmap_buffer.global_state.bandit_live_world );
+            for( const int minute : {135, 140} ) {
+                set_time( calendar::start_of_cataclysm + minute * 1_minutes );
+                process_overmap_npc_move_for_test();
+                process_overmap_npc_move_for_test();
+                CHECK( body_contents( away ) == once );
+                CHECK( away.pos_abs() == position );
+                CHECK( corpse_receipts() == actual_corpse_receipts );
+                CHECK( witness.deaths[away.getID()] == 1 );
+            }
+        }
+    }
+    SECTION( "native first aid begun after recall retains priority across unload and frozen reload" ) {
+        const bool route_stopped_for_care = GENERATE( false, true );
+        CAPTURE( route_stopped_for_care );
+        const bodypart_id arm( "arm_r" );
+        away.apply_damage( nullptr, arm, 10 );
+        const auto bandage = away.i_add( item( itype_id( "bandages" ) ) );
+        away.assign_activity( firstaid_activity_actor( 100000, bandage->tname(), away.getID() ) );
+        away.activity.targets.emplace_back( bandage );
+        away.activity.str_values.emplace_back( arm.id().c_str() );
+        REQUIRE( away.Character::has_activity( activity_id( "ACT_FIRSTAID" ) ) );
+        if( route_stopped_for_care ) {
+            away.reach_omt_destination(); // Native care has stopped its prior travel order.
+        }
+        const auto from = away.pos_abs();
+        const auto care = [&]() {
+            std::ostringstream out;
+            { JsonOut json( out ); away.activity.serialize( json ); }
+            return out.str();
+        };
+        const auto original_care = care();
+        away.on_unload();
+        set_time( calendar::start_of_cataclysm + 125_minutes );
+        process_overmap_npc_move_for_test();
+        REQUIRE( away.pos_abs() == from );
+        CHECK( care() == original_care );
+        if( route_stopped_for_care ) {
+            CHECK_FALSE( away.has_omt_destination() );
+        }
+        CHECK( recalled().motor_active == recalled().active_turns );
+        const auto active_avatar = get_avatar().pos_abs();
+        get_avatar().setpos( project_to<coords::ms>( away.pos_abs_omt() - point( 41, 0 ) ), false );
+        refresh_live_bandit_activation();
+        REQUIRE_FALSE( recalled().active );
+        set_time( calendar::turn + 10_minutes );
+        refresh_live_bandit_activation();
+        const auto saved = body_bytes( away );
+        npc loaded;
+        loaded.deserialize( json_loader::from_string( saved ).get_object() );
+        away = std::move( loaded );
+        overmap_buffer.global_state.bandit_live_world = round_trip_world(
+                    overmap_buffer.global_state.bandit_live_world );
+        away.on_load( &here );
+        CHECK( care() == original_care );
+        CHECK( away.pos_abs() == from );
+        get_avatar().setpos( active_avatar, false );
+        refresh_live_bandit_activation();
+        set_time( calendar::turn + 5_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() == from );
+        CHECK( care() == original_care );
+        CHECK( recalled().motor_active == recalled().active_turns );
+        // Active native on_load recomputes temperature even with zero dt.
+        // Preserve that ordinary convergence while checking no extra care,
+        // physiology interval, movement or rally funding is consumed.
+        const auto care_interval_state = [&]() {
+            return std::make_tuple( care(), away.pos_abs(), away.get_moves(), away.get_hp(),
+                                    away.get_last_updated(), away.get_hunger(), away.get_thirst(),
+                                    away.get_sleepiness(), recalled().active_turns, recalled().motor_active );
+        };
+        const auto once = care_interval_state();
+        process_overmap_npc_move_for_test();
+        CHECK( care_interval_state() == once );
+    }
+    SECTION( "a foreign native copy cannot settle or borrow the rally body interval" ) {
+        npc foreign; // Intentional duplicate native save identity, never installed.
+        foreign.deserialize( json_loader::from_string( body_bytes( away ) ).get_object() );
+        const auto foreign_before = body_bytes( foreign );
+        const auto actual_before = body_bytes( away );
+        const auto owner_before = serialize_world( overmap_buffer.global_state.bandit_live_world );
+        auto interval = live_bandit_body_interval_for( foreign );
+        REQUIRE( static_cast<bool>( interval ) );
+        CHECK_FALSE( interval.active() );
+        interval.finish_loaded_interval();
+        interval.settle_body( foreign.getID(), to_turns<int>(
+                                  calendar::turn - calendar::start_of_cataclysm ) );
+        CHECK( foreign.catch_up_body() == 0_turns );
+        CHECK( body_bytes( foreign ) == foreign_before );
+        CHECK( body_bytes( away ) == actual_before );
+        CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == owner_before );
+    }
+    SECTION( "native loaded credit cannot be funded a second time after unload" ) {
+        g->load_npcs();
+        REQUIRE( away.is_active() );
+        for( int turn = 0; turn < 5; ++turn ) {
+            set_time( calendar::turn + 1_turns );
+            refresh_live_bandit_activation();
+            away.process_turn();
+        }
+        const auto current_moves = away.get_moves();
+        const auto position = away.pos_abs();
+        const auto actor_omt = away.pos_abs_omt();
+        const tripoint_abs_omt far( actor_omt.xy() - point( 41, 0 ), actor_omt.z() );
+        get_avatar().setpos( project_to<coords::ms>( far ) + point( 12, 12 ), false );
+        refresh_live_bandit_activation();
+        REQUIRE_FALSE( recalled().active );
+        away.on_unload();
+        g->remove_npc( away.getID() );
+        CHECK( away.get_moves() == current_moves );
+        CHECK( away.pos_abs() == position );
+        CHECK( recalled().motor_active == recalled().active_turns );
+        const auto released = body_bytes( away );
+        get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+        set_time( calendar::turn + 1_turns );
+        refresh_live_bandit_activation();
+        set_time( calendar::turn + 1_turns );
+        refresh_live_bandit_activation();
+        CHECK( body_bytes( away ) == released ); // Eligibility reads supplied no body/movement credit.
+        CHECK( recalled().claim_motor_turns() == 1 );
+        CHECK( recalled().claim_motor_turns() == 0 );
+    }
+    SECTION( "home inside40 cannot age its independent away member at41" ) {
+        const auto body_omt = away.pos_abs_omt();
+        const tripoint_abs_omt far( body_omt.xy() - point( 41, 0 ), body_omt.z() );
+        away.add_effect( efftype_id( "stunned" ), 30_minutes );
+        away.on_unload();
+        get_avatar().setpos( project_to<coords::ms>( far ) + point( 12, 12 ), false );
+        set_time( calendar::turn + 1_turns );
+        refresh_live_bandit_activation();
+        REQUIRE( site().home_activation.active );
+        REQUIRE_FALSE( recalled().active );
+        const auto frozen = body_bytes( away );
+        const auto frozen_contents = body_contents( away );
+        const auto active = recalled().active_turns;
+        const auto remaining = away.get_effect_dur( efftype_id( "stunned" ) );
+        const auto position = away.pos_abs();
+        const auto moves = away.get_moves();
+        set_time( calendar::turn + 600_turns );
+        refresh_live_bandit_activation();
+        away.on_unload();
+        away.on_load( &here );
+        CHECK( body_bytes( away ) == frozen );
+        CHECK( recalled().active_turns == active );
+        const auto saved_body = body_bytes( away );
+        // Native loading starts with a fresh object, not a second append into
+        // the existing EOC queue. Keep the same registered object/identity.
+        npc reloaded;
+        reloaded.deserialize( json_loader::from_string( saved_body ).get_object() );
+        away = std::move( reloaded );
+        overmap_buffer.global_state.bandit_live_world = round_trip_world(
+                    overmap_buffer.global_state.bandit_live_world );
+        away.on_load( &here );
+        CHECK( body_contents( away ) == frozen_contents );
+        get_avatar().setpos( project_to<coords::ms>( far + point( 1, 0 ) ) + point( 12, 12 ), false );
+        refresh_live_bandit_activation();
+        away.on_load( &here );
+        CHECK( recalled().active_turns == active );
+        CHECK( away.get_effect_dur( efftype_id( "stunned" ) ) == remaining );
+        CHECK( away.pos_abs() == position );
+        CHECK( away.get_moves() == moves );
+        const auto resumed = body_bytes( away );
+        CHECK( away.catch_up_body() == 0_turns );
+        CHECK( body_bytes( away ) == resumed );
+        set_time( calendar::turn + 1_turns );
+        refresh_live_bandit_activation();
+        CHECK( away.catch_up_body() == 1_turns );
+        CHECK( recalled().active_turns == active + 1 );
+        const auto once = body_bytes( away );
+        CHECK( away.catch_up_body() == 0_turns );
+        CHECK( body_bytes( away ) == once );
+    }
+    SECTION( "actual native motor arrival precedes response and stale recall loses ownership" ) {
+        const auto from = away.pos_abs();
+        const auto id = away.getID();
+        set_time( calendar::start_of_cataclysm + 125_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() != from );
+        REQUIRE( away.pos_abs_omt() == site().anchor );
+        set_time( calendar::start_of_cataclysm + 130_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::arrived );
+        CHECK_FALSE( site().active_hostile_operation.is_active() );
+        const auto reads = live_response_member_power_reads( site() );
+        const auto selected = select_capable_response_party( site(),
+                              site().current_scout_report.action_policy, 1, reads );
+        REQUIRE( selected.eligible );
+        REQUIRE( selected.required_local_reserve == 0 );
+        REQUIRE( evaluate_response_authorization( site(), 130, selected, reads ).authorized );
+        REQUIRE( transition_camp_decision_state( site(), camp_decision_state::report_awaiting_assessment,
+                 camp_decision_state::preparing_follow_on, 1, 1, 130, -1,
+                 "actual home-ready party authorized" ) == camp_decision_transition_result::applied );
+        const auto home = site().anchor;
+        const auto plan = plan_hostile_operation_with_authorized_response( site(),
+                          hostile_operation_kind::shakedown, selected,
+                          { home, home + point( 1, 0 ), home + point( 3, 0 ) }, home + point( 1, 0 ), 130 );
+        REQUIRE( plan.plan.valid );
+        auto old_rally = site().response_home_rally;
+        old_rally->find( std::to_string( id.get_value() ) )->outcome = raid_sweep::home_rally_outcome::homeward;
+        old_rally->find( std::to_string( id.get_value() ) )->active = false;
+        REQUIRE( apply_hostile_operation_plan_with_authorized_response( site(), plan ) );
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::transferred );
+        site().response_home_rally = old_rally; // Explicit stale cross-owner projection control.
+        refresh_live_bandit_activation();
+        const auto &operation = site().active_hostile_operation.reservation;
+        REQUIRE( operation.activation.initialized() );
+        auto interval = live_bandit_body_interval_for( away );
+        CHECK( interval.active() == operation.activation.active );
+        CHECK( interval.active_delta_turns() == operation.activation.active_delta_turns );
+        CHECK( away.getID() == id );
+        const auto before = body_bytes( away );
+        CHECK( away.catch_up_body() == 0_turns );
+        CHECK( body_bytes( away ) == before );
+    }
+    SECTION( "native incapacity consumes no banked travel and real recovery can finish the same recall" ) {
+        const auto from = away.pos_abs();
+        const auto allowance = recalled().allowance_turns;
+        const auto episode = site().response_home_rally->episode;
+        away.add_effect( efftype_id( "stunned" ), 1_hours );
+        set_time( calendar::start_of_cataclysm + 125_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() == from );
+        CHECK( recalled().motor_active == recalled().active_turns );
+        CHECK( recalled().working() );
+        away.remove_effect( efftype_id( "stunned" ) );
+        set_time( calendar::start_of_cataclysm + 130_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() != from );
+        CHECK( recalled().allowance_turns == allowance );
+        CHECK( site().response_home_rally->episode == episode );
+        CHECK( recalled().claim_motor_turns() == 0 );
+    }
+    SECTION( "actual active no-progress expires finitely and reload does not restart the episode" ) {
+        away.add_effect( efftype_id( "stunned" ), 24_hours );
+        const auto from = away.pos_abs();
+        const auto allowance = recalled().allowance_turns;
+        const auto episode = site().response_home_rally->episode;
+        set_time( calendar::turn + 7_hours );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() == from );
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::expired );
+        CHECK_FALSE( away.has_omt_destination() );
+        overmap_buffer.global_state.bandit_live_world = round_trip_world(
+                    overmap_buffer.global_state.bandit_live_world );
+        set_time( calendar::turn + 5_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::expired );
+        CHECK( recalled().allowance_turns == allowance );
+        CHECK( site().response_home_rally->episode == episode );
+        CHECK( away.pos_abs() == from );
+    }
+    SECTION( "another response source cannot replenish an expired human recall episode" ) {
+        const bool empty_other = GENERATE( false, true );
+        CAPTURE( empty_other );
+        const auto original_source = site().current_scout_report.target_omt;
+        const auto original_target = site().current_scout_report.target_id;
+        const auto original_episode = site().response_home_rally->episode;
+        away.add_effect( efftype_id( "stunned" ), 24_hours );
+        set_time( calendar::turn + 7_hours );
+        process_overmap_npc_move_for_test();
+        REQUIRE( recalled().outcome == raid_sweep::home_rally_outcome::expired );
+        if( !empty_other ) {
+            away.remove_effect( efftype_id( "stunned" ) );
+        }
+        auto deliver = [&]( const tripoint_abs_omt &target, const std::string &id ) {
+            auto &fresh = site().current_scout_report;
+            ++fresh.revision;
+            fresh.application_key = fresh.source_activity_id + ":report:" + std::to_string( fresh.revision );
+            fresh.target_omt = target;
+            fresh.target_id = id;
+            fresh.delivered_minutes = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
+            REQUIRE( observe_authoritative_hostile_target_opportunity(
+                         overmap_buffer.global_state.bandit_live_world, id, target, {100, 3, 1} ) );
+            REQUIRE( accept_current_scout_report_for_assessment( site() ) ==
+                     camp_decision_transition_result::applied );
+        };
+        deliver( original_source + point( 0, 2 ), "other-rally-source" );
+        process_overmap_npc_move_for_test();
+        REQUIRE( site().response_home_rally );
+        if( empty_other ) {
+            CHECK( site().response_home_rally->source == original_source );
+        } else {
+            REQUIRE( site().response_home_rally->pending() );
+            away.add_effect( efftype_id( "stunned" ), 24_hours );
+            set_time( calendar::turn + 7_hours );
+            process_overmap_npc_move_for_test();
+            REQUIRE_FALSE( site().response_home_rally->pending() );
+        }
+        away.remove_effect( efftype_id( "stunned" ) );
+        overmap_buffer.global_state.bandit_live_world = round_trip_world(
+                    overmap_buffer.global_state.bandit_live_world );
+        deliver( original_source, original_target );
+        process_overmap_npc_move_for_test();
+        const auto *again = site().response_home_rally ? site().response_home_rally->find(
+                               std::to_string( away.getID().get_value() ) ) : nullptr;
+        CHECK_FALSE( ( again && again->working() ) );
+        CHECK( site().raid_sources.next_episode( original_source, -1 ) == original_episode );
+    }
+    SECTION( "a typed reopened source starts only its genuinely new rally episode" ) {
+        const auto target = site().current_scout_report.target_omt;
+        REQUIRE( site().raid_sources.reserve( target ) );
+        const auto original_episode = site().response_home_rally->episode;
+        away.add_effect( efftype_id( "stunned" ), 24_hours );
+        set_time( calendar::turn + 7_hours );
+        process_overmap_npc_move_for_test();
+        REQUIRE( recalled().outcome == raid_sweep::home_rally_outcome::expired );
+        away.remove_effect( efftype_id( "stunned" ) );
+        const int minute = to_minutes<int>( calendar::turn - calendar::start_of_cataclysm );
+        site().raid_sources.observe_absence( target, ( minute - 2 ) * 60 );
+        auto deliver = [&]( int observed ) {
+            auto &fresh = site().current_scout_report;
+            ++fresh.revision;
+            fresh.application_key = fresh.source_activity_id + ":report:" + std::to_string( fresh.revision );
+            fresh.delivered_minutes = minute;
+            fresh.assessment.site_signal_observed_minutes = -1;
+            sortie_observation optical;
+            optical.record_schema_version = 1;
+            optical.fact_key = "rally-typed-source";
+            optical.summary = "declared current native report input, not a sensing proof";
+            optical.confidence = 90;
+            optical.observed_minutes = observed;
+            optical.expiry_minutes = minute + 180;
+            optical.kind = sortie_observation_kind::certainty;
+            optical.sense = sortie_observation_sense::light;
+            optical.source_omt = target;
+            optical.emitter_ms = project_to<coords::ms>( target ) + point( 12, 12 );
+            optical.receiver_omt = site().anchor;
+            optical.observer_id = resident.getID();
+            optical.source_id = "rally-typed-light";
+            optical.bucket_start_minutes = observed - observed % 30;
+            optical.simultaneity_start_minutes = optical.bucket_start_minutes;
+            optical.simultaneity_end_minutes = observed;
+            optical.target_revision = fresh.target_lead_revision;
+            optical.share_state = sortie_observation_share_state::reported;
+            fresh.observations = { optical };
+            REQUIRE( accept_current_scout_report_for_assessment( site() ) ==
+                     camp_decision_transition_result::applied );
+        };
+        deliver( minute - 3 ); // A stale receipt cannot reopen the extinct source.
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::expired );
+        CHECK( site().response_home_rally->episode == original_episode );
+        deliver( minute - 1 );
+        const auto position = away.pos_abs();
+        process_overmap_npc_move_for_test();
+        CHECK( site().response_home_rally->episode == original_episode + 1 );
+        CHECK( recalled().working() );
+        CHECK( recalled().active_turns == 0 );
+        CHECK( away.pos_abs() == position );
+    }
+    SECTION( "native death and cleanup resolve recall without mistaking absence for arrival" ) {
+        const auto id = away.getID();
+        const auto retained_body = overmap_buffer.find_npc( id );
+        REQUIRE( retained_body.get() == &away );
+        g->load_npcs();
+        REQUIRE( away.is_active() );
+        // Character's native setter invalidates its cached vital/death read;
+        // Creature's bulk initialization setter intentionally does not.
+        away.set_part_hp_cur( bodypart_id( "torso" ), 0 );
+        away.check_dead_state( &here );
+        REQUIRE( away.is_dead() );
+        g->cleanup_dead();
+        REQUIRE_FALSE( overmap_buffer.find_npc( id ) );
+        set_time( calendar::start_of_cataclysm + 125_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::unavailable );
+        CHECK_FALSE( site().active_hostile_operation.is_active() );
+        CHECK( recalled().last_position != std::optional<tripoint_abs_ms>( resident.pos_abs() ) );
+        const auto active = recalled().active_turns;
+        set_time( calendar::turn + 5_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().outcome == raid_sweep::home_rally_outcome::unavailable );
+        CHECK( recalled().active_turns == active );
+    }
+    SECTION( "missing native ownership cannot resolve or age the same living recall" ) {
+        const auto id = away.getID();
+        const auto retained = overmap_buffer.remove_npc( id );
+        REQUIRE( retained.get() == &away );
+        on_out_of_scope put_back( [&]() {
+            if( !overmap_buffer.find_npc( id ) ) {
+                overmap_buffer.insert_npc( retained );
+            }
+        } );
+        const auto active = recalled().active_turns;
+        const auto body = body_bytes( away );
+        const auto position = away.pos_abs();
+        set_time( calendar::start_of_cataclysm + 125_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().working() );
+        CHECK( recalled().active_turns == active );
+        CHECK( body_bytes( away ) == body );
+        CHECK_FALSE( site().active_hostile_operation.is_active() );
+        overmap_buffer.insert_npc( retained );
+        set_time( calendar::start_of_cataclysm + 130_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( away.pos_abs() == position );
+        CHECK( recalled().active_turns == active ); // Zero-credit reauthentication.
+        set_time( calendar::start_of_cataclysm + 135_minutes );
+        process_overmap_npc_move_for_test();
+        CHECK( recalled().active_turns == active + 300 );
+        CHECK( away.pos_abs_omt() == site().anchor );
     }
 }

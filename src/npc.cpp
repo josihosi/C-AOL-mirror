@@ -4882,9 +4882,14 @@ void npc::on_unload()
 {
     cancel_llm_give( "give.interrupted_unload" );
     refresh_live_bandit_activation();
-    auto *activation = live_bandit_body_activation( getID() );
+    auto activation = live_bandit_body_interval_for( *this );
+    if( is_active() ) {
+        // game::unload_npcs/map-shift call us before releasing the tracker
+        // owner. Inactive physiology service must not consume movement time.
+        activation.finish_loaded_interval();
+    }
     const auto suspended = activation ? time_duration::from_turns(
-                               activation->suspended_body_turns( getID(),
+                               activation.suspended_body_turns( getID(),
                                    to_turns<int>( last_updated - calendar::start_of_cataclysm ) ) ) : 0_turns;
     const auto active_interval = std::max( 0_turns, calendar::turn - last_updated - suspended );
     // Active effects have already run each turn. Finish only the throttled body
@@ -4894,7 +4899,7 @@ void npc::on_unload()
             update_body( calendar::turn - active_interval, calendar::turn );
             last_updated = calendar::turn;
             if( activation ) {
-                activation->settle_body( getID(),
+                activation.settle_body( getID(),
                                          to_turns<int>( last_updated - calendar::start_of_cataclysm ) );
             }
             check_dead_state( &get_map() );
@@ -4924,13 +4929,13 @@ void npc::update_bodytemp_and_wetness()
 void npc::npc_update_body()
 {
     if( calendar::once_every( 10_seconds ) ) {
-        auto *activation = live_bandit_body_activation( getID() );
-        if( activation && !activation->active ) {
+        auto activation = live_bandit_body_interval_for( *this );
+        if( activation && !activation.active() ) {
             return;
         }
         if( activation ) {
             const auto suspended = time_duration::from_turns(
-                                       activation->suspended_body_turns( getID(),
+                                       activation.suspended_body_turns( getID(),
                                            to_turns<int>( last_updated - calendar::start_of_cataclysm ) ) );
             const auto interval = std::max( 0_turns, calendar::turn - last_updated - suspended );
             update_body( calendar::turn - interval, calendar::turn );
@@ -4939,7 +4944,7 @@ void npc::npc_update_body()
         }
         last_updated = calendar::turn;
         if( activation ) {
-            activation->settle_body( getID(),
+            activation.settle_body( getID(),
                                      to_turns<int>( last_updated - calendar::start_of_cataclysm ) );
         }
         update_bodytemp_and_wetness();
@@ -4950,8 +4955,8 @@ void npc::npc_update_body()
 time_duration npc::catch_up_body()
 {
     refresh_live_bandit_activation();
-    auto *activation = live_bandit_body_activation( getID() );
-    if( activation && !activation->active ) {
+    auto activation = live_bandit_body_interval_for( *this );
+    if( activation && !activation.active() ) {
         return 0_turns;
     }
     if( last_updated >= calendar::turn ) {
@@ -4989,7 +4994,7 @@ time_duration npc::catch_up_body()
 
     // Cap at some reasonable number, say 2 days
     const auto suspended = activation ? time_duration::from_turns(
-                               activation->suspended_body_turns( getID(),
+                               activation.suspended_body_turns( getID(),
                                    to_turns<int>( last_updated - calendar::start_of_cataclysm ) ) ) : 0_turns;
     const time_duration dt = std::clamp( calendar::turn - last_updated - suspended, 0_turns, 2_days );
     // TODO: Sleeping, healing etc.
@@ -5018,7 +5023,7 @@ time_duration npc::catch_up_body()
     // and rewind the first interval, so repeated loads replay needs and injury.
     last_updated = calendar::turn;
     if( activation ) {
-        activation->settle_body( getID(),
+        activation.settle_body( getID(),
                                  to_turns<int>( last_updated - calendar::start_of_cataclysm ) );
     }
     check_dead_state( &get_map() );
@@ -5037,8 +5042,8 @@ time_duration npc::catch_up_body()
 void npc::on_load( map *here )
 {
     const time_duration dt = catch_up_body();
-    const auto *activation = live_bandit_body_activation( getID() );
-    if( activation && !activation->active ) {
+    const auto activation = live_bandit_body_interval_for( *this );
+    if( activation && !activation.active() ) {
         return;
     }
 

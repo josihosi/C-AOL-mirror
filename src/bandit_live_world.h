@@ -946,6 +946,9 @@ struct hostile_operation_state {
     hostile_operation_kind operation_kind = hostile_operation_kind::none;
     hostile_operation_phase phase = hostile_operation_phase::assembling;
     active_outing_state reservation;
+    // -1 retains legacy/unrelated policy; a freshly authorized response pins
+    // its explicit preferred or fallback decision through assembly/reload.
+    int response_home_reserve = -1;
     int source_report_revision = 0;
     int source_report_generation = 0;
     std::string source_report_activity_id;
@@ -1217,6 +1220,7 @@ struct site_record {
         int routine_no_candidate_streak = 0;
         std::vector<tripoint_abs_omt> footprint;
         std::vector<member_record> members;
+        std::optional<raid_sweep::home_rally> response_home_rally;
         std::vector<spawn_tile_record> spawn_tiles;
         int next_outing_generation = 1;
         int applied_return_generation = 0;
@@ -1978,6 +1982,8 @@ int structural_terrain_static_risk( const std::string &terrain_fit_class );
 int normalize_hostile_camp_danger_risk( int danger_high );
 int normalize_hostile_camp_character_power( float deterministic_character_threat );
 int hostile_response_home_reserve( int living_total );
+int response_home_rally_allowance_turns( const tripoint_abs_omt &home,
+                                       const tripoint_abs_omt &position, int native_speed );
 int hostile_response_materialization_count( const site_record &site,
         int ready_concrete_source_members );
 response_power_evaluation evaluate_response_party_power(
@@ -1986,6 +1992,8 @@ response_power_evaluation evaluate_response_party_power(
 response_party_selection_result select_capable_response_party(
     const site_record &site, camp_report_policy policy, int danger_high,
     const std::vector<response_member_power_read> &member_reads );
+// Current typed report evidence, shared by operation and home-rally episodes.
+int raid_signal_world( const scout_report_record &report );
 response_authorization_evaluation evaluate_response_authorization(
     const site_record &site, int current_minutes,
     const response_party_selection_result &selection,

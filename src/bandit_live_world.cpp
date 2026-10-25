@@ -2619,14 +2619,16 @@ int required_home_reserve( const bandit_live_world::site_record &site )
 }
 
 bool hostile_operation_party_preserves_home( const bandit_live_world::site_record &site,
-        const std::size_t party_size )
+        const std::size_t party_size, const int response_reserve = -1 )
 {
     const int ready_at_home = static_cast<int>( std::count_if( site.members.begin(),
     site.members.end(), []( const bandit_live_world::member_record & member ) {
         return member.state == member_state::at_home && !member.wounded_or_unready;
     } ) );
     const int remaining_ready = ready_at_home - static_cast<int>( party_size );
-    return remaining_ready >= required_home_reserve( site );
+    return response_reserve >= -1 &&
+           remaining_ready >= ( response_reserve < 0 ? required_home_reserve( site ) :
+                                response_reserve );
 }
 
 bool cannibal_job_requires_attack_pack( bandit_dry_run::job_template job )
@@ -7778,7 +7780,7 @@ hostile_operation_transition_result transition_hostile_operation_phase(
     if( expected_phase == hostile_operation_phase::assembling &&
         next_phase == hostile_operation_phase::outbound ) {
         if( !hostile_operation_party_preserves_home( candidate,
-                next_reservation.member_ids.size() ) ) {
+                next_reservation.member_ids.size(), next_operation.response_home_reserve ) ) {
             return hostile_operation_transition_result::rejected;
         }
         for( const character_id &member_id : next_reservation.member_ids ) {
@@ -10355,6 +10357,9 @@ void hostile_operation_state::serialize( JsonOut &json ) const
     json.member( "schema_version", schema_version );
     json.member( "operation_kind", to_string( operation_kind ) );
     json.member( "phase", to_string( phase ) );
+    if( response_home_reserve >= 0 ) {
+        json.member( "response_home_reserve", response_home_reserve );
+    }
     json.member( "reservation", reservation );
     json.member( "source_report_revision", std::max( 0, source_report_revision ) );
     json.member( "source_report_generation", std::max( 0, source_report_generation ) );
@@ -10411,6 +10416,10 @@ void hostile_operation_state::serialize( JsonOut &json ) const
 void hostile_operation_state::deserialize( const JsonObject &jo )
 {
     hostile_operation_state candidate;
+    jo.read( "response_home_reserve", candidate.response_home_reserve );
+    if( candidate.response_home_reserve < -1 ) {
+        jo.throw_error( "invalid response-specific home reserve" );
+    }
     jo.read( "schema_version", candidate.schema_version );
     if( candidate.schema_version > 5 ) {
         jo.throw_error( "hostile operation schema version is newer than supported schema v5" );
@@ -10566,6 +10575,9 @@ void site_record::serialize( JsonOut &json ) const
     json.member( "camp_decision", bounded.camp_decision );
     json.member( "acted_reports", bounded.acted_reports );
     json.member( "raid_sources", bounded.raid_sources );
+    if( bounded.response_home_rally ) {
+        json.member( "response_home_rally", bounded.response_home_rally );
+    }
     json.member( "returned_cargo_stock", returned_cargo_stock );
     json.member( "active_outing", bounded.active_outing );
     json.member( "active_hostile_operation", bounded.active_hostile_operation );
@@ -10930,6 +10942,8 @@ void site_record::deserialize( const JsonObject &jo,
     jo.read( "acted_reports", acted_reports );
     raid_sources = raid_sweep::source_memory();
     jo.read( "raid_sources", raid_sources );
+    response_home_rally.reset();
+    jo.read( "response_home_rally", response_home_rally );
     if( loaded_schema_version < 8 ) {
         hostile_site_profile legacy_profile = effective_profile( *this );
         const bool legacy_bandit_report =
@@ -11562,7 +11576,7 @@ void site_record::deserialize( const JsonObject &jo,
     const bool hostile_reserve_is_consistent = legacy_withdrawal_only ||
             active_hostile_operation.phase != hostile_operation_phase::assembling ||
             hostile_operation_party_preserves_home( *this,
-                    hostile_reservation.member_ids.size() );
+                    hostile_reservation.member_ids.size(), active_hostile_operation.response_home_reserve );
     bool hostile_operation_is_consistent = active_hostile_operation.is_active() &&
                                            hostile_reservation.camp_id == site_id &&
                                            hostile_reservation.generation > applied_return_generation &&
@@ -14466,6 +14480,18 @@ int hostile_response_home_reserve( const int living_total )
     return std::max( 1, ( std::max( 0, living_total ) + 2 ) / 3 );
 }
 
+int response_home_rally_allowance_turns( const tripoint_abs_omt &home,
+                                       const tripoint_abs_omt &position, int native_speed )
+{
+    if( native_speed <= 0 ) {
+        return 0;
+    }
+    const std::int64_t travel = static_cast<std::int64_t>(
+                                   structural_homeward_delay_minutes( home, position ) ) * 60 * 100 / native_speed;
+    return static_cast<int>( std::min<std::int64_t>( std::numeric_limits<int>::max(),
+                             travel + scout_missing_grace_minutes * 60 ) );
+}
+
 int hostile_response_materialization_count( const site_record &site,
         const int ready_concrete_source_members )
 {
@@ -14578,39 +14604,38 @@ response_party_selection_result select_capable_response_party(
                std::make_tuple( -rhs.power, rhs.npc_id );
     } );
 
-    result.required_local_reserve = hostile_response_home_reserve( roster.living_total );
-    const int response_capacity = static_cast<int>( capable_members.size() ) -
-                                  result.required_local_reserve;
-    const int maximum_party_size = std::min( 6, response_capacity );
-    if( maximum_party_size < 2 ) {
-        result.rejection_reason = "named capable home reserve leaves fewer than two responders";
-        return result;
+    const int preferred_reserve = hostile_response_home_reserve( roster.living_total );
+    for( const int reserve : { preferred_reserve, 0 } ) {
+        result.required_local_reserve = reserve;
+        const int maximum_party_size = std::min( 6,
+                                       static_cast<int>( capable_members.size() ) - reserve );
+        for( int party_size = 2; party_size <= maximum_party_size; ++party_size ) {
+            std::vector<int> powers;
+            powers.reserve( party_size );
+            for( int index = 0; index < party_size; ++index ) {
+                powers.push_back( capable_members[index].power );
+            }
+            const response_power_evaluation evaluation = evaluate_response_party_power(
+                        policy, danger_high, powers );
+            if( !evaluation.valid || !evaluation.clears_margin ) {
+                continue;
+            }
+            result.party_size = party_size;
+            result.party_power = evaluation.party_power;
+            result.required_power = evaluation.required_power;
+            for( int index = 0; index < party_size; ++index ) {
+                result.member_ids.push_back( capable_members[index].npc_id );
+            }
+            for( int index = party_size; index < party_size + reserve; ++index ) {
+                result.reserve_member_ids.push_back( capable_members[index].npc_id );
+            }
+            result.eligible = true;
+            return result;
+        }
     }
-
-    for( int party_size = 2; party_size <= maximum_party_size; ++party_size ) {
-        std::vector<int> powers;
-        powers.reserve( party_size );
-        for( int index = 0; index < party_size; ++index ) {
-            powers.push_back( capable_members[index].power );
-        }
-        const response_power_evaluation evaluation = evaluate_response_party_power(
-                    policy, danger_high, powers );
-        if( !evaluation.valid || !evaluation.clears_margin ) {
-            continue;
-        }
-        result.party_size = party_size;
-        result.party_power = evaluation.party_power;
-        result.required_power = evaluation.required_power;
-        for( int index = 0; index < party_size; ++index ) {
-            result.member_ids.push_back( capable_members[index].npc_id );
-        }
-        for( int index = party_size;
-             index < party_size + result.required_local_reserve; ++index ) {
-            result.reserve_member_ids.push_back( capable_members[index].npc_id );
-        }
-        result.eligible = true;
-        return result;
-    }
+    // A refusal retains the ordinary policy value; zero is an explicit
+    // successful response decision, never a global site-policy mutation.
+    result.required_local_reserve = preferred_reserve;
 
     result.rejection_reason = "no bounded response party clears the faction power margin";
     return result;
@@ -20061,6 +20086,12 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                                    static_cast<int>( claim_result ) ) );
                     continue;
                 }
+                const auto commit_reads = response_member_read_lookup( site );
+                if( !evaluate_response_authorization( site, now_minutes, selection,
+                                                      commit_reads ).authorized ) {
+                    result.response_operation_rejections++;
+                    continue;
+                }
                 site = std::move( candidate );
                 state.hostile_target_opportunities = std::move( claim_candidate.hostile_target_opportunities );
                 result.response_operations_applied++;
@@ -21311,8 +21342,9 @@ static bool authorized_response_selection_is_current( const site_record &site,
         selection.job != expected_job || selection.party_size < 2 ||
         selection.party_size > static_cast<int>( max_hostile_operation_members ) ||
         selection.party_size != static_cast<int>( selection.member_ids.size() ) ||
-        selection.required_local_reserve != hostile_response_home_reserve(
-            site.roster().living_total ) ||
+        ( selection.required_local_reserve != 0 &&
+          selection.required_local_reserve != hostile_response_home_reserve(
+              site.roster().living_total ) ) ||
         selection.reserve_member_ids.size() != static_cast<std::size_t>(
             selection.required_local_reserve ) || !power.valid ||
         selection.required_power != power.required_power ||
@@ -21373,7 +21405,7 @@ std::string raid_source_evidence( const scout_report_record &report, std::uint64
     return raid_sweep::fingerprint( std::move( facts ) );
 }
 
-static int raid_signal_world( const scout_report_record &report )
+int raid_signal_world( const scout_report_record &report )
 {
     int latest = -1;
     for( const auto &observation : report.observations ) {
@@ -21466,7 +21498,8 @@ authorized_hostile_operation_plan plan_hostile_operation_with_authorized_respons
         operation_kind != expected_kind || current_minutes < 0 ||
         current_minutes < site.camp_decision.last_transition_minutes ||
         !authorized_response_selection_is_current( site, operation_kind, selection ) ||
-        !hostile_operation_party_preserves_home( site, selection.member_ids.size() ) ||
+        !hostile_operation_party_preserves_home( site, selection.member_ids.size(),
+                selection.required_local_reserve ) ||
         route.size() < 2 || route.size() > max_active_outing_route_steps ||
         route.front() != site.anchor ||
         !hostile_approach_matches_report( route.back(), site.camp_decision.target_omt ) ||
@@ -21476,6 +21509,7 @@ authorized_hostile_operation_plan plan_hostile_operation_with_authorized_respons
     }
 
     hostile_operation_state &operation = plan.operation;
+    operation.response_home_reserve = selection.required_local_reserve;
     active_outing_state &reservation = operation.reservation;
     operation.operation_kind = operation_kind;
     operation.phase = hostile_operation_phase::assembling;
@@ -21728,6 +21762,13 @@ bool apply_hostile_operation_plan( site_record &site, const hostile_operation_pl
 
     site_record candidate = site;
     candidate.active_hostile_operation = operation;
+    if( candidate.response_home_rally ) {
+        for( const auto id : reservation.member_ids ) {
+            if( auto *recalled = candidate.response_home_rally->find( std::to_string( id.get_value() ) ) ) {
+                recalled->outcome = raid_sweep::home_rally_outcome::transferred;
+            }
+        }
+    }
     if( operation.operation_kind == hostile_operation_kind::raid ) {
         if( !candidate.raid_sources.reserve( operation.reservation.target_omt ) ) {
             return false;
@@ -21793,7 +21834,9 @@ bool apply_hostile_operation_plan_with_authorized_response( site_record &site,
         !authorized_response_selection_is_current( site, operation.operation_kind,
                 authorized_plan.selection ) ||
         reservation.member_ids != authorized_plan.selection.member_ids ||
-        !hostile_operation_party_preserves_home( site, reservation.member_ids.size() ) ||
+        operation.response_home_reserve != authorized_plan.selection.required_local_reserve ||
+        !hostile_operation_party_preserves_home( site, reservation.member_ids.size(),
+                operation.response_home_reserve ) ||
         reservation.shared_route.size() < 2 ||
         reservation.shared_route.size() > max_active_outing_route_steps ||
         reservation.shared_route.front() != site.anchor ||
@@ -21817,6 +21860,13 @@ bool apply_hostile_operation_plan_with_authorized_response( site_record &site,
 
     site_record candidate = site;
     candidate.active_hostile_operation = operation;
+    if( candidate.response_home_rally ) {
+        for( const auto id : reservation.member_ids ) {
+            if( auto *recalled = candidate.response_home_rally->find( std::to_string( id.get_value() ) ) ) {
+                recalled->outcome = raid_sweep::home_rally_outcome::transferred;
+            }
+        }
+    }
     if( operation.operation_kind == hostile_operation_kind::raid ) {
         if( !candidate.raid_sources.reserve( operation.reservation.target_omt ) ) {
             return false;

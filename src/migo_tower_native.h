@@ -49,6 +49,8 @@ receiver_result receive_signals( const std::vector<live_bandit_signal_observatio
 // Revalidate the received evidence and exact current bodies before committing
 // all selected population leases. A decision estimate alone cannot dispatch.
 bool begin_response( const std::string &site_id, int now_turn );
+// Native movement ownership includes an individually authenticated home recall;
+// assault membership and its witness/encounter policies remain separate.
 bool owns_intent( const monster &body, migo_population::representation owner );
 // Shared geographic interval and native payload pause boundary. Calls never
 // grant movement; the existing native process/energy guards still own credit.

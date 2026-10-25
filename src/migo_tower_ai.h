@@ -71,6 +71,7 @@ struct capability_projection {
 };
 
 struct admission_decision {
+    int required_home_reserve = 2;
     std::vector<std::string> members;
     capability_projection projection;
     std::string reason;
@@ -112,6 +113,8 @@ struct source_history {
     std::uint64_t episode_at_outcome = 0;
     bool observed_active = true;
     int extinct_world = -1;
+    std::uint64_t rally_episode = 0;
+    std::map<std::string, int> rally_outcomes;
     std::map<std::string, std::string> observed_access;
     // Cache eviction cannot grant the ordinary blind first-response baseline.
     // This is uncertainty about history, never an invented casualty fact.
@@ -210,6 +213,7 @@ struct site_state {
     admission_decision decision;
     std::uint64_t next_generation = 1;
     std::optional<operation_record> operation;
+    std::optional<raid_sweep::home_rally> response_home_rally;
     int last_service_world = -1;
     std::int64_t active_elapsed = 0;
     std::vector<source_history> sources;

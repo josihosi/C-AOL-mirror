@@ -2706,9 +2706,26 @@ TEST_CASE( "live_response_selection_reads_loaded_and_unloaded_home_npc_owners",
     npc *sleeping_member = g->find_npc( generated_ids.front() );
     REQUIRE( sleeping_member != nullptr );
     sleeping_member->add_effect( effect_sleep, 1_hours );
+    const auto fallback = bandit_live_world::select_live_capable_response_party(
+                              owned_site, bandit_live_world::camp_report_policy::bandit_shakedown, 0 );
+    REQUIRE( fallback.eligible );
+    CHECK( fallback.required_local_reserve == 0 );
+    CHECK( fallback.member_ids.size() == 2 );
+    for( const auto id : { outside_member->getID(), sleeping_member->getID() } ) {
+        CHECK( std::find( fallback.member_ids.begin(), fallback.member_ids.end(), id ) ==
+               fallback.member_ids.end() );
+    }
+    // This is a capability view for report-authorized response, not ordinary
+    // peaceful robbery admission. No current report authorizes this site.
+    CHECK_FALSE( bandit_live_world::plan_hostile_operation( owned_site,
+                 bandit_live_world::hostile_operation_kind::shakedown,
+    { owned_site.anchor, owned_site.anchor + point( 1, 0 ), owned_site.anchor + point( 3, 0 ) },
+    owned_site.anchor + point( 1, 0 ), 0 ).valid );
+    for( int i : { 1, 2 } ) {
+        generated_npcs[i]->add_effect( effect_sleep, 1_hours );
+    }
     CHECK_FALSE( bandit_live_world::select_live_capable_response_party(
-                     owned_site, bandit_live_world::camp_report_policy::bandit_shakedown,
-                     0 ).eligible );
+                     owned_site, bandit_live_world::camp_report_policy::bandit_shakedown, 0 ).eligible );
     CHECK( serialize_live_world_for_optics_test( world ) == before );
 }
 

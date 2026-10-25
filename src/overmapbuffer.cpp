@@ -33,6 +33,7 @@
 #include "horde_entity.h"
 #include "horde_map.h"
 #include "migo_population_native.h"
+#include "migo_tower_native.h"
 #include "imgui/imgui.h"
 #include "json.h"
 #include "line.h"
@@ -1973,7 +1974,7 @@ void overmapbuffer::move_hordes()
     // A Mi-go-only pass does not service predators or ordinary hordes. Keep
     // its once-only accounting separate from the complete nearby passes.
     std::set<overmap *> migo_processed = processed;
-    // Follow only already leased operation bodies beyond the ordinary
+    // Follow only already leased operation/recall bodies beyond the ordinary
     // player-near pass. This neither discovers sites nor admits unrelated
     // far hordes, and supplies no catch-up or 40-OMT activation policy.
     // Snapshot the already bounded range query: native commits can refresh
@@ -1982,19 +1983,50 @@ void overmapbuffer::move_hordes()
     for( const auto &id : active_sites ) {
         const auto *site = global_state.migo_towers.find( id );
         const auto *population = global_state.migo_populations.find( id );
-        if( !population || !site || !site->operation || site->operation->resolved ||
-            !site->operation->activity.active ) {
+        if( !population || !site ) {
             continue;
         }
-        for( const auto &member : site->operation->members ) {
+        if( site->operation && !site->operation->resolved && site->operation->activity.active ) {
+            for( const auto &member : site->operation->members ) {
+                const auto *lease = population->find( member.member_id );
+                if( member.settled || member.returned || !lease || !lease->current_position ||
+                    lease->assignment == migo_population::duty::available ||
+                    lease->owner != migo_population::representation::abstract ) {
+                    continue;
+                }
+                overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
+                if( owner && migo_processed.insert( owner ).second ) {
+                    owner->move_hordes( true );
+                }
+            }
+        }
+        if( !site->response_home_rally ) {
+            continue;
+        }
+        const auto &rally = *site->response_home_rally;
+        for( const auto &member : rally.members ) {
             const auto *lease = population->find( member.member_id );
-            if( member.settled || member.returned || !lease || !lease->current_position ||
-                lease->assignment == migo_population::duty::available ||
-                lease->owner != migo_population::representation::abstract ) {
+            if( !member.working() || !member.active || member.last_world != to_turn<int>( calendar::turn ) ||
+                !lease || !lease->current_position || lease->hp <= 0 ||
+                lease->owner != migo_population::representation::abstract ||
+                lease->assignment != migo_population::duty::returning ) {
                 continue;
             }
+            // A current independent recall may be beyond the ordinary
+            // nearby envelope without belonging to an assault operation.
+            // Admit only its resident, authenticated native container.
             overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
-            if( owner && migo_processed.insert( owner ).second ) {
+            const auto *entry = owner ? owner->entity_at( project_remain<coords::om>(
+                                    *lease->current_position ).remainder_tripoint ) : nullptr;
+            const monster *body = entry ? entry->monster_data.get() : nullptr;
+            const auto *intent = body ? body->migo_intent() : nullptr;
+            if( body && intent && body->pos_abs() == *lease->current_position &&
+                body->population_identity().member_id == member.member_id &&
+                intent->generation == rally.generation &&
+                ( !site->operation || site->operation->resolved ||
+                  site->operation->generation != rally.generation ) &&
+                migo_tower::owns_intent( *body, migo_population::representation::abstract ) &&
+                migo_processed.insert( owner ).second ) {
                 owner->move_hordes( true );
             }
         }
@@ -3792,6 +3824,12 @@ bool overmapbuffer::despawn_monster( monster &critter )
         }
         if( inserted ) {
             critter.transfer_owned_items_to( *( *inserted )->second.monster_data );
+            if( migo_tower::owns_intent( *( *inserted )->second.monster_data,
+                                       migo_population::representation::abstract ) ) {
+                // Classification preceded the lease commit. Reconcile only
+                // the accepted native owner, after the last iterator use.
+                om.refresh_monster_schedule( critter.pos_abs() );
+            }
         }
         return inserted.has_value();
     }

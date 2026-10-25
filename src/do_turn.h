@@ -7,6 +7,7 @@
 #include "live_light.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <chrono>
 #include <map>
 #include <optional>
@@ -96,6 +97,31 @@ struct activation_clock;
 }
 void refresh_live_bandit_activation();
 bandit_live_world::activation_clock *live_bandit_body_activation( character_id id );
+namespace raid_sweep
+{
+struct home_rally_member;
+}
+// A synchronous value view of one already evaluated owner. It performs no
+// discovery, eligibility evaluation, movement or second pause debit.
+class live_bandit_body_interval
+{
+    public:
+        explicit live_bandit_body_interval( bandit_live_world::activation_clock *clock = nullptr );
+        explicit live_bandit_body_interval( raid_sweep::home_rally_member *member,
+                                           bool authenticated = true );
+        explicit operator bool() const;
+        bool active() const;
+        std::int64_t active_delta_turns() const;
+        std::int64_t suspended_body_turns( character_id id, int anchor ) const;
+        void settle_body( character_id id, int anchor );
+        // Actual loaded-owner release only, never an eligibility/read query.
+        void finish_loaded_interval();
+    private:
+        bandit_live_world::activation_clock *clock_ = nullptr;
+        raid_sweep::home_rally_member *member_ = nullptr;
+        bool authenticated_ = true;
+};
+live_bandit_body_interval live_bandit_body_interval_for( const npc &body );
 
 namespace bandit_live_world
 {

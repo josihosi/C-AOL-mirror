@@ -392,8 +392,7 @@ admission_decision select_response( const std::vector<candidate> &available,
             capable.push_back( &c );
         }
     }
-    const int maximum = static_cast<int>( capable.size() ) - std::max( 2, home_reserve );
-    if( maximum < 3 ) {
+    if( capable.size() < 3 ) {
         out.reason = "insufficient_capable_members_and_home_reserve";
         return out;
     }
@@ -460,39 +459,43 @@ admission_decision select_response( const std::vector<candidate> &available,
                      "observed_threat_survival_margin";
         return true;
     };
-    if( consider( preferred ) ) {
-        return out;
-    }
-    // Actual ordinary towers have eight residents. Bound pathological legacy
-    // over-capacity enumeration explicitly; exhaustion is uncertainty, not an
-    // invented successful or impossible response.
     int comparisons = 1;
-    for( int count = 3; count <= maximum; ++count ) {
-        std::vector<const candidate *> group;
-        std::function<bool( size_t )> choose = [&]( size_t begin ) {
-            if( static_cast<int>( group.size() ) == count ) {
-                if( ++comparisons > 4096 ) {
-                    return true;
-                }
-                return consider( group );
-            }
-            for( size_t i = begin; i < capable.size(); ++i ) {
-                if( capable.size() - i < static_cast<size_t>( count ) - group.size() ) {
-                    break;
-                }
-                group.push_back( capable[i] );
-                if( choose( i + 1 ) ) {
-                    return true;
-                }
-                group.pop_back();
-            }
-            return false;
-        };
-        if( choose( 0 ) ) {
-            if( out.members.empty() ) {
-                out.reason = "capability_selection_budget_exhausted";
-            }
+    for( const int reserve : { std::max( 2, home_reserve ), 0 } ) {
+        const int maximum = static_cast<int>( capable.size() ) - reserve;
+        if( maximum < 3 ) {
+            continue;
+        }
+        out.required_home_reserve = reserve;
+        if( consider( preferred ) ) {
             return out;
+        }
+        for( int count = 3; count <= maximum; ++count ) {
+            std::vector<const candidate *> group;
+            std::function<bool( size_t )> choose = [&]( size_t begin ) {
+                if( static_cast<int>( group.size() ) == count ) {
+                    if( ++comparisons > 4096 ) {
+                        return true;
+                    }
+                    return consider( group );
+                }
+                for( size_t i = begin; i < capable.size(); ++i ) {
+                    if( capable.size() - i < static_cast<size_t>( count ) - group.size() ) {
+                        break;
+                    }
+                    group.push_back( capable[i] );
+                    if( choose( i + 1 ) ) {
+                        return true;
+                    }
+                    group.pop_back();
+                }
+                return false;
+            };
+            if( choose( 0 ) ) {
+                if( out.members.empty() ) {
+                    out.reason = "capability_selection_budget_exhausted";
+                }
+                return out;
+            }
         }
     }
     if( out.reason != "requires_stronger_response" ) {
@@ -607,6 +610,10 @@ void source_history::serialize( JsonOut &json ) const
     json.member( "episode_at_outcome", episode_at_outcome );
     json.member( "observed_active", observed_active );
     json.member( "extinct_world", extinct_world );
+    if( rally_episode > 0 || !rally_outcomes.empty() ) {
+        json.member( "rally_episode", rally_episode );
+        json.member( "rally_outcomes", rally_outcomes );
+    }
     json.member( "observed_access", observed_access );
     json.member( "prior_outcome_unavailable", prior_outcome_unavailable );
     json.member( "casualty_attempts", casualty_attempts );
@@ -632,6 +639,16 @@ void source_history::deserialize( const JsonObject &json )
     json.read( "episode_at_outcome", episode_at_outcome );
     json.read( "observed_active", observed_active );
     json.read( "extinct_world", extinct_world );
+    json.read( "rally_episode", rally_episode );
+    json.read( "rally_outcomes", rally_outcomes );
+    if( rally_episode > episode || ( rally_episode == 0 && !rally_outcomes.empty() ) ||
+        rally_outcomes.size() > 16 || std::any_of( rally_outcomes.begin(), rally_outcomes.end(),
+    []( const auto &entry ) {
+        return entry.first.empty() || entry.first.size() > 128 || entry.second < 0 ||
+               entry.second > static_cast<int>( raid_sweep::home_rally_outcome::expired );
+    } ) ) {
+        json.throw_error( "invalid home rally source facts" );
+    }
     json.read( "observed_access", observed_access );
     json.read( "prior_outcome_unavailable", prior_outcome_unavailable );
     json.read( "casualty_attempts", casualty_attempts );
@@ -803,6 +820,7 @@ source_history *site_state::remember_source( const tripoint_abs_omt &p )
             return nullptr;
         }
         if( oldest->completed_generation > 0 || !oldest->opposition.empty() ||
+            !oldest->rally_outcomes.empty() ||
             oldest->prior_outcome_unavailable ) {
             note_source( *this, oldest->area );
         }
@@ -830,6 +848,7 @@ void site_state::serialize( JsonOut &json ) const
     json.member( "recognized_enemies", recognized_enemies );
     json.member( "decision_members", decision.members );
     json.member( "decision_reason", decision.reason );
+    json.member( "decision_home_reserve", decision.required_home_reserve );
     json.member( "projection_known", decision.projection.known );
     json.member( "projection_sufficient", decision.projection.sufficient );
     json.member( "projection_casualties", decision.projection.casualties );
@@ -838,6 +857,9 @@ void site_state::serialize( JsonOut &json ) const
     json.member( "projection_incoming_dps", decision.projection.incoming_damage_per_second );
     json.member( "next_generation", next_generation );
     json.member( "operation", operation );
+    if( response_home_rally ) {
+        json.member( "response_home_rally", response_home_rally );
+    }
     json.member( "last_service_world", last_service_world );
     json.member( "active_elapsed", active_elapsed );
     json.member( "sources", sources );
@@ -855,6 +877,7 @@ void site_state::deserialize( const JsonObject &json )
     json.read( "recognized_enemies", recognized_enemies );
     json.read( "decision_members", decision.members );
     json.read( "decision_reason", decision.reason );
+    json.read( "decision_home_reserve", decision.required_home_reserve );
     json.read( "projection_known", decision.projection.known );
     json.read( "projection_sufficient", decision.projection.sufficient );
     json.read( "projection_casualties", decision.projection.casualties );
@@ -863,6 +886,11 @@ void site_state::deserialize( const JsonObject &json )
     json.read( "projection_incoming_dps", decision.projection.incoming_damage_per_second );
     json.read( "next_generation", next_generation );
     json.read( "operation", operation );
+    json.read( "response_home_rally", response_home_rally );
+    if( response_home_rally && response_home_rally->generation >= next_generation ) {
+        next_generation = response_home_rally->generation == std::numeric_limits<std::uint64_t>::max() ?
+                          response_home_rally->generation : response_home_rally->generation + 1;
+    }
     if( operation && operation->generation >= next_generation ) {
         next_generation = operation->generation == std::numeric_limits<std::uint64_t>::max() ?
                           operation->generation : operation->generation + 1;

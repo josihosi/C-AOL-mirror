@@ -20,6 +20,7 @@
 #include "worldfactory.h"
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
+#include "creature_tracker.h"
 #include "do_turn.h"
 #include "debug.h"
 #include "field_type.h"
@@ -230,13 +231,38 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
             old_bandit_ids.insert( member.npc_id );
         }
     }
-    overmap_buffer.global_state.migo_towers.clear();
     map &here = get_map();
     const auto old_origin = here.get_abs_sub();
     const auto source_bub = get_avatar().pos_bub();
     const auto source = get_avatar().pos_abs();
     const auto source_omt = project_to<coords::omt>( source );
-    const tripoint_abs_omt anchor( source_omt.xy() + point( 4, 0 ), 0 );
+    // This is the new-content manifest control. A retagged existing forest
+    // column is a legacy site and must not acquire fresh biological slots.
+    // Find a genuinely unused nearby column through native existing-only
+    // reads; never replace saved maps or override that production safeguard.
+    std::optional<tripoint_abs_omt> fresh_anchor;
+    for( const int dy : {0, -1, 1, -2, 2} ) {
+        const tripoint_abs_omt candidate( source_omt.xy() + point( 4, dy ), 0 );
+        if( std::any_of( old_populations.sites.begin(), old_populations.sites.end(),
+        [&]( const auto &site ) { return site.anchor.xy() == candidate.xy(); } ) ) {
+            continue;
+        }
+        bool existing = false;
+        for( int z = 0; z < 4; ++z ) {
+            for( int x = 0; x < 2; ++x ) {
+                for( int y = 0; y < 2; ++y ) {
+                    existing |= MAPBUFFER.lookup_submap_existing( project_to<coords::sm>(
+                                    tripoint_abs_omt( candidate.xy(), z ) ) + point( x, y ) ) != nullptr;
+                }
+            }
+        }
+        if( !existing ) {
+            fresh_anchor = candidate;
+            break;
+        }
+    }
+    REQUIRE( fresh_anchor );
+    const tripoint_abs_omt anchor = *fresh_anchor;
     REQUIRE_FALSE( here.inbounds( project_to<coords::ms>( anchor ) ) );
     std::vector<oter_id> old_terrain;
     std::set<character_id> old_npcs;
@@ -250,12 +276,11 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
                                                 std::to_string( z + 1 ) + "_north" ) );
     }
     const auto geometry = migo_population::geometry_at( anchor );
-    REQUIRE( geometry );
     on_out_of_scope restore( [&]() {
         auto &om = overmap_buffer.get( project_to<coords::om>( anchor ).xy() );
         std::vector<std::pair<tripoint_abs_ms, std::string>> residents;
         for( const auto &entry : om.horde_entities() ) {
-            if( entry.second->monster_data &&
+            if( geometry && entry.second->monster_data &&
                 entry.second->monster_data->population_identity().site_id == geometry->id ) {
                 residents.emplace_back( entry.first,
                                         entry.second->monster_data->population_identity().member_id );
@@ -292,9 +317,12 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
     } );
     // Real mapgen prepares the saved manifest, without entering the tower or
     // calling discover. Both receivers must consume these exact native slots.
+    REQUIRE( geometry );
+    overmap_buffer.global_state.migo_towers.clear();
     tinymap prepared;
     prepared.load( anchor, false );
     std::set<std::string> saved_ids;
+    int native_spawn_slots = 0;
     for( int z = 0; z < 4; ++z ) {
         for( int x = 0; x < 2; ++x ) {
             for( int y = 0; y < 2; ++y ) {
@@ -302,6 +330,7 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
                         tripoint_abs_omt( anchor.xy(), z ) ) + point( x, y ) );
                 REQUIRE( sm );
                 for( const auto &slot : sm->spawns ) {
+                    ++native_spawn_slots;
                     if( slot.population.site_id == geometry->id ) {
                         CHECK( saved_ids.insert( slot.population.member_id ).second );
                     }
@@ -309,6 +338,10 @@ TEST_CASE( "migo_real_signal_receiver_and_map_spawn_share_saved_residents",
             }
         }
     }
+    const auto *seed_state = overmap_buffer.global_state.migo_populations.find( geometry->id );
+    CAPTURE( anchor, source_omt, geometry->id, native_spawn_slots );
+    INFO( "existing native seed committed=" << ( seed_state && seed_state->seed_committed ) );
+    INFO( "post-load new_content=" << ( seed_state && seed_state->new_content ) );
     REQUIRE( saved_ids.size() == 8 );
     auto population = [&]() {
         return overmap_buffer.global_state.migo_populations.find( geometry->id );
@@ -792,8 +825,12 @@ TEST_CASE( "migo_capability_admission_uses_damage_survival_and_real_reserve",
     CHECK( larger.projection.casualties == 1 );
     CHECK( larger.projection.party_damage_per_second > 0 );
     const auto cautious = select_party( available, {enemy}, 1, true );
-    CHECK( cautious.members.empty() ); // Even six cannot defeat before first loss.
-    CHECK( cautious.reason == "largest_party_fails_survival_margin" );
+    // Six cannot meet the cautious criterion with the preferred reserve;
+    // the legitimate larger response may consume it without relaxing loss.
+    CHECK( cautious.members.size() > 6 );
+    CHECK( cautious.required_home_reserve == 0 );
+    CHECK( cautious.projection.sufficient );
+    CHECK( cautious.projection.casualties == 0 );
     enemy.known = false;
     CHECK( select_party( available, {enemy}, 1, false ).reason == "observed_capability_unknown" );
     enemy.known = true;
@@ -806,10 +843,18 @@ TEST_CASE( "migo_capability_admission_uses_damage_survival_and_real_reserve",
     enemy.armor.set_resist( damage_type_id( "bash" ), 100 );
     CHECK( select_party( available, {enemy}, 1, false ).members.empty() );
     available.resize( 4 );
-    CHECK( select_party( available, {}, 1, false ).members.empty() );
+    const auto four = select_party( available, {}, 1, false );
+    CHECK( four.members.size() == 3 );
+    CHECK( four.required_home_reserve == 0 );
     available.push_back( {"substitute", "mon_mi_go", ordinary} );
     CHECK( select_party( available, {}, 1, false ).members.size() == 3 );
     available.back().capability.hp = 0;
+    const auto surviving = select_party( available, {}, 1, false );
+    CHECK( surviving.members.size() == 3 );
+    CHECK( surviving.required_home_reserve == 0 );
+    CHECK( std::find( surviving.members.begin(), surviving.members.end(), "substitute" ) ==
+           surviving.members.end() );
+    available.resize( 2 );
     CHECK( select_party( available, {}, 1, false ).members.empty() );
 }
 
@@ -907,7 +952,14 @@ TEST_CASE( "migo_observed_modular_gun_does_not_invent_hidden_ammunition",
     npc resident;
     resident.normalize();
     Character &human = npc_target ? static_cast<Character &>( resident ) : get_avatar();
-    human.setpos( here, tripoint_bub_ms( 30, 66, 0 ), false );
+    const tripoint_bub_ms target( 30, 66, 0 );
+    if( npc_target ) {
+        // Initial pose of an unregistered observation subject, not a transfer
+        // between native overmap owners. The actual avatar keeps setpos.
+        resident.set_pos_abs_only( here.get_abs( target ) );
+    } else {
+        human.setpos( here, target, false );
+    }
     here.build_map_cache( 0 );
     const auto bytes = []( const item &value ) {
         std::ostringstream output;
@@ -1849,7 +1901,10 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     const auto old_second = overmap_buffer.ter_existing( second_cell );
     const auto start = project_to<coords::ms>( first_cell ) + point( 12, 12 );
     const auto goal = start + point( 18, 0 );
-    const auto unrelated_position = start + point( 0, 3 );
+    // This body has its own authenticated predator scheduler. Keep it in
+    // the same resident container but outside its independent 40-OMT range;
+    // the Mi-go-only pass must not wake it along with the leased party.
+    const auto unrelated_position = start + point( 0, 41 * 2 * SEEY );
     const std::string id = "remote-operation-component";
     std::string unrelated_id;
     on_out_of_scope restore( [&]() {
@@ -1881,6 +1936,9 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     // would admit unrelated hordes through the ordinary nearby owner pass.
     get_avatar().setpos( project_to<coords::ms>( project_to<coords::omt>( start ) + point( 30, 0 ) ),
                          false );
+    REQUIRE( project_to<coords::om>( unrelated_position ).xy() == first_om );
+    REQUIRE( rl_dist( get_avatar().pos_abs_omt().xy(),
+                      project_to<coords::omt>( unrelated_position ).xy() ) > 40 );
 
     const auto prepare_cell = [&]( const tripoint_abs_omt &cell ) {
         tinymap terrain;
@@ -1941,6 +1999,10 @@ TEST_CASE( "migo_operation_scheduler_crosses_remote_overmaps_without_servicing_o
     REQUIRE( retained );
     REQUIRE( retained->is_active() );
     const auto unrelated_processed = retained->last_processed;
+    const auto *predator_owner = overmap_buffer.global_state.predator_activity.find( unrelated_id );
+    INFO( "unrelated predator confirmed=" << ( predator_owner && predator_owner->confirmed )
+          << " distance_omt=" << rl_dist( get_avatar().pos_abs_omt().xy(),
+                                        project_to<coords::omt>( unrelated_position ).xy() ) );
     auto *current = overmap_buffer.global_state.migo_towers.find( id );
     REQUIRE( current );
     if( deferred_geometry ) {
@@ -3003,11 +3065,18 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
                                          ter_str_id( y == entry_y ? "t_resin_hole_c" : "t_wall_resin" ) );
                     }
                 }
-                const tripoint_omt_ms stairs( ( walled_approach ?
-                                              home.x() - cell.x() * 24 + 4 : 6 ) + ( z == 2 ),
+                // Keep both members of the real stair pair inside this OMT.
+                // A home near the east edge still needs an off-axis approach,
+                // not a silently refused placement at x=25.
+                const int stair_base = walled_approach ?
+                                       std::clamp( home.x() - cell.x() * 24 + 4, 0, 2 * SEEX - 2 ) : 6;
+                const tripoint_omt_ms stairs( stair_base + ( z == 2 ),
                                              home.y() - cell.y() * 24, z );
                 if( home.z() > 0 && !missing_stairs && cell.x() == anchor.x() ) {
                     if( z == 0 ) {
+                        const bool stairs_inside = stairs.x() >= 0 && stairs.x() < 2 * SEEX &&
+                                                   stairs.y() >= 0 && stairs.y() < 2 * SEEY;
+                        CAPTURE( scenario, cell, home, stairs, stairs_inside );
                         terrain.ter_set( stairs, ter_str_id( "t_stairs_up" ) );
                         REQUIRE( terrain.ter( stairs ) == ter_str_id( "t_stairs_up" ) );
                     } else if( z == 1 ) {
@@ -3178,7 +3247,36 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
         }
         final_position = current->pos_abs().to_string_writable();
         if( turn == 249 ) {
-            final_reason = physical_navigation::read_step( *current, home ).reason;
+            const auto final_read = physical_navigation::read_step( *current, home );
+            final_reason = final_read.reason;
+            if( !native_floorplan && !remote ) {
+                std::ostringstream details;
+                details << "loaded origin=" << here.inbounds( current->pos_abs() )
+                        << " goal=" << here.inbounds( home )
+                        << " map=" << here.get_abs_sub().to_string()
+                        << " read action=" << static_cast<int>( final_read.next )
+                        << " known=" << final_read.known
+                        << " next=" << final_read.position.to_string_writable()
+                        << " cost=" << final_read.move_cost;
+                const auto next = here.get_bub( final_read.position );
+                const Creature *occupant = get_creature_tracker().creature_at( next );
+                details << " native_reach=" << current->can_reach_to( next )
+                        << " native_will=" << current->will_move_to( &here, next )
+                        << " native_can=" << current->can_move_to( next )
+                        << " native_cost=" << current->calc_movecost( here, current->pos_bub(), next )
+                        << " moves=" << current->get_moves()
+                        << " occupant=" << ( occupant != nullptr );
+                if( const auto *npc = dynamic_cast<const class npc *>( occupant ) ) {
+                    details << " npc=" << npc->getID().get_value();
+                }
+                for( int z = current->posz(); z <= home.z(); ++z ) {
+                    const auto p = here.get_bub( tripoint_abs_ms( current->pos_abs().xy(), z ) );
+                    details << " " << p.to_string() << ":" << here.ter( p ).id().str()
+                            << ":floor=" << here.has_floor_or_water( p )
+                            << ":move=" << current->will_move_to( &here, p );
+                }
+                final_geometry = details.str();
+            }
             if( native_floorplan && !remote ) {
                 std::ostringstream details;
                 details << "native max_dist=" << current->get_pathfinding_settings().max_dist
@@ -3205,6 +3303,12 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     const auto &finished = *overmap_buffer.global_state.migo_towers.find( id )->operation;
     const auto assignment = overmap_buffer.global_state.migo_populations.find( id )->find(
                                 "returnee" )->assignment;
+    const auto *final_member = overmap_buffer.global_state.migo_populations.find( id )->find( "returnee" );
+    INFO( "scenario=" << scenario << " home=" << final_member->home.to_string_writable()
+          << " owner=" << static_cast<int>( final_member->owner )
+          << " epoch=" << final_member->token.epoch
+          << " current=" << ( final_member->current_position ?
+                              final_member->current_position->to_string_writable() : "absent" ) );
     if( missing_stairs ) {
         CHECK( refused_missing_connection );
         CHECK( assignment == migo_population::duty::returning );
@@ -3213,6 +3317,95 @@ TEST_CASE( "migo_native_return_resolves_distant_floors_and_occupied_approaches",
     } else {
         CHECK( assignment == migo_population::duty::available );
     }
+}
+
+TEST_CASE( "migo_native_arrival_keeps_motor_owned_until_service_commits",
+           "[migo_tower][home_rally_native][arrival_commit]" )
+{
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_bandits = overmap_buffer.global_state.bandit_live_world;
+    clear_avatar();
+    clear_map_without_vision( -1, 2 );
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        clear_avatar();
+        clear_map_without_vision( -1, 2 );
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        overmap_buffer.global_state.bandit_live_world = old_bandits;
+        set_time( old_turn );
+    } );
+    overmap_buffer.global_state.bandit_live_world = {};
+    set_time( calendar::turn_zero + 100000_turns );
+    map &here = get_map();
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    const tripoint_bub_ms lower( 50, 50, 0 );
+    const tripoint_bub_ms upper( 50, 50, 1 );
+    here.ter_set( lower, ter_str_id( "t_stairs_up" ) );
+    here.ter_set( upper, ter_str_id( "t_stairs_down" ) );
+    const auto home = here.get_abs( upper );
+    const auto anchor = project_to<coords::omt>( home );
+    const std::string id = "native-arrival-commit";
+    migo_population::member_record member;
+    member.token = {id, "returnee", 1, anchor};
+    member.type = mtype_id( "mon_mi_go_scout" );
+    member.home = home;
+    member.owner = migo_population::representation::local;
+    member.assignment = migo_population::duty::returning;
+    member.hp = member.type->hp;
+    migo_population::site_record population;
+    population.id = id;
+    population.anchor = anchor;
+    REQUIRE( population.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state site;
+    site.site_id = id;
+    site.anchor = anchor;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = anchor;
+    operation.members = {{member.token.member_id}};
+    operation.advance( to_turn<int>( calendar::turn ), 0 );
+    site.operation = operation;
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    monster *body = g->place_critter_at( member.type, lower );
+    REQUIRE( body );
+    body->population_identity() = member.token;
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.phase = migo_tower::member_phase::returning;
+    intent.home = home;
+    body->set_migo_intent( intent );
+    body->set_moves( 0 ); // Initial fixture credit; the native next turn earns movement.
+    process_monsters_and_npcs_turn_for_test();
+    CHECK( body->pos_abs() == here.get_abs( lower ) );
+    CHECK( body->get_moves() == 0 ); // First authenticated adoption grants no backlog.
+    calendar::turn += 1_turns;
+    process_monsters_and_npcs_turn_for_test();
+    // Native120 credit pays the real100-cost stair. The remaining action
+    // opportunity must not surrender the return motor to ordinary idle work.
+    CHECK( body->pos_abs() == home );
+    CHECK( body->migo_intent()->last_energy_world == to_turn<int>( calendar::turn ) );
+    CHECK( body->migo_intent()->phase == migo_tower::member_phase::returning );
+    CHECK( migo_tower::owns_intent( *body, migo_population::representation::local ) );
+    auto *current = overmap_buffer.global_state.migo_populations.find( id );
+    REQUIRE( current );
+    CHECK( current->find( "returnee" )->assignment == migo_population::duty::returning );
+    CHECK_FALSE( overmap_buffer.global_state.migo_towers.find( id )->operation->members[0].returned );
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+    CHECK( current->find( "returnee" )->assignment == migo_population::duty::available );
+    CHECK( body->migo_intent()->phase == migo_tower::member_phase::settled );
+    CHECK( overmap_buffer.global_state.migo_towers.find( id )->operation->members[0].returned );
+    const auto settled_pose = body->pos_abs();
+    const int settled_moves = body->get_moves();
+    const auto settled_token = body->population_identity();
+    migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+    CHECK( body->pos_abs() == settled_pose );
+    CHECK( body->get_moves() == settled_moves );
+    CHECK( body->population_identity().epoch == settled_token.epoch );
+    CHECK( body->get_hp() == member.hp );
 }
 
 TEST_CASE( "migo_final_sweep_disposition_preserves_a_peers_actual_native_engagement",
@@ -4719,4 +4912,994 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     const auto reset_object = reset_json.get_object();
     reset_object.allow_omitted_members();
     CHECK( reset_object.get_int( "turn" ) == now + 600 );
+}
+
+TEST_CASE( "migo_response_reserve_fallback_uses_only_present_capable_members",
+           "[migo_tower][home_rally]" )
+{
+    using namespace migo_tower;
+    combat_profile ordinary;
+    ordinary.known = true;
+    ordinary.hp = 100;
+    ordinary.speed = 100;
+    ordinary.hit = 5;
+    ordinary.dodge = 5;
+    ordinary.melee.add_damage( damage_type_id( "bash" ), 20 );
+    std::vector<candidate> present;
+    for( int i = 0; i < 4; ++i ) {
+        present.push_back( { "present-" + std::to_string( i ),
+                             i == 2 ? "mon_mi_go_scout" : "mon_mi_go", ordinary } );
+    }
+    const auto selected = select_party( present, {}, 1, false );
+    REQUIRE( selected.members.size() == 3 );
+    CHECK( selected.projection.sufficient );
+    present.resize( 3 );
+    CHECK( select_party( present, {}, 1, false ).members.size() == 3 );
+    present.back().capability.hp = 0;
+    CHECK( select_party( present, {}, 1, false ).members.empty() );
+    present.back().capability = ordinary;
+    combat_profile overwhelming = ordinary;
+    overwhelming.armor.set_resist( damage_type_id( "bash" ), 100 );
+    CHECK( select_party( present, { overwhelming }, 1, false ).members.empty() );
+    overwhelming.known = false;
+    CHECK( select_party( present, { overwhelming }, 1, false ).reason ==
+           "observed_capability_unknown" );
+}
+
+TEST_CASE( "native_migo_response_recalls_an_available_away_body_before_readiness",
+           "[migo_tower][home_rally_native]" )
+{
+    const bool upper_home = GENERATE( false, true );
+    const bool sufficient_present = GENERATE( false, true );
+    CAPTURE( upper_home, sufficient_present );
+    clear_avatar();
+    clear_map_with_vision( -1, 4, false );
+    clear_creatures();
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    set_time_to_day();
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    const auto anchor = project_to<coords::omt>( here.get_abs( tripoint_bub_ms( 60, 60, 0 ) ) );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        for( const auto &entry : terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        clear_avatar();
+        clear_map_without_vision( -1, 4 );
+        set_time( old_turn );
+    } );
+    for( int z = 0; z < 4; ++z ) {
+        const tripoint_abs_omt p( anchor.xy(), z );
+        terrain.emplace_back( p, overmap_buffer.ter( p ) );
+        overmap_buffer.ter_set( p, oter_str_id( "mi-go_scout_tower_" +
+                                            std::to_string( z + 1 ) + "_north" ) );
+    }
+    const auto geometry = migo_population::geometry_at( anchor );
+    REQUIRE( geometry );
+    migo_population::site_record population;
+    population.id = geometry->id;
+    population.anchor = anchor;
+    std::vector<migo_population::member_record> members;
+    std::vector<monster *> bodies;
+    const int member_count = sufficient_present ? 5 : !upper_home ? 4 : 3;
+    for( int i = 0; i < member_count; ++i ) {
+        const int x = i == member_count - 1 ? 85 :
+                      !sufficient_present && i == 2 ? 109 : 60 + i;
+        const tripoint_bub_ms position( x, 60, i == 0 ? 1 : 0 );
+        here.ter_set( position, ter_str_id( "t_floor" ) );
+        monster *body = g->place_critter_at( mtype_id( "mon_mi_go" ), position );
+        REQUIRE( body );
+        migo_population::member_record member;
+        member.token = { geometry->id, "native-rally-" + std::to_string( i ), 1, anchor };
+        member.type = body->type->id;
+        member.home = here.get_abs( tripoint_bub_ms( 60 + i, 60,
+                                   upper_home && i == member_count - 1 ? 3 : 0 ) );
+        member.hp = body->get_hp();
+        member.owner = migo_population::representation::local;
+        member.current_position = body->pos_abs();
+        body->population_identity() = member.token;
+        members.push_back( member );
+        bodies.push_back( body );
+    }
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    migo_tower::site_state state;
+    state.site_id = geometry->id;
+    state.anchor = anchor;
+    const int now = to_turn<int>( calendar::turn );
+    state.signal = migo_tower::signal_record{ "native-rally-signal", "smoke",
+                   anchor + point( 2, 0 ), std::nullopt, members.front().token.member_id,
+                   bodies.front()->pos_abs(), now };
+    overmap_buffer.global_state.migo_towers.sites.push_back( state );
+    for( int z : { 0, 1 } ) {
+        here.build_map_cache( z );
+    }
+    const bool dispatched = migo_tower::begin_response( geometry->id, now );
+    if( sufficient_present ) {
+        REQUIRE( dispatched );
+        const auto *actual = overmap_buffer.global_state.migo_towers.find( geometry->id );
+        REQUIRE( actual->operation );
+        REQUIRE( actual->response_home_rally );
+        REQUIRE( actual->response_home_rally->find( members.back().token.member_id ) );
+        CHECK( actual->operation->members.size() == 3 );
+        CHECK_FALSE( actual->operation->contains( members.back().token.member_id ) );
+        CHECK( actual->response_home_rally->find( members.back().token.member_id )->working() );
+        CHECK( actual->response_home_rally->generation != actual->operation->generation );
+        CHECK( actual->decision.required_home_reserve == 0 );
+        CHECK( migo_tower::plan_local( *bodies.back(), false, nullptr ) );
+        CHECK( bodies.back()->pos_abs() == *members.back().current_position );
+        const auto generation = actual->operation->generation;
+        CHECK_FALSE( migo_tower::begin_response( geometry->id, now ) );
+        CHECK( actual->operation->generation == generation );
+        if( !upper_home ) {
+            overmap *owner = overmap_buffer.find_loaded_overmap( project_to<coords::om>( anchor ).xy() );
+            REQUIRE( owner );
+            on_out_of_scope release( [&]() {
+                for( const auto &entry : owner->horde_entities() ) {
+                    if( entry.second->monster_data &&
+                        entry.second->monster_data->population_identity().site_id == geometry->id &&
+                        std::any_of( members.begin(), members.end(), [&]( const auto &created ) {
+                            return created.token.member_id == entry.second->monster_data->population_identity().member_id;
+                        } ) ) {
+                        owner->release_monster_payload( entry.first,
+                                                       entry.second->monster_data->handoff_actor_id() );
+                    }
+                }
+            } );
+            const auto recalled_id = members.back().token.member_id;
+            const auto ordinary = std::find_if( bodies.begin(), bodies.end(), [&]( const monster *body ) {
+                return body != bodies.back() &&
+                       !actual->operation->contains( body->population_identity().member_id );
+            } );
+            REQUIRE( ordinary != bodies.end() );
+            const auto ordinary_id = ( *ordinary )->population_identity().member_id;
+            const auto ordinary_position = ( *ordinary )->pos_abs();
+            const auto operation_body = std::find_if( bodies.begin(), bodies.end(), [&]( const monster *body ) {
+                return actual->operation->contains( body->population_identity().member_id );
+            } );
+            REQUIRE( operation_body != bodies.end() );
+            const auto recalled_position = bodies.back()->pos_abs();
+            REQUIRE( g->despawn_monster( **operation_body ) );
+            REQUIRE( g->despawn_monster( **ordinary ) );
+            REQUIRE( g->despawn_monster( *bodies.back() ) );
+            const auto body_bytes = []( const monster &body ) {
+                std::ostringstream out;
+                { JsonOut json( out ); body.serialize( json ); }
+                return out.str();
+            };
+            auto actual_recall = [&]() -> monster & {
+                const auto *member = overmap_buffer.global_state.migo_populations.find(
+                                         geometry->id )->find( recalled_id );
+                REQUIRE( member->current_position );
+                if( member->owner == migo_population::representation::abstract ) {
+                    auto *entry = owner->entity_at( project_remain<coords::om>(
+                                                       *member->current_position ).remainder_tripoint );
+                    REQUIRE( entry );
+                    REQUIRE( entry->monster_data );
+                    return *entry->monster_data;
+                }
+                monster *local = nullptr;
+                for( monster &body : g->all_monsters() ) {
+                    if( body.population_identity().member_id == recalled_id ) {
+                        local = &body;
+                    }
+                }
+                REQUIRE( local );
+                return *local;
+            };
+            auto *ordinary_entry = owner->entity_at(
+                                       project_remain<coords::om>( ordinary_position ).remainder_tripoint );
+            REQUIRE( ordinary_entry );
+            REQUIRE( ordinary_entry->monster_data );
+            const auto ordinary_before = body_bytes( *ordinary_entry->monster_data );
+            const auto actor_omt = project_to<coords::omt>( recalled_position );
+            get_avatar().setpos( project_to<coords::ms>( actor_omt - point( 40, 0 ) ) + point( 12, 12 ), false );
+            set_time( calendar::turn + 1_turns );
+            migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+            REQUIRE( actual->operation->activity.active );
+            REQUIRE( actual->response_home_rally->find( recalled_id )->active );
+            overmap_buffer.move_hordes(); // Operation and recall name this same non-nearby container.
+            CHECK( actual_recall().pos_abs() != recalled_position );
+            CHECK( actual_recall().migo_intent()->last_energy_world == to_turn<int>( calendar::turn ) );
+            const auto once = body_bytes( actual_recall() );
+            overmap_buffer.move_hordes();
+            CHECK( body_bytes( actual_recall() ) == once );
+            CHECK( body_bytes( *ordinary_entry->monster_data ) == ordinary_before );
+            CHECK( overmap_buffer.global_state.migo_populations.find( geometry->id )->find(
+                       ordinary_id )->assignment == migo_population::duty::available );
+        }
+        return;
+    }
+    REQUIRE_FALSE( dispatched );
+    REQUIRE_FALSE( overmap_buffer.global_state.migo_towers.find( geometry->id )->operation );
+    REQUIRE( project_to<coords::omt>( bodies.back()->pos_abs() ).xy() != anchor.xy() );
+    const auto before = bodies.back()->pos_abs();
+    const auto identity = bodies.back()->population_identity();
+    REQUIRE( migo_tower::plan_local( *bodies.back(), false, nullptr ) );
+    REQUIRE( bodies.back()->has_dest() );
+    REQUIRE( bodies.back()->get_dest() != before );
+    CHECK( bodies.back()->population_identity().site_id == identity.site_id );
+    CHECK( bodies.back()->population_identity().member_id == identity.member_id );
+    CHECK( bodies.back()->population_identity().epoch == identity.epoch );
+    CHECK( bodies.back()->population_identity().site_anchor == identity.site_anchor );
+    CHECK( bodies.back()->pos_abs() == before ); // Planning is not arrival/movement.
+    CHECK_FALSE( overmap_buffer.global_state.migo_towers.find( geometry->id )->operation );
+    const auto member_id = members.back().token.member_id;
+    const auto site_id = geometry->id;
+    auto population_now = [&]() -> migo_population::site_record & {
+        return *overmap_buffer.global_state.migo_populations.find( site_id );
+    };
+    auto site_now = [&]() -> migo_tower::site_state & {
+        return *overmap_buffer.global_state.migo_towers.find( site_id );
+    };
+    auto recall_now = [&]() -> raid_sweep::home_rally_member & {
+        return *site_now().response_home_rally->find( member_id );
+    };
+    REQUIRE( site_now().response_home_rally );
+    REQUIRE( site_now().response_home_rally->find( member_id ) );
+    CHECK( recall_now().active_turns == 0 );
+    const auto allowance = recall_now().allowance_turns;
+    const auto signal_turn = site_now().signal->observed_turn;
+    SECTION( "real native movement and arrival precede atomic admission" ) {
+        monster &returnee = *bodies.back();
+        int native_steps = 0;
+        for( int turn = 0; turn < 80 && population_now().find( member_id )->assignment ==
+             migo_population::duty::returning; ++turn ) {
+            set_time( calendar::turn + 1_turns );
+            returnee.process_turn();
+            REQUIRE( migo_tower::plan_local( returnee, false, nullptr ) );
+            for( int action = 0; action < 16 && returnee.get_moves() > 0 && returnee.has_dest(); ++action ) {
+                const auto from = returnee.pos_abs();
+                const auto moves_before = returnee.get_moves();
+                REQUIRE( migo_tower::move_local( returnee ) );
+                native_steps += returnee.pos_abs() != from;
+                REQUIRE( ( returnee.pos_abs() != from || returnee.get_moves() < moves_before || !returnee.has_dest() ) );
+            }
+            migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        }
+        CHECK( native_steps > 0 );
+        CHECK( returnee.pos_abs() != before );
+        REQUIRE( population_now().find( member_id )->assignment == migo_population::duty::available );
+        CHECK( project_to<coords::omt>( returnee.pos_abs() ).xy() == anchor.xy() );
+        CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::arrived );
+        CHECK( recall_now().allowance_turns == allowance );
+        CHECK( site_now().signal->observed_turn == signal_turn );
+        REQUIRE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        REQUIRE( site_now().operation );
+        CHECK( site_now().decision.required_home_reserve == 0 );
+        CHECK( site_now().operation->contains( member_id ) );
+        CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::transferred );
+        CHECK( returnee.migo_intent()->generation == site_now().operation->generation );
+        const auto once_moves = returnee.get_moves();
+        const auto once_hp = returnee.get_hp();
+        returnee.process_turn(); // Same native world interval cannot fund again after transfer.
+        CHECK( returnee.get_moves() == once_moves );
+        CHECK( returnee.get_hp() == once_hp );
+    }
+    SECTION( "independent frozen body and episode survive native reload without banked work" ) {
+        monster &returnee = *bodies.back();
+        returnee.add_effect( efftype_id( "stunned" ), 30_minutes );
+        const auto frozen_position = returnee.pos_abs();
+        const auto actor_omt = project_to<coords::omt>( frozen_position );
+        const tripoint_abs_omt far( actor_omt.xy() - point( 41, 0 ), actor_omt.z() );
+        const auto bytes = []( const auto &value ) {
+            std::ostringstream out;
+            { JsonOut json( out ); value.serialize( json ); }
+            return out.str();
+        };
+        get_avatar().setpos( project_to<coords::ms>( far ) + point( 12, 12 ), false );
+        set_time( calendar::turn + 1_turns );
+        migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+        REQUIRE( population_now().activity.active );
+        REQUIRE_FALSE( recall_now().active );
+        const auto frozen_body = bytes( returnee );
+        const auto active_before = recall_now().active_turns;
+        set_time( calendar::turn + 600_turns );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 600 );
+        returnee.process_turn();
+        returnee.on_unload();
+        returnee.on_load();
+        CHECK( bytes( returnee ) == frozen_body );
+        CHECK( recall_now().active_turns == active_before );
+        const auto population_bytes = bytes( overmap_buffer.global_state.migo_populations );
+        const auto policy_bytes = bytes( overmap_buffer.global_state.migo_towers );
+        overmap_buffer.global_state.migo_populations.deserialize( json_loader::from_string( population_bytes ) );
+        overmap_buffer.global_state.migo_towers.deserialize( json_loader::from_string( policy_bytes ) );
+        returnee.deserialize( json_loader::from_string( frozen_body ) );
+        returnee.on_load();
+        CHECK( bytes( returnee ) == frozen_body );
+        get_avatar().setpos( project_to<coords::ms>( far + point( 1, 0 ) ) + point( 12, 12 ), false );
+        migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+        REQUIRE( recall_now().active );
+        CHECK( recall_now().active_turns == active_before );
+        REQUIRE( migo_tower::activity_for( returnee, migo_population::representation::local,
+                 to_turn<int>( calendar::turn ), migo_tower::activity_boundary::load ) );
+        const auto resumed = bytes( returnee );
+        REQUIRE( migo_tower::activity_for( returnee, migo_population::representation::local,
+                 to_turn<int>( calendar::turn ), migo_tower::activity_boundary::load ) );
+        CHECK( bytes( returnee ) == resumed );
+        CHECK( returnee.pos_abs() == frozen_position );
+        CHECK( recall_now().allowance_turns == allowance );
+        CHECK( site_now().signal->observed_turn == signal_turn );
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        CHECK( recall_now().working() ); // Stale source cannot erase the genuine homeward trip.
+        set_time( calendar::turn + 1_turns );
+        migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+        returnee.process_turn();
+        CHECK( recall_now().active_turns == active_before + 1 );
+    }
+    SECTION( "native priority refusal conserves owner and finite same-episode work" ) {
+        monster &returnee = *bodies.back();
+        returnee.add_effect( efftype_id( "stunned" ), 1_hours );
+        const auto before_position = returnee.pos_abs();
+        const auto token = returnee.population_identity();
+        set_time( calendar::turn + 1_turns );
+        const auto refused = migo_tower::prepare_step( returnee, migo_population::representation::local );
+        CHECK( refused.next == physical_navigation::action::none );
+        CHECK( refused.reason == "home_rally_native_priority" );
+        CHECK( returnee.pos_abs() == before_position );
+        CHECK( returnee.population_identity().epoch == token.epoch );
+        CHECK( recall_now().working() );
+        CHECK( recall_now().allowance_turns == allowance );
+        returnee.remove_effect( efftype_id( "stunned" ) );
+        REQUIRE( migo_tower::plan_local( returnee, false, nullptr ) );
+        CHECK( returnee.get_dest() != before_position );
+        const auto earned = recall_now().active_turns;
+        const auto no_progress = recall_now().no_progress_turns;
+        set_time( calendar::turn + time_duration::from_turns( no_progress ) );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), no_progress );
+        CHECK( returnee.pos_abs() == before_position );
+        CHECK( recall_now().active_turns == earned + no_progress );
+        CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::expired );
+        CHECK( population_now().find( member_id )->assignment == migo_population::duty::available );
+        CHECK_FALSE( returnee.has_dest() );
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::expired );
+        CHECK( recall_now().allowance_turns == allowance );
+    }
+    SECTION( "switching response sources cannot replenish a spent native recall episode" ) {
+        const bool empty_other = GENERATE( false, true );
+        CAPTURE( empty_other );
+        const auto serialize = []( const auto &value ) {
+            std::ostringstream out;
+            { JsonOut json( out ); value.serialize( json ); }
+            return out.str();
+        };
+        const auto original_source = site_now().signal->source_omt;
+        const auto original_episode = site_now().response_home_rally->episode;
+        const int allowance = static_cast<int>( recall_now().no_progress_turns );
+        for( monster *body : bodies ) {
+            const auto *participant = site_now().response_home_rally->find(
+                                          body->population_identity().member_id );
+            if( participant && participant->working() ) {
+                REQUIRE( migo_tower::plan_local( *body, false, nullptr ) );
+                CHECK( participant->active );
+                CHECK( participant->active_turns == 0 );
+            }
+        }
+        set_time( calendar::turn + time_duration::from_turns( allowance ) );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), allowance );
+        REQUIRE( recall_now().outcome == raid_sweep::home_rally_outcome::expired );
+        REQUIRE_FALSE( site_now().response_home_rally->pending() );
+        if( empty_other ) {
+            for( monster *body : bodies ) {
+                if( project_to<coords::omt>( body->pos_abs() ).xy() != anchor.xy() ) {
+                    body->add_effect( efftype_id( "stunned" ), 24_hours );
+                }
+            }
+        }
+        site_now().signal->source_omt += point( 0, 2 );
+        site_now().signal->sample_id = "different-rally-source";
+        site_now().signal->observed_turn = to_turn<int>( calendar::turn );
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        if( empty_other ) {
+            REQUIRE( site_now().response_home_rally );
+            CHECK( site_now().response_home_rally->source == original_source );
+            for( monster *body : bodies ) {
+                body->remove_effect( efftype_id( "stunned" ) );
+            }
+        } else {
+            REQUIRE( site_now().response_home_rally );
+            REQUIRE( site_now().response_home_rally->pending() );
+            for( monster *body : bodies ) {
+                const auto *participant = site_now().response_home_rally->find(
+                                              body->population_identity().member_id );
+                if( participant && participant->working() ) {
+                    REQUIRE( migo_tower::plan_local( *body, false, nullptr ) );
+                    CHECK( participant->active );
+                    CHECK( participant->active_turns == 0 );
+                }
+            }
+            set_time( calendar::turn + time_duration::from_turns( allowance ) );
+            migo_tower::service_operations( to_turn<int>( calendar::turn ), allowance );
+            REQUIRE_FALSE( site_now().response_home_rally->pending() );
+        }
+        // Use the real source/population serializers. Reload cannot turn a
+        // spent A episode into a new trip merely because B was most recent.
+        const auto saved_towers = serialize( overmap_buffer.global_state.migo_towers );
+        const auto saved_population = serialize( overmap_buffer.global_state.migo_populations );
+        overmap_buffer.global_state.migo_towers.deserialize(
+            json_loader::from_string( saved_towers ).get_object() );
+        overmap_buffer.global_state.migo_populations.deserialize(
+            json_loader::from_string( saved_population ).get_object() );
+        site_now().signal->source_omt = original_source;
+        site_now().signal->sample_id = "same-original-rally-source";
+        site_now().signal->observed_turn = to_turn<int>( calendar::turn );
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        REQUIRE( site_now().find_source( original_source ) );
+        CHECK( site_now().find_source( original_source )->episode == original_episode );
+        const auto *again = site_now().response_home_rally ?
+                            site_now().response_home_rally->find( member_id ) : nullptr;
+        CHECK_FALSE( ( again && again->working() ) );
+    }
+    SECTION( "only a genuinely reopened source can renew a native Mi-go recall" ) {
+        const int interval = static_cast<int>( recall_now().no_progress_turns );
+        for( monster *body : bodies ) {
+            const auto *participant = site_now().response_home_rally->find(
+                                          body->population_identity().member_id );
+            if( participant && participant->working() ) {
+                REQUIRE( migo_tower::plan_local( *body, false, nullptr ) );
+            }
+        }
+        set_time( calendar::turn + time_duration::from_turns( interval ) );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), interval );
+        REQUIRE_FALSE( site_now().response_home_rally->pending() );
+        const auto episode = site_now().response_home_rally->episode;
+        const auto source = site_now().signal->source_omt;
+        auto *history = site_now().find_source( source );
+        REQUIRE( history );
+        // Declared genuine source-owner extinction/receipt inputs. This
+        // exercises native episode admission, not physical sensing itself.
+        history->observed_active = false;
+        history->extinct_world = to_turn<int>( calendar::turn );
+        site_now().signal->observed_turn = to_turn<int>( calendar::turn );
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        CHECK_FALSE( site_now().response_home_rally->pending() );
+        CHECK( site_now().find_source( source )->episode == episode );
+        set_time( calendar::turn + 1_turns );
+        site_now().signal->observed_turn = to_turn<int>( calendar::turn );
+        const auto position = bodies.back()->pos_abs();
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        REQUIRE( site_now().response_home_rally->pending() );
+        CHECK( site_now().response_home_rally->episode == episode + 1 );
+        CHECK( recall_now().active_turns == 0 );
+        CHECK( bodies.back()->pos_abs() == position );
+    }
+    SECTION( "an unseen authenticated member may join a spent episode only once" ) {
+        const int interval = static_cast<int>( recall_now().no_progress_turns );
+        for( monster *body : bodies ) {
+            const auto *participant = site_now().response_home_rally->find(
+                                          body->population_identity().member_id );
+            if( participant && participant->working() ) {
+                REQUIRE( migo_tower::plan_local( *body, false, nullptr ) );
+            }
+        }
+        set_time( calendar::turn + time_duration::from_turns( interval ) );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), interval );
+        REQUIRE_FALSE( site_now().response_home_rally->pending() );
+        monster &newly_away = *bodies[1]; // Existing genuine member, not a new population.
+        const auto id = newly_away.population_identity().member_id;
+        REQUIRE_FALSE( site_now().response_home_rally->find( id ) );
+        const tripoint_bub_ms position( 86, 61, 0 );
+        here.ter_set( position, ter_str_id( "t_floor" ) );
+        newly_away.setpos( here, position );
+        REQUIRE( migo_tower::activity_for( newly_away, migo_population::representation::local,
+                                         to_turn<int>( calendar::turn ), migo_tower::activity_boundary::load ) );
+        site_now().signal->observed_turn = to_turn<int>( calendar::turn );
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        const auto *participant = site_now().response_home_rally->find( id );
+        REQUIRE( participant );
+        CHECK( participant->working() );
+        CHECK( participant->active_turns == 0 );
+        CHECK_FALSE( recall_now().working() );
+        const auto allowance = participant->allowance_turns;
+        const auto generation = site_now().response_home_rally->generation;
+        CHECK_FALSE( migo_tower::begin_response( site_id, to_turn<int>( calendar::turn ) ) );
+        CHECK( site_now().response_home_rally->find( id )->allowance_turns == allowance );
+        CHECK( site_now().response_home_rally->generation == generation );
+    }
+    SECTION( "real native death ends recall without an invented arrival or loss report" ) {
+        monster &returnee = *bodies.back();
+        returnee.set_hp( 0 );
+        returnee.check_dead_state( &here );
+        REQUIRE( returnee.is_dead() );
+        REQUIRE( population_now().find( member_id )->owner == migo_population::representation::dead );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+        CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::unavailable );
+        CHECK_FALSE( site_now().operation );
+        CHECK( site_now().signal->observed_turn == signal_turn );
+        const auto active = recall_now().active_turns;
+        set_time( calendar::turn + 5_minutes );
+        migo_tower::service_operations( to_turn<int>( calendar::turn ), 300 );
+        CHECK( recall_now().active_turns == active );
+        CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::unavailable );
+    }
+    if( !upper_home ) {
+        SECTION( "actual native handoff preserves the recall through abstract freeze and return" ) {
+            const std::string fault = GENERATE( "none", "missing", "foreign" );
+            CAPTURE( fault );
+            const auto position = bodies.back()->pos_abs();
+            overmap *owner = overmap_buffer.find_loaded_overmap( project_to<coords::om>( position ).xy() );
+            REQUIRE( owner );
+            on_out_of_scope release( [&]() {
+                for( const auto &entry : owner->horde_entities() ) {
+                    if( entry.second->monster_data &&
+                        entry.second->monster_data->population_identity().site_id == site_id &&
+                        std::any_of( members.begin(), members.end(), [&]( const auto &created ) {
+                            return created.token.member_id == entry.second->monster_data->population_identity().member_id;
+                        } ) ) {
+                        owner->release_monster_payload( entry.first,
+                                                       entry.second->monster_data->handoff_actor_id() );
+                    }
+                }
+            } );
+            const auto epoch = bodies.back()->population_identity().epoch;
+            const auto peer_id = members[2].token.member_id;
+            REQUIRE( peer_id != member_id );
+            REQUIRE( g->despawn_monster( *bodies[2] ) );
+            REQUIRE( g->despawn_monster( *bodies.back() ) );
+            REQUIRE( population_now().find( member_id )->owner == migo_population::representation::abstract );
+            CHECK( population_now().find( member_id )->token.epoch == epoch + 1 );
+            auto payload_for = [&]( const std::string &id ) -> monster & {
+                const auto *member = population_now().find( id );
+                REQUIRE( member->current_position );
+                if( member->owner == migo_population::representation::local ) {
+                    monster *local = nullptr;
+                    for( monster &candidate : g->all_monsters() ) {
+                        if( candidate.population_identity().member_id == id &&
+                            candidate.pos_abs() == *member->current_position ) {
+                            local = &candidate;
+                        }
+                    }
+                    REQUIRE( local );
+                    REQUIRE( population_now().owns( local->population_identity(), member->owner ) );
+                    return *local;
+                }
+                REQUIRE( member->owner == migo_population::representation::abstract );
+                const auto *entry = owner->entity_at(
+                                        project_remain<coords::om>( *member->current_position ).remainder_tripoint );
+                REQUIRE( entry );
+                REQUIRE( entry->monster_data );
+                return *entry->monster_data;
+            };
+            auto payload = [&]() -> monster & { return payload_for( member_id ); };
+            const auto native_callback = [&]() {
+                overmap_buffer.move_hordes();
+                // This fixture's geometry is loaded. A real abstract step
+                // may materialize; follow that accepted native owner rather
+                // than requiring the departed container to retain its copy.
+                if( population_now().find( member_id )->owner == migo_population::representation::local &&
+                    recall_now().working() ) {
+                    monster &local = payload();
+                    local.process_turn();
+                    REQUIRE( migo_tower::plan_local( local, false, nullptr ) );
+                    for( int action = 0; action < 16 && local.get_moves() > 0 && local.has_dest(); ++action ) {
+                        REQUIRE( migo_tower::move_local( local ) );
+                    }
+                }
+            };
+            const auto bytes = []( const monster &body ) {
+                std::ostringstream out;
+                { JsonOut json( out ); body.serialize( json ); }
+                return out.str();
+            };
+            REQUIRE( migo_tower::owns_intent( payload(), migo_population::representation::abstract ) );
+            const auto actor_omt = project_to<coords::omt>( position );
+            const tripoint_abs_omt far( actor_omt.xy() - point( 41, 0 ), actor_omt.z() );
+            get_avatar().setpos( project_to<coords::ms>( far ) + point( 12, 12 ), false );
+            set_time( calendar::turn + 1_turns );
+            migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+            REQUIRE_FALSE( recall_now().active );
+            const auto frozen = bytes( payload() );
+            const auto frozen_peer = bytes( payload_for( peer_id ) );
+            const auto peer_active = site_now().response_home_rally->find( peer_id )->active_turns;
+            const auto active = recall_now().active_turns;
+            set_time( calendar::turn + 600_turns );
+            migo_tower::service_operations( to_turn<int>( calendar::turn ), 600 );
+            overmap_buffer.move_hordes();
+            CHECK( bytes( payload() ) == frozen );
+            CHECK( recall_now().active_turns == active );
+            get_avatar().setpos( project_to<coords::ms>( far + point( 1, 0 ) ) + point( 12, 12 ), false );
+            migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+            REQUIRE( recall_now().active );
+            REQUIRE_FALSE( site_now().response_home_rally->find( peer_id )->active );
+            CHECK( rl_dist( get_avatar().pos_abs_omt().xy(),
+                            project_to<coords::omt>( payload_for( peer_id ).pos_abs() ).xy() ) == 41 );
+            CHECK( recall_now().active_turns == active );
+            if( fault != "none" ) {
+                const auto recorded_epoch = population_now().find( member_id )->token.epoch;
+                const auto current = payload().pos_abs();
+                std::string refused_body;
+                if( fault == "missing" ) {
+                    // The retained metadata alone must not substitute for an
+                    // absent native owner. This is a deliberate absence control.
+                    REQUIRE( owner->release_monster_payload( current, payload().handoff_actor_id() ) );
+                } else {
+                    // A declared stale/foreign saved payload, never a way to
+                    // bind a positive actor or rewrite its canonical lease.
+                    ++payload().population_identity().epoch;
+                    refused_body = bytes( payload() );
+                }
+                set_time( calendar::turn + 1_turns );
+                migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+                overmap_buffer.move_hordes();
+                CHECK_FALSE( recall_now().active );
+                CHECK( recall_now().active_turns == active );
+                CHECK( recall_now().working() );
+                CHECK( population_now().find( member_id )->assignment == migo_population::duty::returning );
+                CHECK( population_now().find( member_id )->token.epoch == recorded_epoch );
+                CHECK( bytes( payload_for( peer_id ) ) == frozen_peer );
+                if( fault == "missing" ) {
+                    CHECK_FALSE( owner->entity_at( project_remain<coords::om>( current ).remainder_tripoint ) );
+                } else {
+                    CHECK( bytes( payload() ) == refused_body );
+                }
+                return;
+            }
+            int steps = 0;
+            for( int turn = 0; turn < 80 && recall_now().working(); ++turn ) {
+                const auto from = payload().pos_abs();
+                set_time( calendar::turn + 1_turns );
+                migo_tower::service_operations( to_turn<int>( calendar::turn ), 1 );
+                native_callback();
+                steps += payload().pos_abs() != from;
+            }
+            CHECK( steps > 0 );
+            CHECK( recall_now().outcome == raid_sweep::home_rally_outcome::arrived );
+            CHECK( population_now().find( member_id )->assignment == migo_population::duty::available );
+            CHECK( project_to<coords::omt>( payload().pos_abs() ).xy() == anchor.xy() );
+            CHECK( payload().population_identity().epoch == epoch + 2 ); // Accepted native materialization.
+            CHECK( recall_now().allowance_turns == allowance );
+            CHECK( bytes( payload_for( peer_id ) ) == frozen_peer );
+            CHECK( site_now().response_home_rally->find( peer_id )->active_turns == peer_active );
+            CHECK( site_now().response_home_rally->find( peer_id )->working() );
+            const auto once = bytes( payload() );
+            overmap_buffer.move_hordes();
+            overmap_buffer.move_hordes();
+            CHECK( bytes( payload() ) == once );
+            CHECK( bytes( payload_for( peer_id ) ) == frozen_peer );
+
+        }
+    }
+}
+
+TEST_CASE( "response_dispatch_settles_the_previous_native_body_interval",
+           "[migo_tower][home_rally_dispatch_settlement]" )
+{
+    const bool abstract = GENERATE( false, true );
+    const bool legacy = GENERATE( false, true );
+    CAPTURE( abstract, legacy );
+    clear_avatar();
+    clear_map_with_vision( -1, 4, false );
+    clear_creatures();
+    const auto old_turn = calendar::turn;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    overmap_buffer.global_state.migo_populations.clear();
+    overmap_buffer.global_state.migo_towers.clear();
+    set_time( calendar::turn_zero + 100000_turns );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    const auto player_position = get_avatar().pos_abs();
+    const auto anchor = project_to<coords::omt>( here.get_abs( tripoint_bub_ms( 60, 60, 0 ) ) );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> terrain;
+    overmap *owner = nullptr;
+    std::vector<migo_population::member_record> members;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        if( owner ) {
+            for( const auto &member : members ) {
+                owner->release_monster_payload( *member.current_position, member.token.member_id );
+            }
+        }
+        for( const auto &entry : terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        clear_avatar();
+        clear_map_without_vision( -1, 4 );
+        set_time( old_turn );
+    } );
+    for( int z = 0; z < 4; ++z ) {
+        const tripoint_abs_omt p( anchor.xy(), z );
+        terrain.emplace_back( p, overmap_buffer.ter( p ) );
+        overmap_buffer.ter_set( p, oter_str_id( "mi-go_scout_tower_" +
+                                            std::to_string( z + 1 ) + "_north" ) );
+    }
+    const auto geometry = migo_population::geometry_at( anchor );
+    REQUIRE( geometry );
+    migo_population::site_record population;
+    population.id = geometry->id;
+    population.anchor = anchor;
+    std::array<monster *, 3> bodies;
+    for( int i = 0; i < 3; ++i ) {
+        const tripoint_bub_ms p( 60 + i, 60, i == 0 ? 1 : 0 );
+        here.ter_set( p, ter_str_id( "t_floor" ) );
+        migo_population::member_record member;
+        member.token = {geometry->id, "dispatch-pause-" + std::to_string( i ), 1, anchor};
+        member.type = mtype_id( "mon_mi_go" );
+        member.home = here.get_abs( p );
+        member.current_position = member.home;
+        member.hp = member.type->hp;
+        member.owner = abstract && i > 0 ? migo_population::representation::abstract :
+                       migo_population::representation::local;
+        members.push_back( member );
+        if( member.owner == migo_population::representation::local ) {
+            bodies[i] = g->place_critter_at( member.type, p );
+            REQUIRE( bodies[i] );
+            bodies[i]->population_identity() = member.token;
+        }
+    }
+    REQUIRE( population.commit_seed( members, std::nullopt, "", 0, true, false ) );
+    overmap_buffer.global_state.migo_populations.sites.push_back( population );
+    owner = &overmap_buffer.get( project_to<coords::om>( anchor ).xy() );
+    if( abstract ) {
+        for( int i : {1, 2} ) {
+            // Genuine legacy ABSTRACT fixture births, not transformed LOCAL
+            // copies. The existing native container owns their first payload.
+            monster body( members[i].type );
+            body.population_identity() = members[i].token;
+            body.set_pos_abs_only( members[i].home );
+            auto *entry = owner->retain_monster_payload( members[i].home, body );
+            REQUIRE( entry );
+            REQUIRE( entry->monster_data );
+            bodies[i] = entry->monster_data.get();
+        }
+    }
+    migo_tower::site_state site;
+    site.site_id = geometry->id;
+    site.anchor = anchor;
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    auto home = [&]() -> auto & {
+        return *overmap_buffer.global_state.migo_populations.find( geometry->id );
+    };
+    auto state = [&]() -> auto & {
+        return *overmap_buffer.global_state.migo_towers.find( geometry->id );
+    };
+    const auto serialize = []( const monster &body ) {
+        std::ostringstream out;
+        { JsonOut json( out ); body.serialize( json ); }
+        return out.str();
+    };
+    const auto suspension = [&]( const monster &body ) {
+        const auto document = json_loader::from_string( serialize( body ) );
+        const auto object = document.get_object();
+        const auto consume = []( const auto &self, const JsonValue &value ) -> void {
+            if( value.test_object() ) {
+                for( const JsonMember child : value.get_object() ) {
+                    self( self, child );
+                }
+            } else if( value.test_array() ) {
+                for( const JsonValue child : value.get_array() ) {
+                    self( self, child );
+                }
+            } else if( value.test_string() ) {
+                ( void )value.get_string();
+            } else if( value.test_bool() ) {
+                ( void )value.get_bool();
+            } else if( value.test_number() ) {
+                ( void )value.get_float();
+            } else {
+                REQUIRE( value.test_null() );
+            }
+        };
+        for( const JsonMember member : object ) {
+            // Consume each actual complete native value; no blanket omission
+            // setting can hide a missing field or change in this body record.
+            consume( consume, member );
+        }
+        time_duration value;
+        REQUIRE( object.read( "suspended_evolution_time", value ) );
+        return value;
+    };
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    if( !legacy ) {
+        REQUIRE( migo_tower::activity_for( *bodies[1], members[1].owner,
+                                         to_turn<int>( calendar::turn ), migo_tower::activity_boundary::load ) );
+    }
+    const auto before = suspension( *bodies[1] );
+    const auto frozen_body = serialize( *bodies[1] );
+    get_avatar().setpos( project_to<coords::ms>( anchor + point( 41, 0 ) ), false );
+    set_time( calendar::turn + 1_turns );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    REQUIRE_FALSE( home().activity.active );
+    set_time( calendar::turn + 600_turns );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    CHECK( serialize( *bodies[1] ) == frozen_body );
+    get_avatar().setpos( player_position, false );
+    set_time( calendar::turn + 1_turns );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    state().signal = migo_tower::signal_record{"dispatch-pause", "smoke", anchor + point( 2, 0 ),
+                     std::nullopt, members.front().token.member_id, bodies.front()->pos_abs(),
+                     to_turn<int>( calendar::turn )};
+    for( int z : {0, 1} ) {
+        here.build_map_cache( z );
+    }
+    REQUIRE( migo_tower::begin_response( geometry->id, to_turn<int>( calendar::turn ) ) );
+    REQUIRE( state().operation );
+    CHECK( state().operation->contains( members[1].token.member_id ) );
+    // The new operation owns only its new interval. Earlier legacy absence or
+    // frozen home debt must already be settled in the real selected body.
+    CHECK( suspension( *bodies[1] ) > before );
+    if( !legacy ) {
+        CHECK( suspension( *bodies[1] ) == before +
+               time_duration::from_turns( home().activity.suspended_turns ) );
+    }
+    const auto committed = serialize( *bodies[1] );
+    CHECK_FALSE( migo_tower::begin_response( geometry->id, to_turn<int>( calendar::turn ) ) );
+    CHECK( serialize( *bodies[1] ) == committed );
+    REQUIRE( migo_tower::activity_for( *bodies[1], members[1].owner,
+                                     to_turn<int>( calendar::turn ), migo_tower::activity_boundary::load ) );
+    CHECK( serialize( *bodies[1] ) == committed );
+}
+
+TEST_CASE( "compact_rally_source_facts_are_bounded_and_eviction_cannot_grant_a_trip",
+           "[migo_tower][home_rally][serialization]" )
+{
+    const auto serialize = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut json( out ); value.serialize( json ); }
+        return out.str();
+    };
+    raid_sweep::source_outcome human;
+    migo_tower::source_history migo;
+    const auto check = [&]( auto original ) {
+        CHECK( serialize( original ).find( "rally_episode" ) == std::string::npos );
+        original.rally_episode = original.episode;
+        for( int outcome = 0; outcome <= static_cast<int>( raid_sweep::home_rally_outcome::expired );
+             ++outcome ) {
+            original.rally_outcomes["member-" + std::to_string( outcome )] = outcome;
+        }
+        auto loaded = original;
+        loaded.deserialize( json_loader::from_string( serialize( original ) ).get_object() );
+        CHECK( serialize( loaded ) == serialize( original ) );
+        for( int malformed = 0; malformed < 6; ++malformed ) {
+            auto bad = original;
+            if( malformed == 0 ) {
+                bad.rally_episode = 0;
+            } else if( malformed == 1 ) {
+                bad.rally_episode = bad.episode + 1;
+            } else if( malformed == 2 ) {
+                bad.rally_outcomes[""] = 1;
+            } else if( malformed == 3 ) {
+                bad.rally_outcomes[std::string( 129, 'x' )] = 1;
+            } else if( malformed == 4 ) {
+                bad.rally_outcomes["bad-outcome"] = 5;
+            } else {
+                for( int i = 0; i < 17; ++i ) {
+                    bad.rally_outcomes["oversize-" + std::to_string( i )] = 1;
+                }
+            }
+            auto refused = original;
+            CHECK_THROWS( refused.deserialize( json_loader::from_string( serialize( bad ) ).get_object() ) );
+        }
+    };
+    check( human );
+    check( migo );
+
+    const tripoint_abs_omt source( 10, 20, 0 );
+    raid_sweep::source_memory memory;
+    REQUIRE( memory.reserve( source ) );
+    memory.find( source )->rally_episode = 1;
+    memory.find( source )->rally_outcomes["spent"] = static_cast<int>( raid_sweep::home_rally_outcome::expired );
+    for( int i = 1; i <= 4; ++i ) {
+        REQUIRE( memory.reserve( source + point( i, 0 ) ) );
+    }
+    CHECK_FALSE( memory.find( source ) );
+    CHECK_FALSE( memory.rally_history_known( source, 1 ) );
+    const auto before_refusal = serialize( memory );
+    CHECK_FALSE( memory.ready( source, "unknown-previous-outcome" ) );
+    CHECK( serialize( memory ) == before_refusal );
+    // Rally refusal must not reserve a generation-zero slot and bypass the
+    // existing absent-area dispatch caution. Genuine resident evidence is a
+    // separate control, not a fabricated extinction of the evicted area.
+    raid_sweep::source_memory resident;
+    REQUIRE( resident.reserve( source ) );
+    CHECK( resident.find( source )->generation == 0 );
+    resident.observe_absence( source, 1000 );
+    CHECK( resident.next_episode( source, 1000 ) == 1 );
+    CHECK( resident.next_episode( source, 1001 ) == 2 );
+    CHECK( resident.rally_history_known( source, 2 ) );
+    resident.adopt_signal( source, 1001 );
+    CHECK( resident.find( source )->episode == 2 );
+
+    migo_tower::site_state site;
+    auto *first = site.remember_source( source );
+    REQUIRE( first );
+    first->rally_episode = 1;
+    first->rally_outcomes["spent"] = static_cast<int>( raid_sweep::home_rally_outcome::transferred );
+    for( int i = 1; i <= 4; ++i ) {
+        REQUIRE( site.remember_source( source + point( i, 0 ) ) );
+    }
+    CHECK_FALSE( site.find_source( source ) );
+    const auto *unknown = site.remember_source( source );
+    REQUIRE( unknown );
+    CHECK( unknown->prior_outcome_unavailable );
+    CHECK( unknown->rally_outcomes.empty() );
+    CHECK( unknown->episode == unknown->episode_at_outcome );
+}
+
+TEST_CASE( "individual_home_rally_interval_is_finite_and_reload_cannot_replenish_it",
+           "[home_rally][migo_tower]" )
+{
+    using namespace raid_sweep;
+    const auto bytes = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut json( out ); value.serialize( json ); }
+        return out.str();
+    };
+    home_rally rally;
+    rally.source = tripoint_abs_omt( 2, 3, 0 );
+    rally.episode = 1;
+    home_rally_member member;
+    member.member_id = "genuine-existing-member";
+    member.allowance_turns = 100;
+    member.no_progress_turns = 40;
+    member.evaluate( 1000, true, 900 );
+    member.observe( tripoint_abs_ms( 30, 40, 0 ), false );
+    CHECK( member.active_turns == 0 );
+    CHECK( member.active_delta_turns == 0 );
+    CHECK( member.suspended_body_turns( 900 ) == 100 );
+    CHECK( member.claim_motor_turns() == 0 );
+    member.settle_body( 1000 );
+    member.evaluate( 1005, true, 1000 );
+    CHECK( member.active_turns == 5 );
+    CHECK( member.claim_motor_turns() == 5 );
+    CHECK( member.claim_motor_turns() == 0 );
+    member.evaluate( 1006, false, 1000 );
+    CHECK( member.active_turns == 5 );
+    member.evaluate( 5000, false, 1000 );
+    CHECK( member.active_turns == 5 );
+    CHECK( member.suspended_body_turns( 1000 ) == 3995 );
+    CHECK_FALSE( member.exhausted() );
+    REQUIRE( rally.add( member ) );
+    CHECK_FALSE( rally.add( member ) );
+    const auto frozen = bytes( rally );
+    home_rally loaded;
+    loaded.deserialize( json_loader::from_string( frozen ) );
+    CHECK( bytes( rally ) == frozen ); // Serialization is not an owner callback.
+    REQUIRE( loaded.find( member.member_id ) );
+    auto &resumed = *loaded.find( member.member_id );
+    CHECK( resumed.active_delta_turns == 0 );
+    resumed.evaluate( 6000, true, 1000 );
+    CHECK( resumed.active_turns == 5 );
+    CHECK( resumed.claim_motor_turns() == 0 );
+    CHECK( resumed.suspended_body_turns( 1000 ) == 4995 );
+    resumed.settle_body( 6000 );
+    resumed.evaluate( 6001, true, 6000 );
+    CHECK( resumed.active_turns == 6 );
+    CHECK( resumed.claim_motor_turns() == 1 );
+    resumed.evaluate( 6001, true, 6000 );
+    CHECK( resumed.claim_motor_turns() == 0 );
+    const auto current = bytes( loaded );
+    resumed.evaluate( 5999, true, 6000 );
+    CHECK( bytes( loaded ) == current );
+    resumed.observe( tripoint_abs_ms( 29, 40, 0 ), false );
+    CHECK( resumed.last_progress == 6 );
+    resumed.evaluate( 6041, true, 6000 );
+    CHECK( resumed.exhausted() ); // Real active no-progress, not the frozen absence.
+    CHECK( resumed.active_turns == 46 );
+    resumed.observe( tripoint_abs_ms( 28, 40, 0 ), true );
+    CHECK( resumed.outcome == home_rally_outcome::arrived );
+    CHECK_FALSE( loaded.pending() );
+    const auto arrived = bytes( loaded );
+    resumed.observe( tripoint_abs_ms( 27, 40, 0 ), true );
+    CHECK( bytes( loaded ) == arrived );
+    for( int i = 0; i < 15; ++i ) {
+        member.member_id = "other-" + std::to_string( i );
+        REQUIRE( loaded.add( member ) );
+    }
+    member.member_id = "overflow";
+    CHECK_FALSE( loaded.add( member ) );
+    CHECK( loaded.members.size() == 16 );
 }

@@ -2327,6 +2327,37 @@ bool live_bandit_inside_activation( const tripoint_abs_omt &position )
                      std::abs( static_cast<std::int64_t>( position.y() ) - player.y() ) ) <= 40;
 }
 
+npc *live_bandit_home_rally_body( const bandit_live_world::site_record &site,
+                                const character_id id )
+{
+    const auto *member = site.find_member( id );
+    const auto actor = overmap_buffer.find_npc( id );
+    if( !member || member->state != bandit_live_world::member_state::at_home || !actor ||
+        actor->is_dead() || actor->get_bandit_live_world_projection_lease().present ||
+        bandit_live_world::active_operation_duty_site_for(
+            overmap_buffer.global_state.bandit_live_world, id ) ) {
+        return nullptr;
+    }
+    const overmap *container = overmap_buffer.find_loaded_overmap(
+                                  project_to<coords::om>( actor->pos_abs_omt().xy() ) );
+    const npc *loaded = g->find_npc( id );
+    return container && container->find_npc( id ).get() == actor.get() &&
+           ( !loaded || loaded == actor.get() ) ? actor.get() : nullptr;
+}
+
+raid_sweep::home_rally_member *live_bandit_home_rally_member( const npc &body )
+{
+    for( auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        if( site.response_home_rally ) {
+            auto *member = site.response_home_rally->find( std::to_string( body.getID().get_value() ) );
+            if( member && member->working() && live_bandit_home_rally_body( site, body.getID() ) == &body ) {
+                return member;
+            }
+        }
+    }
+    return nullptr;
+}
+
 void evaluate_live_bandit_activation()
 {
     using namespace bandit_live_world;
@@ -2388,6 +2419,18 @@ void evaluate_live_bandit_activation()
         };
         party( site.active_outing );
         party( site.active_hostile_operation.reservation );
+
+        if( site.response_home_rally ) {
+            for( const auto &member : site.members ) {
+                auto *recalled = site.response_home_rally->find( std::to_string( member.npc_id.get_value() ) );
+                if( !recalled || !recalled->working() ) {
+                    continue;
+                }
+                const npc *actor = live_bandit_home_rally_body( site, member.npc_id );
+                recalled->evaluate( now, actor && living_nearby.count( member.npc_id ) != 0,
+                                    actor ? body_clock( *actor ) : recalled->body_anchor );
+            }
+        }
 
         std::map<character_id, int> home_bodies;
         std::map<character_id, int> member_deadlines;
@@ -15960,6 +16003,193 @@ int live_bandit_scout_unbanked_moves( const int previous_moves, const int remain
     return std::min( std::max( previous_moves, 0 ), remaining_moves );
 }
 
+void record_live_bandit_rally_outcomes( bandit_live_world::site_record &site )
+{
+    if( !site.response_home_rally ) {
+        return;
+    }
+    const auto &rally = *site.response_home_rally;
+    auto *history = site.raid_sources.find( rally.source );
+    if( !history || history->episode != rally.episode ) {
+        return; // Evicted/older episodes cannot overwrite current source facts.
+    }
+    if( history->rally_episode != rally.episode ) {
+        history->rally_episode = rally.episode;
+        history->rally_outcomes.clear();
+    }
+    for( const auto &member : rally.members ) {
+        if( history->rally_outcomes.count( member.member_id ) || history->rally_outcomes.size() < 16 ) {
+            history->rally_outcomes[member.member_id] = static_cast<int>( member.outcome );
+        }
+    }
+}
+
+void service_live_bandit_home_rallies()
+{
+    using namespace bandit_live_world;
+    using raid_sweep::home_rally_outcome;
+    const int now = to_turns<int>( calendar::turn - calendar::start_of_cataclysm );
+    auto &world = overmap_buffer.global_state.bandit_live_world;
+    for( auto &site : world.sites ) {
+        record_live_bandit_rally_outcomes( site );
+        if( site.retired_empty_site ) {
+            continue;
+        }
+        // The real report/assessment owner supplies recall permission, not a
+        // signal, intent label or speculative missing-body position.
+        if( live_bandit_home_active( site ) && site.origin == origin_disposition::active_hostile &&
+            !site.has_active_outside_pressure() &&
+            site.camp_decision.state == camp_decision_state::report_awaiting_assessment ) {
+            const auto reads = live_bandit_response_member_power_reads_impl( site );
+            const auto effective = evaluate_scout_report_at( site.current_scout_report,
+                                   live_bandit_current_minutes() );
+            const auto selected = select_capable_response_party( site,
+                                  site.current_scout_report.action_policy, effective.danger_high, reads );
+            const auto authorization = evaluate_response_authorization( site,
+                                       live_bandit_current_minutes(), selected, reads );
+            const auto &report = site.current_scout_report;
+            const auto episode = site.raid_sources.next_episode( report.target_omt,
+                                 raid_signal_world( report ) );
+            const bool same_episode = site.response_home_rally &&
+                                      site.response_home_rally->source == report.target_omt &&
+                                      site.response_home_rally->episode == episode;
+            if( authorization.report_current && authorization.report_revision_available &&
+                authorization.report_unexpired && authorization.assessment_ready &&
+                authorization.opportunity_sufficient &&
+                ( same_episode || !site.response_home_rally || !site.response_home_rally->pending() ) ) {
+                raid_sweep::home_rally rally = same_episode ? *site.response_home_rally : raid_sweep::home_rally();
+                rally.source = report.target_omt;
+                rally.episode = episode;
+                const auto *history = site.raid_sources.find( report.target_omt );
+                bool added = false;
+                for( const auto &member : site.members ) {
+                    const auto id = std::to_string( member.npc_id.get_value() );
+                    if( rally.find( id ) ||
+                        ( history && history->rally_episode == episode &&
+                          ( history->rally_outcomes.count( id ) || history->rally_outcomes.size() >= 16 ) ) ) {
+                        continue; // No repeated episode/packet/reload can replenish this member.
+                    }
+                    npc *body = live_bandit_home_rally_body( site, member.npc_id );
+                    if( body && body->is_active() ) {
+                        body->catch_up_body(); // Finish rightful loaded physiology before adopting the new trip.
+                    }
+                    if( member.wounded_or_unready || !body || !live_bandit_inside_activation( body->pos_abs_omt() ) ||
+                        !live_bandit_abstract_scout_member_can_travel( *body ) ||
+                        body->has_flag( json_flag_CANNOT_MOVE ) || body->get_last_updated() > calendar::turn ||
+                        body->hp_percentage() <= 50 || body->is_player_ally() || body->activity ||
+                        ( body->current_target() && body->get_ai_danger() > 0 ) ||
+                        ( body->has_omt_destination() && !site_contains_omt( site, body->goal ) ) ||
+                        site_contains_omt( site, body->pos_abs_omt() ) ) {
+                        continue;
+                    }
+                    raid_sweep::home_rally_member recalled;
+                    recalled.member_id = id;
+                    recalled.allowance_turns = response_home_rally_allowance_turns(
+                                                  site.anchor, body->pos_abs_omt(), body->get_speed() );
+                    recalled.no_progress_turns = hostile_scout_immobility_grace_minutes * 60;
+                    recalled.evaluate( now, true, to_turns<int>(
+                                           body->get_last_updated() - calendar::start_of_cataclysm ) );
+                    recalled.observe( body->pos_abs(), false );
+                    added |= rally.add( std::move( recalled ) );
+                }
+                // Newly proven availability may admit a never-recalled ID;
+                // every prior outcome/allowance in this episode stays intact.
+                // An empty B is no reason to discard A. Allocate only the
+                // existing bounded source slot, without inventing an outcome.
+                if( added && site.raid_sources.rally_history_known( report.target_omt, episode ) &&
+                    site.raid_sources.reserve( report.target_omt ) ) {
+                    site.raid_sources.adopt_signal( report.target_omt, raid_signal_world( report ) );
+                    if( site.raid_sources.rally_history_known( report.target_omt, episode ) ) {
+                        site.response_home_rally = std::move( rally );
+                        record_live_bandit_rally_outcomes( site );
+                    }
+                }
+            }
+        }
+        if( !site.response_home_rally ) {
+            continue;
+        }
+        for( const auto &member : site.members ) {
+            auto *recalled = site.response_home_rally->find( std::to_string( member.npc_id.get_value() ) );
+            if( !recalled || !recalled->working() ) {
+                continue;
+            }
+            if( member.state == member_state::dead ||
+                live_bandit_confirmed_character_death( member.npc_id, 0, live_bandit_current_minutes() ) ) {
+                // Native cleanup may already have removed the body. Its
+                // recorded death resolves this trip; absence alone does not.
+                recalled->outcome = home_rally_outcome::unavailable;
+                continue;
+            }
+            if( active_operation_duty_site_for( world, member.npc_id ) ) {
+                recalled->outcome = home_rally_outcome::transferred;
+                continue;
+            }
+            npc *body = live_bandit_home_rally_body( site, member.npc_id );
+            if( !body || !recalled->active || recalled->last_world != now ) {
+                continue; // No absent/foreign/far peer can authorize work.
+            }
+            if( body->get_last_updated() > calendar::turn ) {
+                continue;
+            }
+            // Finish actual body pause before the independent interval hands
+            // over to a home/operation owner. This callback remains once-only.
+            if( get_map().inbounds( body->pos_abs() ) ) {
+                body->catch_up_body();
+            } else if( body->get_last_updated() < calendar::turn ) {
+                // Effects and native death must place blood, corpses and
+                // inventory at this authenticated body, not in the player map.
+                tinymap body_map;
+                body_map.load( body->pos_abs_omt(), false );
+                swap_map current( *body_map.cast_to_map() );
+                body->catch_up_body();
+                body_map.save();
+            }
+            if( body->is_dead() ) {
+                recalled->outcome = home_rally_outcome::unavailable;
+                continue;
+            }
+            const bool home = site_contains_omt( site, body->pos_abs_omt() );
+            recalled->observe( body->pos_abs(), home );
+            if( home ) {
+                if( live_bandit_member_routing_home( *body, site ) ) {
+                    body->reach_omt_destination();
+                }
+                continue;
+            }
+            if( recalled->exhausted() ) {
+                recalled->outcome = home_rally_outcome::expired;
+                if( live_bandit_member_routing_home( *body, site ) ) {
+                    body->omt_path.clear();
+                    body->goal = npc::no_goal_point;
+                }
+                continue;
+            }
+            if( body->activity || !live_bandit_abstract_scout_member_can_travel( *body ) ||
+                body->has_flag( json_flag_CANNOT_MOVE ) ||
+                ( body->current_target() && body->get_ai_danger() > 0 ) ||
+                ( body->has_omt_destination() && !site_contains_omt( site, body->goal ) ) ) {
+                recalled->claim_motor_turns();
+                continue; // Native escape, care and independent work keep priority.
+            }
+            if( !live_bandit_member_routing_home( *body, site ) ) {
+                auto path = overmap_buffer.get_travel_path( body->pos_abs_omt(), site.anchor,
+                            overmap_path_params::for_npc() ).points;
+                if( !path.empty() ) {
+                    body->goal = site.anchor;
+                    body->omt_path = std::move( path );
+                    body->guard_pos.reset();
+                    body->clear_ai_guard_pos();
+                    body->set_mission( NPC_MISSION_TRAVELLING );
+                } else {
+                    recalled->claim_motor_turns();
+                }
+            }
+        }
+        record_live_bandit_rally_outcomes( site );
+    }
+}
+
 bool live_bandit_local_step_has_known_dangerous_trap(
     const npc &member, map &here, const tripoint_bub_ms &step )
 {
@@ -19333,6 +19563,7 @@ void overmap_npc_move()
     if( dispatch_cadence_due || structural_cadence_due ) {
         refresh_live_bandit_member_readiness( bandit_state );
     }
+    service_live_bandit_home_rallies();
     // Home rosters receive the same bounded signal packet on the existing
     // five-minute cadence.  This is discovery and memory only: the normal
     // structural/drive scheduler remains the sole dispatch decision owner.
@@ -20376,12 +20607,28 @@ void overmap_npc_move()
         return claim;
     };
     for( npc *&elem : travelling_npcs ) {
+        if( elem->is_dead() ) {
+            continue; // Native death cannot fund travel, even after its response episode is replaced.
+        }
         const auto *assigned = bandit_live_world::active_operation_duty_site_for(
                                    bandit_state, elem->getID() );
-        const auto *activation = live_bandit_body_activation( elem->getID() );
+        auto activation = live_bandit_body_interval_for( *elem );
         // A geographic reentry earns no motion for the suspended interval.
         // The ordinary owning cursor still claims the next active cadence.
-        if( activation && ( !activation->active || activation->active_delta_turns <= 0 ) ) {
+        if( activation && ( !activation.active() || activation.active_delta_turns() <= 0 ) ) {
+            continue;
+        }
+        auto *recalled = live_bandit_home_rally_member( *elem );
+        if( recalled && elem->is_active() ) {
+            continue; // Native local turns, not this coarse owner, supply moves.
+        }
+        const int recalled_elapsed = recalled ? recalled->claim_motor_turns() : 0;
+        if( recalled && ( recalled_elapsed <= 0 ||
+                          elem->get_last_updated() > calendar::turn ||
+                          elem->activity ||
+                          !live_bandit_abstract_scout_member_can_travel( *elem ) ||
+                          elem->has_flag( json_flag_CANNOT_MOVE ) ||
+                          ( elem->current_target() && elem->get_ai_danger() > 0 ) ) ) {
             continue;
         }
         if( assigned != nullptr &&
@@ -20556,6 +20803,15 @@ void overmap_npc_move()
                                                          bandit_live_world::scout_phase_requires_homeward_only(
                                                                  local_owner->active_outing.phase );
                     const int previous_moves = elem->get_moves();
+                    if( recalled ) {
+                        elem->set_moves( active_time::funded_moves( previous_moves,
+                                         elem->get_speed(), recalled_elapsed ) );
+                        if( elem->get_moves() <= 0 ) {
+                            elem->set_moves( live_bandit_scout_unbanked_moves(
+                                                 previous_moves, elem->get_moves() ) );
+                            continue;
+                        }
+                    }
                     std::optional<tripoint_abs_ms> local_homeward_step;
                     if( inactive_local_homeward ) {
                         const auto &claim = claim_local_homeward_motion( *local_owner );
@@ -20579,7 +20835,7 @@ void overmap_npc_move()
                         elem->set_moves( live_bandit_scout_cadence_moves( *elem, claim.elapsed_minutes ) );
                     }
                     on_out_of_scope discard_homeward_credit( [&] {
-                        if( inactive_local_homeward )
+                        if( inactive_local_homeward || recalled )
                         {
                             // One qualified OMT step consumes this cadence. The
                             // coarse Native motor has no move_to cost; do not bank
@@ -20614,6 +20870,7 @@ void overmap_npc_move()
         }
         if( local_pair_homeward_member_ids.count( elem->getID() ) == 0 &&
             forward_destination == local_pair_forward_destinations.end() &&
+            !recalled &&
             !elem->has_omt_destination() && calendar::once_every( 1_hours ) && one_in( 3 ) ) {
             // travelling destination is reached/not set, try different one
             elem->set_omt_destination();
@@ -20750,6 +21007,96 @@ bandit_live_world::activation_clock *live_bandit_body_activation( const characte
         }
     }
     return nullptr;
+}
+
+live_bandit_body_interval::live_bandit_body_interval( bandit_live_world::activation_clock *clock ) :
+    clock_( clock ) {}
+
+live_bandit_body_interval::live_bandit_body_interval( raid_sweep::home_rally_member *member,
+        bool authenticated ) : member_( member ), authenticated_( authenticated ) {}
+
+live_bandit_body_interval::operator bool() const
+{
+    return clock_ || member_;
+}
+
+bool live_bandit_body_interval::active() const
+{
+    return clock_ ? clock_->active : !member_ ||
+           ( authenticated_ && member_->active && member_->last_world >= 0 &&
+             member_->last_world <= to_turns<int>( calendar::turn - calendar::start_of_cataclysm ) );
+}
+
+std::int64_t live_bandit_body_interval::active_delta_turns() const
+{
+    return clock_ ? clock_->active_delta_turns : member_ && authenticated_ ? member_->active_delta_turns : 0;
+}
+
+std::int64_t live_bandit_body_interval::suspended_body_turns( character_id id, int anchor ) const
+{
+    const int now = to_turns<int>( calendar::turn - calendar::start_of_cataclysm );
+    if( member_ && ( !authenticated_ || member_->last_world > now ) ) {
+        return std::max( 0, now - anchor ); // Refuse a future interval without rebasing its state.
+    }
+    return clock_ ? clock_->suspended_body_turns( id, anchor ) :
+           member_ ? member_->suspended_body_turns( anchor ) : 0;
+}
+
+void live_bandit_body_interval::settle_body( character_id id, int anchor )
+{
+    if( clock_ ) {
+        clock_->settle_body( id, anchor );
+    } else if( member_ && authenticated_ ) {
+        member_->settle_body( anchor );
+    }
+}
+
+void live_bandit_body_interval::finish_loaded_interval()
+{
+    const int now = to_turns<int>( calendar::turn - calendar::start_of_cataclysm );
+    if( member_ && authenticated_ && member_->last_world >= 0 && member_->last_world <= now ) {
+        // The loaded owner is releasing this interval. Its retained native
+        // moves stay on the body; elapsed time cannot also fund coarse travel.
+        // Current range may already have frozen the next interval before the
+        // tracker releases this body, without undoing its prior loaded work.
+        member_->motor_active = member_->active_turns;
+    }
+}
+
+live_bandit_body_interval live_bandit_body_interval_for( const npc &body )
+{
+    const auto id = body.getID();
+    const std::string member_key = std::to_string( id.get_value() );
+    bandit_live_world::activation_clock *home = nullptr;
+    raid_sweep::home_rally_member *rally = nullptr;
+    bool authenticated = false;
+    // Real operation ownership always supersedes a stale rally snapshot.
+    // Ordinary body callbacks still select their owner in one ledger pass.
+    for( auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        for( auto *outing : { &site.active_outing, &site.active_hostile_operation.reservation } ) {
+            if( !outing->member_is_resolved( id ) &&
+                std::find( outing->member_ids.begin(), outing->member_ids.end(), id ) !=
+                outing->member_ids.end() && outing->activation.initialized() ) {
+                return live_bandit_body_interval( &outing->activation );
+            }
+        }
+        if( site.response_home_rally && !rally ) {
+            auto *member = site.response_home_rally->find( member_key );
+            if( member && member->working() && member->last_world >= 0 ) {
+                rally = member;
+                authenticated = live_bandit_home_rally_body( site, id ) == &body;
+            }
+        }
+        if( !home && site.home_activation.initialized() && site.home_activation.bodies.count( id ) ) {
+            home = &site.home_activation;
+        }
+    }
+    if( rally ) {
+        // A foreign copy cannot fall through to a live home clock and borrow
+        // the canonical participant's body interval or settle its pause debt.
+        return live_bandit_body_interval( rally, authenticated );
+    }
+    return live_bandit_body_interval( home );
 }
 
 std::map<character_id, tripoint_abs_omt> live_bandit_elevated_recovery_orders_for_test()

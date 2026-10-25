@@ -225,11 +225,15 @@ std::vector<identity> site_record::reserve( int count,
 }
 
 std::vector<identity> site_record::reserve_exact( const std::vector<identity> &selected,
-        const std::function<bool( const member_record & )> &healthy )
+        const std::function<bool( const member_record & )> &healthy,
+        int response_home_reserve )
 {
-    if( !seed_committed || selected.empty() ) {
+    if( !seed_committed || selected.empty() || response_home_reserve < -1 ||
+        ( response_home_reserve >= 0 && ( selected.size() < 3 ||
+          ( response_home_reserve != 0 && response_home_reserve != defensive_reserve ) ) ) ) {
         return {};
     }
+    const int reserve = response_home_reserve < 0 ? defensive_reserve : response_home_reserve;
     std::set<std::string> available;
     for( const member_record &m : members ) {
         if( m.owner != representation::dead && m.owner != representation::slot &&
@@ -238,7 +242,7 @@ std::vector<identity> site_record::reserve_exact( const std::vector<identity> &s
         }
     }
     if( available.size() < selected.size() + static_cast<size_t>( std::max( 0,
-            defensive_reserve ) ) ) {
+            reserve ) ) ) {
         return {};
     }
     std::set<std::string> unique;
