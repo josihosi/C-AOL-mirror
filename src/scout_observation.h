@@ -3,11 +3,13 @@
 #define CATA_SRC_SCOUT_OBSERVATION_H
 #include <string>
 #include <memory>
+#include <optional>
 #include <vector>
 #include "coordinates.h"
 class Character;
 class Creature;
 class npc;
+class monster;
 namespace bandit_live_world
 {
 struct site_record;
@@ -22,6 +24,11 @@ struct visibility_read {
     bool known = false;
     bool visible = false;
     std::string reason;
+};
+// Physical access facts are present only after native optical visibility succeeds.
+struct access_read {
+    visibility_read visibility;
+    std::string facts;
 };
 struct actor_capability {
     int maximum_range = 0;
@@ -47,6 +54,12 @@ class site_reader
         // Exact physical geometry only, including the origin. Signal consumers
         // use this for the actual lookout's exit ray, separately from distant
         // source reach and from recognition of any creature.
+        access_read read_access( const monster &observer, const tripoint_abs_ms &target );
+        // Prospective footing and geometric view only, not a sighting. The
+        // caller supplies its observer type's potential range; arrived bodies
+        // still acquire actual evidence under current light and capability.
+        visibility_read read_lookout( const tripoint_abs_ms &origin,
+                                      const tripoint_abs_ms &target, int potential_range );
         visibility_read read_ray( const tripoint_abs_ms &origin,
                                   const tripoint_abs_ms &target );
         visibility_read read_signal( const Character &observer, const tripoint_abs_ms &origin,
@@ -63,6 +76,13 @@ class site_reader
         size_t cached_vehicle_scan_count() const;
         size_t cached_vehicle_cell_query_count() const;
         size_t cached_vehicle_part_read_count() const;
+        // Existing decision-local inputs, not physical I/O or cast-ray counts.
+        size_t cached_lighting_submap_count() const;
+        size_t cached_sunlight_summary_count() const;
+        size_t cached_lighting_path_group_count() const;
+        // Snapshot only an already computed decision value. No physical read,
+        // cache preparation, native action or clock settlement is performed.
+        std::optional<float> cached_lighting_at( const tripoint_abs_ms &point ) const;
 };
 // Stationary, site-directed callers own watch/identity validation. No map generation or actor spawning.
 bool watching_member( const bandit_live_world::site_record &site, const npc &observer );

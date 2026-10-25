@@ -326,41 +326,22 @@ std::vector<combat_profile> selected_profiles( const admission_decision &decisio
 void observe_source_access( source_history &history, const signal_record &source,
                             const monster &observer, scout_observation::site_reader &reader )
 {
-    map &here = get_map();
-    if( !here.inbounds( observer.pos_abs() ) || !observer.can_see() ) {
+    if( !observer.can_see() ) {
         return;
     }
     raid_sweep::progress region;
     region.begin( source.source_omt, 1, source.source_ms );
     for( const auto &candidate : region.candidates ) {
-        if( !here.inbounds( candidate.position ) ) {
+        const auto access = reader.read_access( observer, candidate.position );
+        if( !access.visibility.known || !access.visibility.visible ) {
             continue;
         }
-        const auto p = here.get_bub( candidate.position );
-        const int range = std::min( MAX_VIEW_DISTANCE * 2,
-                                    2 * observer.sight_range( here.ambient_light_at( p ) ) );
-        if( range <= 0 || !here.sees_with_optics( observer.pos_bub( here ), p, range, 2.0f ) ||
-            !reader.read_ray( observer.pos_abs(), candidate.position ).visible ) {
-            continue;
-        }
-        // Retain the latest actually visible fact at each bounded candidate.
-        // Darkness, leaving the bubble or another observer's narrower view
-        // cannot turn forgotten geometry into a new source episode.
         const auto key = candidate.position.to_string_writable();
         if( history.observed_access.size() >= 45 * OVERMAP_LAYERS + 1 &&
             history.observed_access.count( key ) == 0 ) {
             continue;
         }
-        history.observed_access[key] =
-            std::to_string( here.move_cost( p ) ) + ":" +
-            std::to_string( here.has_floor_or_water( p ) ) + ":" +
-            std::to_string( here.has_flag( ter_furn_flag::TFLAG_GOES_UP, p ) ) + ":" +
-            std::to_string( here.has_flag( ter_furn_flag::TFLAG_GOES_DOWN, p ) ) + ":" +
-            std::to_string( static_cast<bool>( here.ter( p )->open ) ||
-                            static_cast<bool>( here.furn( p )->open ) ) + ":" +
-            std::to_string( here.get_field_intensity( p, field_type_id( "fd_fire" ) ) ) + ":" +
-            std::to_string( here.get_field_intensity( p, field_type_id( "fd_fire" ) ) > 0 &&
-                            here.has_flag( ter_furn_flag::TFLAG_FIRE_CONTAINER, p ) );
+        history.observed_access[key] = access.facts;
     }
 }
 

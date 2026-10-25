@@ -2082,7 +2082,29 @@ class map
                                         const std::optional<tripoint_bub_ms> &override_p ) const;
 
     protected:
-        void generate_lightmap( int zlev, bool observe_only = false );
+        struct sunlight_submap_input {
+            bool uniform;
+            // Exact native transparency>=air and no-floor conjunction. An
+            // authenticated native uniform flag need not prove geometry.
+            std::optional<bool> clear;
+            std::optional<bool> all_blocking;
+            std::bitset<SEEX * SEEY> air_path;
+        };
+        using sunlight_prefix_input = std::function<std::optional<sunlight_submap_input>(
+                                      const tripoint_rel_sm & )>;
+        using sunlight_projection = std::function<std::optional<four_quadrants>(
+                                    const tripoint_bub_ms & )>;
+        void generate_lightmap( int zlev, bool observe_only = false,
+                               const sunlight_projection *projection = nullptr,
+                               const tripoint_bub_ms *target = nullptr );
+        // Synchronous native point projection. Exact ambient is returned only
+        // with complete inputs. An optional caller can separately settle its
+        // predicate from a proved lower bound; that bound is never exact ambient.
+        std::optional<float> generate_observed_lightmap( const tripoint_bub_ms &target,
+                const std::function<bool( const tripoint_bub_ms & )> &require_cell,
+                const sunlight_prefix_input *prefix_input = nullptr,
+                const std::function<bool( float )> *sufficient = nullptr,
+                std::optional<float> *source_light = nullptr );
         void build_seen_cache( const tripoint_bub_ms &origin, int target_z,
                                int extension_range = MAX_VIEW_DISTANCE,
                                bool cumulative = false,

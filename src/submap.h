@@ -3,6 +3,7 @@
 #define CATA_SRC_SUBMAP_H
 
 #include <cstddef>
+#include <bitset>
 #include <cstdint>
 #include <iterator>
 #include <map>
@@ -38,8 +39,24 @@
 // IWYU pragma: no_forward_declare vehicle // behind unique_ptr
 // IWYU pragma: no_forward_declare basecamp // behind unique_ptr
 class JsonOut;
+class JsonObject;
 class JsonValue;
 class map;
+
+// Synchronous physical-light inputs only. No terrain grid, entities, item
+// ownership or serialized cache; each bit retains its native submap position.
+struct submap_sunlight_input {
+    bool uniform = false;
+    bool vehicles = false;
+    std::bitset<SEEX * SEEY> floors;
+    std::bitset<SEEX * SEEY> sun_roofs;
+    std::bitset<SEEX * SEEY> opaque;
+    std::bitset<SEEX * SEEY> clear;
+    std::bitset<SEEX * SEEY> nonclear;
+    // Positive transparency with no attenuation beyond native weather. Used
+    // only as a conservative solar-path witness, never as actual brightness.
+    std::bitset<SEEX * SEEY> air;
+};
 
 struct spawn_point {
     point_sm_ms pos;
@@ -288,6 +305,13 @@ class submap
         void mirror( bool horizontally );
 
         void store( JsonOut &jsout ) const;
+
+        submap_sunlight_input sunlight_input( float outside_sight_penalty ) const;
+        // Native physical-format projection, never native deserialization.
+        // Migration-required IDs and unsupported/malformed inputs refuse.
+        static std::optional<submap_sunlight_input> read_sunlight_input(
+            const JsonObject &entry, const tripoint_abs_sm &expected,
+            float outside_sight_penalty );
         void load( const JsonValue &jv, const std::string &member_name, int version );
 
         // If is_uniform is true, this submap is a solid block of terrain

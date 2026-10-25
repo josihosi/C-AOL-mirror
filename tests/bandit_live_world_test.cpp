@@ -27339,7 +27339,7 @@ TEST_CASE( "bandit_live_world_watch_distance_uses_nearest_same_z_footprint_cell"
     }
 }
 
-TEST_CASE( "bandit_live_world_watch_selection_uses_only_the_exact_clear_concealed_ring",
+TEST_CASE( "bandit_live_world_watch_selection_uses_clear_exact_ring_and_prefers_concealment",
            "[bandit][live_world][watch_selection]" )
 {
     using bandit_live_world::watch_selection_candidate;
@@ -27376,14 +27376,22 @@ TEST_CASE( "bandit_live_world_watch_selection_uses_only_the_exact_clear_conceale
             { tripoint_abs_omt( 14, 10, 0 ), false, true, true, 1 },
         } ).valid );
         CHECK_FALSE( select( {
-            { tripoint_abs_omt( 14, 10, 0 ), true, false, true, 1 },
-        } ).valid );
-        CHECK_FALSE( select( {
             { tripoint_abs_omt( 14, 10, 0 ), true, true, false, 1 },
         } ).valid );
         CHECK_FALSE( select( {
             { tripoint_abs_omt( 14, 10, 0 ), true, true, true, -1 },
         } ).valid );
+    }
+
+    SECTION( "an exposed viable watch remains available and concealment is preferred" ) {
+        const watch_selection_candidate exposed{ tripoint_abs_omt( 14, 10, 0 ), true, false, true, 1 };
+        const watch_selection_candidate concealed{ tripoint_abs_omt( 14, 13, 0 ), true, true, true, 9 };
+        const auto alone = select( { exposed } );
+        REQUIRE( alone.valid );
+        CHECK( alone.omt == exposed.omt );
+        const auto preferred = select( { exposed, concealed } );
+        REQUIRE( preferred.valid );
+        CHECK( preferred.omt == concealed.omt );
     }
 
     SECTION( "distance uses the nearest actual footprint cell rather than an anchor" ) {
@@ -39959,8 +39967,12 @@ TEST_CASE( "loaded interrupted watch resumes only after current survival permits
     const bool cannibal = GENERATE( false, true );
     const bool forced_sleep = GENERATE( false, true );
     const std::string recovery = GENERATE( "same", "blocked", "missing", "none" );
-    const bool different = recovery == "blocked" || recovery == "missing";
-    CAPTURE( cannibal, forced_sleep, recovery );
+    // Alternate bookkeeping alone cannot make the current physical watch unsafe.
+    // Keep that safe-resume positive, and separately require a real obstruction.
+    const bool obstructed = ( recovery == "blocked" || recovery == "missing" ) ?
+                            GENERATE( false, true ) : false;
+    const bool different = obstructed;
+    CAPTURE( cannibal, forced_sleep, recovery, obstructed );
     auto previous_world = overmap_buffer.global_state.bandit_live_world;
     const auto previous_turn = calendar::turn;
     const auto previous_player = get_avatar().pos_abs_omt();
@@ -40038,7 +40050,7 @@ TEST_CASE( "loaded interrupted watch resumes only after current survival permits
             terrain.emplace_back( point, overmap_buffer.ter( point ) );
             overmap_buffer.ter_set( point, oter_id( "solid_earth" ) );
         }
-    const auto new_watch = outing.target_omt + point( 0, -3 );
+    const auto new_watch = watch + point( 0, -1 );
     for( const auto point : {
              outing.target_omt, watch, approach, site.anchor,
              outing.target_omt + tripoint( -1, 0, 0 ),
@@ -40055,11 +40067,14 @@ TEST_CASE( "loaded interrupted watch resumes only after current survival permits
             overmap_buffer.ter_set( new_watch + tripoint( -offset, 0, 0 ), oter_id( "field" ) );
             overmap_buffer.ter_set( outing.target_omt + tripoint( 0, -offset, 0 ), oter_id( "field" ) );
         }
+        for( const auto &point : line_to( new_watch, outing.target_omt ) ) {
+            overmap_buffer.ter_set( point, oter_id( "field" ) );
+        }
         overmap_buffer.ter_set( new_watch, oter_id( "forest" ) );
     }
     // These are real stored target cells for geometry qualification, not a
     // signal/readiness certificate. The interrupted watch still has no records.
-    tinymap target_map;
+    smallmap target_map;
     target_map.load( outing.target_omt, false, false );
     std::vector<std::tuple<tripoint_omt_ms, ter_id, furn_id>> previous_cells;
     on_out_of_scope restore_target( [&]() {
@@ -40077,6 +40092,41 @@ TEST_CASE( "loaded interrupted watch resumes only after current survival permits
             target_map.furn_set( point, furn_id( "f_null" ) );
         }
     target_map.save();
+    // A required alternate has actual saved physical footing/corridor, not
+    // just an OMT label. Only these three necessary approach tiles are prepared.
+    std::vector<std::unique_ptr<smallmap>> alternate_inputs;
+    std::vector<std::tuple<std::size_t, tripoint_omt_ms, ter_id, furn_id>> alternate_cells;
+    on_out_of_scope restore_alternate_inputs( [&]() {
+        for( const auto &[index, point, terrain, furniture] : alternate_cells ) {
+            alternate_inputs[index]->ter_set( point, terrain );
+            alternate_inputs[index]->furn_set( point, furniture );
+        }
+        for( const auto &input : alternate_inputs ) {
+            input->save();
+        }
+    } );
+    if( different ) {
+        std::vector<tripoint_abs_omt> alternate_areas{ new_watch };
+        for( const auto &point : line_to( new_watch, outing.target_omt ) ) {
+            if( point != outing.target_omt ) {
+                alternate_areas.push_back( point );
+            }
+        }
+        for( const auto &area : alternate_areas ) {
+            auto input = std::make_unique<smallmap>();
+            input->load( area, false, false );
+            for( int z : { 0, 1, 2 } ) {
+                for( const auto &point : input->points_on_zlevel( z ) ) {
+                    alternate_cells.emplace_back( alternate_inputs.size(), point,
+                                                  input->ter( point ), input->furn( point ) );
+                    input->ter_set( point, ter_str_id( z == 0 ? "t_grass" : "t_open_air" ) );
+                    input->furn_set( point, furn_str_id( "f_null" ) );
+                }
+            }
+            input->save();
+            alternate_inputs.push_back( std::move( input ) );
+        }
+    }
     const auto watch_origin = project_to<coords::ms>( watch );
     std::vector<local_handoff_member_read> handoff_reads;
     for( std::size_t index = 0; index < outing.member_ids.size(); ++index ) {
@@ -40163,6 +40213,61 @@ TEST_CASE( "loaded interrupted watch resumes only after current survival permits
         REQUIRE( actors[0]->has_active_faction_alarm() );
         REQUIRE_FALSE( actors[0]->faction_alarm_requires_response() );
     }
+    std::vector<std::pair<tripoint_bub_ms, ter_id>> barrier;
+    on_out_of_scope restore_barrier( [&]() {
+        for( const auto &[point, terrain] : barrier ) {
+            get_map().ter_set( point, terrain );
+        }
+    } );
+    structural_route_read qualified;
+    if( different ) {
+        // Block the view east toward the site, while leaving the native north
+        // exit and the bodies' current usable footing passable.
+        for( int y = 0; y < 2 * SEEY; ++y ) {
+            const auto point = get_map().get_bub( watch_origin + tripoint_rel_ms( 2 * SEEX - 1, y, 0 ) );
+            barrier.emplace_back( point, get_map().ter( point ) );
+            get_map().ter_set( point, ter_str_id( "t_wall" ) );
+        }
+        get_map().build_map_cache( 0 );
+        scout_observation::site_reader actual_geometry;
+        const auto target_center = project_to<coords::ms>( outing.target_omt ) +
+                                   tripoint_rel_ms( SEEX, SEEY, 0 );
+        REQUIRE_FALSE( actual_geometry.read_lookout( watch_origin + tripoint_rel_ms( SEEX, SEEY, 0 ),
+                       target_center, MAX_VIEW_DISTANCE * 2 ).visible );
+        const auto alternate_geometry = actual_geometry.read_lookout( project_to<coords::ms>( new_watch ) +
+                                        tripoint_rel_ms( SEEX, SEEY, 0 ), target_center,
+                                        MAX_VIEW_DISTANCE * 2 );
+        CAPTURE( alternate_geometry.known, alternate_geometry.reason );
+        const auto alternate_standing = project_to<coords::ms>( new_watch ) +
+                                        tripoint_rel_ms( SEEX, SEEY, 0 );
+        CAPTURE( get_map().inbounds( alternate_standing ),
+                 alternate_inputs.front()->ter( tripoint_omt_ms( SEEX, SEEY, 0 ) ).id().str(),
+                 alternate_inputs.front()->impassable( tripoint_omt_ms( SEEX, SEEY, 0 ) ) );
+        if( get_map().inbounds( alternate_standing ) ) {
+            CAPTURE( get_map().ter( get_map().get_bub( alternate_standing ) ).id().str(),
+                     get_map().passable( get_map().get_bub( alternate_standing ) ) );
+        }
+        REQUIRE( alternate_geometry.visible );
+        for( const auto &actor : actors ) {
+            const auto exit = get_map().get_bub( watch_origin + tripoint_rel_ms( 8, -1, 0 ) );
+            REQUIRE_FALSE( get_map().route( *actor, pathfinding_target::point( exit ) ).empty() );
+            REQUIRE_FALSE( live_bandit_member_route_to_for_test( *actor, site, new_watch ).empty() );
+        }
+        structural_outing_plan qualified_plan;
+        qualified_plan.lead_id = outing.target_lead_id;
+        qualified_plan.target_omt = outing.target_omt;
+        qualified_plan.job = bandit_dry_run::job_template::scout;
+        int qualified_budget = 8;
+        qualified = live_bandit_structural_route_read_for_test( site, qualified_plan,
+                    qualified_budget );
+        CAPTURE( qualified.reachable, qualified.complete_route_cost, qualified.summary );
+        REQUIRE( qualified.reachable );
+        REQUIRE( std::any_of( qualified.watch_candidates.begin(), qualified.watch_candidates.end(),
+        [new_watch]( const auto & candidate ) {
+            return candidate.omt == new_watch && candidate.reachable &&
+                   candidate.two_intervening_omts_clear;
+        } ) );
+    }
     calendar::turn += 1_minutes;
     advance_live_bandit_local_scout_assessments_for_test();
     if( recovery == "none" ) {
@@ -40182,18 +40287,13 @@ TEST_CASE( "loaded interrupted watch resumes only after current survival permits
         return;
     }
     if( different ) {
+        CAPTURE( outing.phase, outing.assessment.exit_reason,
+                 outing.alternate_watch_kind, outing.alternate_watch_omt );
         REQUIRE( outing.assessment.interruption->pending() );
         REQUIRE( outing.alternate_watch_reposition_pending );
         const auto chosen = outing.alternate_watch_omt;
         CHECK( chosen != watch );
         CHECK( chosen != alternate );
-        structural_outing_plan qualified_plan;
-        qualified_plan.lead_id = outing.target_lead_id;
-        qualified_plan.target_omt = outing.target_omt;
-        qualified_plan.job = bandit_dry_run::job_template::scout;
-        int qualified_budget = 8;
-        const auto qualified = live_bandit_structural_route_read_for_test(
-                                   site, qualified_plan, qualified_budget );
         const auto actual_candidate = std::find_if( qualified.watch_candidates.begin(),
                                       qualified.watch_candidates.end(),
         [chosen]( const auto & candidate ) {
@@ -48136,7 +48236,18 @@ TEST_CASE( "binocular acquisition ends with native watch interruption and reload
                bandit_live_world::structural_watch_kind::fallback );
         observer.setpos( project_to<coords::ms>( watch.selected_watch_omt ) + tripoint_rel_ms( 12, 18, 0 ),
                          false );
-        CHECK_FALSE( scout_observation::watching_member( loaded.sites.front(), observer ) );
+        REQUIRE( bandit_live_world::target_footprint_watch_distance( watch.selected_watch_omt,
+                 watch.target_footprint ) == 4 );
+        CHECK( scout_observation::watching_member( loaded.sites.front(), observer ) );
+        auto farther = loaded;
+        farther.sites.front().active_outing.selected_watch_omt += tripoint( -1, 0, 0 );
+        observer.setpos( project_to<coords::ms>( farther.sites.front().active_outing.selected_watch_omt ) +
+                         tripoint_rel_ms( 12, 18, 0 ), false );
+        CHECK( scout_observation::watching_member( farther.sites.front(), observer ) );
+        farther.sites.front().active_outing.selected_watch_omt += tripoint( -1, 0, 0 );
+        observer.setpos( project_to<coords::ms>( farther.sites.front().active_outing.selected_watch_omt ) +
+                         tripoint_rel_ms( 12, 18, 0 ), false );
+        CHECK_FALSE( scout_observation::watching_member( farther.sites.front(), observer ) );
     }
     SECTION( "persistent character combat intent cannot regain optics after reload" ) {
         observer.set_attitude( NPCATT_KILL );
@@ -48277,7 +48388,11 @@ TEST_CASE( "binocular acquisition ends with native watch interruption and reload
         observer.set_attitude( NPCATT_NULL );
         observer.remove_effect( efftype_id( "npc_flee_player" ) );
         observer.set_ai_danger( 1 );
-        rejected_both();
+        REQUIRE_FALSE( observer.is_active() );
+        // An unloaded tactical cache is not a new native threat. Genuine fear,
+        // harmful fields and visible native hostiles remain refusal controls.
+        CHECK( scout_observation::watching_member( site, observer ) );
+        CHECK( scout_observation::watching_member( round_trip_world( world ).sites.front(), observer ) );
         observer.set_ai_danger( 0 );
         here.add_field( observer.pos_bub( here ), field_type_id( "fd_fire" ), 3 );
         rejected_both();
@@ -48389,6 +48504,80 @@ TEST_CASE( "production lookout route scoring precedes exact member assignment",
     CHECK( chosen.footprint_distance == 3 );
     CHECK( plan.member_ids.empty() );
     CHECK( site.active_outing.observations.empty() );
+}
+
+TEST_CASE( "prospective lookout choice does not recognize occupants or require a lit scene",
+           "[bandit][binocular_056][prospective_lookout]" )
+{
+    const auto old_origin = get_map().get_abs_sub();
+    const auto old_position = get_avatar().pos_abs();
+    const auto old_turn = calendar::turn;
+    clear_avatar();
+    clear_npcs();
+    clear_map_with_vision( -1, 1, false );
+    map &here = get_map();
+    const auto target = project_to<coords::omt>( here.get_abs( tripoint_bub_ms( 84, 66, 0 ) ) );
+    const auto watch = target + tripoint( -3, 0, 0 );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> previous;
+    for( int y = -5; y <= 6; ++y ) {
+        for( int x = -5; x <= 5; ++x ) {
+            const auto pos = target + tripoint( x, y, 0 );
+            previous.emplace_back( pos, overmap_buffer.ter( pos ) );
+            overmap_buffer.ter_set( pos, oter_str_id( "field" ).id() );
+        }
+    }
+    on_out_of_scope restore( [&]() {
+        clear_npcs();
+        for( const auto &entry : previous ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+        here.load( old_origin, false, false );
+        get_avatar().setpos( old_position, false );
+        set_time( old_turn );
+    } );
+    overmap_buffer.ter_set( watch, oter_str_id( "forest" ).id() );
+    bandit_live_world::site_record site;
+    site.site_id = "test:prospective-lookout";
+    site.anchor = target + tripoint( 0, 5, 0 );
+    bandit_live_world::structural_outing_plan plan;
+    plan.lead_id = "structural_bounty:prospective-lookout";
+    plan.target_omt = target;
+    plan.job = bandit_dry_run::job_template::scout;
+    bandit_live_world::camp_map_lead lead;
+    lead.lead_id = plan.lead_id;
+    lead.kind = bandit_live_world::camp_lead_kind::structural_bounty;
+    lead.omt = target;
+    site.intelligence_map.leads.push_back( lead );
+    const auto select = [&]() {
+        int budget = 8;
+        const auto read = live_bandit_structural_route_read_for_test( site, plan, budget );
+        INFO( read.summary );
+        REQUIRE( read.reachable );
+        REQUIRE( read.target_footprint == std::vector<tripoint_abs_omt>{ target } );
+        const auto chosen = bandit_live_world::select_watch_ring_candidate(
+                                read.target_footprint, read.watch_candidates );
+        REQUIRE( chosen.valid );
+        CHECK( chosen.omt == watch );
+        CHECK( plan.member_ids.empty() );
+        CHECK( site.active_outing.observations.empty() );
+        return chosen.omt;
+    };
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    set_time( calendar::turn_zero + 1_days );
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 90, 0 ), false );
+    here.build_map_cache( 0 );
+    const auto empty_night = select();
+    set_time_to_day();
+    get_avatar().setpos( here, tripoint_bub_ms( 84, 66, 0 ), false );
+    npc &occupant = spawn_npc( point_bub_ms( 85, 66 ), "test_talker" );
+    const auto occupant_position = occupant.pos_abs();
+    here.build_map_cache( 0 );
+    CHECK( select() == empty_night );
+    here.load( old_origin + point( 20, 20 ), false, false );
+    get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    here.build_map_cache( 0 );
+    CHECK( select() == empty_night );
+    CHECK( occupant.pos_abs() == occupant_position );
 }
 
 TEST_CASE( "retained actual pair arrival starts finite watch through production writers",
@@ -54177,6 +54366,16 @@ TEST_CASE( "opt-in signal adapter explains actual watcher and producer-reader re
         get_avatar().setpos( saved_position, false );
     } );
     map &here = get_map();
+    // The actual human reader needs illumination at both watcher and plume.
+    // Their target-centred native source planes extend left/right of this
+    // original main-map fixture. Supply real physical inputs before creating
+    // any member or emitting the packet; no sensing expectation is weakened.
+    for( const int offset : { -4, 2 } ) {
+        map physical_inputs;
+        physical_inputs.load( here.get_abs_sub() + point( offset, 0 ), false, false );
+        physical_inputs.main_cleanup_override( false );
+        wipe_map_terrain_with_vision( &physical_inputs, false );
+    }
     auto world = make_structural_signal_test_world( true, 956100 );
     auto &site = world.sites.front();
     auto &outing = site.active_outing;
@@ -54338,6 +54537,100 @@ TEST_CASE( "opt-in signal adapter explains actual watcher and producer-reader re
     REQUIRE( candidate.get_array( "readers" ).size() == 2 );
     CHECK( object_at( candidate.get_array( "readers" ), 0 ).get_bool( "visible" ) );
 
+    SECTION( "actual associated packet is independent of player and resident geometry" ) {
+        const auto origin = here.get_abs_sub();
+        const auto avatar_position = get_avatar().pos_abs();
+        const std::string old_savedir = PATH_INFO::savedir();
+        const auto dictionary = ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path();
+        const auto fixture_savedir = std::filesystem::path( old_savedir ) / "optical-human-saved";
+        REQUIRE_FALSE( std::filesystem::exists( fixture_savedir ) );
+        PATH_INFO::set_savedir( fixture_savedir.string() + "/" );
+        on_out_of_scope restore_savedir( [&]() {
+            PATH_INFO::set_savedir( old_savedir );
+            std::filesystem::remove_all( fixture_savedir );
+        } );
+        std::filesystem::create_directories( PATH_INFO::world_base_save_path().get_unrelative_path() );
+        if( std::filesystem::exists( dictionary ) ) {
+            std::filesystem::copy_file( dictionary,
+                                       ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+        }
+        on_out_of_scope restore_map( [&]() {
+            here.load( origin, false, false );
+            get_avatar().setpos( avatar_position, false );
+        } );
+        const auto fixed_time = calendar::turn;
+        std::vector<std::string> fixed_bodies;
+        for( const auto &member : members ) {
+            fixed_bodies.push_back( r054_actor_bytes( *member ) );
+        }
+        const auto compare = [&]( const char *context ) {
+            const auto actual = acquire( { packet } );
+            INFO( "physical caller context=" << context );
+            REQUIRE_FALSE( actual.first.empty() );
+            CHECK( actual.first.front().source_id == acquired.first.front().source_id );
+            CHECK( actual.first.front().observed_minutes == acquired.first.front().observed_minutes );
+            const auto candidate = object_at( diagnostic( actual.second ).get_array( "candidates" ), 0 );
+            CHECK( candidate.get_bool( "associated_with_target_site" ) );
+            CHECK( candidate.get_bool( "reader_evaluated" ) );
+            REQUIRE( candidate.get_array( "readers" ).size() == 2 );
+            for( const JsonObject &reader : candidate.get_array( "readers" ) ) {
+                reader.allow_omitted_members();
+                CHECK( reader.get_bool( "known" ) );
+                CHECK( reader.get_bool( "visible" ) );
+            }
+            CHECK( calendar::turn == fixed_time );
+            for( std::size_t index = 0; index < members.size(); ++index ) {
+                CHECK( r054_actor_bytes( *members[index] ) == fixed_bodies[index] );
+            }
+        };
+        compare( "near resident" );
+        here.load( origin + point( 20, 20 ), false, false );
+        get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+        REQUIRE_FALSE( here.inbounds( abs_source ) );
+        REQUIRE_FALSE( here.inbounds( observer.pos_abs() ) );
+        compare( "far resident" );
+        // Native serialization/eviction is fixture preparation, never part of
+        // observation. Reuse the genuinely emitted packet at its original turn.
+        MAPBUFFER.save();
+        MAPBUFFER.clear_outside_reality_bubble();
+        REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( project_to<coords::sm>( abs_source ) ) );
+        compare( "far saved" );
+        here.load( origin, false, false );
+        get_avatar().setpos( avatar_position, false );
+        compare( "near reloaded" );
+    }
+    SECTION( "native emitter interior is distinct from the consulted smoke plume" ) {
+        here.ter_set( source, ter_str_id( "t_floor" ) );
+        here.invalidate_map_cache( 0 );
+        here.build_map_cache( 0 );
+        REQUIRE_FALSE( here.is_outside( source ) );
+        REQUIRE( packet.smoke_observable_ms );
+        const auto plume = here.get_bub( *packet.smoke_observable_ms );
+        REQUIRE_FALSE( here.is_outside( plume ) );
+        const auto rejected = acquire( { packet } );
+        CHECK( rejected.first.empty() );
+        const auto candidate = object_at( diagnostic( rejected.second ).get_array( "candidates" ), 0 );
+        REQUIRE( candidate.get_bool( "reader_evaluated" ) );
+        for( const JsonObject &reader : candidate.get_array( "readers" ) ) {
+            reader.allow_omitted_members();
+            CHECK( reader.get_bool( "known" ) );
+            CHECK_FALSE( reader.get_bool( "visible" ) );
+            CHECK( reader.get_string( "reason" ) == "interior_unknown" );
+        }
+        reset_live_light_sample_cache();
+        run_live_light_delivery_for_test();
+        const auto &fresh = live_light::samples_for_turn( calendar::turn );
+        const auto emitted = std::find_if( fresh.begin(), fresh.end(), [&]( const auto &signal ) {
+            return signal.mark.kind == "smoke" && signal.source_ms == abs_source;
+        } );
+        REQUIRE( emitted != fresh.end() );
+        REQUIRE( emitted->smoke_observable_ms );
+        CHECK( *emitted->smoke_observable_ms != *packet.smoke_observable_ms );
+        const auto escaped = here.get_bub( *emitted->smoke_observable_ms );
+        here.build_map_cache( escaped.z() );
+        CHECK( here.is_outside( escaped ) );
+        CHECK_FALSE( acquire( { *emitted } ).first.empty() );
+    }
     SECTION( "opt-in off preserves acquisition and compact ordinary row" ) {
         set_test_env( names[0], "0", 1 );
         rng_get_engine() = initial_rng;
@@ -54349,18 +54642,19 @@ TEST_CASE( "opt-in signal adapter explains actual watcher and producer-reader re
         CHECK( quiet.second.find( " diagnostic=" ) == std::string::npos );
         CHECK( acquire( {} ).second.empty() );
     }
-    SECTION( "interior source retains generic reader refusal" ) {
+    SECTION( "interior consulted plume retains generic reader refusal" ) {
         here.ter_set( source, ter_str_id( "t_floor" ) );
+        REQUIRE( packet.smoke_observable_ms );
+        const auto observable = *packet.smoke_observable_ms;
+        const auto plume = here.get_bub( observable );
+        here.ter_set( plume, ter_str_id( "t_floor" ) );
         here.invalidate_map_cache( 0 );
+        here.invalidate_map_cache( plume.z() );
         here.build_map_cache( 0 );
-        reset_live_light_sample_cache();
-        run_live_light_delivery_for_test();
-        const auto &inside = live_light::samples_for_turn( calendar::turn );
-        const auto smoke = std::find_if( inside.begin(), inside.end(), [&]( const auto & signal ) {
-            return signal.mark.kind == "smoke" && signal.source_ms == abs_source;
-        } );
-        REQUIRE( smoke != inside.end() );
-        const auto rejected = acquire( { *smoke } );
+        REQUIRE_FALSE( here.is_outside( plume ) );
+        CAPTURE( abs_source, observable, observer.pos_abs(),
+                 scout_observation::site_sightline( observer.pos_abs(), observable ) );
+        const auto rejected = acquire( { packet } );
         CHECK( rejected.first.empty() );
         const auto refused = object_at( diagnostic( rejected.second ).get_array( "candidates" ), 0 );
         CHECK( refused.get_string( "adapter_rejection" ) == "no_visible_watcher" );
@@ -54372,9 +54666,25 @@ TEST_CASE( "opt-in signal adapter explains actual watcher and producer-reader re
         }
     }
     SECTION( "actual target-local occlusion reports the first reader refusal" ) {
-        here.ter_set( source + point( -1, 0 ), ter_str_id( "t_wall" ) );
-        here.invalidate_map_cache( 0 );
-        here.build_map_cache( 0 );
+        const auto observable = packet.smoke_observable_ms.value_or( *packet.source_ms );
+        const auto consumed_ray = scout_observation::site_sightline( observer.pos_abs(), observable );
+        REQUIRE( consumed_ray.size() > 1 );
+        auto wall = consumed_ray[consumed_ray.size() - 2];
+        const auto wall_omt = project_to<coords::omt>( wall );
+        if( std::none_of( outing.target_footprint.begin(), outing.target_footprint.end(),
+        [&]( const auto &tile ) { return tile.xy() == wall_omt.xy(); } ) ) {
+            // At an OMT edge the endpoint is the first consulted cell. A wall
+            // immediately before it is genuinely outside this site-only ray.
+            wall = observable;
+        }
+        here.ter_set( here.get_bub( wall ), ter_str_id( "t_wall" ) );
+        here.invalidate_map_cache( wall.z() );
+        here.build_map_cache( wall.z() );
+        CAPTURE( abs_source, observable, wall, observer.pos_abs(), consumed_ray );
+        for( const auto &member : members ) {
+            REQUIRE_FALSE( here.sees_site_with_optics( member->pos_bub( here ), here.get_bub( observable ),
+                           MAX_VIEW_DISTANCE * 2, 2.0f, outing.target_footprint ) );
+        }
         const auto rejected = acquire( { packet } );
         CHECK( rejected.first.empty() );
         const auto refused = object_at( diagnostic( rejected.second ).get_array( "candidates" ), 0 );

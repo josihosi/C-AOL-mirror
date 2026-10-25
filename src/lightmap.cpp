@@ -353,6 +353,62 @@ void map::apply_character_light( Character &p, const bool observe_only )
 // toward the lower limit. Since it's sunlight, the rays are parallel.
 // Each layer consults the next layer up to determine the intensity of the light that reaches it.
 // Once this is complete, additional operations add more dynamic lighting.
+namespace
+{
+struct sunlight_input {
+    float transparency;
+    bool floor;
+    four_quadrants light;
+};
+
+// Shared native centre/cardinal recurrence. Full-cache fast paths remain in
+// their owner; point projections evaluate only the physical dependency branches.
+template<typename Previous>
+static std::optional<four_quadrants> sunlight_cell( const point_bub_ms &p,
+        float inside_light, bool outside, float sight_penalty, Previous &&previous,
+        bool *lit = nullptr )
+{
+    constexpr std::array<point, 5> cardinals = {
+        point::zero, point::north, point::west, point::east, point::south
+    };
+    constexpr std::array<std::array<quadrant, 2>, 5> quadrants = {{
+        {{quadrant::NE, quadrant::NW}}, {{quadrant::NE, quadrant::NW}},
+        {{quadrant::SW, quadrant::NW}}, {{quadrant::SE, quadrant::NE}},
+        {{quadrant::SE, quadrant::SW}}
+    }};
+    four_quadrants result( inside_light );
+    for( int i = 0; i < 5; ++i ) {
+        const auto pos = p + cardinals[i];
+        if( pos.x() < 0 || pos.y() < 0 || pos.x() >= MAPSIZE_X || pos.y() >= MAPSIZE_Y ) {
+            continue;
+        }
+        const auto input = previous( pos );
+        if( !input ) {
+            return std::nullopt;
+        }
+        float transparency = input->transparency;
+        if( outside ) {
+            transparency /= sight_penalty;
+        }
+        const float light = input->light.max();
+        if( transparency > LIGHT_TRANSPARENCY_SOLID && !input->floor && light > 0.0f ) {
+            const float level = clamp( light * LIGHT_TRANSPARENCY_OPEN_AIR / transparency,
+                                       inside_light, light );
+            if( lit ) {
+                *lit |= level > inside_light;
+            }
+            if( i == 0 ) {
+                result.fill( level );
+                break;
+            }
+            result[quadrants[i][0]] = level;
+            result[quadrants[i][1]] = level;
+        }
+    }
+    return result;
+}
+} // namespace
+
 void map::build_sunlight_cache( int pzlev, const bool observe_only )
 {
     const int zlev_min = -OVERMAP_DEPTH;
@@ -430,70 +486,28 @@ void map::build_sunlight_cache( int pzlev, const bool observe_only )
         const auto &prev_floor_cache = prev_map_cache.floor_cache;
         const auto &outside_cache = map_cache.outside_cache;
         const float sight_penalty = get_weather().weather_id->sight_penalty;
-        // TODO: Replace these with a lookup inside the four_quadrants class.
-        constexpr std::array<point, 5> cardinals = {
-            { point::zero, point::north, point::west, point::east, point::south }
-        };
-        constexpr std::array<std::array<quadrant, 2>, 5> dir_quadrants = {{
-                {{quadrant::NE, quadrant::NW}},
-                {{quadrant::NE, quadrant::NW}},
-                {{quadrant::SW, quadrant::NW}},
-                {{quadrant::SE, quadrant::NE}},
-                {{quadrant::SE, quadrant::SW}},
-            }
-        };
-
-        fully_inside = true; // recalculate
-
-        // Fall back to minimal light level if we don't find anything.
-        std::fill_n( &lm[0][0], MAPSIZE_X * MAPSIZE_Y, four_quadrants( inside_light_level ) );
-
+        fully_inside = true;
         for( int x = 0; x < MAPSIZE_X; ++x ) {
             for( int y = 0; y < MAPSIZE_Y; ++y ) {
-                // Check center, then four adjacent cardinals.
-                for( int i = 0; i < 5; ++i ) {
-                    point prev( cardinals[i] + point( x, y ) );
-                    bool inbounds = prev.x >= 0 && prev.x < MAPSIZE_X &&
-                                    prev.y >= 0 && prev.y < MAPSIZE_Y;
-
-                    if( !inbounds ) {
-                        continue;
-                    }
-
-                    float prev_light_max;
-                    float prev_transparency = prev_transparency_cache[prev.x][prev.y];
-                    // This is pretty gross, this cancels out the per-tile transparency effect
-                    // derived from weather.
-                    if( outside_cache[x][y] ) {
-                        prev_transparency /= sight_penalty;
-                    }
-
-                    if( prev_transparency > LIGHT_TRANSPARENCY_SOLID &&
-                        !prev_floor_cache[prev.x][prev.y] &&
-                        ( prev_light_max = prev_lm[prev.x][prev.y].max() ) > 0.0 ) {
-                        const float light_level = clamp( prev_light_max * LIGHT_TRANSPARENCY_OPEN_AIR / prev_transparency,
-                                                         inside_light_level, prev_light_max );
-
-                        if( i == 0 ) {
-                            lm[x][y].fill( light_level );
-                            fully_inside &= light_level <= inside_light_level;
-                            break;
-                        } else {
-                            fully_inside &= light_level <= inside_light_level;
-                            lm[x][y][dir_quadrants[i][0]] = light_level;
-                            lm[x][y][dir_quadrants[i][1]] = light_level;
-                        }
-                    }
-                }
+                bool lit = false;
+                const auto value = sunlight_cell( point_bub_ms( x, y ), inside_light_level,
+                outside_cache[x][y], sight_penalty, [&]( const point_bub_ms &prev ) {
+                    return std::optional<sunlight_input>( sunlight_input{
+                        prev_transparency_cache[prev.x()][prev.y()],
+                        prev_floor_cache[prev.x()][prev.y()], prev_lm[prev.x()][prev.y()] } );
+                }, &lit );
+                lm[x][y] = *value;
+                fully_inside &= !lit;
             }
         }
     }
 }
 
-void map::generate_lightmap( const int zlev, const bool observe_only )
+void map::generate_lightmap( const int zlev, const bool observe_only,
+                             const sunlight_projection *projection, const tripoint_bub_ms *target )
 {
     level_cache &map_cache = get_cache( zlev );
-    if( !map_cache.lightmap_dirty ) {
+    if( !projection && !map_cache.lightmap_dirty ) {
         return;
     }
     map_cache.lightmap_dirty = false;
@@ -533,7 +547,41 @@ void map::generate_lightmap( const int zlev, const bool observe_only )
 
     const float natural_light = g->natural_light_level( zlev );
 
-    build_sunlight_cache( zlev, observe_only );
+    if( projection ) {
+        lm.fill( four_quadrants{} );
+        const auto sunlight = ( *projection )( *target );
+        if( !sunlight ) {
+            return;
+        }
+        lm[target->x()][target->y()] = *sunlight;
+        std::set<point_bub_ms> seeded{ target->xy() };
+        // Seed all native aperture inputs before any character/field/vehicle
+        // light is applied. Later aperture reads retain ordinary loop order.
+        for( int x = 0; x < MAPSIZE_X; ++x ) {
+            for( int y = 0; y < MAPSIZE_Y; ++y ) {
+                const point_bub_ms p( x, y );
+                if( square_dist( p, target->xy() ) > MAX_VIEW_DISTANCE ||
+                    ( outside_cache[x][y] && ( top_floor || !prev_floor_cache[x][y] ) ) ) {
+                    continue;
+                }
+                for( int i = 0; i < 4; ++i ) {
+                    const auto neighbour = p + point( dir_x[i], dir_y[i] );
+                    if( lightmap_boundaries.contains( neighbour ) &&
+                        outside_cache[neighbour.x()][neighbour.y()] &&
+                        ( top_floor || !prev_floor_cache[neighbour.x()][neighbour.y()] ) &&
+                        seeded.insert( neighbour ).second ) {
+                        const auto value = ( *projection )( tripoint_bub_ms( neighbour, zlev ) );
+                        if( !value ) {
+                            return;
+                        }
+                        lm[neighbour.x()][neighbour.y()] = *value;
+                    }
+                }
+            }
+        }
+    } else {
+        build_sunlight_cache( zlev, observe_only );
+    }
 
     // Dawn/dusk tint: color sunlit tiles during twilight. At this point lm
     // contains only sunlight (no artificial sources yet), so any excess over
@@ -604,7 +652,8 @@ void map::generate_lightmap( const int zlev, const bool observe_only )
                     const point_bub_ms p2( sx + smx * SEEX, sy + smy * SEEY );
                     const tripoint_bub_ms p( p2, zlev );
                     // Project light into any openings into buildings.
-                    if( !outside_cache[p.x()][p.y()] || ( !top_floor && prev_floor_cache[p.x()][p.y()] ) ) {
+                    if( ( !projection || square_dist( p.xy(), target->xy() ) <= MAX_VIEW_DISTANCE ) &&
+                        ( !outside_cache[p.x()][p.y()] || ( !top_floor && prev_floor_cache[p.x()][p.y()] ) ) ) {
                         // Apply light sources for external/internal divide
                         for( int i = 0; i < 4; ++i ) {
                             point_bub_ms neighbour = p.xy() + point( dir_x[i], dir_y[i] );
@@ -682,6 +731,22 @@ void map::generate_lightmap( const int zlev, const bool observe_only )
 
     // Apply any vehicle light sources
     VehicleList vehs = get_vehicles();
+    if( observe_only && projection ) {
+        // A physical part can enter the projected window while its native
+        // container stays outside. The observation owner has already proved
+        // these indexed vehicles' native coordinate bindings. Reuse the same
+        // emission/caster once per body, without loading or relocating owners.
+        for( vehicle *v : get_cache_ref( zlev ).vehicle_list ) {
+            if( std::none_of( vehs.begin(), vehs.end(), [&]( const wrapped_vehicle &entry ) {
+            return entry.v == v;
+            } ) ) {
+                wrapped_vehicle entry;
+                entry.v = v;
+                entry.pos = v->pos_bub( *this );
+                vehs.push_back( entry );
+            }
+        }
+    }
     for( wrapped_vehicle &vv : vehs ) {
         vehicle *v = vv.v;
 
@@ -809,6 +874,396 @@ void map::generate_lightmap( const int zlev, const bool observe_only )
             }
         }
     }
+}
+
+std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &target,
+        const std::function<bool( const tripoint_bub_ms & )> &require_cell,
+        const sunlight_prefix_input *prefix_input,
+        const std::function<bool( float )> *sufficient,
+        std::optional<float> *source_light )
+{
+    if( source_light ) {
+        source_light->reset();
+    }
+    if( !inbounds( target ) || !require_cell( target ) ) {
+        return std::nullopt;
+    }
+    // Native generate_lightmap applies these overrides last, in field order.
+    // No distant emitter or solar input can change the final target scalar.
+    std::optional<float> local_override;
+    for( const auto &entry : field_at( target ) ) {
+        const float value = entry.second.get_intensity_level().local_light_override;
+        if( value >= 0.0f ) {
+            local_override = value;
+        }
+    }
+    const sunlight_projection no_sun = []( const tripoint_bub_ms & ) {
+        return std::optional<four_quadrants>( four_quadrants{} );
+    };
+    const auto publish_source = [&]() {
+        if( source_light ) {
+            // Native sm is written only at an emitting cell, not by incoming
+            // casts or sunlight. require_cell authenticated this cell's physical
+            // halo and indexed vehicle owners (including offset emitters).
+            *source_light = get_cache_ref( target.z() ).sm[target.x()][target.y()];
+        }
+    };
+    if( local_override ) {
+        if( source_light ) {
+            // A field overrides ambient only. Creature::light_at still gives
+            // a genuine bright source priority over that final ambient scalar.
+            generate_lightmap( target.z(), true, &no_sun, &target );
+            publish_source();
+        }
+        return local_override;
+    }
+    // Include one buffered-source peer halo. This is a fixed native caster
+    // input plane, not the optical ray or an unbounded history enumeration.
+    bool plane_complete = true;
+    for( int dx = -MAX_VIEW_DISTANCE - 1; plane_complete && dx <= MAX_VIEW_DISTANCE + 1; ++dx ) {
+        for( int dy = -MAX_VIEW_DISTANCE - 1; dy <= MAX_VIEW_DISTANCE + 1; ++dy ) {
+            const auto p = target + tripoint( dx, dy, 0 );
+            if( !inbounds( p ) ) {
+                continue; // Same fixed native array clipping as castLight.
+            }
+            if( !require_cell( p ) ||
+                ( target.z() < OVERMAP_HEIGHT && !require_cell( p + tripoint::above ) ) ) {
+                plane_complete = false;
+                break;
+            }
+        }
+    }
+    if( !plane_complete && !sufficient ) {
+        return std::nullopt;
+    }
+    // First evaluate the same native artificial-source/casting owner with a
+    // zero solar input. Every solar/aperture contribution is capped by these
+    // environmental values and scalar composition is max, not addition. If
+    // known artificial light strictly dominates that cap, higher geometry
+    // cannot change this scalar result and need not be requested.
+    std::optional<float> artificial_floor;
+    if( plane_complete ) {
+        generate_lightmap( target.z(), true, &no_sun, &target );
+        publish_source();
+        const float artificial = ambient_light_at( target );
+        artificial_floor = artificial;
+        const float solar_cap = std::max( { g->natural_light_level( 0 ),
+                                          g->natural_light_level( target.z() ),
+                                          LIGHT_AMBIENT_DIM * 0.8f, LIGHT_AMBIENT_LOW } );
+        if( artificial > solar_cap ) {
+            return artificial;
+        }
+    }
+    bool complete = true;
+    std::map<tripoint_rel_sm, std::optional<sunlight_submap_input>> prefix_inputs;
+    const auto input = [&]( const tripoint_rel_sm &sm ) -> const std::optional<sunlight_submap_input> & {
+        const auto found = prefix_inputs.find( sm );
+        if( found != prefix_inputs.end() ) {
+            return found->second;
+        }
+        std::optional<sunlight_submap_input> value;
+        if( prefix_input ) {
+            value = ( *prefix_input )( sm );
+        } else if( const submap *physical = get_submap_at_grid( sm ) ) {
+            bool clear = true;
+            bool all_blocking = true;
+            std::bitset<SEEX * SEEY> air_path;
+            const auto &cache = get_cache_ref( sm.z() );
+            const float penalty = get_weather().weather_id->sight_penalty;
+            for( int x = sm.x() * SEEX; x < ( sm.x() + 1 ) * SEEX; ++x ) {
+                for( int y = sm.y() * SEEY; y < ( sm.y() + 1 ) * SEEY; ++y ) {
+                    const float transparency = cache.transparency_cache[x][y];
+                    const bool floor = cache.floor_cache[x][y];
+                    clear &= transparency >= LIGHT_TRANSPARENCY_OPEN_AIR && !floor;
+                    all_blocking &= transparency <= LIGHT_TRANSPARENCY_SOLID || floor;
+                    air_path[( y % SEEY ) * SEEX + x % SEEX] = !floor && transparency > 0.0f &&
+                            transparency <= LIGHT_TRANSPARENCY_OPEN_AIR * std::max( 1.0f, penalty );
+                }
+            }
+            value = sunlight_submap_input{ physical->is_uniform(), clear, all_blocking, air_path };
+        }
+        return prefix_inputs.emplace( sm, value ).first->second;
+    };
+    std::map<int, std::optional<bool>> prefixes;
+    const auto native_outside_prefix = [&]( int z ) -> std::optional<bool> {
+        const auto found = prefixes.find( z );
+        if( found != prefixes.end() ) {
+            return found->second;
+        }
+        int max_populated = 0;
+        bool flags_complete = true;
+        std::array<bool, OVERMAP_LAYERS> clear;
+        std::array<bool, OVERMAP_LAYERS> blocked{};
+        clear.fill( true );
+        // The requested layer+1 is always admitted by the native start clamp.
+        // An actual nonuniform owner raises that lower bound exactly as
+        // calc_max_populated_zlev does. A blocker within it is decisive even
+        // if unrelated higher metadata is unavailable.
+        const auto start_lower_bound = [&]() {
+            return clamp( max_populated + 1, std::min( target.z() + 1, OVERMAP_HEIGHT ),
+                          OVERMAP_HEIGHT );
+        };
+        for( int level = z + 1; level <= OVERMAP_HEIGHT; ++level ) {
+            for( int x = 0; x < my_MAPSIZE; ++x ) {
+                for( int y = 0; y < my_MAPSIZE; ++y ) {
+                    const auto &value = input( tripoint_rel_sm( x, y, level ) );
+                    flags_complete &= value.has_value();
+                    if( value && !value->uniform && level > 0 ) {
+                        max_populated = std::max( max_populated, level );
+                    }
+                    const int slot = level + OVERMAP_DEPTH;
+                    clear[slot] &= value && value->clear && *value->clear;
+                    blocked[slot] |= value && value->clear && !*value->clear;
+                    for( int prior = z + 1; prior <= std::min( level, start_lower_bound() ); ++prior ) {
+                        if( blocked[prior + OVERMAP_DEPTH] ) {
+                            prefixes[z] = false;
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        // All possible preceding levels clear is sufficient regardless of
+        // where the native uniform-flag start actually falls.
+        bool all_clear = true;
+        for( int level = z + 1; level <= OVERMAP_HEIGHT; ++level ) {
+            all_clear &= clear[level + OVERMAP_DEPTH];
+        }
+        if( all_clear ) {
+            prefixes[z] = true;
+            return true;
+        }
+        // Only now inspect lower positive-level uniform flags: they can raise
+        // the native start, but cannot otherwise affect this prefix's light.
+        for( int level = 1; level <= z; ++level ) {
+            for( int x = 0; x < my_MAPSIZE; ++x ) {
+                for( int y = 0; y < my_MAPSIZE; ++y ) {
+                    const auto &value = input( tripoint_rel_sm( x, y, level ) );
+                    flags_complete &= value.has_value();
+                    if( value && !value->uniform ) {
+                        max_populated = std::max( max_populated, level );
+                    }
+                }
+            }
+        }
+        const int lower = start_lower_bound();
+        for( int level = z + 1; level <= lower; ++level ) {
+            if( blocked[level + OVERMAP_DEPTH] ) {
+                prefixes[z] = false;
+                return false;
+            }
+        }
+        if( flags_complete ) {
+            bool exact_clear = true;
+            for( int level = z + 1; level <= lower; ++level ) {
+                exact_clear &= clear[level + OVERMAP_DEPTH];
+            }
+            if( exact_clear ) {
+                prefixes[z] = true;
+                return true;
+            }
+        }
+        return std::nullopt;
+    };
+    std::map<tripoint_bub_ms, four_quadrants> sunlight;
+    std::optional<float> target_solar_floor;
+    sunlight_projection project;
+    const auto native_inside_prefix = [&]( int z ) -> std::optional<bool> {
+        const float outside = g->natural_light_level( 0 );
+        const float above_baseline = z + 1 >= 0 && outside > LIGHT_SOURCE_BRIGHT ?
+                                     LIGHT_AMBIENT_DIM * 0.8f : LIGHT_AMBIENT_LOW;
+        // A genuinely lit accessible point on the preceding native plane
+        // disproves fully_inside in both of its original update branches.
+        for( const auto &[point, light] : sunlight ) {
+            if( point.z() == z + 1 && light.max() > above_baseline && require_cell( point ) ) {
+                const auto &cache = get_cache_ref( point.z() );
+                if( !cache.floor_cache[point.x()][point.y()] &&
+                    cache.transparency_cache[point.x()][point.y()] > LIGHT_TRANSPARENCY_SOLID ) {
+                    return false;
+                }
+            }
+        }
+        const auto included_start = [&]() {
+            int maximum = 0;
+            for( const auto &[sm, value] : prefix_inputs ) {
+                if( sm.z() > 0 && value && !value->uniform ) {
+                    maximum = std::max( maximum, sm.z() );
+                }
+            }
+            return clamp( maximum + 1, std::min( target.z() + 1, OVERMAP_HEIGHT ), OVERMAP_HEIGHT );
+        };
+        std::vector<int> blocking_planes;
+        for( int level = z + 2; level <= OVERMAP_HEIGHT; ++level ) {
+            bool blocked = true;
+            for( int x = 0; blocked && x < my_MAPSIZE; ++x ) {
+                for( int y = 0; blocked && y < my_MAPSIZE; ++y ) {
+                    const auto &value = input( tripoint_rel_sm( x, y, level ) );
+                    blocked &= value && value->all_blocking && *value->all_blocking;
+                }
+            }
+            if( blocked ) {
+                blocking_planes.push_back( level );
+            }
+            for( const int plane : blocking_planes ) {
+                if( plane <= included_start() ) {
+                    return true;
+                }
+            }
+        }
+        // A real clear vertical channel is a bounded positive witness, not a
+        // brightness substitute. Even with the worst native weather ordering,
+        // this lower bound proves some preceding-plane light exceeds its
+        // retirement baseline. No unrelated upper tile grids are constructed.
+        const float penalty = get_weather().weather_id->sight_penalty;
+        const float attenuation = std::max( { 1.0f, penalty, 1.0f / penalty } );
+        const double lower = outside / std::pow( static_cast<double>( attenuation ),
+                                               OVERMAP_HEIGHT - ( z + 1 ) );
+        for( int x = 0; x < my_MAPSIZE; ++x ) {
+            for( int y = 0; y < my_MAPSIZE; ++y ) {
+                std::bitset<SEEX * SEEY> path;
+                path.set();
+                for( int level = z + 1; path.any() && level <= OVERMAP_HEIGHT; ++level ) {
+                    const auto &value = input( tripoint_rel_sm( x, y, level ) );
+                    if( value ) {
+                        path &= value->air_path;
+                    } else {
+                        path.reset();
+                    }
+                }
+                if( path.any() ) {
+                    if( lower > above_baseline ) {
+                        return false;
+                    }
+                    // When that bound is inconclusive, qualify one actual
+                    // candidate through the same native point owner.
+                    for( int cell = 0; cell < SEEX * SEEY; ++cell ) {
+                        if( path[cell] ) {
+                            const tripoint_bub_ms candidate( x * SEEX + cell % SEEX,
+                                                            y * SEEY + cell / SEEX, z + 1 );
+                            const auto light = project( candidate );
+                            if( light && light->max() > above_baseline ) {
+                                return false;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return std::nullopt;
+    };
+    project = [&]( const tripoint_bub_ms &p ) -> std::optional<four_quadrants> {
+        const auto found = sunlight.find( p );
+        if( found != sunlight.end() ) {
+            return found->second;
+        }
+        if( p.z() == OVERMAP_HEIGHT ) {
+            return four_quadrants( g->natural_light_level( 0 ) );
+        }
+        if( !inbounds( p ) || !require_cell( p ) ) {
+            return std::nullopt;
+        }
+        const float outside_light = g->natural_light_level( 0 );
+        const float inside = p.z() >= 0 && outside_light > LIGHT_SOURCE_BRIGHT ?
+                             LIGHT_AMBIENT_DIM * 0.8f : LIGHT_AMBIENT_LOW;
+        auto value = sunlight_cell( p.xy(), inside,
+        get_cache_ref( p.z() ).outside_cache[p.x()][p.y()],
+        get_weather().weather_id->sight_penalty, [&]( const point_bub_ms &xy )
+        -> std::optional<sunlight_input> {
+            const tripoint_bub_ms above( xy, p.z() + 1 );
+            if( !require_cell( above ) ) {
+                return std::nullopt;
+            }
+            const auto &cache = get_cache_ref( above.z() );
+            const float transparency = cache.transparency_cache[xy.x()][xy.y()];
+            const bool floor = cache.floor_cache[xy.x()][xy.y()];
+            if( floor || transparency <= LIGHT_TRANSPARENCY_SOLID ) {
+                return sunlight_input{ transparency, floor, four_quadrants{} };
+            }
+            const auto light = project( above );
+            return light ? std::optional<sunlight_input>( sunlight_input{
+                       transparency, floor, *light } ) : std::nullopt;
+        } );
+        const four_quadrants full_outside( outside_light );
+        // At a non-underground target, a fully known native cell recurrence
+        // and the global fully-outside fast fill are the remaining choices.
+        // Their minimum may settle an optical predicate even when unrelated
+        // prefix inputs cannot establish which exact scalar native would use.
+        // The recurrence itself already consulted the actual upper floor and
+        // opacity: a fully-inside predecessor yields its native inside value.
+        if( p == target && p.z() >= 0 && value ) {
+            target_solar_floor = std::min( value->max(), outside_light );
+        }
+        // An equal scalar is independent of the fast-fill choice. Otherwise
+        // preserve the native global mode; never substitute the local
+        // recurrence's numeric threshold for an unproved global prefix.
+        if( !value || value->max() != outside_light ) {
+            const auto prefix = native_outside_prefix( p.z() );
+            if( prefix && *prefix ) {
+                sunlight.emplace( p, full_outside );
+                return full_outside;
+            }
+            if( !value || !prefix ) {
+                return std::nullopt;
+            }
+        }
+        if( p.z() < 0 && value->max() > inside && value->max() <= LIGHT_AMBIENT_DIM * 0.8f ) {
+            const auto retired = native_inside_prefix( p.z() );
+            if( !retired ) {
+                return std::nullopt;
+            }
+            if( *retired ) {
+                value = four_quadrants( inside );
+            }
+        }
+        sunlight.emplace( p, *value );
+        return value;
+    };
+    if( !plane_complete ) {
+        if( source_light ) {
+            // Set the authenticated source fact before the caller evaluates its
+            // native actor predicate, even when incoming ambient stays unknown.
+            generate_lightmap( target.z(), true, &no_sun, &target );
+            publish_source();
+        }
+        const auto solar = project( target );
+        const float lower = solar ? solar->max() : target_solar_floor.value_or( 0.0f );
+        if( ( *sufficient )( lower ) ) {
+            return std::nullopt; // Predicate settled, exact scalar still unknown.
+        }
+        // Only the native source at this authenticated target is used here.
+        // sm is written at the emitting cell, never by incoming cast rays.
+        // Missing sources/occluders may affect incoming light, so the partial
+        // ambient result is deliberately discarded instead of treated as exact.
+        if( !source_light ) {
+            generate_lightmap( target.z(), true, &no_sun, &target );
+        }
+        const float local_source = get_cache_ref( target.z() ).sm[target.x()][target.y()];
+        if( local_source > lower ) {
+            ( *sufficient )( local_source );
+        }
+        return std::nullopt;
+    }
+    const sunlight_projection required = [&]( const tripoint_bub_ms &p ) {
+        const auto value = project( p );
+        complete &= value.has_value();
+        return value;
+    };
+    generate_lightmap( target.z(), true, &required, &target );
+    // A missing solar/aperture input returns before emitters, after sm was
+    // cleared. Keep the authenticated source from the completed no-sun pass;
+    // this partial cache does not prove source absence or exact ambient.
+    if( complete ) {
+        publish_source();
+    }
+    if( !complete && sufficient ) {
+        // The artificial plane was complete even though some necessary solar
+        // input was not. Its native result remains a lower bound, just as in
+        // the incomplete-plane branch; never publish it as exact brightness.
+        ( *sufficient )( std::max( artificial_floor.value_or( 0.0f ),
+                                  target_solar_floor.value_or( 0.0f ) ) );
+    }
+    return complete ? std::optional<float>( ambient_light_at( target ) ) : std::nullopt;
 }
 
 void map::add_light_source( const tripoint_bub_ms &p, float luminance,

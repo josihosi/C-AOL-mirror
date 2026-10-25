@@ -8,6 +8,9 @@
 #include <filesystem>
 #include <variant>
 #include <functional>
+#include <fstream>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -69,6 +72,8 @@ struct mapbuffer::existing_read_context {
     std::optional<std::variant<zzip, zzip::checked_reader>> archive;
     bool checked_attempted = false;
     overmapbuffer::existing_terrain_reader terrain{ overmap_buffer };
+    std::optional<float> sunlight_penalty;
+    std::map<tripoint_abs_sm, std::optional<submap_sunlight_input>> sunlight_inputs;
 };
 
 mapbuffer::existing_submap_reader::existing_submap_reader( mapbuffer &source ) :
@@ -149,6 +154,122 @@ std::unique_ptr<submap> mapbuffer::existing_submap_reader::read_omitted_uniform(
     auto result = std::make_unique<submap>();
     result->set_all_ter( uniform->id(), true );
     return result;
+}
+
+std::unique_ptr<submap_sunlight_input> mapbuffer::existing_submap_reader::read_sunlight_input(
+    const tripoint_abs_sm &p, float outside_sight_penalty )
+{
+    if( !std::isfinite( outside_sight_penalty ) || outside_sight_penalty <= 0.0f ) {
+        return nullptr;
+    }
+    if( const submap *resident = source.lookup_submap_cached( p ) ) {
+        return std::make_unique<submap_sunlight_input>( resident->sunlight_input( outside_sight_penalty ) );
+    }
+    if( context->sunlight_penalty != outside_sight_penalty ) {
+        context->sunlight_inputs.clear();
+        context->sunlight_penalty = outside_sight_penalty;
+    }
+    const auto found = context->sunlight_inputs.find( p );
+    if( found != context->sunlight_inputs.end() ) {
+        return found->second ? std::make_unique<submap_sunlight_input>( *found->second ) : nullptr;
+    }
+    bool read_error = false;
+    if( auto uniform = read_omitted_uniform( p, &read_error ) ) {
+        return std::make_unique<submap_sunlight_input>( uniform->sunlight_input( outside_sight_penalty ) );
+    }
+    if( read_error ) {
+        return nullptr; // Checked preflight precedes every possible archive lookup.
+    }
+    const auto omt = project_to<coords::omt>( p );
+    std::map<tripoint_abs_sm, std::optional<submap_sunlight_input>> staged;
+    const auto first = project_to<coords::sm>( omt );
+    for( int x = 0; x < 2; ++x ) {
+        for( int y = 0; y < 2; ++y ) {
+            staged.emplace( first + point( x, y ), std::nullopt );
+        }
+    }
+    try {
+        std::string bytes;
+        const auto name = std::filesystem::u8path( quad_file_name( omt ) );
+        if( world_generator->active_world->has_compression_enabled() ) {
+            const auto path = ( find_dirname( omt ) + zzip_suffix ).get_unrelative_path();
+            if( context->path != path || !context->archive ||
+                !std::holds_alternative<zzip::checked_reader>( *context->archive ) ) {
+                throw std::runtime_error( "missing checked sunlight archive" );
+            }
+            auto contents = std::get<zzip::checked_reader>( *context->archive ).get_file( name,
+                            ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+            if( !contents ) {
+                throw std::runtime_error( "missing sunlight entry" );
+            }
+            bytes.assign( reinterpret_cast<const char *>( contents->data() ), contents->size() );
+        } else {
+            std::ifstream input( ( find_dirname( omt ) / quad_file_name( omt ) ).get_unrelative_path(),
+                                 std::ios::binary );
+            if( !input ) {
+                throw std::runtime_error( "unreadable sunlight entry" );
+            }
+            std::ostringstream buffer;
+            buffer << input.rdbuf();
+            if( input.bad() ) {
+                throw std::runtime_error( "failed sunlight entry read" );
+            }
+            bytes = buffer.str();
+        }
+        const auto document = json_loader::from_string( bytes );
+        if( !document.test_array() ) {
+            throw std::runtime_error( "invalid sunlight document" );
+        }
+        const JsonArray entries = document.get_array();
+        if( entries.empty() || entries.size() > 4 ) {
+            throw std::runtime_error( "invalid sunlight quad" );
+        }
+        std::set<tripoint_abs_sm> positions;
+        for( const JsonValue saved : entries ) {
+            if( !saved.test_object() ) {
+                throw std::runtime_error( "invalid sunlight entry type" );
+            }
+            const JsonObject entry = saved.get_object();
+            entry.allow_omitted_members();
+            if( !entry.has_array( "coordinates" ) ) {
+                throw std::runtime_error( "missing sunlight coordinates" );
+            }
+            const JsonArray coordinates = entry.get_array( "coordinates" );
+            if( coordinates.size() != 3 || !coordinates.has_int( 0 ) ||
+                !coordinates.has_int( 1 ) || !coordinates.has_int( 2 ) ) {
+                throw std::runtime_error( "invalid sunlight coordinates" );
+            }
+            for( const JsonValue coordinate : coordinates ) {
+                const int64_t value = coordinate.get_int64();
+                if( value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max() ) {
+                    throw std::runtime_error( "sunlight coordinate overflow" );
+                }
+            }
+            const tripoint_abs_sm position( coordinates.get_int( 0 ), coordinates.get_int( 1 ),
+                                            coordinates.get_int( 2 ) );
+            if( project_to<coords::omt>( position ) != omt || !positions.insert( position ).second ) {
+                throw std::runtime_error( "foreign or duplicate sunlight coordinates" );
+            }
+            auto summary = submap::read_sunlight_input( entry, position, outside_sight_penalty );
+            if( !summary ) {
+                throw std::runtime_error( "unsupported sunlight physical input" );
+            }
+            staged[position] = std::move( summary );
+        }
+    } catch( const std::exception & ) {
+        for( auto &[position, value] : staged ) {
+            value.reset();
+        }
+    }
+    // A fixed native window intersects at most144 sibling-expanded positions
+    // in one segment/level. Bound generic callers too without retaining raw
+    // quad documents or payloads. No values survive this reader's decision.
+    if( context->sunlight_inputs.size() + staged.size() > 256 ) {
+        context->sunlight_inputs.clear();
+    }
+    context->sunlight_inputs.insert( staged.begin(), staged.end() );
+    const auto &result = context->sunlight_inputs.at( p );
+    return result ? std::make_unique<submap_sunlight_input>( *result ) : nullptr;
 }
 
 mapbuffer MAPBUFFER;

@@ -86,6 +86,7 @@
 #include "magic.h"
 #include "magic_teleporter_list.h"
 #include "map.h"
+#include "lightmap.h"
 #include "map_memory.h"
 #include "mapdata.h"
 #include "mattack_common.h"
@@ -5510,6 +5511,256 @@ void field_type_migrations::check()
         if( !migration.second.is_valid() ) {
             debugmsg( "field_type_migration specifies invalid to_field id '%s'", migration.second.c_str() );
         }
+    }
+}
+
+namespace
+{
+std::optional<int> sunlight_integer( const JsonValue &value )
+{
+    if( !value.test_int() ) {
+        return std::nullopt;
+    }
+    const int64_t wide = value.get_int64();
+    return wide < std::numeric_limits<int>::min() || wide > std::numeric_limits<int>::max() ?
+           std::nullopt : std::optional<int>( static_cast<int>( wide ) );
+}
+
+class sunlight_input_builder
+{
+        float penalty;
+        bool valid = true;
+        std::map<int, std::map<field_type_id, int>> fields;
+    public:
+        submap_sunlight_input value;
+
+        explicit sunlight_input_builder( float outside_penalty ) : penalty( outside_penalty ) {}
+
+        void terrain( int cell, const ter_t &ter ) {
+            value.floors[cell] = !( ter.has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
+                                    ter.has_flag( ter_furn_flag::TFLAG_NO_FLOOR_WATER ) ||
+                                    ter.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ||
+                                    ter.has_flag( ter_furn_flag::TFLAG_TRANSPARENT_FLOOR ) );
+            value.opaque[cell] = !ter.transparent;
+        }
+
+        void furniture( int cell, const furn_t &furn ) {
+            value.opaque[cell] = value.opaque[cell] || !furn.transparent;
+            value.sun_roofs[cell] = furn.has_flag( ter_furn_flag::TFLAG_SUN_ROOF_ABOVE );
+        }
+
+        bool field( int cell, field_type_id type, int intensity ) {
+            if( intensity <= 0 || intensity > type->get_max_intensity() ) {
+                valid = false;
+                return false;
+            }
+            const bool inserted = fields[cell].emplace( type, intensity ).second;
+            valid &= inserted;
+            return inserted;
+        }
+
+        bool finish() {
+            if( !valid || !std::isfinite( penalty ) || penalty <= 0.0f ) {
+                return false;
+            }
+            for( int cell = 0; cell < SEEX * SEEY; ++cell ) {
+                float inside = value.opaque[cell] ? LIGHT_TRANSPARENCY_SOLID :
+                               LIGHT_TRANSPARENCY_OPEN_AIR;
+                float outside = inside * penalty;
+                const auto found = fields.find( cell );
+                if( found != fields.end() ) {
+                    // Native field stores/iterates by field_type_id, not JSON
+                    // tuple order. Preserve multiplication/rounding order.
+                    for( const auto &[type, intensity] : found->second ) {
+                        const auto &level = type->get_intensity_level( intensity - 1 );
+                        if( !level.transparent ) {
+                            if( !std::isfinite( level.translucency ) || level.translucency < 0.0f ) {
+                                return false;
+                            }
+                            inside *= level.translucency;
+                            outside *= level.translucency;
+                        }
+                    }
+                }
+                if( !std::isfinite( inside ) || !std::isfinite( outside ) ) {
+                    return false;
+                }
+                value.clear[cell] = std::min( inside, outside ) >= LIGHT_TRANSPARENCY_OPEN_AIR;
+                value.nonclear[cell] = std::max( inside, outside ) < LIGHT_TRANSPARENCY_OPEN_AIR;
+                value.opaque[cell] = std::max( inside, outside ) <= LIGHT_TRANSPARENCY_SOLID;
+                value.air[cell] = inside > 0.0f && outside > 0.0f &&
+                                  inside <= LIGHT_TRANSPARENCY_OPEN_AIR &&
+                                  outside <= LIGHT_TRANSPARENCY_OPEN_AIR * std::max( 1.0f, penalty );
+            }
+            return true;
+        }
+};
+} // namespace
+
+submap_sunlight_input submap::sunlight_input( float outside_sight_penalty ) const
+{
+    sunlight_input_builder summary( outside_sight_penalty );
+    summary.value.uniform = is_uniform();
+    summary.value.vehicles = !vehicles.empty();
+    for( int y = 0; y < SEEY; ++y ) {
+        for( int x = 0; x < SEEX; ++x ) {
+            const point_sm_ms p( x, y );
+            const int cell = y * SEEX + x;
+            summary.terrain( cell, get_ter( p ).obj() );
+            summary.furniture( cell, get_furn( p ).obj() );
+            for( const auto &[type, entry] : get_field( p ) ) {
+                summary.field( cell, type, entry.get_field_intensity() );
+            }
+        }
+    }
+    if( !summary.finish() ) {
+        summary.value.clear.reset();
+        summary.value.nonclear.reset();
+        summary.value.opaque.reset();
+        summary.value.air.reset();
+    }
+    return summary.value;
+}
+
+std::optional<submap_sunlight_input> submap::read_sunlight_input(
+    const JsonObject &entry, const tripoint_abs_sm &expected, float outside_sight_penalty )
+{
+    try {
+        entry.allow_omitted_members(); // Unrelated payload stays raw JSON.
+        // These tables belong to this native decoder. A still-valid migration
+        // key cannot be accepted as canonical merely because id() succeeds.
+        if( !entry.has_int( "version" ) || !entry.has_array( "coordinates" ) ||
+            !entry.has_array( "terrain" ) ) {
+            return std::nullopt;
+        }
+        const auto saved_version = sunlight_integer( entry.get_member( "version" ) );
+        if( !saved_version ) {
+            return std::nullopt;
+        }
+        const int version = *saved_version;
+        if( version < 22 || version > savegame_version ||
+            expected.z() < -OVERMAP_DEPTH || expected.z() > OVERMAP_HEIGHT ) {
+            return std::nullopt;
+        }
+        const JsonArray coordinates = entry.get_array( "coordinates" );
+        if( coordinates.size() != 3 || sunlight_integer( coordinates[0] ) != expected.x() ||
+            sunlight_integer( coordinates[1] ) != expected.y() ||
+            sunlight_integer( coordinates[2] ) != expected.z() ) {
+            return std::nullopt;
+        }
+        sunlight_input_builder summary( outside_sight_penalty );
+        // Any actual serialized entry becomes nonuniform in submap::load.
+        summary.value.uniform = false;
+        int cell = 0;
+        for( const JsonValue item : entry.get_array( "terrain" ) ) {
+            std::string id;
+            int count = 1;
+            if( item.test_string() ) {
+                id = item.get_string();
+            } else if( item.test_array() ) {
+                const JsonArray run = item.get_array();
+                if( run.size() != 2 || !run.has_string( 0 ) || !sunlight_integer( run[1] ) ) {
+                    return std::nullopt;
+                }
+                id = run.get_string( 0 );
+                count = *sunlight_integer( run[1] );
+            } else {
+                return std::nullopt;
+            }
+            const ter_str_id terrain( id );
+            if( count <= 0 || count > SEEX * SEEY - cell || !terrain.is_valid() ||
+                ter_migrations.count( terrain ) ) {
+                return std::nullopt;
+            }
+            for( int stop = cell + count; cell < stop; ++cell ) {
+                summary.terrain( cell, terrain.obj() );
+            }
+        }
+        if( cell != SEEX * SEEY ) {
+            return std::nullopt;
+        }
+        std::bitset<SEEX * SEEY> furniture_positions;
+        if( entry.has_member( "furniture" ) ) {
+            if( !entry.has_array( "furniture" ) ) {
+                return std::nullopt;
+            }
+            for( const JsonValue saved : entry.get_array( "furniture" ) ) {
+                if( !saved.test_array() ) {
+                    return std::nullopt;
+                }
+                const JsonArray item = saved.get_array();
+                if( item.size() != 3 || !sunlight_integer( item[0] ) ||
+                    !sunlight_integer( item[1] ) || !item.has_string( 2 ) ) {
+                    return std::nullopt;
+                }
+                const int x = *sunlight_integer( item[0] );
+                const int y = *sunlight_integer( item[1] );
+                if( x < 0 || x >= SEEX || y < 0 || y >= SEEY || furniture_positions[y * SEEX + x] ) {
+                    return std::nullopt;
+                }
+                furniture_positions.set( y * SEEX + x );
+                const furn_str_id furniture( item.get_string( 2 ) );
+                if( !furniture.is_valid() || furn_migrations.count( furniture ) ) {
+                    return std::nullopt;
+                }
+                summary.furniture( y * SEEX + x, furniture.obj() );
+            }
+        }
+        std::bitset<SEEX * SEEY> field_positions;
+        if( entry.has_member( "fields" ) ) {
+            if( !entry.has_array( "fields" ) ) {
+                return std::nullopt;
+            }
+            const JsonArray entries = entry.get_array( "fields" );
+            if( entries.size() % 3 != 0 ) {
+                return std::nullopt;
+            }
+            for( size_t index = 0; index < entries.size(); index += 3 ) {
+                if( !sunlight_integer( entries[index] ) || !sunlight_integer( entries[index + 1] ) ||
+                    !entries.has_array( index + 2 ) ) {
+                    return std::nullopt;
+                }
+                const int x = *sunlight_integer( entries[index] );
+                const int y = *sunlight_integer( entries[index + 1] );
+                if( x < 0 || x >= SEEX || y < 0 || y >= SEEY || field_positions[y * SEEX + x] ) {
+                    return std::nullopt;
+                }
+                field_positions.set( y * SEEX + x );
+                const JsonArray fields = entries.get_array( index + 2 );
+                const int width = version >= 39 ? 4 : 3;
+                if( fields.size() % width != 0 ) {
+                    return std::nullopt;
+                }
+                for( size_t field = 0; field < fields.size(); field += width ) {
+                    if( !fields.has_string( field ) || !sunlight_integer( fields[field + 1] ) ||
+                        !sunlight_integer( fields[field + 2] ) ) {
+                        return std::nullopt;
+                    }
+                    const field_type_str_id type( fields.get_string( field ) );
+                    const int intensity = *sunlight_integer( fields[field + 1] );
+                    if( version >= 39 ) {
+                        if( !fields.has_object( field + 3 ) ) {
+                            return std::nullopt;
+                        }
+                        const JsonObject provenance = fields.get_object( field + 3 );
+                        provenance.allow_omitted_members(); // No actor lookup/decode.
+                    }
+                    if( !type.is_valid() || type == fd_null || field_migrations.count( type ) ||
+                        !summary.field( y * SEEX + x, type.id(), intensity ) ) {
+                        return std::nullopt;
+                    }
+                }
+            }
+        }
+        if( entry.has_member( "vehicles" ) ) {
+            if( !entry.has_array( "vehicles" ) ) {
+                return std::nullopt;
+            }
+            summary.value.vehicles = !entry.get_array( "vehicles" ).empty();
+        }
+        return summary.finish() ? std::optional<submap_sunlight_input>( summary.value ) : std::nullopt;
+    } catch( const std::exception & ) {
+        return std::nullopt;
     }
 }
 

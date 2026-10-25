@@ -4507,6 +4507,8 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     clear_map_with_vision( -1, 4, false );
     clear_creatures();
     const auto old_turn = calendar::turn;
+    const auto old_map_origin = get_map().get_abs_sub();
+    const auto old_avatar_position = get_avatar().pos_abs();
     const auto old_populations = overmap_buffer.global_state.migo_populations;
     const auto old_towers = overmap_buffer.global_state.migo_towers;
     overmap_buffer.global_state.migo_populations.clear();
@@ -4527,6 +4529,9 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
         overmap_buffer.global_state.migo_populations = old_populations;
         overmap_buffer.global_state.migo_towers = old_towers;
         get_avatar().unset_mutation( trait_id( "DEBUG_CLOAK" ) );
+        get_map().load( old_map_origin, false, false );
+        get_avatar().setpos( old_avatar_position, false );
+        reset_live_light_sample_cache();
         set_time( old_turn );
     } );
     // Registry reset alone does not isolate this one-observer control:
@@ -4589,9 +4594,28 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     sample.range_cap_omt = 40;
     const int now = to_turn<int>( calendar::turn );
     sample.observed_turn = now;
+    bool matched_contexts = false;
     std::string expected = "received";
     std::vector<live_bandit_signal_observation> samples = {sample, sample};
     samples[1].sample_id = "not-reached-after-success";
+    SECTION( "actual emitted packet retains receiver across player and saved geometry" ) {
+        const auto original_towers = overmap_buffer.global_state.migo_towers;
+        const auto original_populations = overmap_buffer.global_state.migo_populations;
+        here.add_field( here.get_bub( source ), field_type_id( "fd_smoke" ), 1 );
+        get_avatar().setpos( source, false ); // Carrier source is genuinely sampled now.
+        reset_live_light_sample_cache();
+        run_live_light_delivery_for_test();
+        const auto &actual = live_light::samples_for_turn( calendar::turn );
+        const auto found = std::find_if( actual.begin(), actual.end(), [&]( const auto &packet ) {
+            return packet.mark.kind == "smoke" && packet.source_ms == source;
+        } );
+        REQUIRE( found != actual.end() );
+        REQUIRE( found->observed_turn == now );
+        samples = { *found };
+        overmap_buffer.global_state.migo_towers = original_towers;
+        overmap_buffer.global_state.migo_populations = original_populations;
+        matched_contexts = true;
+    }
     SECTION( "positive and early success" ) {}
     SECTION( "full native token epoch remains exact" ) {
         auto &resident = overmap_buffer.global_state.migo_populations.sites.back().members.front();
@@ -4770,6 +4794,7 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     const auto original_time = calendar::turn;
     const auto plain = migo_tower::receive_signals( samples, now );
     const auto plain_state = snapshot();
+    const auto plain_towers = overmap_buffer.global_state.migo_towers;
     overmap_buffer.global_state.migo_towers = before_towers;
     overmap_buffer.global_state.migo_populations = before_populations;
     migo_tower::receiver_observation observed;
@@ -4899,6 +4924,7 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     CHECK( again.str() == report );
     observed = migo_tower::receiver_observation();
     CHECK_FALSE( observed.entered() );
+    const auto original_samples = samples;
     samples[0].observed_turn = now + 600;
     migo_tower::receive_signals( samples, now + 600, &observed );
     REQUIRE( observed.entered() );
@@ -4912,6 +4938,71 @@ TEST_CASE( "receiver observation records only a genuine bounded native scan",
     const auto reset_object = reset_json.get_object();
     reset_object.allow_omitted_members();
     CHECK( reset_object.get_int( "turn" ) == now + 600 );
+    if( matched_contexts ) {
+        const auto fixed_body = body_snapshot();
+        const auto fixed_time = calendar::turn;
+        const auto original_origin = here.get_abs_sub();
+        const std::string old_savedir = PATH_INFO::savedir();
+        const auto dictionary = ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path();
+        const auto fixture_savedir = std::filesystem::path( old_savedir ) / "optical-migo-saved";
+        REQUIRE_FALSE( std::filesystem::exists( fixture_savedir ) );
+        PATH_INFO::set_savedir( fixture_savedir.string() + "/" );
+        on_out_of_scope restore_savedir( [&]() {
+            PATH_INFO::set_savedir( old_savedir );
+            std::filesystem::remove_all( fixture_savedir );
+        } );
+        std::filesystem::create_directories( PATH_INFO::world_base_save_path().get_unrelative_path() );
+        if( std::filesystem::exists( dictionary ) ) {
+            std::filesystem::copy_file( dictionary,
+                                       ( PATH_INFO::world_base_save_path() / "maps.dict" ).get_unrelative_path() );
+        }
+        const auto compare = [&]( const char *context ) {
+            overmap_buffer.global_state.migo_towers = before_towers;
+            overmap_buffer.global_state.migo_populations = before_populations;
+            migo_tower::receiver_observation record;
+            const auto result = migo_tower::receive_signals( original_samples, now, &record );
+            INFO( "MiGo physical receiver context=" << context );
+            CHECK( result.received == plain.received );
+            CHECK( result.received > 0 );
+            CHECK( snapshot() == plain_state );
+            auto completed = plain_towers.sites.front().sources.front();
+            REQUIRE( completed.finish( 1, 0, "empty", {}, false, {} ) );
+            const auto &remote = overmap_buffer.global_state.migo_towers.sites.front();
+            CHECK( remote.sources.front().latest_evidence == completed.completed_evidence );
+            completed.latest_evidence = remote.sources.front().latest_evidence;
+            CHECK_FALSE( completed.retry_ready( completed.retry_after_active, {}, remote.decision, false ) );
+            CHECK( body_snapshot() == fixed_body );
+            CHECK( calendar::turn == fixed_time );
+            std::ostringstream serialized;
+            { JsonOut json( serialized ); record.serialize( json ); }
+            const auto report = json_loader::from_string( serialized.str() ).get_object();
+            report.allow_omitted_members();
+            bool received = false;
+            for( const JsonObject &entry : report.get_array( "records" ) ) {
+                entry.allow_omitted_members();
+                if( entry.get_string( "kind" ) == "attempt" &&
+                    entry.get_string( "outcome", "" ) == "received" ) {
+                    CHECK( entry.get_int( "ray_known" ) == 1 );
+                    CHECK( entry.get_int( "ray_visible" ) == 1 );
+                    received = true;
+                }
+            }
+            CHECK( received );
+        };
+        compare( "near resident" );
+        here.load( original_origin + point( 20, 20 ), false, false );
+        get_avatar().setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+        REQUIRE_FALSE( here.inbounds( source ) );
+        REQUIRE_FALSE( here.inbounds( body->pos_abs() ) );
+        compare( "far resident" );
+        MAPBUFFER.save();
+        MAPBUFFER.clear_outside_reality_bubble();
+        REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( project_to<coords::sm>( position ) ) );
+        compare( "far saved" );
+        here.load( original_origin, false, false );
+        compare( "near reloaded" );
+    }
+
 }
 
 TEST_CASE( "migo_response_reserve_fallback_uses_only_present_capable_members",

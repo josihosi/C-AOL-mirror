@@ -15,6 +15,7 @@ class JsonArray;
 class cata_path;
 class submap;
 class vehicle;
+struct submap_sunlight_input;
 
 /**
  * Store, buffer, save and load the entire world map.
@@ -42,6 +43,11 @@ class mapbuffer
                  * callers must not attempt ordinary archive lookup after error. */
                 std::unique_ptr<submap> read_omitted_uniform( const tripoint_abs_sm &p,
                         bool *read_error = nullptr );
+                // Checked per-entry native physical metadata. No cold entity
+                // decode/install or writable archive recovery. One decision
+                // only; cache entries also bind the supplied native weather.
+                std::unique_ptr<submap_sunlight_input> read_sunlight_input(
+                    const tripoint_abs_sm &p, float outside_sight_penalty );
             private:
                 mapbuffer &source;
                 std::unique_ptr<existing_read_context> context;

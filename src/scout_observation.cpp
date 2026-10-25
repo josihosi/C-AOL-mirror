@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <set>
 #include <memory>
 #include <map>
@@ -41,6 +42,46 @@ class vehicle_footprint_index
         mutable size_t part_reads = 0;
         mutable std::map<tripoint_abs_sm, std::vector<mapbuffer::vehicle_part_position>> cells;
     public:
+        bool coordinates_match( const vehicle &v ) const {
+            // Native map::loadn binds sm_pos. A decoded cold body's default
+            // zero is valid only if that really is its resident owner; do not
+            // relocate it merely to make a read succeed.
+            const submap *owner = MAPBUFFER.lookup_submap_cached( v.sm_pos );
+            if( !owner || std::none_of( owner->vehicles.begin(), owner->vehicles.end(),
+            [&]( const auto &candidate ) { return candidate.get() == &v; } ) ) {
+                return false;
+            }
+            // Native cache projection visits all parts, including overhangs.
+            // Authenticate each against the existing resident index before
+            // admitting that vehicle; do not bind or move an unproved body.
+            for( const auto &part : v.get_all_parts_with_fakes() ) {
+                if( part.part().removed ) {
+                    continue;
+                }
+                const auto position = v.abs_part_pos( part.part() );
+                if( position.z() < -OVERMAP_DEPTH || position.z() > OVERMAP_HEIGHT ) {
+                    return false;
+                }
+                const auto &indexed = at( project_to<coords::sm>( position ) );
+                if( std::none_of( indexed.begin(), indexed.end(), [&]( const auto &entry ) {
+                return entry.first == &v && entry.second == position;
+                } ) ) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        bool coordinates_match( const mapbuffer::vehicle_part_position &entry ) const {
+            if( !entry.first || !coordinates_match( *entry.first ) ) {
+                return false;
+            }
+            for( const auto &part : entry.first->get_all_parts_with_fakes() ) {
+                if( entry.first->abs_part_pos( part.part() ) == entry.second ) {
+                    return true;
+                }
+            }
+            return false;
+        }
         const std::vector<mapbuffer::vehicle_part_position> &at( const tripoint_abs_sm &pos ) const {
             ++queries;
             const auto found = cells.find( pos );
@@ -73,13 +114,216 @@ class existing_view : public map
         int high;
         bool lighting_view;
         int observed_high;
-        bool lighting_complete = false;
-        bool remote_vehicle_parts = false;
         tripoint_abs_sm lighting_center;
         std::set<tripoint_abs_sm> available;
         std::vector<std::unique_ptr<submap>> omitted_uniform;
         std::vector<tripoint_abs_omt> lighting_footprint;
+        std::map<tripoint_abs_seg, std::unique_ptr<mapbuffer::existing_submap_reader>> lighting_readers;
+        std::set<tripoint_bub_ms> lighting_validated;
+        vehicle_footprint_index *lighting_vehicles = nullptr;
+        std::set<tripoint_abs_sm> unavailable;
+        std::set<int> lighting_dirty;
+        std::map<tripoint_abs_ms, std::optional<float>> light_results;
+        std::map<tripoint_abs_ms, float> source_results;
+        std::map<tripoint_abs_sm, std::optional<submap_sunlight_input>> lighting_prefix_inputs;
+
+        bool load_light_submap( const tripoint_abs_sm &pos ) {
+            if( available.count( pos ) ) {
+                return true;
+            }
+            if( unavailable.count( pos ) ) {
+                return false;
+            }
+            auto &reader = lighting_readers[project_to<coords::seg>( pos )];
+            if( !reader ) {
+                reader = std::make_unique<mapbuffer::existing_submap_reader>( MAPBUFFER );
+            }
+            bool read_error = false;
+            auto uniform = reader->read_omitted_uniform( pos, &read_error );
+            submap *sm = uniform ? uniform.get() : read_error ? nullptr : reader->lookup( pos );
+            if( !sm ) {
+                unavailable.insert( pos );
+                return false;
+            }
+            const auto &parts = lighting_vehicles->at( pos );
+            if( std::any_of( sm->vehicles.begin(), sm->vehicles.end(), [&]( const auto &v ) {
+                return v->sm_pos != pos || !lighting_vehicles->coordinates_match( *v );
+            } ) || std::any_of( parts.begin(), parts.end(), [&]( const auto &part ) {
+                return !lighting_vehicles->coordinates_match( part );
+            } ) ) {
+                unavailable.insert( pos );
+                return false;
+            }
+            if( uniform ) {
+                omitted_uniform.push_back( std::move( uniform ) );
+            }
+            const tripoint_rel_sm local( pos.x() - get_abs_sub().x(),
+                                         pos.y() - get_abs_sub().y(), pos.z() );
+            setsubmap( get_nonant( local ), sm );
+            available.insert( pos );
+            update_vehicle_list( sm, pos.z() );
+            for( const auto &part : parts ) {
+                auto &cache = const_cast<level_cache &>( get_cache_ref( part.second.z() ) );
+                cache.vehicle_list.insert( part.first );
+            }
+            invalidate_map_cache( pos.z() );
+            lighting_dirty.insert( pos.z() );
+            if( pos.z() < OVERMAP_HEIGHT ) {
+                set_floor_cache_dirty( pos.z() + 1 );
+                lighting_dirty.insert( pos.z() + 1 );
+            }
+            return true;
+        }
+
+        bool require_light_cell( const tripoint_bub_ms &p ) {
+            if( lighting_validated.count( p ) ) {
+                return true;
+            }
+            if( !inbounds( p ) ) {
+                return false;
+            }
+            // Native outside flags consult the tile and its immediate halo.
+            // Load only intersecting submaps, not an upper-volume window.
+            for( int dx = -1; dx <= 1; ++dx ) {
+                for( int dy = -1; dy <= 1; ++dy ) {
+                    const auto neighbour = p + point( dx, dy );
+                    if( inbounds( neighbour ) &&
+                        !load_light_submap( project_to<coords::sm>( get_abs( neighbour ) ) ) ) {
+                        return false;
+                    }
+                }
+            }
+            const submap *physical = get_submap_at_grid(
+                                         tripoint_rel_sm( p.x() / SEEX, p.y() / SEEY, p.z() ) );
+            if( physical && physical->is_uniform() ) {
+                // Native uniform transparency samples outside at the NW tile
+                // and copies it across this entire submap. Prove that tile's
+                // physical outside halo too, without recursively preparing
+                // the neighbouring submaps' own transparency samples.
+                const tripoint_bub_ms corner( p.x() / SEEX * SEEX, p.y() / SEEY * SEEY, p.z() );
+                for( int dx = -1; dx <= 1; ++dx ) {
+                    for( int dy = -1; dy <= 1; ++dy ) {
+                        const auto neighbour = corner + point( dx, dy );
+                        if( inbounds( neighbour ) &&
+                            !load_light_submap( project_to<coords::sm>( get_abs( neighbour ) ) ) ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            const auto &terrain = ter( p ).obj();
+            if( p.z() > -OVERMAP_DEPTH &&
+                ( terrain.has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
+                  terrain.has_flag( ter_furn_flag::TFLAG_NO_FLOOR_WATER ) ||
+                  terrain.has_flag( ter_furn_flag::TFLAG_GOES_DOWN ) ||
+                  terrain.has_flag( ter_furn_flag::TFLAG_TRANSPARENT_FLOOR ) ) &&
+                !load_light_submap( project_to<coords::sm>( get_abs( p - tripoint::above ) ) ) ) {
+                return false; // Native floor may be supplied by furniture below.
+            }
+            if( !lighting_dirty.empty() ) {
+                rebuild_vehicle_level_caches();
+                for( int z : lighting_dirty ) {
+                    build_outside_cache( z );
+                    build_transparency_cache( z );
+                    build_floor_cache( z );
+                }
+                // A newly loaded upper submap rebuilds that whole floor plane.
+                // Reapply roofs from its already admitted lower vehicles too,
+                // after all terrain rebuilds, in the native bottom-up order.
+                std::set<int> vehicle_levels = lighting_dirty;
+                for( int z : lighting_dirty ) {
+                    if( z > -OVERMAP_DEPTH ) {
+                        vehicle_levels.insert( z - 1 );
+                    }
+                }
+                for( int z : vehicle_levels ) {
+                    do_vehicle_caching( z );
+                }
+                lighting_dirty.clear();
+            }
+            lighting_validated.insert( p );
+            return true;
+        }
+
+        const std::optional<submap_sunlight_input> &sunlight_metadata( const tripoint_abs_sm &pos ) {
+            const auto found = lighting_prefix_inputs.find( pos );
+            if( found != lighting_prefix_inputs.end() ) {
+                return found->second;
+            }
+            auto &reader = lighting_readers[project_to<coords::seg>( pos )];
+            if( !reader ) {
+                reader = std::make_unique<mapbuffer::existing_submap_reader>( MAPBUFFER );
+            }
+            auto physical = reader->read_sunlight_input( pos, get_weather().weather_id->sight_penalty );
+            std::optional<submap_sunlight_input> value;
+            if( physical ) {
+                value = std::move( *physical );
+            }
+            return lighting_prefix_inputs.emplace( pos, std::move( value ) ).first->second;
+        }
+
+        std::optional<sunlight_submap_input> sunlight_summary( const tripoint_rel_sm &local ) {
+            const tripoint_abs_sm pos( get_abs_sub().xy() + local.xy().raw(), local.z() );
+            const auto &physical = sunlight_metadata( pos );
+            if( !physical ) {
+                return std::nullopt;
+            }
+            sunlight_submap_input result{ physical->uniform, std::nullopt, std::nullopt, {} };
+            auto floors = physical->floors;
+            const auto &below = sunlight_metadata( pos - tripoint::above );
+            if( below ) {
+                floors |= below->sun_roofs;
+            }
+            if( ( floors | physical->nonclear ).any() ) {
+                result.clear = false; // Additional vehicle facts cannot undo this blocker.
+            }
+            // A floor already proved by the native terrain/vehicle cache is
+            // also a decisive blocker. This admits no extra geometry: it only
+            // uses clean, authenticated planes already needed by the point.
+            if( available.count( pos ) && available.count( pos - tripoint::above ) &&
+                !lighting_dirty.count( pos.z() ) && !lighting_dirty.count( pos.z() - 1 ) ) {
+                const auto &cache = get_cache_ref( pos.z() );
+                for( int x = local.x() * SEEX; x < ( local.x() + 1 ) * SEEX; ++x ) {
+                    for( int y = local.y() * SEEY; y < ( local.y() + 1 ) * SEEY; ++y ) {
+                        if( cache.floor_cache[x][y] ) {
+                            result.clear = false;
+                            break;
+                        }
+                    }
+                    if( result.clear && !*result.clear ) {
+                        break;
+                    }
+                }
+            }
+            if( ( floors | physical->opaque ).all() ) {
+                result.all_blocking = true;
+            }
+            const bool no_vehicles = below && !physical->vehicles && !below->vehicles &&
+                                     lighting_vehicles->at( pos ).empty() &&
+                                     lighting_vehicles->at( pos - tripoint::above ).empty();
+            if( no_vehicles ) {
+                const auto clear = physical->clear & ~floors;
+                if( clear.all() ) {
+                    result.clear = true;
+                }
+                if( clear.any() ) {
+                    result.all_blocking = false;
+                }
+                result.air_path = physical->air & ~floors;
+            }
+            return result;
+        }
+
     public:
+        size_t lighting_submap_count() const {
+            return lighting_view ? available.size() : 0;
+        }
+        size_t sunlight_summary_count() const {
+            return lighting_prefix_inputs.size();
+        }
+        size_t lighting_path_group_count() const {
+            return lighting_view ? lighting_readers.size() : 0;
+        }
         existing_view( vehicle_footprint_index &vehicles, const tripoint_abs_ms &origin,
                        const tripoint_abs_ms &target,
                        const bool padding = true, const bool full_window = false,
@@ -105,6 +349,17 @@ class existing_view : public map
             low = std::max( -OVERMAP_DEPTH, std::min( origin.z(), target.z() ) - 1 );
             observed_high = std::min( OVERMAP_HEIGHT, std::max( origin.z(), target.z() ) );
             high = native_lighting ? OVERMAP_HEIGHT : observed_high;
+            if( native_lighting ) {
+                lighting_vehicles = &vehicles;
+                for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
+                    for( int x = 0; x < size; ++x ) {
+                        for( int y = 0; y < size; ++y ) {
+                            setsubmap( get_nonant( tripoint_rel_sm( x, y, z ) ), &unknown );
+                        }
+                    }
+                }
+                return;
+            }
             mapbuffer::existing_submap_reader existing( MAPBUFFER );
             for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
                 for( int x = 0; x < size; ++x ) {
@@ -128,10 +383,15 @@ class existing_view : public map
                         }
                         // Geometry admission indexes physical vehicle parts independently of
                         // this view, including overhangs from excluded resident owners.
+                        if( sm && ( std::any_of( sm->vehicles.begin(), sm->vehicles.end(),
+                        [&]( const auto &v ) { return v->sm_pos != pos || !vehicles.coordinates_match( *v ); } ) ||
+                        std::any_of( vehicles.at( pos ).begin(), vehicles.at( pos ).end(),
+                        [&]( const auto &part ) { return !vehicles.coordinates_match( part ); } ) ) ) {
+                            unavailable.insert( pos );
+                            sm = nullptr;
+                        }
                         if( sm ) {
                             update_vehicle_list( sm, z );
-                        }
-                        if( sm && ( sm->vehicles.empty() || get_map().inbounds( project_to<coords::ms>( pos ) ) ) ) {
                             available.insert( pos );
                         } else {
                             sm = in_site ? &unknown : &ignored;
@@ -143,15 +403,23 @@ class existing_view : public map
             for( int z = low; z <= high; ++z ) {
                 for( int x = 0; x < size; ++x ) {
                     for( int y = 0; y < size; ++y ) {
-                        const auto omt = project_to<coords::omt>( tripoint_abs_sm( first.x() + x, first.y() + y, z ) );
+                        const tripoint_abs_sm pos( first.x() + x, first.y() + y, z );
+                        if( unavailable.count( pos ) ) {
+                            continue;
+                        }
+                        const auto omt = project_to<coords::omt>( pos );
                         if( footprint && std::none_of( footprint->begin(), footprint->end(),
                         [&]( const auto & tile ) {
                         return tile.xy() == omt.xy();
                         } ) ) {
                             continue;
                         }
-                        for( const auto &part : vehicles.at( tripoint_abs_sm( first.x() + x,
-                                                             first.y() + y, z ) ) ) {
+                        for( const auto &part : vehicles.at( pos ) ) {
+                            if( !vehicles.coordinates_match( part ) ) {
+                                available.erase( pos );
+                                setsubmap( get_nonant( tripoint_rel_sm( x, y, z ) ), &unknown );
+                                continue;
+                            }
                             auto &cache = const_cast<level_cache &>( get_cache_ref( z ) );
                             const auto part_omt = project_to<coords::omt>( part.second );
                             if( footprint && std::none_of( footprint->begin(), footprint->end(),
@@ -161,45 +429,29 @@ class existing_view : public map
                                 continue;
                             }
                             cache.vehicle_list.insert( part.first );
-                            remote_vehicle_parts |= !get_map().inbounds( part.second );
                         }
                     }
                 }
             }
         }
         void prepare_visibility() {
-            rebuild_vehicle_level_caches();
             if( lighting_view ) {
-                lighting_complete = true;
-                for( int z = lighting_center.z(); z <= high; ++z ) {
-                    for( int x = 0; x < size; ++x ) {
-                        for( int y = 0; y < size; ++y ) {
-                            const auto absolute = get_abs_sub() + tripoint( x, y, z - get_abs_sub().z() );
-                            const auto omt = project_to<coords::omt>( absolute );
-                            if( !lighting_footprint.empty() && std::none_of( lighting_footprint.begin(),
-                            lighting_footprint.end(), [&]( const auto & tile ) {
-                            return tile.xy() == omt.xy();
-                            } ) ) {
-                                continue;
-                            }
-                            if( !available.count( absolute ) ) {
-                                lighting_complete = false;
-                            }
-                        }
-                    }
-                }
-                lighting_complete = lighting_complete && !remote_vehicle_parts;
-                if( !lighting_complete ) {
-                    return;
-                }
+                return; // Native point projection requests its actual dependencies.
             }
+            rebuild_vehicle_level_caches();
             for( int z = low; z <= high; ++z ) {
                 build_outside_cache( z );
                 build_transparency_cache( z );
                 set_floor_cache_dirty( z );
                 build_floor_cache( z );
-                // Loaded vehicle visibility is copied below in absolute coordinates.
-                // The generic vehicle visibility helper assumes the main map's origin.
+            }
+            // Match native build_map_cache: every terrain level first, then
+            // vehicle caches. A roof changes the next level's floor cache and
+            // must not be overwritten by a later terrain rebuild.
+            for( int z = low; z <= high; ++z ) {
+                do_vehicle_caching( z );
+            }
+            for( int z = low; z <= high; ++z ) {
                 level_cache &cache = const_cast<level_cache &>( get_cache_ref( z ) );
                 cache.natural_light_level_cache = g->natural_light_level( z );
                 for( int x = 0; x < size * SEEX; ++x ) {
@@ -220,13 +472,6 @@ class existing_view : public map
                     }
                 }
             }
-            if( lighting_view ) {
-                // Use the ordinary native sunlight and item/field/terrain/vehicle
-                // light calculation on a full observer-centred native window.
-                // Observation never ticks items, sets character effects or uses
-                // main-map-relative character/monster light coordinates.
-                generate_lightmap( lighting_center.z(), true );
-            }
         }
         bool scope_matches( const std::vector<tripoint_abs_omt> *footprint ) const {
             return footprint ? lighting_footprint == *footprint : lighting_footprint.empty();
@@ -234,19 +479,77 @@ class existing_view : public map
         bool light_matches( const tripoint_abs_ms &point ) const {
             return lighting_view && project_to<coords::sm>( point ) == lighting_center;
         }
-        std::optional<float> native_ambient( const tripoint_abs_ms &point ) const {
-            return lighting_view && lighting_complete ?
-                   std::optional<float>( ambient_light_at( get_bub( point ) ) ) : std::nullopt;
+        std::optional<float> cached_lighting_at( const tripoint_abs_ms &point ) const {
+            const auto found = light_results.find( point );
+            return found != light_results.end() ? found->second : std::nullopt;
+        }
+        std::optional<float> native_ambient( const tripoint_abs_ms &point,
+                const std::function<bool( float )> *sufficient = nullptr,
+                std::optional<float> *source_light = nullptr ) {
+            if( source_light ) {
+                source_light->reset();
+            }
+            if( !lighting_view ) {
+                return std::nullopt;
+            }
+            const auto found = light_results.find( point );
+            const auto source = source_results.find( point );
+            if( found != light_results.end() && ( found->second || !sufficient ) &&
+                ( !source_light || source != source_results.end() ) ) {
+                if( source_light ) {
+                    *source_light = source->second;
+                }
+                return found->second;
+            }
+            const sunlight_prefix_input prefix = [&]( const tripoint_rel_sm &sm ) {
+                return sunlight_summary( sm );
+            };
+            const auto light = generate_observed_lightmap( get_bub( point ),
+            [&]( const tripoint_bub_ms &p ) { return require_light_cell( p ); }, &prefix, sufficient,
+            source_light );
+            if( source_light && *source_light ) {
+                source_results.insert_or_assign( point, **source_light );
+            }
+            light_results.emplace( point, light );
+            return light;
         }
         bool covers( const tripoint_abs_ms &origin, const tripoint_abs_ms &target ) const {
             return !lighting_view && inbounds( origin ) && inbounds( target ) &&
                    origin.z() >= low && origin.z() <= high && target.z() >= low && target.z() <= high;
         }
         bool has_geometry( const tripoint_abs_ms &p ) const {
-            // Parts may extend beyond their loaded origin submap. The main map only
-            // supplies visibility caches for loaded cells; remote vehicle cells stay unknown.
-            return inbounds( p ) && available.count( project_to<coords::sm>( p ) ) &&
-                   ( get_map().inbounds( p ) || !veh_at( get_bub( p ) ) );
+            // Terrain and every indexed vehicle part were authenticated before
+            // native cache projection. Unbound/mismatched owners stay absent.
+            return inbounds( p ) && available.count( project_to<coords::sm>( p ) );
+        }
+        bool has_ledge_geometry( const tripoint_abs_ms &origin, const tripoint_abs_ms &target,
+                                 const std::vector<tripoint_abs_omt> &footprint ) const {
+            if( origin.z() == target.z() ) {
+                return true;
+            }
+            const auto &high = origin.z() > target.z() ? origin : target;
+            const auto &low_point = origin.z() > target.z() ? target : origin;
+            // Same first-ledge scan and footprint as native ledge_coverage.
+            // A known floor is decisive. Without one, unknown lower furniture
+            // or an unbound vehicle could still supply this above-floor bit.
+            for( const auto &point : line_to( tripoint_abs_ms( low_point.xy(), high.z() ), high ) ) {
+                const auto omt = project_to<coords::omt>( point );
+                if( std::none_of( footprint.begin(), footprint.end(), [&]( const auto &tile ) {
+                return tile.xy() == omt.xy();
+                } ) ) {
+                    continue;
+                }
+                if( !has_geometry( point ) ) {
+                    return false;
+                }
+                if( point == high || dont_draw_lower_floor( get_bub( point ) ) ) {
+                    return true; // Native also falls back to high if no earlier ledge exists.
+                }
+                if( !has_geometry( point - tripoint::above ) ) {
+                    return false;
+                }
+            }
+            return true;
         }
         bool has_ray( const tripoint_abs_ms &origin, const tripoint_abs_ms &target ) const {
             if( !has_geometry( origin ) || !has_geometry( target ) ) {
@@ -277,19 +580,19 @@ class existing_view : public map
 std::optional<float> existing_ambient( const tripoint_abs_ms &point,
                                        std::vector<std::unique_ptr<existing_view>> &views,
                                        vehicle_footprint_index &vehicles,
-                                       const std::vector<tripoint_abs_omt> *footprint = nullptr )
+                                       const std::vector<tripoint_abs_omt> *footprint = nullptr,
+                                       const std::function<bool( float )> *sufficient = nullptr,
+                                       std::optional<float> *source_light = nullptr )
 {
-    if( get_map().inbounds( point ) ) {
-        return get_map().ambient_light_at( get_map().get_bub( point ) );
-    }
+    ( void )footprint; // Site/ray ownership is not an illumination boundary.
     for( const auto &view : views ) {
-        if( view->light_matches( point ) && view->scope_matches( footprint ) ) {
-            return view->native_ambient( point );
+        if( view->light_matches( point ) ) {
+            return view->native_ambient( point, sufficient, source_light );
         }
     }
-    auto view = std::make_unique<existing_view>( vehicles, point, point, false, true, true, footprint );
+    auto view = std::make_unique<existing_view>( vehicles, point, point, false, true, true );
     view->prepare_visibility();
-    const auto light = view->native_ambient( point );
+    const auto light = view->native_ambient( point, sufficient, source_light );
     views.push_back( std::move( view ) );
     return light;
 }
@@ -298,6 +601,13 @@ void set_view_ambient( map &view, const tripoint_abs_ms &point, const float ligh
     const auto local = view.get_bub( point );
     auto &cache = const_cast<level_cache &>( view.get_cache_ref( point.z() ) );
     cache.lm[local.x()][local.y()] = four_quadrants( light );
+}
+
+void set_view_source( map &view, const tripoint_abs_ms &point, const float source )
+{
+    const auto local = view.get_bub( point );
+    auto &cache = const_cast<level_cache &>( view.get_cache_ref( point.z() ) );
+    cache.sm[local.x()][local.y()] = source;
 }
 
 float optical_magnification()
@@ -359,9 +669,11 @@ scout_observation::visibility_read read_visibility( const Character &observer,
     auto &views = cached_views ? *cached_views : local_views;
     const map *here = &get_map();
     existing_view *view = nullptr;
-    if( !here->inbounds( *entry ) || !here->inbounds( target ) ) {
+    if( actor || !here->inbounds( *entry ) || !here->inbounds( target ) ) {
         // Borrow only target-local physical cells. Missing corridor/lookout cells
         // are deliberately irrelevant and never fetched to solve this sightline.
+        // Actor predicates always use this isolated value view: reconstructed
+        // target light must not fall back to a different main-map light window.
         for( const auto &candidate : views ) {
             if( candidate->covers( *entry, target ) && candidate->scope_matches( &footprint ) ) {
                 view = candidate.get();
@@ -407,6 +719,9 @@ scout_observation::visibility_read read_visibility( const Character &observer,
                 }
             }
         }
+        if( actor && !view->has_ledge_geometry( origin, target, footprint ) ) {
+            return { false, false, "geometry_unavailable" };
+        }
     }
     const auto from = here->get_bub( origin );
     const auto to = here->get_bub( target );
@@ -419,26 +734,83 @@ scout_observation::visibility_read read_visibility( const Character &observer,
     }
     // Packets still supply emission/weather reach, but a non-luminous plume
     // needs the same real target illumination as the watched exterior tile.
-    const auto target_light = existing_ambient( target, views, vehicles, &footprint );
-    if( !target_light ) {
-        return { false, false, "lighting_geometry_unavailable" };
-    }
-    if( view ) {
-        set_view_ambient( *view, target, *target_light );
-    }
-    // Site-only range uses the native outdoor environmental illumination at the
-    // actual scout height, without inspecting ignored lookout/corridor terrain.
     const float observer_light = g->natural_light_level( origin.z() );
-    if( actor ) {
-        return { true, observer.sees_site_with_optics( *here, *actor, optics, footprint,
-                 observer_light ), "optical_light_weather_or_actor_visibility" };
-    }
     const auto optical_range = [&]( const float light ) {
         return static_cast<int>( std::floor( optics * observer.sight_range( light, observer_light ) ) );
     };
     const int maximum = std::max( optical_range( default_daylight_level() ), optical_range( 0 ) );
-    const bool lit_target = *target_light > here->get_cache_ref( target.z() ).natural_light_level_cache;
-    const int range = lit_target ? maximum : std::min( maximum, optical_range( *target_light ) );
+    const auto range_at = [&]( const float light ) {
+        return light > here->get_cache_ref( target.z() ).natural_light_level_cache ?
+               maximum : std::min( maximum, optical_range( light ) );
+    };
+    std::optional<bool> proven;
+    std::optional<float> target_source;
+    std::unique_ptr<existing_view> probe;
+    const std::function<bool( float )> sufficient = [&]( const float lower ) {
+        if( actor ) {
+            if( !target_source ) {
+                return false;
+            }
+            if( !probe ) {
+                probe = std::make_unique<existing_view>( vehicles, *entry, target, true, false,
+                                                       false, &footprint );
+                probe->prepare_visibility();
+            }
+            for( const auto &point : scout_observation::site_sightline( *entry, target ) ) {
+                if( checked( point ) && !probe->has_geometry( point ) ) {
+                    return false;
+                }
+            }
+            if( !probe->has_geometry( target ) ) {
+                return false;
+            }
+            if( !probe->has_ledge_geometry( origin, target, footprint ) ) {
+                return false;
+            }
+            const auto visible_at = [&]( const float light ) {
+                set_view_ambient( *probe, target, light );
+                set_view_source( *probe, target, *target_source );
+                return observer.sees_site_with_optics( *probe, *actor, optics, footprint,
+                                                      observer_light );
+            };
+            // Character sight/range and the native light-dependent concealment
+            // gates are monotone. All posture/invisibility/terrain gates still
+            // execute in Creature's native owner, on this isolated value view.
+            if( visible_at( lower ) ) {
+                proven = true;
+            } else if( !visible_at( std::max( default_daylight_level(),
+                                            g->natural_light_level( target.z() ) ) + LIGHT_AMBIENT_LIT ) ) {
+                proven = false;
+            }
+        } else if( rl_dist( origin, target ) <= range_at( lower ) ) {
+            proven = true;
+        } else if( rl_dist( origin, target ) > maximum ) {
+            proven = false;
+        }
+        return proven.has_value();
+    };
+    const auto target_light = existing_ambient( target, views, vehicles, &footprint, &sufficient,
+                              actor ? &target_source : nullptr );
+    if( proven ) {
+        return { true, *proven, actor ? "optical_light_weather_or_actor_visibility" :
+                 "target_local_visibility" };
+    }
+    if( !target_light || ( actor && !target_source ) ) {
+        return { false, false, "lighting_geometry_unavailable" };
+    }
+    if( view ) {
+        set_view_ambient( *view, target, *target_light );
+        if( actor ) {
+            set_view_source( *view, target, *target_source );
+        }
+    }
+    // Site-only range uses the native outdoor environmental illumination at the
+    // actual scout height, without inspecting ignored lookout/corridor terrain.
+    if( actor ) {
+        return { true, observer.sees_site_with_optics( *here, *actor, optics, footprint,
+                 observer_light ), "optical_light_weather_or_actor_visibility" };
+    }
+    const int range = range_at( *target_light );
     return { true, rl_dist( origin, target ) <= range, "target_local_visibility" };
 }
 }
@@ -508,7 +880,8 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
     }
     const map *here = &get_map();
     existing_view *view = nullptr;
-    if( !here->inbounds( origin ) || !here->inbounds( endpoint ) ) {
+    // The same isolated geometry/value owner applies to loaded and remote actors.
+    {
         for( const auto &candidate : impl->views ) {
             if( candidate->covers( origin, endpoint ) && candidate->scope_matches( &footprint ) ) {
                 view = candidate.get();
@@ -522,17 +895,57 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
             view = owned.get();
             impl->views.push_back( std::move( owned ) );
         }
-        if( !view->has_ray( origin, endpoint ) ) {
+        if( !view->has_ray( origin, endpoint ) ||
+            ( target.as_character() && !view->has_ledge_geometry( origin, endpoint, footprint ) ) ) {
             return { false, false, "actor_geometry_unavailable" };
         }
         here = view;
     }
-    const auto light = existing_ambient( endpoint, impl->views, impl->vehicles, &footprint );
-    if( !light ) {
+    std::optional<bool> proven;
+    std::optional<float> target_source;
+    std::unique_ptr<existing_view> probe;
+    const std::function<bool( float )> sufficient = [&]( const float lower ) {
+        if( !target_source ) {
+            return false;
+        }
+        if( !probe ) {
+            probe = std::make_unique<existing_view>( impl->vehicles, origin, endpoint, true,
+                                                   false, false, &footprint );
+            probe->prepare_visibility();
+        }
+        if( !probe->has_ray( origin, endpoint ) ||
+            ( target.as_character() && !probe->has_ledge_geometry( origin, endpoint, footprint ) ) ) {
+            return false;
+        }
+        // Monster native day/night interpolation and Character native log
+        // sight are bounded by these endpoint values above a light floor.
+        const int lower_range = std::min( capability.maximum_range, static_cast<int>( std::floor(
+                                             std::min( observer.sight_range( lower ),
+                                                       observer.sight_range( default_daylight_level() ) ) *
+                                             capability.native_range_scale ) ) );
+        set_view_ambient( *probe, endpoint, lower );
+        set_view_source( *probe, endpoint, *target_source );
+        if( observer.sees_site_with_range( *probe, target, lower_range, footprint ) ) {
+            proven = true;
+        } else {
+            set_view_ambient( *probe, endpoint, default_daylight_level() );
+            if( !observer.sees_site_with_range( *probe, target, capability.maximum_range, footprint ) ) {
+                proven = false;
+            }
+        }
+        return proven.has_value();
+    };
+    const auto light = existing_ambient( endpoint, impl->views, impl->vehicles, &footprint,
+                                         &sufficient, &target_source );
+    if( proven ) {
+        return { true, *proven, "actor_light_weather_cover_visibility" };
+    }
+    if( !light || !target_source ) {
         return { false, false, "actor_lighting_unavailable" };
     }
     if( view ) {
         set_view_ambient( *view, endpoint, *light );
+        set_view_source( *view, endpoint, *target_source );
     }
     // The physical ray's transparency cache already applies weather to its
     // outdoor cells. A second range penalty also penalizes fully indoor rays.
@@ -540,6 +953,119 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
                                    observer.sight_range( *light ) * capability.native_range_scale ) ) );
     return { true, observer.sees_site_with_range( *here, target, range, footprint ),
              "actor_light_weather_cover_visibility" };
+}
+access_read site_reader::read_access( const monster &observer, const tripoint_abs_ms &target )
+{
+    const auto origin = observer.pos_abs();
+    if( observer.is_dead_state() || !observer.can_see() ) {
+        return { { true, false, "access_observer_unavailable" }, {} };
+    }
+    const auto ray = read_ray( origin, target );
+    if( !ray.known || !ray.visible ) {
+        return { ray, {} };
+    }
+    std::vector<tripoint_abs_omt> footprint{ project_to<coords::omt>( origin ) };
+    for( const auto &point : site_sightline( origin, target ) ) {
+        const auto omt = project_to<coords::omt>( point );
+        if( std::find( footprint.begin(), footprint.end(), omt ) == footprint.end() ) {
+            footprint.push_back( omt );
+        }
+    }
+    const map *here = &get_map();
+    if( !here->inbounds( origin ) || !here->inbounds( target ) ) {
+        const auto found = std::find_if( impl->views.begin(), impl->views.end(),
+        [&]( const auto &view ) {
+            return view->covers( origin, target ) && view->scope_matches( &footprint );
+        } );
+        if( found == impl->views.end() ) {
+            return { { false, false, "access_geometry_unavailable" }, {} };
+        }
+        here = found->get();
+    }
+    const auto from = here->get_bub( origin );
+    const auto p = here->get_bub( target );
+    std::optional<bool> proven;
+    const std::function<bool( float )> sufficient = [&]( const float lower ) {
+        const int lower_range = std::min( MAX_VIEW_DISTANCE * 2,
+                                         2 * std::min( observer.sight_range( lower ),
+                                                       observer.sight_range( default_daylight_level() ) ) );
+        const int upper_range = std::min( MAX_VIEW_DISTANCE * 2,
+                                         2 * std::max( observer.sight_range( 0 ),
+                                                       observer.sight_range( default_daylight_level() ) ) );
+        if( lower_range > 0 && here->sees_with_optics( from, p, lower_range, 2.0f ) ) {
+            proven = true;
+        } else if( upper_range <= 0 || !here->sees_with_optics( from, p, upper_range, 2.0f ) ) {
+            proven = false;
+        }
+        return proven.has_value();
+    };
+    const auto light = existing_ambient( target, impl->views, impl->vehicles, &footprint,
+                                         &sufficient );
+    if( !light && !proven ) {
+        return { { false, false, "access_lighting_unavailable" }, {} };
+    }
+    if( proven && !*proven ) {
+        return { { true, false, "access_light_or_occlusion" }, {} };
+    }
+    const int range = light ? std::min( MAX_VIEW_DISTANCE * 2,
+                                       2 * observer.sight_range( *light ) ) : 0;
+    if( !proven && ( range <= 0 || !here->sees_with_optics( from, p, range, 2.0f ) ) ) {
+        return { { true, false, "access_light_or_occlusion" }, {} };
+    }
+    const bool fire = here->get_field_intensity( p, field_type_id( "fd_fire" ) ) > 0;
+    return { { true, true, "physical_access" },
+        std::to_string( here->move_cost( p ) ) + ":" +
+        std::to_string( here->has_floor_or_water( p ) ) + ":" +
+        std::to_string( here->has_flag( ter_furn_flag::TFLAG_GOES_UP, p ) ) + ":" +
+        std::to_string( here->has_flag( ter_furn_flag::TFLAG_GOES_DOWN, p ) ) + ":" +
+        std::to_string( static_cast<bool>( here->ter( p )->open ) ||
+                        static_cast<bool>( here->furn( p )->open ) ) + ":" +
+        std::to_string( here->get_field_intensity( p, field_type_id( "fd_fire" ) ) ) + ":" +
+        std::to_string( fire && here->has_flag( ter_furn_flag::TFLAG_FIRE_CONTAINER, p ) ) };
+}
+visibility_read site_reader::read_lookout( const tripoint_abs_ms &origin,
+        const tripoint_abs_ms &target, const int potential_range )
+{
+    if( potential_range <= 0 || potential_range > MAX_VIEW_DISTANCE * 2 ||
+        rl_dist( origin, target ) > potential_range ||
+        std::abs( origin.z() - target.z() ) > fov_3d_z_range ) {
+        return { true, false, "lookout_potential_range" };
+    }
+    const auto ray = read_ray( origin, target );
+    if( !ray.known || !ray.visible ) {
+        return ray;
+    }
+    const map *here = &get_map();
+    if( !here->inbounds( origin ) || !here->inbounds( target ) ) {
+        std::vector<tripoint_abs_omt> footprint{ project_to<coords::omt>( origin ) };
+        for( const auto &point : site_sightline( origin, target ) ) {
+            const auto omt = project_to<coords::omt>( point );
+            if( std::find( footprint.begin(), footprint.end(), omt ) == footprint.end() ) {
+                footprint.push_back( omt );
+            }
+        }
+        const auto found = std::find_if( impl->views.begin(), impl->views.end(),
+        [&]( const auto &view ) {
+            return view->covers( origin, target ) && view->scope_matches( &footprint );
+        } );
+        if( found == impl->views.end() ) {
+            return { false, false, "lookout_geometry_unavailable" };
+        }
+        here = found->get();
+    }
+    const auto standing = here->get_bub( origin );
+    if( !here->passable( standing ) || !here->has_floor_or_water( standing ) ||
+        here->has_flag( ter_furn_flag::TFLAG_DEEP_WATER, standing ) ) {
+        return { true, false, "lookout_unusable_footing" };
+    }
+    for( const auto &entry : here->field_at( standing ) ) {
+        if( entry.second.is_dangerous() ) {
+            return { true, false, "lookout_dangerous_field" };
+        }
+    }
+    // Transient occupants and their identities do not choose a prospective
+    // site. Native movement/arrival still owns occupancy and actual placement.
+    return { true, true, "lookout_geometric_view" };
 }
 visibility_read site_reader::read_ray( const tripoint_abs_ms &origin,
                                       const tripoint_abs_ms &target )
@@ -717,14 +1243,20 @@ static bool watch_position_safe_impl( const npc &observer,
                 hostile_optics_unknown = true;
                 continue;
             }
-            const auto observer_light = existing_ambient( observer.pos_abs(), lighting_views, vehicles );
-            const auto target_light = existing_ambient( enemy->pos_abs(), lighting_views, vehicles );
-            if( !observer_light || !target_light ) {
+            std::optional<float> observer_source;
+            std::optional<float> target_source;
+            const auto observer_light = existing_ambient( observer.pos_abs(), lighting_views, vehicles,
+                                        nullptr, nullptr, &observer_source );
+            const auto target_light = existing_ambient( enemy->pos_abs(), lighting_views, vehicles,
+                                      nullptr, nullptr, &target_source );
+            if( !observer_light || !target_light || !observer_source || !target_source ) {
                 hostile_optics_unknown = true;
                 continue;
             }
             set_view_ambient( *view, observer.pos_abs(), *observer_light );
             set_view_ambient( *view, enemy->pos_abs(), *target_light );
+            set_view_source( *view, observer.pos_abs(), *observer_source );
+            set_view_source( *view, enemy->pos_abs(), *target_source );
             // Non-avatar interruption uses the unchanged native creature path.
             // The avatar requires a physical range/light read because this view
             // has no avatar-centred seen cache, never enhanced combat perception.
@@ -910,4 +1442,38 @@ size_t scout_observation::site_reader::cached_vehicle_cell_query_count() const
 size_t scout_observation::site_reader::cached_vehicle_part_read_count() const
 {
     return impl->vehicles.part_count();
+}
+size_t scout_observation::site_reader::cached_lighting_submap_count() const
+{
+    size_t count = 0;
+    for( const auto &view : impl->views ) {
+        count += view->lighting_submap_count();
+    }
+    return count;
+}
+size_t scout_observation::site_reader::cached_sunlight_summary_count() const
+{
+    size_t count = 0;
+    for( const auto &view : impl->views ) {
+        count += view->sunlight_summary_count();
+    }
+    return count;
+}
+size_t scout_observation::site_reader::cached_lighting_path_group_count() const
+{
+    size_t count = 0;
+    for( const auto &view : impl->views ) {
+        count += view->lighting_path_group_count();
+    }
+    return count;
+}
+std::optional<float> scout_observation::site_reader::cached_lighting_at(
+    const tripoint_abs_ms &point ) const
+{
+    for( const auto &view : impl->views ) {
+        if( view->light_matches( point ) ) {
+            return view->cached_lighting_at( point );
+        }
+    }
+    return std::nullopt;
 }
