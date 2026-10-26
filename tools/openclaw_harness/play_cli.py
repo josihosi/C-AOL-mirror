@@ -224,7 +224,7 @@ class PlayerClient:
             "metadata_source": "game-process.json log_paths" if published else "missing_game_process_log_metadata",
             "entries": entries,
             "scope_note": "run_bound files come from the launch producer and belong to this run; profile_shared and repository_shared files can contain other runs. Missing metadata is reported without guessing a path.",
-            "log_query": "Use each entry's query argv when present, then add --event, --contains, --from-turn/--to-turn, --where FIELD_OPERATOR_JSON, or --select FIELD. Numeric native actor IDs use --where actor_id=4. Use record-artifact with a returned artifact handle for exact bytes.",
+            "log_query": "Use each entry's query argv when present, then add --event, --contains, --from-turn/--to-turn, --where FIELD_OPERATOR_JSON, or --select FIELD. Numeric native actor IDs use --where actor_id=4. The play evidence command also searches collected native intervals after journal rotation: --event raid_performance_interval --where 'interval.first_turn<=TURN' --where 'interval.last_turn>=TURN'. Collection context is not a native request ID. Returned retained_raw handles recover exact bytes.",
         }
 
     def controls(self) -> dict[str, Any]:
@@ -269,6 +269,14 @@ class PlayerClient:
             raise ValueError("decision_scope_options_require_decisions")
         sources = [{"path": entry["path"], "producer": entry["name"]}
                    for entry in logs["entries"] if entry.get("path") and logs["identity_status"] == "bound"]
+        packet_archive = self.session / "cockpit-evidence.sqlite"
+        if (logs["identity_status"] == "bound" and args.event in {None, "raid_performance_interval"}
+                and packet_archive.is_file()):
+            # Prefer the first retained original over a replayed/compacted
+            # journal copy. Collection context is not a native request ID.
+            sources.insert(0, {"path": str(packet_archive), "producer": "native_semantic_events",
+                               "retained_native_packets": True, "run_id": logs["run_id"],
+                               "binding_id": self.binding})
         sources.extend({"path": str(path), "producer": "cockpit", "response": True}
                        for path in sorted((self.session / "responses").glob("*.json"))
                        if not path.name.endswith(".receipt.json"))

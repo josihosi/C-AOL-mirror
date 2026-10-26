@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import sqlite3
 
 from cockpit_evidence import decode, parse_record, select
 from cockpit_archive import ArchiveSequence
@@ -96,6 +97,14 @@ def envelopes(record, source):
             "changed_fields": record.get("changed_fields", record.get("delta")),
             "time_roles": _time_roles(record, observed),
             "source": source, "payload": record}
+    if record.get("event") == "raid_performance_interval":
+        rows = record.get("rows")
+        turns = ([row["turn"] for row in rows] if isinstance(rows, list) and rows and
+                 all(isinstance(row, dict) and type(row.get("turn")) is int for row in rows) else [])
+        # This is a range of recorded rows, never a fabricated event timestamp.
+        base["interval"] = {"first_turn": min(turns) if turns else None,
+                            "last_turn": max(turns) if turns else None,
+                            "row_count": len(rows) if isinstance(rows, list) else None}
     yield base
 
     def observations(value, path=""):
@@ -262,6 +271,39 @@ def matches_predicate(event, predicate):
     return equal if operator == "=" else not equal
 
 
+def _retained_native_records(metadata):
+    """Read the collector's existing exact packets, without replay or recapture."""
+    import evidence_display
+    from cockpit_archive import Archive, ArchiveMap
+
+    archive = Archive(Path(metadata["path"]), run_id=metadata["run_id"],
+                      binding_id=metadata["binding_id"], readonly=True)
+    try:
+        for handle in ArchiveMap(archive, "selected_native_packets").values():
+            if (handle.get("run_id") != metadata["run_id"] or
+                    handle.get("binding_id") != metadata["binding_id"]):
+                raise ValueError("retained_native_packet_binding_mismatch")
+            raw = base64.b64decode(evidence_display.recover(
+                handle["retained_raw"]["sha256"], directory=evidence_display.STORE)["raw_base64"],
+                validate=True)
+            if len(raw) != handle["length"] or hashlib.sha256(raw).hexdigest() != handle["sha256"]:
+                raise ValueError("retained_native_packet_bytes_mismatch")
+            record = parse(raw)
+            if (record.get("event") != "raid_performance_interval" or
+                    record.get("run_id") != metadata["run_id"]):
+                raise ValueError("retained_native_packet_identity_mismatch")
+            source = {"path": handle["path"], "offset": handle["offset"], "length": len(raw),
+                      "sha256": handle["sha256"], "producer": metadata["producer"],
+                      "generation": handle.get("generation"), "retained_raw": handle["retained_raw"],
+                      "storage": "selected_native_packets", "archive_path": metadata["path"],
+                      "binding_id": metadata["binding_id"],
+                      "collection_context": handle.get("collected_during_request"),
+                      "request_correlation": "collection context only; not native request attribution"}
+            yield handle["offset"], raw, record, source
+    finally:
+        archive.close()
+
+
 def query(sources, filters, contains=None, selectors=(), limit=20, predicates=(),
           from_turn=None, to_turn=None):
     predicates = list(predicates)
@@ -275,16 +317,28 @@ def query(sources, filters, contains=None, selectors=(), limit=20, predicates=()
     matching_keys = set()
     scanned = 0
     scanned_bytes = 0
+    native_packets_seen = set()
     for metadata in sources:
         path = Path(metadata["path"])
+        if metadata.get("retained_native_packets"):
+            try:
+                records = list(_retained_native_records(metadata))
+            except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+                unavailable.append({"path": str(path), "error": str(error)})
+                continue
+            scanned_bytes += sum(len(raw) for _, raw, _, _ in records)
+        else:
+            records = None
         try:
             # Freeze exact bytes before querying. Appends cannot alter this result.
-            raw = path.read_bytes()
+            raw = path.read_bytes() if records is None else b""
         except OSError as error:
             unavailable.append({"path": str(path), "error": str(error)})
             continue
         scanned_bytes += len(raw)
-        if metadata.get("response"):
+        if records is not None:
+            pass
+        elif metadata.get("response"):
             from cockpit_file_bridge import FileBackedCockpitBridge as Bridge
             session = path.parent.parent
             receipt = Bridge.response_status(session, path.stem, summary=False)
@@ -295,18 +349,18 @@ def query(sources, filters, contains=None, selectors=(), limit=20, predicates=()
             if not result.get("ok"):
                 unavailable.append({"path": str(path), "error": result})
                 continue
-            records = [(0, raw, result["response"])]
+            records = [(0, raw, result["response"], None)]
         else:
             records, offset = [], 0
             for line in raw.splitlines(keepends=True):
                 if line.strip():
-                    records.append((offset, line, parse(line)))
+                    records.append((offset, line, parse(line), None))
                 offset += len(line)
-        for offset, original, record in records:
+        for offset, original, record, retained_source in records:
             scanned += 1
-            source = {"path": str(path), "offset": offset, "length": len(original),
-                      "sha256": hashlib.sha256(original).hexdigest(),
-                      "producer": metadata.get("producer", path.name)}
+            source = retained_source or {"path": str(path), "offset": offset, "length": len(original),
+                                        "sha256": hashlib.sha256(original).hexdigest(),
+                                        "producer": metadata.get("producer", path.name)}
             for event in envelopes(record, source):
                 events.append(event)
                 try:
@@ -318,6 +372,11 @@ def query(sources, filters, contains=None, selectors=(), limit=20, predicates=()
                     continue
                 if contains is not None and contains.casefold() not in encoded(event).decode("utf-8").casefold():
                     continue
+                if event.get("event") == "raid_performance_interval":
+                    identity = (event.get("run_id"), source["sha256"])
+                    if identity in native_packets_seen:
+                        continue
+                    native_packets_seen.add(identity)
                 request_id = event.get("request_id")
                 if request_id:
                     matching_keys.add((event.get("run_id"), event.get("process_instance"), request_id))

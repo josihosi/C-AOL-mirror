@@ -125,6 +125,116 @@ class PerformanceTest(unittest.TestCase):
         perf.write_json(self.directory / perf.TURN_STATE_NAME, {})
         self.assertEqual(perf.collect_turn_assessment(self.directory, "binding-a")["reason"], "native_interval_run_mismatch")
 
+    def test_public_evidence_finds_delayed_collected_interval_after_rotation(self):
+        import base64
+        import hashlib
+        from types import SimpleNamespace
+        import evidence_display
+        from play_cli import PlayerClient
+
+        self.recorder([sample(1, 0)])
+        perf.write_json(self.directory / "bridge.manifest.json", {"binding_id": "binding-a"})
+        perf.write_json(self.directory / "status.json", {
+            "binding_id": "binding-a", "state": "ready",
+            "session_descriptor": {"run_id": "run-a"}})
+        path = self.directory / "semantic.native.events.jsonl"
+        perf.write_json(self.directory / "game-process.json", {
+            "binding_id": "binding-a", "run_id": "run-a", "log_paths": {
+                "native_semantic_events": {"path": str(path), "scope": "run_bound"}}})
+        client = PlayerClient(self.directory)
+        client.state["pending"] = {"request_id": "wait-a", "request": {"action": "game.wait"},
+                                   "submitted_unix_seconds": 9.0}
+        self.waiting_turns(1, [.2] * 100)
+        unavailable = {"ok": False, "error": "response_not_available_or_stale"}
+        with patch("play_cli.Bridge.response_status", return_value=unavailable), \
+                patch("play_cli.Bridge.send_request") as send:
+            alarm = client.collect(wait_seconds=0)
+        send.assert_not_called()
+        self.assertTrue(alarm["performance_alarm"])
+        self.assertEqual(alarm["turn_assessment"]["selected_native_packets"], [])
+        # Complete that request without inventing a packet during the native
+        # activity. The later input-stop callback is a separate collection.
+        with patch("play_cli.Bridge.response_status", return_value={
+                "ok": True, "receipt": {"binding_id": "binding-a", "response_sha256": "a" * 64}}), \
+                patch("play_cli.Bridge.response_artifact", return_value={
+                    "ok": True, "response": {"ok": False, "error": "keep_watch_unsafe_condition"}}):
+            self.assertEqual(client.collect()["state"], "rejected")
+        client.state["pending"] = {"request_id": "stop-input-b",
+                                   "request": {"action": "game.act", "action_id": "prompt.choose"},
+                                   "submitted_unix_seconds": 20.0}
+        packet = {"event": "raid_performance_interval", "run_id": "run-a",
+                  "rows": [{"turn": turn, "simulation_seconds": .2, "wait_begin": 1,
+                            "wait_end": 0 if turn == 201 else 1}
+                           for turn in range(100, 202)]}
+        raw = json.dumps(packet, separators=(",", ":")).encode() + b"\n"
+        with path.open("ab") as stream:
+            stream.write(raw)
+        with patch("play_cli.Bridge.response_status", return_value=unavailable):
+            collected = client.collect(wait_seconds=0)
+        handle = collected["turn_assessment"]["selected_native_packets"][0]
+        self.assertEqual(handle["collected_during_request"]["request_id"], "stop-input-b")
+        self.assertEqual(base64.b64decode(evidence_display.recover(
+            handle["retained_raw"]["sha256"], self.evidence_store)["raw_base64"]), raw)
+        path.write_text('{"event":"later","run_id":"run-a"}\n')
+        arguments = SimpleNamespace(
+            decisions=False, operation_id=None, group_id=None, actor=[], offset=0, snapshot=None,
+            actor_id=None, actor_name=None, request_id=None, run_id="run-a",
+            event="raid_performance_interval", process_instance=None, contains=None,
+            from_turn=None, to_turn=None, where=["interval.first_turn<=150", "interval.last_turn>=199"],
+            select=["event,run_id,request_id,interval"], limit=5)
+        def query():
+            with patch("evidence_events.retain", side_effect=lambda value: evidence_display.retain(
+                    value, self.evidence_store)), patch("play_cli.Bridge.send_request") as send:
+                result = client.evidence(arguments)
+            send.assert_not_called()
+            return result
+
+        archive_path = self.directory / "cockpit-evidence.sqlite"
+        before_archive = (archive_path.read_bytes(), archive_path.stat().st_mtime_ns)
+        before_client = copy.deepcopy(client.state)
+        result = query()
+        self.assertEqual(result["matched"], 1, result)
+        row = result["rows"][0]
+        self.assertIsNone(row["fields"]["request_id"])
+        self.assertEqual(row["fields"]["interval"], {"first_turn": 100, "last_turn": 201,
+                                                     "row_count": 102})
+        self.assertEqual(row["source"]["retained_raw"], handle["retained_raw"])
+        self.assertEqual(row["source"]["sha256"], handle["sha256"])
+        self.assertEqual(row["source"]["collection_context"]["request_id"], "stop-input-b")
+        self.assertEqual((archive_path.read_bytes(), archive_path.stat().st_mtime_ns), before_archive)
+        self.assertEqual(client.state, before_client)
+        # A journal copy and its retained original are one packet, even when
+        # compaction moved its coordinates. The original remains the citation.
+        path.write_bytes(raw)
+        self.assertEqual(query()["matched"], 1)
+        coverage = arguments.where
+        arguments.where = ["source.offset=0"]
+        self.assertEqual(query()["matched"], 1)
+        arguments.where = coverage
+        arguments.request_id = "stop-input-b"
+        self.assertEqual(query()["matched"], 0)
+        arguments.request_id = None
+        path.write_text('{"event":"later","run_id":"run-a"}\n')
+        from cockpit_archive import Archive, ArchiveMap
+        foreign_raw = raw.replace(b'"run_id":"run-a"', b'"run_id":"foreign"')
+        foreign_artifact = evidence_display.retain(
+            {"raw_base64": base64.b64encode(foreign_raw).decode()}, self.evidence_store)
+        for changes, reason in (({"binding_id": "foreign"}, "binding_mismatch"),
+                                ({"length": handle["length"] + 1}, "bytes_mismatch"),
+                                ({"retained_raw": foreign_artifact,
+                                  "length": len(foreign_raw),
+                                  "sha256": hashlib.sha256(foreign_raw).hexdigest()},
+                                 "identity_mismatch")):
+            with self.subTest(changes=changes):
+                archive = Archive(archive_path, run_id="run-a", binding_id="binding-a")
+                try:
+                    ArchiveMap(archive, "selected_native_packets")[handle["sha256"]] = {**handle, **changes}
+                finally:
+                    archive.close()
+                refused = query()
+                self.assertEqual(refused["matched"], 0)
+                self.assertTrue(any(reason in row["error"] for row in refused["unavailable_sources"]))
+
     def test_mac_cumulative_time_and_rss_are_not_smoothed_cpu(self):
         with patch("r009_technical_witness.subprocess.run") as run:
             run.return_value.returncode = 0
