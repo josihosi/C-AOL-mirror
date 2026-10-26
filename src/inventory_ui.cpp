@@ -6423,6 +6423,7 @@ void trade_selector::execute()
         }
         std::string action;
         if( !semantic_input && !semantic_inventory_input ) {
+            openclaw_harness_native_input_scope input_phase;
             action = _ctxt_trade.handle_input();
         }
         // handle_input may consume a transport request before returning ERROR.

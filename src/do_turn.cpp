@@ -2059,7 +2059,11 @@ live_bandit_shakedown_response query_live_bandit_shakedown_dialogue(
             return *semantic_response;
         }
         ui_manager::redraw();
-        std::string action = ctxt.handle_input();
+        std::string action;
+        {
+            openclaw_harness_native_input_scope input_phase;
+            action = ctxt.handle_input();
+        }
         if( semantic_response ) {
             return *semantic_response;
         }

@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -34,6 +35,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
@@ -110,6 +112,7 @@
 #include "mapbuffer.h"
 #include "trap.h"
 #include "type_id.h"
+#include "ui_manager.h"
 #include "weather_type.h"
 #include "weakpoint.h"
 #include "worldfactory.h"
@@ -53854,6 +53857,369 @@ TEST_CASE( "activity demand keeps native semantic ownership through Pay trade su
     handle_bandit_shakedown_contact_for_test( scene.site() );
     CHECK( demands == 1 );
 }
+
+#if !defined(TILES)
+extern "C" int ungetch( int );
+
+TEST_CASE( "delayed demand and Pay trade inputs retain the owning turn phase",
+           "[bandit_live_world][semantic_surface][shakedown_input_timing]" )
+{
+    const bool nested = GENERATE( false, true );
+    const bool cancel = GENERATE( false, true );
+    CAPTURE( nested, cancel );
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "quiet_signal" );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+    REQUIRE( world_generator->active_world );
+    const std::string world_name = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world_name ) );
+    clear_avatar();
+    clear_map();
+    clear_npcs();
+
+    const std::string run = std::string( "shakedown-input-" ) +
+                            ( nested ? "nested-" : "aftermath-" ) + ( cancel ? "cancel" : "pay" );
+    const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".jsonl" );
+    const auto requests = std::filesystem::path( PATH_INFO::user_dir() ) / ( run + ".requests.jsonl" );
+    std::filesystem::remove( trace );
+    std::filesystem::remove( requests );
+    const std::map<std::string, std::string> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", run }, { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() },
+        { "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", requests.string() }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &entry : settings ) {
+        const char *value = std::getenv( entry.first.c_str() );
+        previous[entry.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        set_test_env( entry.first.c_str(), entry.second.c_str(), 1 );
+    }
+    on_out_of_scope restore_environment( [&] {
+        for( const auto &entry : previous ) {
+            if( entry.second ) {
+                set_test_env( entry.first.c_str(), entry.second->c_str(), 1 );
+            } else {
+                unset_test_env( entry.first.c_str() );
+            }
+        }
+        std::filesystem::remove( trace );
+        std::filesystem::remove( requests );
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&] {
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    const bool owns_imgui = ImGui::GetCurrentContext() == nullptr;
+    if( owns_imgui ) {
+        ImGui::CreateContext();
+        ImGuiIO &io = ImGui::GetIO();
+        io.DisplaySize = ImVec2( 800.0f, 600.0f );
+        io.DeltaTime = 1.0f / 60.0f;
+        io.Fonts->AddFontDefault();
+        io.Fonts->Build();
+        ImGui::NewFrame();
+    }
+    on_out_of_scope close_imgui( [&] {
+        if( owns_imgui ) {
+            ImGui::EndFrame();
+            ImGui::DestroyContext();
+        }
+    } );
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    get_avatar().set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() ); // Native initialization, before the controlled encounter.
+
+    r066_visit_scene scene;
+    avatar &u = get_avatar();
+    REQUIRE( scene.communicate() );
+    REQUIRE( scene.surface( u ).valid );
+    restore_on_out_of_scope<safe_mode_type> restore_safe_mode( g->safe_mode );
+    // Cancel deliberately releases native hostiles. Keep the controlled pause
+    // executable; safemode admission is independent of this input-timer test.
+    g->set_safe_mode( SAFE_MODE_OFF );
+    std::string payment_uid;
+    u.visit_items( [&]( item * it, item * ) {
+        if( it->typeId() == itype_id( "knife_combat" ) ) {
+            payment_uid = std::to_string( it->uid().get_value() );
+        }
+        return VisitResponse::NEXT;
+    } );
+    REQUIRE_FALSE( payment_uid.empty() );
+    semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+    semantic_surface_manager_session session( manager );
+    std::thread writer;
+    std::atomic<bool> writes_ok{ true };
+    on_out_of_scope finish_writer( [&] {
+        if( writer.joinable() ) {
+            writer.join();
+        }
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        manager.set_transport_observer( {} );
+    } );
+    // Read only events already emitted by the real owning game::do_turn.
+    const auto input_open = [&] {
+        bool result = false;
+        std::ifstream events( trace );
+        std::string line;
+        while( std::getline( events, line ) ) {
+            const auto start = line.find( '{' );
+            if( start == std::string::npos ) {
+                continue;
+            }
+            const auto value = json_loader::from_string( line.substr( start ) ).get_object();
+            value.allow_omitted_members();
+            const auto event = value.get_string( "event", "" );
+            if( event == "turn" && value.get_string( "stage" ) == "start" ) {
+                result = false;
+            } else if( event == "turn_phase" ) {
+                result = value.get_string( "phase" ) == "input";
+            }
+        }
+        return result;
+    };
+    std::map<std::string, bool> consumed_in_input;
+    manager.set_transport_observer( [&]( const semantic_request_transport_event & event ) {
+        if( event.event == "request_consumed" && event.request_id.rfind( "delayed-", 0 ) == 0 ) {
+            consumed_in_input[event.request_id] = input_open();
+        }
+    } );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const semantic_action_receipt & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    double processing_cpu = 0.0;
+    const auto measured_processing = [&] {
+        const auto start = std::clock();
+        volatile double calculation = 1.0;
+        while( static_cast<double>( std::clock() - start ) / CLOCKS_PER_SEC < 0.015 ) {
+            calculation = calculation * 1.00000001 + 0.00000001;
+        }
+        processing_cpu += static_cast<double>( std::clock() - start ) / CLOCKS_PER_SEC;
+    };
+    int sequence = 0;
+    const auto delayed = [&]( const semantic_surface_descriptor & owner, const std::string & action,
+    const std::string & stable_id ) {
+        if( writer.joinable() ) {
+            writer.join();
+        }
+        CHECK( input_open() == nested );
+        measured_processing(); // Publication/preparation is outside the new acquisition scopes.
+        const auto request_id = "delayed-" + std::to_string( ++sequence );
+        writer = std::thread( [&, owner, action, stable_id, request_id] {
+            std::this_thread::sleep_for( std::chrono::milliseconds( 120 ) );
+            std::ofstream out( requests, std::ios::app );
+            JsonOut json( out );
+            json.start_object();
+            json.member( "run_id", run );
+            json.member( "surface_id", owner.surface_id );
+            json.member( "frame_id", owner.frame_id );
+            json.member( "request_id", request_id );
+            json.member( "action_id", action );
+            json.member( "stable_id", stable_id );
+            json.end_object();
+            out << '\n';
+            out.close();
+            if( !out ) {
+                writes_ok = false;
+            }
+        } );
+    };
+    int demands = 0;
+    int inventories = 0;
+    bool parent_entered = false;
+    bool pause_queued = false;
+    std::optional<semantic_surface_descriptor> retired_demand;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
+        if( owner.kind == "shakedown_demand" ) {
+            REQUIRE( ++demands == 1 );
+            retired_demand = owner;
+            delayed( owner, "shakedown.pay", "" );
+        } else if( owner.kind == "inventory" ) {
+            REQUIRE( retired_demand );
+            ++inventories;
+            if( inventories == 1 ) {
+                REQUIRE( manager.submit_request( { run, retired_demand->surface_id, retired_demand->frame_id,
+                                                   "stale-pay", "shakedown.pay", std::nullopt, {} } ) );
+                CHECK_FALSE( manager.consume_top_request() );
+            }
+            if( cancel ) {
+                REQUIRE( inventories == 1 );
+                delayed( owner, "inventory.cancel", "" );
+            } else if( inventories == 1 ) {
+                delayed( owner, "trade.switch_pane", "" );
+            } else if( inventories == 2 ) {
+                REQUIRE( std::any_of( owner.valid_actions.begin(), owner.valid_actions.end(),
+                [&]( const auto & a ) {
+                    return a.id == "inventory.toggle" && a.stable_id == payment_uid && a.enabled;
+                } ) );
+                delayed( owner, "inventory.toggle", payment_uid );
+            } else {
+                REQUIRE( inventories == 3 );
+                delayed( owner, "inventory.commit", "" );
+            }
+        } else if( owner.kind == "prompt" ) {
+            REQUIRE_FALSE( cancel );
+            const auto yes = std::find_if( owner.valid_actions.begin(), owner.valid_actions.end(),
+            []( const auto & a ) {
+                return a.id == "prompt.choose" && a.label == "YES" && a.enabled;
+            } );
+            REQUIRE( yes != owner.valid_actions.end() );
+            delayed( owner, yes->id, yes->stable_id );
+        } else if( owner.kind == "world" && !pause_queued ) {
+            pause_queued = true;
+            if( nested && !parent_entered ) {
+                parent_entered = true;
+                REQUIRE( input_open() );
+                CHECK( handle_bandit_shakedown_contact_for_test( scene.site() ) );
+                CHECK( input_open() ); // A child cannot retire its enclosing World input.
+                measured_processing();
+                CHECK( input_open() );
+            }
+            REQUIRE( ungetch( pause->front() ) != -1 );
+        }
+    } );
+    u.set_moves( nested ? 100 : 0 );
+    const auto before = calendar::turn;
+    REQUIRE_FALSE( g->do_turn() );
+    if( writer.joinable() ) {
+        writer.join();
+    }
+    REQUIRE( demands == 1 );
+    CHECK( inventories == ( cancel ? 1 : 3 ) );
+    CHECK( writes_ok );
+    CHECK( calendar::turn == before + 1_turns );
+    REQUIRE( consumed_in_input.size() == static_cast<size_t>( sequence ) );
+    for( const auto &entry : consumed_in_input ) {
+        CAPTURE( entry.first );
+        CHECK( entry.second );
+    }
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return r.action_id == "shakedown.pay" && r.accepted;
+    } ) == 1 );
+    CHECK( std::count_if( receipts.begin(), receipts.end(), []( const auto & r ) {
+        return r.request_id == "stale-pay" && !r.accepted;
+    } ) == 1 );
+    const auto count_uid = [&]( const Character & actor ) {
+        int count = 0;
+        actor.visit_items( [&]( const item * it, const item * ) {
+            count += std::to_string( it->uid().get_value() ) == payment_uid;
+            return VisitResponse::NEXT;
+        } );
+        return count;
+    };
+    CHECK( count_uid( u ) == ( cancel ? 1 : 0 ) );
+    CHECK( u.amount_of( itype_id( "knife_combat" ) ) == ( cancel ? 1 : 0 ) );
+    CHECK( scene.site().active_hostile_operation.shakedown_pending_branch ==
+           ( cancel ? "fight" : "paid" ) );
+    // Native payment retains a source-UID receipt; ordinary item copy policy is unchanged.
+    handle_bandit_shakedown_contact_for_test( scene.site() );
+    CHECK( demands == 1 );
+    CHECK( count_uid( u ) == ( cancel ? 1 : 0 ) );
+
+    manager.set_descriptor_observer( {} );
+    u.set_moves( 0 );
+    REQUIRE_FALSE( g->do_turn() ); // Flush the measured row through its ordinary owner.
+    const int measured_turn = to_turn<int>( before + 1_turns );
+    int begins = 0;
+    int ends = 0;
+    std::optional<double> started;
+    double acquired_wall = 0.0;
+    bool row_seen = false;
+    std::ifstream events( trace );
+    std::string line;
+    while( std::getline( events, line ) ) {
+        const auto start = line.find( '{' );
+        if( start == std::string::npos ) {
+            continue;
+        }
+        const auto object = json_loader::from_string( line.substr( start ) ).get_object();
+        object.allow_omitted_members();
+        const auto event = object.get_string( "event", "" );
+        if( event == "turn_phase" && object.get_int( "game_turn" ) == measured_turn ) {
+            if( object.get_string( "stage" ) == "begin" && object.get_string( "phase" ) == "input" ) {
+                CHECK_FALSE( started );
+                ++begins;
+                started = object.get_float( "wall_time_seconds" );
+            } else if( object.get_string( "stage" ) == "end" ) {
+                REQUIRE( started );
+                ++ends;
+                acquired_wall += object.get_float( "wall_time_seconds" ) - *started;
+                started.reset();
+            }
+        } else if( event == "raid_performance_interval" ) {
+            for( const JsonValue value : object.get_array( "rows" ) ) {
+                const auto row = value.get_object();
+                row.allow_omitted_members();
+                if( row.get_int( "turn" ) == measured_turn ) {
+                    row_seen = true;
+                    CHECK( row.get_float( "input_seconds" ) > 0.0 );
+                    CHECK( row.get_float( "input_seconds" ) ==
+                           Approx( acquired_wall ).margin( 0.001 + begins * 0.000002 ) );
+                    if( !nested ) {
+                        CHECK( row.get_float( "simulation_seconds" ) >= processing_cpu * 0.8 );
+                        CHECK( row.get_float( "process_cpu_seconds" ) >= processing_cpu * 0.8 );
+                    }
+                }
+            }
+        }
+    }
+    CHECK( row_seen );
+    CHECK( begins == ends );
+    CHECK_FALSE( started );
+    if( nested ) {
+        CHECK( begins == 1 );
+    } else {
+        CHECK( begins >= 2 ); // Demand and the real trade override each own their acquisition.
+    }
+
+    // The real payment owner deposits a native copy with a source-UID receipt;
+    // it does not transfer that source UID into the collector's inventory.
+    tinymap store;
+    store.load( scene.site().anchor, false );
+    int paid_sources = 0;
+    for( const auto &p : store.cast_to_map()->points_on_zlevel( scene.site().anchor.z() ) ) {
+        for( const item &goods : store.cast_to_map()->i_at( p ) ) {
+            if( !goods.has_var( "shakedown_source" ) ) {
+                continue;
+            }
+            const auto receipt = json_loader::from_string( goods.get_var( "shakedown_source", "" ) ).get_object();
+            receipt.allow_omitted_members();
+            for( const JsonObject source : receipt.get_array( "property" ) ) {
+                source.allow_omitted_members();
+                if( std::to_string( source.get_int( "source_uid" ) ) == payment_uid ) {
+                    ++paid_sources;
+                    CHECK( receipt.get_int( "receiver_id" ) == u.getID().get_value() );
+                    CHECK( receipt.get_int( "collector_id" ) == scene.collector->getID().get_value() );
+                    CHECK( goods.typeId() == itype_id( "knife_combat" ) );
+                    CHECK( receipt.get_int( "quantity" ) == 1 );
+                }
+            }
+        }
+    }
+    CHECK( paid_sources == ( cancel ? 0 : 1 ) );
+}
+#endif
 
 TEST_CASE( "native roof sender cannot acquire a macro paid return route before local descent",
            "[bandit_live_world][payment_geometry_067]" )
