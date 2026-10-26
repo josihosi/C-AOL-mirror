@@ -84,13 +84,6 @@
   },
   "steps": [
     {
-      "kind": "wait",
-      "label": "load_r050_tower_pre_signal_base",
-      "seconds": 1.0,
-      "capture_after": true,
-      "expected_visible_fact": "Load canonical native payload d598290e4ed23d78ec5a51bbdf6259cb140e80194dc8f0c0a945a03d850785c7 at saved turn5216251. This wall-clock startup wait does not advance simulation. Existing final audit measures every saved human/tower/camp footprint; no player relocation or source/roster/history edit. Verify actual same-run World and source-OFF state before native activation."
-    },
-    {
       "kind": "native_semantic_bootstrap",
       "label": "bind_r050_tower_initial_world",
       "native_semantic_checkpoint": {
@@ -134,7 +127,6 @@
   ],
   "proof_route": {
     "precondition": [
-      "load_r050_tower_pre_signal_base",
       "bind_r050_tower_initial_world"
     ],
     "production_behavior": [
@@ -161,13 +153,6 @@
     "terminal_save_step_label": "native_r050_tower_remote_journey",
     "terminal_exit_timeout_seconds": 30.0,
     "steps": [
-      {
-        "kind": "wait",
-        "label": "r050_tower_same_saved_reentry",
-        "seconds": 1.0,
-        "capture_after": true,
-        "expected_visible_fact": "The actually quicksaved current native journey reloads; do not reinstall the canonical pre-signal base or restore its sourceOFF/director/roster state."
-      },
       {
         "kind": "cockpit_live_session",
         "label": "verify_r050_tower_saved_reentry",

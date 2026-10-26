@@ -12349,5 +12349,89 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
 
+class CanonicalTowerTerminalRouteTest(unittest.TestCase):
+    """Exercise the real readiness/receipt consumer, never a native game launch."""
+
+    def setUp(self) -> None:
+        import hashlib
+        import startup_harness as startup
+        self.startup = startup
+        self.scenario_path = HARNESS_DIR / "scenarios/migo.r050_tower_remote_initial.json"
+        self.scenario = json.loads(self.scenario_path.read_text())
+        temporary = tempfile.TemporaryDirectory(prefix="tower-terminal-readiness-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        # Native-equivalent unit publication: properly pinned immutable bytes,
+        # path, source and curses/SOUND0 receipt. It is never executed or sold as
+        # the actual 3af product. Do not mock either readiness or its validator.
+        self.executable = self.root / "test-only-curses-product"
+        self.executable.write_bytes(b"unit selected product bytes; not a native game")
+        self.receipt_path = self.root / "receipt.json"
+        self.digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        self.receipt = {"schema": startup.PRODUCT_BUILD_RECEIPT_SCHEMA,
+                        "captured_head": "a" * 40, "executable_path": str(self.executable),
+                        "executable_sha256": self.digest(self.executable),
+                        "product_source_sha256": "b" * 64,
+                        "build_configuration": {"platform": "darwin", "renderer": "curses",
+                                                "make_variables": ["TILES=0", "SOUND=0"]}}
+        self.publish_receipt()
+        # Explicit native-platform equivalent fixture for cross-host unit runs.
+        patch = mock.patch.object(startup.sys, "platform", "darwin")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def publish_receipt(self) -> None:
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        self.selected = {"schema": self.startup.SELECTED_PRODUCT_BUILD_SCHEMA,
+                         "receipt_path": str(self.receipt_path),
+                         "receipt_sha256": self.digest(self.receipt_path),
+                         "executable_sha256": self.receipt["executable_sha256"],
+                         "product_source_sha256": self.receipt["product_source_sha256"]}
+
+    def readiness(self, scenario: dict) -> dict:
+        return self.startup.terminal_mode_readiness(
+            scenario, self.executable, selected_product_build=self.selected)
+
+    def test_real_readiness_accepts_initial_and_saved_reentry_routes(self) -> None:
+        from scenario_registry import saved_world_continuation_steps, validate_manifest
+        validate_manifest(self.scenario, path=self.scenario_path)
+        initial = self.scenario
+        reentry = {**self.scenario, "steps": saved_world_continuation_steps(
+            self.scenario["steps"], self.scenario["post_relaunch"])}
+        for label, route in (("initial", initial), ("saved reentry", reentry)):
+            with self.subTest(route=label):
+                result = self.readiness(route)
+                self.assertEqual(result["status"], "ready", result)
+                self.assertEqual(result["executable_sha256"], self.selected["executable_sha256"])
+                self.assertEqual(result["product_source_sha256"], self.selected["product_source_sha256"])
+                self.assertFalse(result["visual_claims"])
+        labels = {step["label"] for step in initial["steps"]}
+        self.assertTrue(set(initial["proof_route"]["precondition"]) <= labels)
+        self.assertEqual(initial["steps"][0]["kind"], "native_semantic_bootstrap")
+        self.assertEqual(initial["steps"][1]["kind"], "cockpit_live_session")
+        self.assertEqual(reentry["steps"][1]["label"], "verify_r050_tower_saved_reentry")
+        self.assertEqual(initial["post_relaunch"]["terminal_save_step_label"],
+                         initial["steps"][1]["label"])
+
+    def test_unsupported_scripted_step_still_refuses_initial_and_reentry(self) -> None:
+        from scenario_registry import saved_world_continuation_steps
+        reentry = saved_world_continuation_steps(self.scenario["steps"], self.scenario["post_relaunch"])
+        for route in (self.scenario["steps"], reentry):
+            with self.subTest(route=[step["label"] for step in route]):
+                bad = {**self.scenario, "steps": [*route, {"kind": "wait", "label": "unsupported", "seconds": 1}]}
+                result = self.readiness(bad)
+                self.assertEqual(result["status"], "unsupported_terminal_mode")
+                self.assertIn("other scripted startup controls are unvalidated", result["reason"])
+
+    def test_selected_native_receipt_and_sound_guards_remain_authoritative(self) -> None:
+        self.selected["receipt_sha256"] = "0" * 64
+        self.assertIn("receipt hash", self.readiness(self.scenario)["reason"])
+        self.receipt["build_configuration"]["make_variables"] = ["TILES=0", "SOUND=1"]
+        self.publish_receipt()
+        result = self.readiness(self.scenario)
+        self.assertEqual(result["status"], "unsupported_terminal_mode")
+        self.assertIn("without SDL sound", result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()
