@@ -60,6 +60,7 @@
 #include "debug_menu.h"
 #include "debug_console.h"
 #include "game.h"
+#include "game_constants.h"
 #include "game_inventory.h"
 #include "map_selector.h"
 #include "field_type.h"
@@ -84,6 +85,9 @@
 #include "uilist.h"
 #include "ui_manager.h"
 #include "uistate.h"
+#include "veh_interact.h"
+#include "veh_type.h"
+#include "vehicle.h"
 
 namespace
 {
@@ -1819,6 +1823,444 @@ TEST_CASE( "actual map editor toggles publish and receipt without editing the ma
     manager.set_descriptor_observer( {} );
     manager.set_receipt_observer( {} );
 }
+
+TEST_CASE( "actual map editor vertical controls use native movement bounds and brush",
+           "[semantic_surface][editmap_native_vertical]" )
+{
+    const int direction = GENERATE( -1, 0, 1 );
+    CAPTURE( direction );
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    restore_on_out_of_scope restore_view( u.view_offset );
+    u.view_offset = tripoint_rel_ms::zero;
+    restore_on_out_of_scope restore_editor( uistate.editmap_state );
+    auto &state = uistate.editmap_state;
+    state = editmap_uistate{};
+    state.selected.fill( false );
+    state.brush.drawing_terrain = true;
+    state.brush.selected_terrain = ter_str_id( "t_flat_roof" ).id();
+    const auto ground = u.pos_bub();
+    const auto upper = ground + tripoint::above;
+    const auto ground_terrain = here.ter( ground );
+    const auto upper_terrain = here.ter( upper );
+    const auto position_before = u.pos_abs();
+    const auto turn_before = calendar::turn;
+    const auto moves_before = u.get_moves();
+    const char *transport = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous = transport ? std::optional<std::string>( transport ) :
+        std::nullopt;
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous );
+    } );
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = true;
+    semantic_surface_manager manager( "editor-native-levels" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    std::vector<semantic_action_request> requests;
+    std::vector<std::pair<std::string, std::string>> steps;
+    std::vector<int> expected_z{ 0 };
+    if( direction == 0 ) {
+        steps = { { "editmap.move_target", "level_up" }, { "editmap.confirm", "" },
+            { "editmap.move_target", "level_down" }, { "editmap.close", "" }
+        };
+        expected_z = { 0, 1, 1, 0 };
+    } else {
+        const int limit = direction > 0 ? OVERMAP_HEIGHT : -OVERMAP_DEPTH;
+        for( int i = 0; i < std::abs( limit ) + 2; ++i ) {
+            steps.emplace_back( "editmap.move_target", direction > 0 ? "level_up" : "level_down" );
+            expected_z.push_back( direction * std::min( i + 1, std::abs( limit ) ) );
+        }
+        steps.emplace_back( "editmap.close", "" );
+    }
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
+        if( owner.kind != "map_editor" ) {
+            return;
+        }
+        const auto step = requests.size();
+        REQUIRE( step < steps.size() );
+        CHECK( state.brush.target == ground + tripoint( 0, 0, expected_z[step] ) );
+        CHECK( owner.payload.at( "target" ) == state.brush.target.to_string() );
+        for( const auto &id : {
+                 "level_up", "level_down"
+             } ) {
+            REQUIRE( std::any_of( owner.valid_actions.begin(), owner.valid_actions.end(),
+            [&]( const auto & action ) {
+                return action.id == "editmap.move_target" && action.stable_id == id && action.enabled;
+            } ) );
+        }
+        if( step == 0 ) {
+            semantic_action_request invalid{ owner.run_id, owner.surface_id, owner.frame_id,
+                                             "invalid-level", "editmap.move_target", "arbitrary_z", {} };
+            REQUIRE( manager.submit_request( invalid ) );
+            CHECK_FALSE( manager.consume_top_request() );
+            CHECK_FALSE( receipts.back().accepted );
+            CHECK( state.brush.target == ground );
+            invalid = { owner.run_id, owner.surface_id, "old-frame", "stale-level",
+                        "editmap.move_target", "level_up", {}
+                      };
+            REQUIRE( manager.submit_request( invalid ) );
+            CHECK_FALSE( manager.consume_top_request() );
+            CHECK( receipts.back().rejection_reason == "stale_frame" );
+            CHECK( state.brush.target == ground );
+        }
+        requests.push_back( { owner.run_id, owner.surface_id, owner.frame_id,
+                              "level-step-" + std::to_string( step ), steps[step].first,
+                              steps[step].second.empty() ? std::nullopt :
+                              std::optional<std::string>( steps[step].second ), {} } );
+        REQUIRE( manager.submit_request( requests.back() ) );
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    editmap_ui editor;
+    REQUIRE_NOTHROW( editor.handle_action() );
+    REQUIRE( requests.size() == steps.size() );
+    REQUIRE( receipts.size() == steps.size() + 2 );
+    for( std::size_t i = 2; i < receipts.size(); ++i ) {
+        CHECK( receipts[i].accepted );
+    }
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->kind == "world" );
+    CHECK( here.ter( ground ) == ground_terrain );
+    CHECK( here.ter( upper ) == ( direction == 0 ? state.brush.selected_terrain : upper_terrain ) );
+    CHECK( u.pos_abs() == position_before );
+    CHECK( calendar::turn == turn_before );
+    CHECK( u.get_moves() == moves_before );
+    const auto restored_frame = manager.top()->frame_id;
+    CHECK_FALSE( manager.submit_request( requests.front() ) );
+    CHECK_FALSE( manager.has_pending_request() );
+    CHECK( manager.top()->frame_id == restored_frame );
+}
+
+TEST_CASE( "actual vehicle interaction close preserves native state and restores World",
+           "[semantic_surface][vehicle_interaction_native_close]" )
+{
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    vehicle *veh = here.add_vehicle( vproto_id( "car" ), tripoint_bub_ms( 65, 65, 0 ),
+                                     -90_degrees, 100, veh_spawn_status::UNDAMAGED );
+    REQUIRE( veh != nullptr );
+    veh->set_owner( u );
+    on_out_of_scope remove_vehicle( [&]() {
+        here.destroy_vehicle( veh );
+    } );
+    const auto serialize = []( const auto & object ) {
+        std::ostringstream out;
+        JsonOut json( out );
+        object.serialize( json );
+        return out.str();
+    };
+    const auto vehicle_before = serialize( *veh );
+    const auto body_before = serialize( u );
+    const auto turn_before = calendar::turn;
+    const char *transport = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous = transport ? std::optional<std::string>( transport ) :
+        std::nullopt;
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous );
+    } );
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = true;
+    semantic_surface_manager manager( "vehicle-native-close" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    semantic_action_request close;
+    int frames = 0;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
+        if( owner.kind != "vehicle_interaction" ) {
+            return;
+        }
+        REQUIRE( ++frames == 1 );
+        REQUIRE( owner.payload.at( "native_owner" ) == "VEH_INTERACT" );
+        REQUIRE( owner.valid_actions.size() == 1 );
+        CHECK( owner.valid_actions.front().id == "vehicle_interaction.close" );
+        CHECK( owner.valid_actions.front().stable_id.empty() );
+        close = { owner.run_id, owner.surface_id, owner.frame_id, "close-vehicle",
+                  "vehicle_interaction.close", std::nullopt, {}
+                };
+        for( const std::string &negative : {
+                 "install", "wrong_run", "stale_frame", "wrong_surface"
+             } ) {
+            auto rejected = close;
+            rejected.request_id = negative;
+            if( negative == "install" ) {
+                rejected.action_id = "vehicle_interaction.install";
+            } else if( negative == "wrong_run" ) {
+                rejected.run_id = "foreign";
+            } else if( negative == "wrong_surface" ) {
+                rejected.surface_id = "foreign";
+            } else {
+                rejected.frame_id = "old";
+            }
+            REQUIRE( manager.submit_request( rejected ) );
+            CHECK_FALSE( manager.consume_top_request() );
+            CHECK_FALSE( receipts.back().accepted );
+            CHECK( serialize( *veh ) == vehicle_before );
+        }
+        REQUIRE( manager.submit_request( close ) );
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    REQUIRE_NOTHROW( veh_interact::run( here, *veh, point_rel_ms::zero ) );
+    CHECK( frames == 1 );
+    REQUIRE( receipts.size() == 5 );
+    CHECK( receipts.back().accepted );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->kind == "world" );
+    CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+    CHECK( serialize( *veh ) == vehicle_before );
+    CHECK( serialize( u ) == body_before );
+    CHECK( calendar::turn == turn_before );
+    CHECK_FALSE( manager.submit_request( close ) );
+    CHECK_FALSE( manager.has_pending_request() );
+    CHECK( frames == 1 );
+    CHECK( serialize( *veh ) == vehicle_before );
+}
+
+#if !defined(TILES)
+extern "C" int ungetch( int );
+extern "C" int flushinp();
+
+TEST_CASE( "vehicle close cannot escape through waited native help input",
+           "[semantic_surface][vehicle_interaction_nested_input]" )
+{
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    map &here = get_map();
+    u.setpos( here, tripoint_bub_ms( 60, 60, 0 ), false );
+    vehicle *veh = here.add_vehicle( vproto_id( "car" ), tripoint_bub_ms( 65, 65, 0 ),
+                                     -90_degrees, 100, veh_spawn_status::UNDAMAGED );
+    REQUIRE( veh != nullptr );
+    veh->set_owner( u );
+    on_out_of_scope remove_vehicle( [&]() {
+        here.destroy_vehicle( veh );
+    } );
+    const auto serialize = []( const auto &object ) {
+        std::ostringstream out;
+        JsonOut json( out );
+        object.serialize( json );
+        return out.str();
+    };
+    const auto vehicle_before = serialize( *veh );
+    const auto body_before = serialize( u );
+    const auto turn_before = calendar::turn;
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        flushinp();
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope restore_mode( test_mode );
+    test_mode = false;
+    const auto path = std::filesystem::temp_directory_path() /
+                      ( "vehicle-help-owner-" + std::to_string(
+                            std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+    const char *old_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> previous = old_path ? std::optional<std::string>( old_path ) :
+        std::nullopt;
+    set_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", path.string().c_str(), 1 );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", previous );
+        std::filesystem::remove( path );
+    } );
+    semantic_surface_manager manager( "vehicle-help-owner" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    const auto queue_key = [&]( const std::string &action, const std::string &category ) {
+        const auto &keys = inp_mngr.get_input_for_action( action, category );
+        const auto key = std::find_if( keys.begin(), keys.end(), []( const input_event &event ) {
+            return event.type == input_event_t::keyboard_char && event.sequence.size() == 1 &&
+                   event.get_first_input() >= 0 && event.get_first_input() < 128;
+        } );
+        REQUIRE( key != keys.end() );
+        REQUIRE( ungetch( key->get_first_input() ) != -1 );
+    };
+    const auto append = [&]( const semantic_surface_descriptor &owner, const std::string &id ) {
+        std::ofstream stream( path, std::ios::app );
+        stream << "{\"run_id\":\"" << owner.run_id << "\",\"surface_id\":\"" << owner.surface_id
+               << "\",\"frame_id\":\"" << owner.frame_id << "\",\"request_id\":\"" << id
+               << "\",\"action_id\":\"vehicle_interaction.close\"}\n";
+    };
+    std::thread writer;
+    on_out_of_scope join_writer( [&]() {
+        if( writer.joinable() ) {
+            writer.join();
+        }
+    } );
+    int parents = 0;
+    int children = 0;
+    int restorations = 0;
+    std::vector<semantic_action_receipt> receipts;
+    semantic_surface_descriptor parent;
+    manager.set_transport_observer( [&]( const semantic_request_transport_event &event ) {
+        if( event.event == "request_consumed" && event.request_id == "parent-during-help" ) {
+            // Native-thread physical exit also makes the faulty deferred-receipt
+            // owner finish honestly instead of trapping the causal control.
+            queue_key( "QUIT", "HELP_KEYBINDINGS" );
+        }
+    } );
+    manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+        receipts.push_back( receipt );
+        if( receipt.request_id == "parent-during-help" ) {
+            CHECK_FALSE( receipt.accepted );
+            CHECK( receipt.rejection_reason == "wrong_surface" );
+            REQUIRE( manager.top() );
+            CHECK( manager.top()->kind == "unsupported" );
+            CHECK( manager.top()->payload.count( "owner" ) == 1 );
+            if( manager.top()->payload.count( "owner" ) ) {
+                CHECK( manager.top()->payload.at( "owner" ) == "HELP_KEYBINDINGS" );
+            }
+        }
+    } );
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind == "unsupported" ) {
+            CHECK( owner.payload.at( "owner" ) == "HELP_KEYBINDINGS" );
+            CHECK( owner.valid_actions.empty() );
+            ++children;
+        } else if( owner.kind == "vehicle_interaction" ) {
+            if( owner.surface_id == parent.surface_id ) {
+                CHECK( owner.frame_id != parent.frame_id );
+                ++restorations;
+                return;
+            }
+            ++parents;
+            if( parents == 1 ) {
+                parent = owner;
+                queue_key( "HELP_KEYBINDINGS", "VEH_INTERACT" );
+                // Only immutable strings/file bytes cross threads. The manager,
+                // curses, callbacks and all assertions stay on the native thread.
+                writer = std::thread( [&, owner]() {
+                    std::this_thread::sleep_for( std::chrono::milliseconds( 150 ) );
+                    append( owner, "parent-during-help" );
+                } );
+            } else if( parents == 2 ) {
+                CHECK( children >= 1 );
+                CHECK( restorations >= 1 );
+                append( owner, "parent-after-help" );
+            } else {
+                FAIL( "vehicle owner failed to close after help" );
+            }
+        }
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+        manager.set_transport_observer( {} );
+    } );
+    REQUIRE_NOTHROW( veh_interact::run( here, *veh, point_rel_ms::zero ) );
+    CHECK( parents == 2 );
+    CHECK( children >= 1 );
+    CHECK( restorations >= 1 );
+    REQUIRE( receipts.size() == 2 );
+    CHECK_FALSE( receipts.front().accepted );
+    CHECK( receipts.back().request_id == "parent-after-help" );
+    CHECK( receipts.back().accepted );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->kind == "world" );
+    CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
+    CHECK( serialize( *veh ) == vehicle_before );
+    CHECK( serialize( u ) == body_before );
+    CHECK( calendar::turn == turn_before );
+}
+
+TEST_CASE( "vehicle close authority is suspended for sibling native input categories",
+           "[semantic_surface][vehicle_interaction_nested_input]" )
+{
+    const std::string category = GENERATE( "STRING_INPUT", "HELP_KEYBINDINGS", "CONFIRMATION" );
+    CAPTURE( category );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        flushinp();
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    restore_on_out_of_scope restore_mode( test_mode );
+    test_mode = false;
+    semantic_surface_manager manager( "vehicle-sibling-input" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    int dispatches = 0;
+    semantic_surface_scope vehicle_owner( manager, "vehicle_interaction", "Vehicle interaction", {},
+    { { "vehicle_interaction.close", "", "Close", true } },
+    [&]( const semantic_action_request & ) {
+        ++dispatches;
+        return semantic_action_dispatch_result{ true, "", "", false, false };
+    } );
+    const auto parent = *manager.top();
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto &receipt ) {
+        receipts.push_back( receipt );
+    } );
+    int children = 0;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &owner ) {
+        if( owner.kind != "unsupported" ) {
+            return;
+        }
+        ++children;
+        CHECK( owner.payload.at( "owner" ) == category );
+        CHECK( owner.valid_actions.empty() );
+        REQUIRE( manager.submit_request( { parent.run_id, parent.surface_id, parent.frame_id,
+                                           "parent-in-child", "vehicle_interaction.close", std::nullopt, {} } ) );
+        manager.mark_transport_wake();
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    input_context child( category );
+    child.register_action( "ANY_INPUT" );
+    CHECK( child.handle_input( 5 ) == "TIMEOUT" );
+    CHECK( children == 1 );
+    CHECK( dispatches == 0 );
+    REQUIRE( receipts.size() == 1 );
+    CHECK_FALSE( receipts.front().accepted );
+    CHECK( receipts.front().rejection_reason == "wrong_surface" );
+    REQUIRE( manager.top() );
+    CHECK( manager.top()->surface_id == parent.surface_id );
+    CHECK( manager.top()->frame_id != parent.frame_id );
+    const auto restored = *manager.top();
+    REQUIRE( manager.submit_request( { restored.run_id, restored.surface_id, restored.frame_id,
+                                       "restored-parent", "vehicle_interaction.close", std::nullopt, {} } ) );
+    manager.mark_transport_wake();
+    input_context native_parent( "VEH_INTERACT" );
+    CHECK( native_parent.handle_input( 5 ) == "ERROR" );
+    CHECK( dispatches == 1 );
+    REQUIRE( receipts.size() == 2 );
+    CHECK( receipts.back().accepted );
+}
+#endif
 
 TEST_CASE( "actual map editor receipts mutation and no-op completion before close",
            "[semantic_surface][editmap_native_completion]" )

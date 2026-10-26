@@ -179,6 +179,12 @@ bool openclaw_harness_is_wait_probe_input( const input_event &input )
 bool semantic_surface_owns_input_context( const semantic_surface_descriptor &surface,
         const input_context &ctxt )
 {
+    // The close-only vehicle scope covers its main input, not HELP or another
+    // native child opened synchronously inside handle_input(). Such children
+    // must publish the existing actionless unsupported owner until they return.
+    if( surface.kind == "vehicle_interaction" ) {
+        return ctxt.get_category() == "VEH_INTERACT";
+    }
     // World input is the only owner allowed to use DEFAULTMODE directly.  The
     // other supported owners construct their own semantic scope before they
     // wait for input, so their top descriptor is sufficient proof of ownership.

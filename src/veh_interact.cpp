@@ -54,6 +54,7 @@
 #include "proficiency.h"
 #include "requirements.h"
 #include "ret_val.h"
+#include "semantic_surface.h"
 #include "skill.h"
 #include "string_formatter.h"
 #include "tileray.h"
@@ -526,9 +527,37 @@ void veh_interact::do_main_loop( map &here )
 
     while( !finish ) {
         calc_overview( here );
+        bool semantic_quit = false;
+        std::optional<semantic_surface_scope> semantic_scope;
+        if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
+            semantic_scope.emplace( *manager, "vehicle_interaction", "Vehicle interaction",
+            std::map<std::string, std::string> { { "native_owner", "VEH_INTERACT" } },
+            std::vector<semantic_action_descriptor> {
+                { "vehicle_interaction.close", "", "Close vehicle interaction", true }
+            }, [&semantic_quit]( const semantic_action_request & request ) {
+                if( request.action_id != "vehicle_interaction.close" ) {
+                    return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+                }
+                if( !request.stable_id.value_or( "" ).empty() ) {
+                    return semantic_action_dispatch_result{ false, "invalid_target", "" };
+                }
+                semantic_quit = true;
+                return semantic_action_dispatch_result{ true, "", "" };
+            } );
+            semantic_scope->consume_request();
+        }
         ui_manager::redraw();
         const int description_scroll_lines = catacurses::getmaxy( w_parts ) - 4;
-        const std::string action = main_context.handle_input();
+        std::string action = semantic_quit ? "QUIT" : main_context.handle_input();
+        // A request can also arrive while the native input owner is waiting.
+        if( semantic_quit ) {
+            action = "QUIT";
+        }
+        // Physical-only controls retain their native behavior and child input
+        // ownership. The close-only scope must not authorize a nested editor.
+        if( action != "QUIT" ) {
+            semantic_scope.reset();
+        }
         msg.reset();
         if( const std::optional<tripoint_rel_ms> vec = main_context.get_direction_rel_ms( action ) ) {
             move_cursor( here, vec->xy() );

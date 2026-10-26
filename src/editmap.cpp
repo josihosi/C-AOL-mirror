@@ -412,6 +412,8 @@ void editmap_ui::handle_action()
             { "editmap.move_target", "south", "Move target south", true },
             { "editmap.move_target", "west", "Move target west", true },
             { "editmap.move_target", "east", "Move target east", true },
+            { "editmap.move_target", "level_up", "Move target one level up", true },
+            { "editmap.move_target", "level_down", "Move target one level down", true },
             { "editmap.confirm", "", "Apply brush or confirm selection", true },
             { "editmap.close", "", "Close map editor", true },
             { "editmap.select_brush", "", "Select brush shape", true },
@@ -486,6 +488,10 @@ void editmap_ui::handle_action()
                     semantic_native_action = "LEFT";
                 } else if( target == "east" ) {
                     semantic_native_action = "RIGHT";
+                } else if( target == "level_up" ) {
+                    semantic_native_action = "LEVEL_UP";
+                } else if( target == "level_down" ) {
+                    semantic_native_action = "LEVEL_DOWN";
                 } else {
                     return semantic_action_dispatch_result{ false, "invalid_target", "" };
                 }
