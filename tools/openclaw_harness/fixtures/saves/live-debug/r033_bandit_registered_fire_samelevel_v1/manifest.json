@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_fire_samelevel_v1",
   "source_fixture": "r008_fire_signal_common_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 maintained-fire successor. It retains the exact empty registered bandit site and at-home observer footing, then stages only a brazier and logs at reachable same-level solid floor [3371,996,0] plus a fueled lighter. No fd_fire/fd_smoke or signal state is authored; the source must be ignited through the native player action before the two staffed-observer cadences.",
   "save_transforms": [
     {"kind":"player_mutations","player_save":"#Wm9yYWlkYSBWaWNr.sav.zzip","mutations":["DEBUG_LS","DEBUG_NOTEMP","DEBUG_STAMINA","DEBUG_CARDIO","DEBUG_CLAIRVOYANCE","DEBUG_NIGHTVISION"]},

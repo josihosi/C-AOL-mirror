@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "bandit.r033_registered_smoke_samelevel_dedup_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "R-033 isolated same-level smoke successor. It evaluates only a source-bound native smokebomb emission through the first two authoritative staffed-observer cadences: first creation, then unchanged identity/dedup. Fixture registration and activation are zero credit.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",

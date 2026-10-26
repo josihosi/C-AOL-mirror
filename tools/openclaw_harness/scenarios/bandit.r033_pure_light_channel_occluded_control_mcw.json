@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "bandit.r033_pure_light_channel_occluded_control_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Matched negative control for R-033.  It holds the exposed lamp fixture's night turn, lamp, source coordinate, observer pair, camp, and native cadence constant, changing only physical containment around the lamp's local escape aperture.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",

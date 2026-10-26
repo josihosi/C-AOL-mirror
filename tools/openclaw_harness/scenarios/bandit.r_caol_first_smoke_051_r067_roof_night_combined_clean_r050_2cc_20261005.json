@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_051_r067_roof_night_combined_clean_r050_2cc_20261005",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Focused R051 native nighttime combined smoke and light recipient comparison from a fresh exact R050 bandit-only fixture copy using the accepted 2cc immutable build.",
   "profile": "r051-roof-night-combined-clean-r050-2cc-20261005",
   "world": "TestSetup00",

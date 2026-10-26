@@ -1,6 +1,7 @@
 {
   "manifest_version":2,
   "name":"bandit.r033_registered_fire_samelevel_dedup_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description":"R-033 maintained-fire route v2. Native ignition creates the only fire field at reachable same-level source [3371,996,0]; the persistent fd_fire source is then read at two authoritative staffed-observer cadences to prove create-then-dedup.",
   "profile":"dev-harness","config_profile":"dev-harness","world":"McWilliams",
   "fixture":"r033_bandit_registered_fire_samelevel_v1","fixture_profile":"live-debug","installed_save_player":"#Wm9yYWlkYSBWaWNr.sav.zzip","replace_existing_worlds":true,

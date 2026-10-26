@@ -2,6 +2,7 @@
   "name": "r029_fire_signal_ground_cannibal_positive_v1",
   "source_fixture": "r008_fire_signal_common_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-029 positive same-elevation control: native brazier fire on solid ground in adjacent OMT to an assigned binocular observer; no signal or ecology state is authored.",
   "save_transforms": [
     {"kind":"player_mutations","player_save":"#Wm9yYWlkYSBWaWNr.sav.zzip","mutations":["DEBUG_LS","DEBUG_NOTEMP","DEBUG_STAMINA","DEBUG_CARDIO","DEBUG_CLAIRVOYANCE","DEBUG_NIGHTVISION"]},

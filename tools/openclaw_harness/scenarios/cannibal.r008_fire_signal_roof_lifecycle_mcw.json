@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r008_fire_signal_roof_lifecycle_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Cannibal-policy member of the outcome-sized roof-fire family. The footprint conversion and fire materials are setup only; the worker must bind production-created cannibal actors and their actual signal, stalking, attack, bubble, return, and persistence path.",
   "profile": "dev-harness",
   "world": "McWilliams",

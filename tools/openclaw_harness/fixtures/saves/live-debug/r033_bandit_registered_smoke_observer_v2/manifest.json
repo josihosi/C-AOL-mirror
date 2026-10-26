@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_smoke_observer_v2",
   "source_fixture": "r008_fire_signal_roof_bandit_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 successor footing. It recreates only the exact zero-credit registered idle camp state audited after the prior native bootstrap: site overmap_special:bandit_camp@140,40,0 and its at-home, unwounded observer id 18, with empty lead/report/operation/outing state. Separately it stages exactly one already-active smokebomb_act on the verified solid roof. Its authoritative countdown extends from the saved turn through the next five-minute signal cadence. No fd_smoke or fd_fire field, light source, sound, lead, report, operation, contact, dispatch, or local projection is authored.",
   "save_transforms": [
     {

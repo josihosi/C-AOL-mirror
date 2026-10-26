@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_smoke_samelevel_control_v1",
   "source_fixture": "r008_fire_signal_common_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 falsifying control. It is identical to the registered same-level smoke fixture except that the active smokebomb is centered inside the staffed camp's anchor OMT, leaving room for natural smoke spread without crossing an OMT boundary during the two cadence window.",
   "save_transforms": [
     {

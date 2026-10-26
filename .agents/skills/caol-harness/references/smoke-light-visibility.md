@@ -7,14 +7,26 @@ save's actual furniture, fuel, fire, windows and source positions.
 
 ## Representative source placement
 
-Owner clarification, 2026-10-25: full camp/tower stories should resemble a separated home and
-survivor activity site. Normally choose several OMTs of meaningful travel, outside immediate
-home/contact geometry, with a plausible approach and observation opportunity. An adjacent or
-one-OMT brazier is a labelled close-range control, not the default for every faction or the sole
-proof of distant sensing, scouting and return. Do not impose one universal minimum: native source
-strength, weather, terrain and the intended branch determine a useful distance. Record home,
-source and observer coordinates/z, actual OMT distance and measured source reach in the existing
-setup note. Do not treat the historical example coordinates/formulas below as current calibration.
+Owner clarification, 2026-10-26: representative end-to-end camp/tower stories require at least
+10 OMTs between the player activity/source area and the camp or tower. Keep the player at least
+10 OMTs from the participating home footprints during the representative remote leg; measure from
+the nearest footprint edge, not just its anchor. Record actual home, player, source and observer
+coordinates/z and OMT distances. Label the footprint-edge layout metric separately from the
+native observer-to-source distance and measured reception cap; diagonal layout separation does
+not establish that a source is in range. For 30–40 OMT reach scenarios, use substantially greater
+separation that exercises the claimed reach, with actual signal strength, terrain and weather
+supporting the selected case. Ten OMTs is a floor, not sufficient coverage of long-range reach.
+Prepare15 OMT by default for ordinary full stories. Keep the emitter actually loaded/active
+when its sampling requires that; the remote party is the camp, not necessarily the fire.
+
+Closer setups remain explicitly labelled component, near-contact, combat or diagnostic controls;
+they do not count as representative distant sensing, scouting or return proof. A necessary close-home
+setup visit earns no remote proof; return to the separated player/source area before the remote leg.
+Stay near the emitter when its native sampling requires a loaded source. If existing source reach
+cannot support the minimum, report that coverage
+limit and use a suitable scenario rather than silently moving the camp/player closer or relaxing
+observation. Preserve current saves, actors and input ownership when adapting a live continuation.
+Do not treat historical example coordinates/formulas below as current calibration.
 
 Across the selected signal/journey recipes, include useful separated positive cases and meaningful
 near-reach or beyond-reach/occluded negatives. Reuse existing variants; this does not order a full

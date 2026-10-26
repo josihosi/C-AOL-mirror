@@ -1,7 +1,8 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_042_rural_roof_b",
-  "description": "R042 countryside B: A plus one normal unseeded southern bandit camp; assess factions separately.",
+  "setup_classification": {"kind": "representative_candidate", "native_source_qualified": false, "native_prepared_save_adopted": false},
+  "description": "Representative default15 R042 dual-faction source setup145,153; preserve original homes/rosters/history and separately qualify each real recipient.",
   "profile": "first-smoke-042-rural-b-20260929",
   "world": "TestSetup00",
   "observer_character": true,
@@ -69,13 +70,13 @@
       "macos"
     ],
     "profile": "first-smoke-042-rural-b-20260929",
-    "fixture": "r042_rural_roof_dual_faction_b_v1",
+    "fixture": "r042_rural_dual_faction_remote_v1",
     "requirements": {
       "os": "macos",
       "source": "current-worktree",
       "executable": "build_logs/first-smoke-040/r040-stage3-current-source/isolated/cataclysm-tiles",
       "profile": "first-smoke-042-rural-b-20260929",
-      "fixture": "r042_rural_roof_dual_faction_b_v1",
+      "fixture": "r042_rural_dual_faction_remote_v1",
       "helper": "none",
       "peekaboo": false,
       "input": [
@@ -92,7 +93,7 @@
       "label": "load_r042_rural_baseline_b",
       "seconds": 1.0,
       "capture_after": true,
-      "expected_visible_fact": "Load exact R042 B 45-file fresh start from profile first-smoke-042-rural-b-20260929; player save SHA256 037c9bf694be280cb19fe607ef691429593120245c2741d6b0906dfa8833d247; turn 5216234, unlit prepared house/roof, current weather, house and cannibal camp preserved. Check effective userdir, source-bound executable, World, safe mode, mutations and pending input. The inherited distant bandit_cabin [103,167,0] and its old lead remain parent state; B's newly added bandit_camp [129,149,0] has no seeded roster or knowledge."
+      "expected_visible_fact": "Load unchanged R042 pre-signal payload with only initial player relocation145,153,0 and final all-home distance audit. Qualify actual terrain/support/emission and native reach before scoring; layout15 is not native observer15."
     },
     {
       "kind": "native_semantic_bootstrap",
@@ -111,7 +112,7 @@
     {
       "kind": "cockpit_live_session",
       "label": "native_r042_rural_journey_b",
-      "objective": "From this independent unlit pre-signal rural roof save, follow the shared roof start and normal lighter route. Verify native physical light and smoke before each faction's admission; track real scout IDs, watch, return/report and selected response IDs. For A, follow the cannibal approach through entry, stairs and combat. For B, also follow the distinct southern bandit camp through discovery and a saved prechoice Pay/Fight branch with actual payment or combat. Keep nearest useful native response/prechoice saves for scoped continuations.",
+      "objective": "At saved field145,153,0, establish usable native physical footing and a genuinely emitting source while player remains near SOURCE and all homes remain remote. Audit every inherited footprint, then native observer XYZ/distance/cap, weather, exposure and identity separately for bandit129,149 and cannibal135,137. No assumed shared reach, forced signal or camp/actor/history rewrite. Follow genuinely admitted native scouting/response/return and persistence, or retain the actual source/route/authorization refusal; inherited cabin103,167 remains distinct.",
       "proof_targets": [
         "byte-exact fixture/profile identity and same-run native World/action/save/reload",
         "current fire/fuel/weather and source-bound light plus smoke packets",
@@ -157,7 +158,7 @@
     "claim": "R042 countryside B: A plus one normal unseeded southern bandit camp; assess factions separately. Native faction behavior requires fresh gameplay receipts.",
     "failure_rule": "Offline fixture and binding checks grant no signal, roster, raid, building, payment or combat proof."
   },
-  "fixture": "r042_rural_roof_dual_faction_b_v1",
+  "fixture": "r042_rural_dual_faction_remote_v1",
   "fixture_profile": "live-debug",
   "replace_existing_worlds": true,
   "post_relaunch": {

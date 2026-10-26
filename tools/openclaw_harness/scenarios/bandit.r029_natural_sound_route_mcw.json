@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "bandit.r029_natural_sound_route_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Current-source R-029 bandit sound-route witness. The disposable fixture supplies an unloaded firearm, ammunition, stabilizers, roof and a nearby overmap-special footprint. Placement and ordinary structural roster materialization are zero-credit; the nearer camp has no concrete observer until maintenance creates one, so verify its concrete at-home member/readiness on the following staffed-observer cadence before emitting the stimulus. The player must load and fire through product UI before any observation, lead or response receives credit.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",

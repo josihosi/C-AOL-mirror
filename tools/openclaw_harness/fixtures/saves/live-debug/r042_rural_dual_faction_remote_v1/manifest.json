@@ -1,0 +1,45 @@
+{
+  "name": "r042_rural_dual_faction_remote_v1",
+  "source_fixture": "r042_rural_roof_dual_faction_b_v1",
+  "source_profile": "live-debug",
+  "description": "Default15 remote derivative of the unchanged pre-signal dual-faction R042 payload. Move only initial player to existing field145,153,0. Audit bandit129,149, cannibal135,137, inherited cabin103,167 and every additional home footprint. Preserve original rosters, clocks, ownership and old cabin knowledge. This is no guaranteed common signal envelope: each real recipient, native distance/cap and source identity must qualify separately. Keep emitter loaded/active with player near SOURCE and HOME remote; native terrain/emission/save/reload adoption remains open. No new source/camp/actor/history injected.",
+  "setup_classification": {
+    "kind": "representative_candidate",
+    "minimum_footprint_edge_omt": 15,
+    "default_footprint_edge_omt": 15,
+    "native_source_qualified": false,
+    "native_prepared_save_adopted": false
+  },
+  "gameplay_credit": false,
+  "save_transforms": [
+    {
+      "kind": "player_near_overmap_special",
+      "player_save": "#VGVzdDAw.sav.zzip",
+      "special_id": "bandit_camp",
+      "site_index": 1,
+      "offset_omt": [
+        16,
+        4,
+        0
+      ]
+    },
+    {
+      "kind": "representative_human_source_geometry",
+      "player_save": "#VGVzdDAw.sav.zzip",
+      "source_area_omt": [
+        [
+          145,
+          153,
+          0
+        ]
+      ],
+      "expected_source_terrain_id": "field",
+      "expected_home_site_ids": [
+        "overmap_special:bandit_camp@129,149,0",
+        "overmap_special:bandit_cabin@103,167,0",
+        "overmap_special:cannibal_camp@135,137,0"
+      ],
+      "minimum_distance_omt": 15
+    }
+  ]
+}

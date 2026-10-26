@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "writhing_stalker.live_light_continuity_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Native light-continuity spoke: a night lamp is visible to a saved stalker while the player uses only advertised movement/wait owners, allowing same-run light sample, expiry and waypoint evidence.",
   "capabilities": {
     "runtime.entry_mode": "cockpit_live_session",

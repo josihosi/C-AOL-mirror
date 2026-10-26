@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_051_open_building_r050_20261005",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "R051 open-building signal comparison from an exact fresh R050 bandit-only start. Keep the retained added bandit camp; open the real nearby window/door by ordinary native actions, then compare physical light and smoke and follow only naturally admitted added-site actors.",
   "profile": "r051-open-building-r050-20261005",
   "world": "TestSetup00",

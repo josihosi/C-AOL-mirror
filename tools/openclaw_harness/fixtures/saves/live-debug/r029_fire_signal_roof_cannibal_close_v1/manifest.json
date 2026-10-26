@@ -2,6 +2,7 @@
   "name": "r029_fire_signal_roof_cannibal_close_v1",
   "source_fixture": "r008_fire_signal_roof_bandit_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-029 close cannibal signal footing. Uses the known-valid one-OMT source/camp placement from the R-029 sound route while supplying no signal, lead, roster, report, or operation state.",
   "save_transforms": [
     {

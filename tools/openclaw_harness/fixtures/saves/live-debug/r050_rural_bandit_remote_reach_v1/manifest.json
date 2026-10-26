@@ -1,0 +1,91 @@
+{
+  "name": "r050_rural_bandit_remote_reach_v1",
+  "source_fixture": "r050_rural_roof_bandit_only_v1",
+  "source_profile": "live-debug",
+  "description": "Reach-compatible hard-minimum alternative to unchanged default15 r050_rural_bandit_remote_v1. Reuse the exact maintained pre-signal payload; move only initial player to saved field140,138,0. Full camp edge11/cabin37 differs from native observer distance. Original Mixed later physically qualified an elevated source140,138,1 at native15/cap16 on its own continuation; that history is NOT copied here. Fresh Luna setup must create usable physical elevation/support and a genuinely charged enabled cone source, remain near SOURCE, end any close-HOME visits, and qualify current weather/night/exposure/intensity/range before source-associated travel. No platform, vehicle, battery, light, lead, report or party is authored. Native geometry/emission/save/reload adoption remains required; hard10 exception is not default15 credit.",
+  "setup_classification": {
+    "kind": "representative_candidate",
+    "minimum_footprint_edge_omt": 10,
+    "default_footprint_edge_omt": 15,
+    "native_source_qualified": false,
+    "native_prepared_save_adopted": false
+  },
+  "gameplay_credit": false,
+  "save_transforms": [
+    {
+      "kind": "player_near_overmap_special",
+      "player_save": "#VGVzdDAw.sav.zzip",
+      "special_id": "bandit_camp",
+      "site_index": 1,
+      "offset_omt": [
+        11,
+        -11,
+        0
+      ]
+    },
+    {
+      "kind": "representative_human_source_geometry",
+      "player_save": "#VGVzdDAw.sav.zzip",
+      "source_area_omt": [
+        [
+          140,
+          138,
+          0
+        ]
+      ],
+      "expected_source_terrain_id": "field",
+      "expected_home_site_ids": [
+        "overmap_special:bandit_camp@129,149,0",
+        "overmap_special:bandit_cabin@103,167,0"
+      ],
+      "minimum_distance_omt": 10
+    }
+  ],
+  "native_setup_recipe": {
+    "evidence_class": "candidate setup only; no native source/reach/save adoption credit",
+    "initial_source_omt": [
+      140,
+      138,
+      0
+    ],
+    "candidate_emitter_omt": [
+      140,
+      138,
+      1
+    ],
+    "candidate_source_part_ms": [
+      3372,
+      3323,
+      1
+    ],
+    "candidate_player_standing_ms": [
+      3372,
+      3324,
+      1
+    ],
+    "finite_platform": {
+      "terrain_id": "t_flat_roof",
+      "inclusive_min_ms": [
+        3370,
+        3322,
+        1
+      ],
+      "inclusive_max_ms": [
+        3374,
+        3326,
+        1
+      ],
+      "cells": 25,
+      "owner": "ordinary supported native map-editor setup; not a fixture terrain transform"
+    },
+    "emitter": "Complete ordinary car with genuine battery/power and enabled cone headlights; disconnected lamp/frame is insufficient. Face real observer using native controls and verify actual cone/emission/exposure, never infer from item presence.",
+    "qualification": "Native current source packet plus exact observer/source distance, night/weather cap, LOS and freshness; native save/reload and current power revalidation before scoring. Prior observed night15/cap16 is a recipe premise, not a promised result.",
+    "forbidden_substitutions": [
+      "copy evolved world/vehicle UID or report",
+      "move home or actors",
+      "inject signal/light or power state",
+      "reuse old lead as fresh evidence"
+    ],
+    "distance_contract": "Conservative nearest full-home edge11 >=hard10, below default15. Native observer distance15/cap16 is a separate historically qualified candidate; all values revalidated in new setup."
+  }
+}

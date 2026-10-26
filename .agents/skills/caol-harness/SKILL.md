@@ -39,10 +39,12 @@ condition earns no proof of the bypassed natural stage, but subsequent native be
 prove the downstream question. Use [setup and interactions](references/setup-and-interactions.md)
 for mutation effects and [scenario composition](GAME-MANUAL.md#compose-a-useful-scenario) for examples.
 
-For camp/tower signal and response stories, use meaningful home-to-source separation and real
-travel, not an adjacent brazier as the default. Record actual OMT distance and choose it against
-the source's measured reach and the scenario's purpose. Near-contact fixtures prove only their
-focused boundary; they cannot supply the sole distant discovery/journey proof. Follow
+For representative camp/tower signal and response stories, require at least 10 OMTs of
+player/activity-source separation from participating camp/tower footprints. Use substantially
+greater separation for 30–40 OMT reach scenarios. Record actual distances and measured source
+reach. Closer fixtures are labelled focused controls and do not prove representative remote
+behavior; close-home setup visits end before the remote leg while the emitter stays actively
+simulated. Follow
 [representative source placement](references/smoke-light-visibility.md#representative-source-placement).
 
 ## Starting a game

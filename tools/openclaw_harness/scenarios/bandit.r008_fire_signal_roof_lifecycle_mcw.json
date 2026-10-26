@@ -1,10 +1,11 @@
 {
   "manifest_version": 1,
   "name": "bandit.r008_fire_signal_roof_lifecycle_mcw",
-  "description": "Outcome-sized exposed-roof R-008 laboratory. Setup receipts prove only the generated roof, distributed fuel, source zone, fire tools, and existing camp zones. The worker creates the fire through ordinary player UI, retreats exactly two map tiles with a native movement receipt, then owns a long production observation through whichever signal, approach, camp, bubble, return, and persistence boundaries the run can honestly settle.",
+  "setup_classification": {"kind": "representative_candidate", "native_source_qualified": false, "native_prepared_save_adopted": false},
+  "description": "Representative R008 bandit roof journey with unchanged source140,31 and nearest full home edge20 verified after all inherited transforms; native source reach and adoption must still qualify.",
   "profile": "dev-harness",
   "world": "McWilliams",
-  "fixture": "r008_fire_signal_roof_bandit_v1",
+  "fixture": "r008_fire_signal_roof_remote_v1",
   "fixture_profile": "live-debug",
   "replace_existing_worlds": true,
   "capabilities": {
@@ -23,8 +24,8 @@
     "permissions": ["accessibility", "screen-recording"],
     "platform": ["macos"],
     "profile": "dev-harness",
-    "fixture": "r008_fire_signal_roof_bandit_v1",
-    "requirements": {"os": "macos", "source": "current-worktree", "executable": "cataclysm-tiles", "profile": "dev-harness", "fixture": "r008_fire_signal_roof_bandit_v1", "helper": "Peekaboo", "peekaboo": true, "input": ["ordinary fire setup and worker-owned live cockpit"], "ocr": true, "cleanup": true},
+    "fixture": "r008_fire_signal_roof_remote_v1",
+    "requirements": {"os": "macos", "source": "current-worktree", "executable": "cataclysm-tiles", "profile": "dev-harness", "fixture": "r008_fire_signal_roof_remote_v1", "helper": "Peekaboo", "peekaboo": true, "input": ["ordinary fire setup and worker-owned live cockpit"], "ocr": true, "cleanup": true},
     "grants_gameplay_proof": false
   },
   "steps": [

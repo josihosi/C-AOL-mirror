@@ -20,6 +20,33 @@ API versus local). Reuse an observed compatible journey for several checks while
 which actual transitions it exercised. Select current registry/build bindings at execution;
 no row invents a registry manifest or guarantees an old save still exists.
 
+## Representative starts and inherited saves
+
+For C1–C4 full signal/scout/response journeys, participating hostile homes must be at least
+10 OMT from the player activity/source area; prepare15 OMT by default. Measure to actual
+footprint edges using the game's OMT distance, not a map-screen impression. Keep the source
+actually emitting while its recipient home is remote. Dedicated30–40 OMT cases exercise the
+implemented reach separately. This does not change the scout's eventual close lookout distance,
+combat approach or any product perception radius.
+
+An inherited fixture is not automatically representative. Before selecting a prepared save as
+a full-story start, verify its actual player/source/home geometry after all transforms, including
+inherited and additional participating camps. A below-minimum or unmeasured layout is not a
+representative start. Correct its preparation recipe and regenerate through the existing setup
+owner, then verify the resulting save and native launch. Do not patch only anchor coordinates:
+terrain/special footprint, original roster/body homes, source identity and native ownership must
+agree. Never move an in-flight party to manufacture a completed journey.
+
+Known legacy reuse traps: the R008/R029/R033 signal-fixture families include explicit1/3/6-OMT
+placements; these remain labelled channel/occlusion/component controls. The historical R050
+camp129,149 is only6 OMT from source131,143, regardless of its farther cabin. The
+bandit_scout_to_decision_observer_v0_2026-08-06 producer places a camp at offset[2,4,0], so it
+is also not a representative-distance start. Mixed performance fixtures that pre-stage parties
+remain load probes, not natural journey proof. Preserve historical IDs/results; stop reusing
+these as positive full-story defaults. Existing exact regression controls can keep their geometry
+and narrow purpose. Retire obsolete generated copies through their save/input owner after useful
+continuations are settled; no backup collection or blanket historical replay.
+
 ## Release coverage catalogue
 
 | ID / recipe | Original cases and maintained instructions | Required release coverage and adjustments |

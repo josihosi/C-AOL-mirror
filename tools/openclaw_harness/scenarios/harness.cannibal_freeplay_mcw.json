@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "harness.cannibal_freeplay_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Explore the exposed roof and nearby ecology as a player. Qualify sustained native waiting and useful time/distance observation, deliberately cancel a pending operation and continue in the same game, and retrieve the identities or transitions needed to explain developing signals or faction state. Choose a meaningful game-time boundary from the current scene and observed rate. Ordinary fire tools and roof fuel are supplied as zero-credit setup. This qualifies reusable control, observation and resource behavior; a full cannibal raid verdict is later product work.",
   "profile": "harness-cannibal-freeplay",
   "config_profile": "dev-harness",

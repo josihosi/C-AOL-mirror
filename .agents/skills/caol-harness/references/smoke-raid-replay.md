@@ -26,8 +26,14 @@ setup and remaining outcome. Include `RUN` (native run directory), `PROFILE` and
 from that binding for the queries below. Registry selection reuses its profile; it does not
 create a disposable copy. Use a preserved-copy manifest for independent starts.
 
-For the normalized closed-window setup: indoor brazier `[3159,3449,0]`, camp OMT
-`[131,143,0]`. Closed windows isolate smoke from exterior light. Verify current state once;
+The historical normalized closed-window source is `[3159,3449,0]`, in OMT `[131,143,0]`;
+that OMT identifies the player/basecamp location, not an acceptable hostile-home default.
+This old setup is a source/window control, not a representative distant raid start. For full
+stories, select a maintained pre-signal save with hostile homes at least10 OMT from the
+source/player activity area (default15), measured to the nearest home-footprint edge. Verify
+actual footprints in the save; an old recipe name or manifest does not certify distance.
+Keep the emitter in active simulation while the home is remote. Closed windows isolate smoke
+from exterior light. Verify current state once;
 a diagnostic continuation may already have fire, scouts or raid knowledge and must retain that narrower credit. Full-start ignition requires the intended unlit source; do not silently replace it with an already-burning checkpoint. Keep ordinary vision for this
 arm. Use the current observation/menu; collect any pending request before issuing another.
 

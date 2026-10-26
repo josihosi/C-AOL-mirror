@@ -2,6 +2,7 @@
   "name": "r029_bandit_gunfire_in_range_v1",
   "source_fixture": "r008_fire_signal_roof_bandit_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-029 bandit sound-route footing. Setup supplies a roof, an unloaded revolver with compatible ammunition, stabilizer traits, and a non-colliding nearby bandit camp. It writes no significant sound, lead, scout, report, decision, operation, contact, or hostile actor state. Equipment and camp placement are zero-credit; the player must load and fire through ordinary game UI before production may observe a sound.",
   "save_transforms": [
     {

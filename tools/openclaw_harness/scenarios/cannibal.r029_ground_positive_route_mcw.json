@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "cannibal.r029_ground_positive_route_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "R-029 positive same-elevation source/camp geometry for native staffed significant-sound observation.",
   "profile": "r029-sound-observer-repair-001",
   "config_profile": "r029-sound-observer-repair-001",

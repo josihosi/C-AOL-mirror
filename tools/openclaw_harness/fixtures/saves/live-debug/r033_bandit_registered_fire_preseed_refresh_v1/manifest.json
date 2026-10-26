@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_fire_preseed_refresh_v1",
   "source_fixture": "r033_bandit_registered_fire_samelevel_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 zero-credit preseed validation. The inherited maintained-fire footing is unchanged; this transform adds one durable signal lead with the exact native smoke identity but intentionally low confidence. The native fire callback must refresh that lead; the authored lead is setup only.",
   "save_transforms": [
     {

@@ -2,6 +2,7 @@
   "name": "r033_bandit_light_only_observer_v1",
   "source_fixture": "r008_fire_signal_roof_bandit_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 isolated physical-light footing. It sets a night turn and places one f_exodii_lamp (native light_emitted 90) at a named roof offset, with a nearby seeded bandit camp and a concrete observer-plus-escort candidate pair. The copied map contains no injected fd_fire or fd_smoke, no significant sound, and no authored lead, dispatch, report, operation, contact, or hostile actor state. Fixture placement, registration, and roster materialization are zero-credit; only a bound production scan, a later eligible staffed-camp read, and a native scheduler decision can establish observation or an approach.",
   "save_transforms": [
     {

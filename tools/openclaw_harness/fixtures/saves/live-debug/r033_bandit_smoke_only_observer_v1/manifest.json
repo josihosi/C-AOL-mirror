@@ -2,6 +2,7 @@
   "name": "r033_bandit_smoke_only_observer_v1",
   "source_fixture": "r008_fire_signal_roof_bandit_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 isolated physical-smoke footing. It stages one primed smoke grenade on the verified solid tile-flat roof two map squares east of the avatar, so native item processing starts its smoke emission immediately before the first eligible callback without a z-level fall, plus a nearby seeded bandit camp with a concrete candidate observer. The copied map contains no injected fd_smoke/fd_fire, no luminous furniture/item, no significant sound, and no authored lead, dispatch, report, operation, contact, or hostile actor state. Item activation state and camp registration are zero-credit; only native emission, a bound production scan, and a later eligible staffed-camp read can establish observation.",
   "save_transforms": [
     {

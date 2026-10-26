@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_smoke_samelevel_v3",
   "source_fixture": "r008_fire_signal_common_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 same-level successor. It starts on the audited solid z0 floor at [3372,996,0], retains only the exact empty registered bandit site overmap_special:bandit_camp@140,40,0 and its at-home, unwounded observer id 18, equips that observer with a binocular optic for the native OMT sight calculation, then stages one active smokebomb_act on verified ground inside the staffed camp's anchor OMT at [3374,983,0]. The source expires well after the first two five-minute cadences. Registration, optic assignment, and item activation are zero-credit setup only; no field, light, sound, lead, report, operation, contact, dispatch, or local projection is authored.",
   "save_transforms": [
     {

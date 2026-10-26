@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_smoke_pairedsites_v4",
   "source_fixture": "r008_fire_signal_common_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 paired-site successor. It starts on the audited solid z0 floor at [3372,996,0], pre-registers both native-visible bandit sites (staffed 140,40 with at-home unwounded observer id 18, and empty inherited 140,51), then stages one active same-level smokebomb_act two tiles east. Both site registrations and item activation are zero-credit setup only; no field, light, sound, lead, report, operation, contact, dispatch, or local projection is authored.",
   "save_transforms": [
     {"kind": "player_mutations", "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip", "mutations": ["DEBUG_LS", "DEBUG_NOTEMP", "DEBUG_STAMINA", "DEBUG_CARDIO", "DEBUG_CLAIRVOYANCE", "DEBUG_NIGHTVISION"]},

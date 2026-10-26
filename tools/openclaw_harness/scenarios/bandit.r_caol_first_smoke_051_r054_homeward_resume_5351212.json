@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_051_r054_homeward_resume_5351212",
+  "setup_classification": {"kind": "historical_continuation", "reason": "Retained same-world saved journey; never reinstall or reset from its legacy fixture reference. No representative fresh-start credit.", "representative_remote_credit": false},
   "description": "R051 R054 saved-world successor segment after native quicksave at turn5351212; same bandit scouts and build.",
   "profile": "first-smoke-051-r054-homeward-resume5351212-20261001",
   "world": "TestSetup00",

@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "bandit.r033_registered_smoke_callback_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Current-source R-033 successor: an isolated active native smoke item is held across the first authoritative staffed-observer cadence from a separately audited registered idle camp. Fixture registration and item activation are zero credit. The run must preserve the first source-bound scan and the following actual callback/lead result without conflating other channels.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",

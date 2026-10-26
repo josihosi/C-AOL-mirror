@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.live_world_exposed_sight_avoid_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Scenario 3 for cannibal camp night-raid live matrix: start from exposed-scout footing, seed a camp-shaped cannibal_camp, advance a bounded 20-turn live window, and prove the cannibal-specific local gate treats recent sight/exposure as hold_off/non-combat/non-shakedown rather than attack_now or visible-beeline credit. The inherited bandit_camp reposition artifact, if present, is a control/source-fixture artifact and must not satisfy cannibal proof.",
   "profile": "dev-harness",
   "world": "McWilliams",

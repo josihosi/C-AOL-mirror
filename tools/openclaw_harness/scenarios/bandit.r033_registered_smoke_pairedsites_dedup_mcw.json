@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "bandit.r033_registered_smoke_pairedsites_dedup_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "R-033 paired-site same-level successor. It evaluates one source-bound native smokebomb emission after both native-visible bandit sites have been registered zero-credit: first callback/lead creation, then unchanged identity/dedup on the next cadence.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",

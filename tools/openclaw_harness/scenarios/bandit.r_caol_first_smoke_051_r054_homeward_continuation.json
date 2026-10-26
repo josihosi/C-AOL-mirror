@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_051_r054_homeward_continuation",
+  "setup_classification": {"kind": "historical_continuation", "reason": "Retained same-world saved journey; never reinstall or reset from its legacy fixture reference. No representative fresh-start credit.", "representative_remote_credit": false},
   "description": "R051 homeward continuation from the exact R053 native quicksave at turn 5351211, rebound to the accepted immutable R054 build.",
   "profile": "first-smoke-051-r054-homeward-20261001",
   "world": "TestSetup00",

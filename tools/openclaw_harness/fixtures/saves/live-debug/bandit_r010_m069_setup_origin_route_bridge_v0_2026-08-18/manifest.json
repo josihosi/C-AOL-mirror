@@ -2,6 +2,7 @@
   "name": "bandit_r010_m069_setup_origin_route_bridge_v0_2026-08-18",
   "source_fixture": "bandit_scout_to_decision_observer_southwest_v0_2026-08-07",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Prepared clone/route/roster fixture; preserve its exact local geometry and existing history. Not a representative fresh remote journey.", "representative_remote_credit": false},
   "description": "R010-M069 setup-only origin bridge: preserve the southwest observer corridor and move the avatar from its saved observer footing to the retained homeward OMT (160,39,0). No ecology or gameplay state is injected.",
   "save_transforms": [
     {

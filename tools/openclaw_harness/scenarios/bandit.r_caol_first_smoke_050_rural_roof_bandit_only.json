@@ -1,7 +1,8 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_050_rural_roof_bandit_only",
-  "description": "R050 rural roof bandit-only control derived from untouched B: preserve both bandit sites and ordinary unsignaled behavior while removing the nearby cannibal camp interference.",
+  "setup_classification": {"kind": "representative_candidate", "native_source_qualified": false, "native_prepared_save_adopted": false},
+  "description": "R050 representative default15 fresh source-associated journey from the unchanged maintained bandit-only payload; original close-roof controls and historical continuations remain separate.",
   "profile": "first-smoke-050-rural-bandit-only-20260930",
   "world": "TestSetup00",
   "observer_character": true,
@@ -69,13 +70,13 @@
       "macos"
     ],
     "profile": "first-smoke-050-rural-bandit-only-20260930",
-    "fixture": "r050_rural_roof_bandit_only_v1",
+    "fixture": "r050_rural_bandit_remote_v1",
     "requirements": {
       "os": "macos",
       "source": "current-worktree",
       "executable": "cataclysm-tiles",
       "profile": "first-smoke-050-rural-bandit-only-20260930",
-      "fixture": "r050_rural_roof_bandit_only_v1",
+      "fixture": "r050_rural_bandit_remote_v1",
       "helper": "none",
       "peekaboo": false,
       "input": [
@@ -92,7 +93,7 @@
       "label": "load_r050_bandit_only_baseline",
       "seconds": 1.0,
       "capture_after": true,
-      "expected_visible_fact": "Load exact R050 45-file pre-signal bandit-only rural roof start at turn 5216234. House, roof, braziers, weather, added bandit_camp [129,149,0], inherited bandit_cabin [103,167,0] and its old lead match the parent. The cannibal camp placement and terrain are absent. Verify effective userdir, exact executable, World, safe mode, mutations and pending input; the fixture has no new bandit lead, report, roster or operation."
+      "expected_visible_fact": "Load maintained R050 pre-signal bytes plus initial-player-only remote transform145,149,0 and final all-home footprint audit. Original homes/rosters/clocks/history must be unchanged; old roof131,143 is not this source. Geometry alone gives no terrain/emission/reach or gameplay credit. Verify exact userdir/executable/World and supported native setup before scoring."
     },
     {
       "kind": "native_semantic_bootstrap",
@@ -111,7 +112,7 @@
     {
       "kind": "cockpit_live_session",
       "label": "native_r050_bandit_only_journey",
-      "objective": "From this independent unlit roof baseline, use ordinary lighter and verified brazier controls to establish physical smoke. Follow the added bandit camp at [129,149,0] through native admission, same-ID scouting/watch/return/report, demand and a saved pre-choice Pay/Fight boundary. For the peaceful branch, verify actual loot transfer, departure and return. Distinguish the inherited distant cabin by site ID and preserve normal bandit supply, drive and cadence.",
+      "objective": "From existing field145,149,0 at full-home-edge15, establish useful physical source footing and a genuine emitting source with ordinary supported setup. Keep player near SOURCE and HOME remote; end close-home setup visits before scoring. Measure actual recipient/source XYZ, native distance, cap, weather and exposure; layout15 is not native15. If the source cannot reach, retain the exact refusal and use the separately declared hard10-compatible alternative only as a new setup choice, never by moving homes or resetting current history. Follow only genuinely admitted same-ID scouts through watch/return/report and real response, saved pre-choice Pay/Fight and downstream ordinary loot/departure/return. Keep inherited cabin103,167 separate; no signal/report/claim/actor injection.",
       "proof_targets": [
         "byte-exact selected fixture and same-run native World/action/quicksave/reload",
         "current roof fire/fuel/weather and physical source-bound smoke packet",
@@ -154,10 +155,10 @@
     ]
   },
   "evidence_contract": {
-    "claim": "R050 bandit-only rural roof start permits an uncontaminated native bandit journey; the fixture itself grants no gameplay proof.",
+    "claim": "Default15-layout R050 pre-signal source-associated native journey; layout is setup only, actual source reach and native stages require fresh proof.",
     "failure_rule": "Offline selection and load do not prove smoke admission, scouting, demand, payment or departure."
   },
-  "fixture": "r050_rural_roof_bandit_only_v1",
+  "fixture": "r050_rural_bandit_remote_v1",
   "fixture_profile": "live-debug",
   "replace_existing_worlds": true,
   "post_relaunch": {

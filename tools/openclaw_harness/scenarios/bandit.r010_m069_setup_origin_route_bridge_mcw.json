@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r010_m069_setup_origin_route_bridge_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "R010-M069 setup-only bridge: establish the avatar at retained (160,39,0), preflight that authoritative origin, then prove the ordinary CHOOSE_DESTINATION route back to (162,36,0) is nonempty before any ecology lifecycle.",
   "profile": "dev-harness",
   "world": "McWilliams",

@@ -2,6 +2,7 @@
   "name": "r033_bandit_light_continuity_stalker_v1",
   "source_fixture": "r033_bandit_light_only_observer_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 physical night lamp plus one saved hostile writhing stalker. The lamp remains the only authored cue; stalker light memory must come from the live production scan, never an injected target or memory field.",
   "save_transforms": [
     {

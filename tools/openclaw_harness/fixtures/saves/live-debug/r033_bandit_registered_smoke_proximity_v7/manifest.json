@@ -2,6 +2,7 @@
   "name": "r033_bandit_registered_smoke_proximity_v7",
   "source_fixture": "r008_fire_signal_common_v1",
   "source_profile": "live-debug",
+  "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
   "description": "R-033 proximity successor with a native, player-controlled smoke source. It preserves the registered same-level binocular observer and camp footing from v6, equips one inactive smokebomb in the live-accessible wielded slot, and leaves activation and source movement to native semantic actions.",
   "save_transforms": [
     {"kind": "player_mutations", "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip", "mutations": ["DEBUG_LS", "DEBUG_NOTEMP", "DEBUG_STAMINA", "DEBUG_CARDIO", "DEBUG_CLAIRVOYANCE", "DEBUG_NIGHTVISION"]},

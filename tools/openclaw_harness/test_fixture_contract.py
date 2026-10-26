@@ -11543,5 +11543,128 @@ class RepresentativeHumanSourceGeometryTest(unittest.TestCase):
                              [row["kind"] for row in resolved["save_transforms"]])
 
 
+class MaintainedRepresentativeMigrationTest(unittest.TestCase):
+    cases = {
+        "r050_rural_bandit_remote_v1": ("TestSetup00", (145, 149, 0), 15, [42, 15]),
+        "r050_rural_bandit_remote_reach_v1": ("TestSetup00", (140, 138, 0), 10, [37, 11]),
+        "r042_rural_dual_faction_remote_v1": ("TestSetup00", (145, 153, 0), 15, [42, 15, 15]),
+        "r008_fire_signal_roof_remote_v1": ("McWilliams", (140, 31, 1), 15, [84, 20, 138]),
+    }
+
+    def test_actual_saved_terrain_and_all_inherited_home_edges(self) -> None:
+        # Read maintained payloads, never the live/prepared peer continuation.
+        for name, (world, position, minimum, distances) in self.cases.items():
+            with self.subTest(fixture=name):
+                resolved = resolve_fixture_payload(name, "live-debug")
+                base = resolved["save_src"] / world
+                guard = resolved["save_transforms"][-1]
+                before = {p: p.read_bytes() for p in base.iterdir() if p.is_file()}
+                # Initial placement/roof transforms are separately controlled;
+                # measure their intended final position against REAL saved facts.
+                with mock.patch("startup_harness.load_player_abs_omt",
+                                return_value=(position, [position[0] * 24 + 12,
+                                                         position[1] * 24 + 12, position[2]])):
+                    result = audit_representative_human_source_geometry(base, guard)
+                self.assertEqual(result["minimum_distance_omt"], minimum)
+                self.assertEqual([row["nearest_footprint_distance_omt"] for row in result["homes"]], distances)
+                self.assertEqual(result["source_area_omt"], [list(position)])
+                self.assertFalse(result["gameplay_credit"])
+                self.assertIn("actual source and emission", result["native_qualification_required"])
+                self.assertEqual({p: p.read_bytes() for p in before}, before)
+                self.assertFalse((resolved["fixture_dir"] / "save").exists())
+
+    def test_new_player_only_recipes_preserve_actual_home_state(self) -> None:
+        import startup_harness as startup
+        for name in ("r050_rural_bandit_remote_reach_v1", "r042_rural_dual_faction_remote_v1"):
+            with self.subTest(fixture=name), tempfile.TemporaryDirectory() as temporary:
+                resolved = resolve_fixture_payload(name, "live-debug")
+                base = resolved["save_src"] / "TestSetup00"
+                world = Path(temporary) / "World"
+                world.mkdir()
+                dimension = world / "dimension_data.gsav"
+                dimension.write_bytes((base / dimension.name).read_bytes())
+                player = world / "player.sav.zzip"
+                initial = {"turn": 5216234, "om_x": 0, "om_y": 0, "levx": 262,
+                           "levy": 286, "levz": 0, "player": {"location": [3156, 3444, 0],
+                           "inv": [{"typeid": "lighter", "uid": 117}], "hp": 81}}
+                player.write_text(json.dumps(initial))
+                transforms = json.loads(json.dumps(resolved["save_transforms"]))
+                self.assertEqual([row["kind"] for row in transforms],
+                                 ["player_near_overmap_special", "representative_human_source_geometry"])
+                for row in transforms:
+                    row["player_save"] = player.name
+                placements = startup.load_bandit_special_placements(
+                    HARNESS_DIR.parents[1], base,
+                    set(startup.BANDIT_HOME_SPECIAL_IDS) | {"cannibal_camp"})
+                dimension_before = dimension.read_bytes()
+                source_point = transforms[-1]["source_area_omt"][0]
+                native_terrain = startup.saved_overmap_terrain_id(base, tuple(source_point))
+                with mock.patch("startup_harness.run_zzip", side_effect=PlayerMutationsTransformContractTest.fake_zzip), \
+                        mock.patch("startup_harness.load_bandit_special_placements", return_value=placements), \
+                        mock.patch("startup_harness.saved_overmap_terrain_id",
+                                   side_effect=lambda _world, point: native_terrain if list(point) == source_point else None):
+                    reports = apply_fixture_save_transforms(world, transforms)
+                position = self.cases[name][1]
+                expected = json.loads(json.dumps(initial))
+                expected["player"]["location"] = [position[0] * 24 + 12, position[1] * 24 + 12, position[2]]
+                expected.update(levx=position[0] * 2, levy=position[1] * 2, levz=position[2])
+                self.assertEqual(json.loads(player.read_text()), expected)
+                self.assertEqual(dimension.read_bytes(), dimension_before)
+                self.assertEqual(reports[-1]["player_omt"], list(position))
+                self.assertFalse(player.with_suffix("").exists())
+
+    def test_representative_declarations_bind_the_correct_recipe_everywhere(self) -> None:
+        cases = {
+            "bandit.r_caol_first_smoke_050_rural_roof_bandit_only": "r050_rural_bandit_remote_v1",
+            "bandit.r050_representative_remote_reach_mcw": "r050_rural_bandit_remote_reach_v1",
+            "bandit.r_caol_first_smoke_042_rural_roof_b": "r042_rural_dual_faction_remote_v1",
+            "bandit.r008_fire_signal_roof_lifecycle_mcw": "r008_fire_signal_roof_remote_v1",
+        }
+        for name, fixture in cases.items():
+            with self.subTest(scenario=name):
+                scenario = load_scenario(name)
+                self.assertEqual(scenario["setup_classification"]["kind"], "representative_candidate")
+                self.assertEqual(scenario["fixture"], fixture)
+                self.assertEqual(scenario["runtime_contract"]["fixture"], fixture)
+                self.assertEqual(scenario["runtime_contract"]["requirements"]["fixture"], fixture)
+                self.assertEqual(resolve_fixture_payload(fixture, "live-debug")["save_transforms"][-1]["kind"],
+                                 "representative_human_source_geometry")
+                self.assertFalse(scenario["runtime_contract"]["grants_gameplay_proof"])
+
+    def test_close_controls_and_saved_continuations_keep_their_owners(self) -> None:
+        for name in ("r033_bandit_registered_smoke_observer_v2",
+                     "bandit_scout_to_decision_observer_v0_2026-08-06",
+                     "r008_fire_signal_roof_cannibal_v1"):
+            resolved = resolve_fixture_payload(name, "live-debug")
+            self.assertEqual(resolved["manifest"]["setup_classification"]["kind"], "focused_control")
+            self.assertNotIn("representative_human_source_geometry",
+                             [row["kind"] for row in resolved["save_transforms"]])
+        for name in ("bandit.r_caol_first_smoke_051_r054_homeward_continuation",
+                     "bandit.r_caol_first_smoke_051_r054_homeward_resume_5351212"):
+            scenario = load_scenario(name)
+            self.assertEqual(scenario["setup_classification"]["kind"], "historical_continuation")
+            self.assertEqual(scenario["fixture"], "r050_rural_roof_bandit_only_v1")
+            self.assertNotIn("representative_candidate", scenario["setup_classification"]["kind"])
+
+    def test_reach_alternative_does_not_claim_copied_emission_or_default_fifteen(self) -> None:
+        resolved = resolve_fixture_payload("r050_rural_bandit_remote_reach_v1", "live-debug")
+        self.assertEqual(resolved["payload_fixture"], "r050_rural_roof_bandit_only_v1")
+        manifest = resolved["manifest"]
+        self.assertEqual(manifest["setup_classification"]["minimum_footprint_edge_omt"], 10)
+        self.assertFalse(manifest["setup_classification"]["native_source_qualified"])
+        self.assertFalse(manifest["setup_classification"]["native_prepared_save_adopted"])
+        recipe = manifest["native_setup_recipe"]
+        self.assertEqual(recipe["candidate_source_part_ms"], [3372, 3323, 1])
+        self.assertEqual(recipe["finite_platform"]["cells"], 25)
+        self.assertEqual(recipe["finite_platform"]["inclusive_min_ms"], [3370, 3322, 1])
+        self.assertEqual(recipe["finite_platform"]["inclusive_max_ms"], [3374, 3326, 1])
+        self.assertIn("not a fixture terrain transform", recipe["finite_platform"]["owner"])
+        self.assertEqual([row["kind"] for row in resolved["save_transforms"]],
+                         ["player_near_overmap_special", "representative_human_source_geometry"])
+        default = resolve_fixture_payload("r050_rural_bandit_remote_v1", "live-debug")
+        self.assertEqual(default["save_transforms"][-1]["minimum_distance_omt"], 15)
+        self.assertEqual(default["save_transforms"][-1]["source_area_omt"], [[145, 149, 0]])
+
+
 if __name__ == "__main__":
     unittest.main()

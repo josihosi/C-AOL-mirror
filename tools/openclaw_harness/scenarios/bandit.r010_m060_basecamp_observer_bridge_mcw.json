@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r010_m060_basecamp_observer_bridge_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "Narrow R010-M060 proof that the southwest observer fixture's registered player basecamp reaches the first loaded production observer consumer. It stops after the next structural cadence and does not dispatch, return, report, decide, or create a hostile operation.",
   "profile": "dev-harness",
   "world": "McWilliams",

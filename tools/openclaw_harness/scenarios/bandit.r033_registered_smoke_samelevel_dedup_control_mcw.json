@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "bandit.r033_registered_smoke_samelevel_dedup_control_mcw",
+  "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
   "description": "R-033 falsifying control for the retained OMT divergence. It keeps the active same-level smokebomb centered in one OMT; if the observer still creates a second lead at the next cadence, production identity/dedup is implicated. Fixture registration and activation are zero credit.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",
