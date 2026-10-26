@@ -25081,12 +25081,17 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
 
         if kind == "representative_human_source_geometry":
             allowed = {"kind", "player_save", "source_area_omt", "expected_home_site_ids",
-                       "minimum_distance_omt", "expected_source_terrain_id"}
+                       "minimum_distance_omt", "expected_source_terrain_id", "expected_migo_site_ids"}
             source_area = raw.get("source_area_omt")
             expected_homes = raw.get("expected_home_site_ids")
             minimum = raw.get("minimum_distance_omt", 15)
             expected_terrain = raw.get("expected_source_terrain_id")
+            expected_migo = raw.get("expected_migo_site_ids", [])
             if (set(raw) - allowed or not player_save or
+                    not isinstance(expected_migo, list) or
+                    any(not isinstance(value, str) or not re.fullmatch(
+                        r"mi-go-(?:tower|camp):\(-?\d+,-?\d+,0\)", value) for value in expected_migo) or
+                    len(set(expected_migo)) != len(expected_migo) or
                     not isinstance(expected_terrain, str) or not expected_terrain.strip() or
                     isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 10 or
                     not isinstance(source_area, list) or not source_area or
@@ -25105,6 +25110,8 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
                                "expected_home_site_ids": list(expected_homes),
                                "expected_source_terrain_id": expected_terrain,
                                "minimum_distance_omt": minimum})
+            if "expected_migo_site_ids" in raw:
+                transforms[-1]["expected_migo_site_ids"] = list(expected_migo)
             continue
 
         if kind == "bandit_active_sortie_clock":
@@ -28075,7 +28082,215 @@ def apply_seed_overmap_special_near_player_transform(world_dir: Path, transform:
 
 
 
+def _representative_migo_home_geometry(
+    world_dir: Path, payload: Dict[str, Any], expected: Sequence[str],
+) -> Tuple[Dict[str, Set[Tuple[int, int, int]]], List[Dict[str, Any]]]:
+    """Read placed geometry and serialized provenance separately; never discover/spawn bodies."""
+    def refuse(message: str) -> None:
+        raise SystemExit("Representative Mi-go geometry: " + message)
+
+    def point(value: Any) -> Tuple[int, int, int]:
+        if (not isinstance(value, list) or len(value) != 3 or any(
+                isinstance(v, bool) or not isinstance(v, int) or not -(2**31) <= v < 2**31
+                for v in value)):
+            refuse("malformed native coordinate")
+        return tuple(value)
+
+    overmaps: Dict[Tuple[int, int], Dict[str, Any]] = {}
+    for archive in sorted((world_dir / "overmaps").iterdir()):
+        match = re.fullmatch(r"o\.(-?\d+)\.(-?\d+)\.zzip", archive.name)
+        if not match:
+            continue
+        plain, _, data = extract_overmap_payload(archive)
+        try:
+            overmaps[tuple(int(v) for v in match.groups())] = data
+        finally:
+            cleanup_extracted_overmap(plain, keep=False)
+
+    def terrain(position: Tuple[int, int, int]) -> str:
+        ox, oy, local = overmap_file_coords_from_abs_omt(position)
+        data = overmaps.get((ox, oy), {})
+        layers = data.get("layers")
+        index = overmap_layer_index(position[2])
+        if not isinstance(layers, list) or index >= len(layers) or not isinstance(layers[index], list):
+            refuse("missing placed floor terrain")
+        target = overmap_flat_index(local)
+        total, found = 0, None
+        # Validate the complete native RLE without allocating a tile plane.
+        for entry in layers[index]:
+            if (not isinstance(entry, list) or len(entry) != 2 or
+                    not isinstance(entry[0], str) or not entry[0] or
+                    isinstance(entry[1], bool) or not isinstance(entry[1], int) or entry[1] <= 0):
+                refuse("malformed placed floor terrain")
+            if total <= target < total + entry[1]:
+                found = entry[0]
+            total += entry[1]
+            if total > OMAPX * OMAPY:
+                refuse("oversized placed floor terrain")
+        if total != OMAPX * OMAPY or found is None:
+            refuse("incomplete placed floor terrain")
+        return found
+
+    # Match the full native special definition, including its rotation and
+    # unequal camp roof heights. The ledger anchor is not a footprint.
+    definitions = json.loads((repo_root() / "data/json/overmap/overmap_special/specials.json").read_text())
+    definitions = {d["id"]: d["overmaps"] for d in definitions
+                   if d.get("id") in {"Mi-Go Scout Tower", "Mi-Go Encampment"}}
+    if set(definitions) != {"Mi-Go Scout Tower", "Mi-Go Encampment"}:
+        refuse("native special definitions unavailable")
+    homes: Dict[str, Set[Tuple[int, int, int]]] = {}
+    floor_facts: Dict[str, List[Dict[str, Any]]] = {}
+    for (ox, oy), data in overmaps.items():
+        placements = data.get("overmap_special_placements")
+        if not isinstance(placements, list):
+            refuse("missing saved special placements")
+        for placement in placements:
+            if not isinstance(placement, dict):
+                refuse("malformed saved special placement")
+            special = placement.get("special")
+            if not isinstance(special, str) or not special:
+                refuse("malformed saved special identity")
+            if special not in definitions:
+                continue  # Barry/mission specials are not this population owner.
+            definition = definitions[special]
+            groups = placement.get("placements")
+            if not isinstance(groups, list) or not groups:
+                refuse("missing native placement groups")
+            tower = special == "Mi-Go Scout Tower"
+            ground_type = "mi-go_scout_tower_1" if tower else "mi-go_camp1"
+            for group in groups:
+                raw = group.get("points") if isinstance(group, dict) else None
+                if not isinstance(raw, list) or len(raw) != len(definition):
+                    refuse("native footprint needs every placed floor")
+                points = [point(p.get("p")) if isinstance(p, dict) else point(None) for p in raw]
+                if any(not 0 <= p[0] < OMAPX or not 0 <= p[1] < OMAPY for p in points):
+                    refuse("native placement is outside its overmap")
+                absolute = {(x + ox * OMAPX, y + oy * OMAPY, z) for x, y, z in points}
+                if len(absolute) != len(points):
+                    refuse("duplicate placed floor")
+                for p in absolute:
+                    point(list(p))
+                actual = {p: terrain(p) for p in absolute}
+                anchors = [(p, re.fullmatch(rf"{re.escape(ground_type)}_(north|east|south|west)", value))
+                           for p, value in actual.items() if p[2] == 0]
+                anchors = [(p, m.group(1)) for p, m in anchors if m]
+                if len(anchors) != 1:
+                    refuse("placed floor lacks unique native ground anchor")
+                anchor, direction = anchors[0]
+                expected_terrain = {}
+                for part in definition:
+                    x, y, z = point(part["point"])
+                    for _ in range(("north", "east", "south", "west").index(direction)):
+                        x, y = -y, x
+                    position = (anchor[0] + x, anchor[1] + y, anchor[2] + z)
+                    expected_terrain[position] = part["overmap"].rsplit("_", 1)[0] + "_" + direction
+                if actual != expected_terrain:
+                    refuse("placed floor geometry/rotation disagrees with native special")
+                kind = "tower" if tower else "camp"
+                site_id = f"mi-go-{kind}:({anchor[0]},{anchor[1]},0)"
+                if site_id in homes:
+                    refuse("duplicate native placement")
+                homes[site_id] = absolute
+                floor_facts[site_id] = [{"omt": list(p), "terrain_id": actual[p]} for p in sorted(actual)]
+
+    population = payload.get("overmapbuffer", {}).get("migo_populations", {})
+    sites = population.get("sites") if isinstance(population, dict) else None
+    if not isinstance(sites, list):
+        refuse("missing serialized population registry")
+    records: Dict[str, Dict[str, Any]] = {}
+    members_seen = set()
+    for site in sites:
+        if not isinstance(site, dict) or not isinstance(site.get("id"), str):
+            refuse("malformed population site")
+        site_id = site["id"]
+        if site_id in records or site_id not in homes:
+            refuse("duplicate population site or missing placed geometry")
+        anchor = point(site.get("anchor"))
+        kind = "tower" if site_id.startswith("mi-go-tower:") else "camp"
+        if site.get("tower") is not (kind == "tower") or anchor not in homes[site_id] or anchor[2] != 0 or site_id != f"mi-go-{kind}:({anchor[0]},{anchor[1]},0)":
+            refuse("population anchor disagrees with placed geometry")
+        for key in ("new_content", "seed_committed", "occupancy_verified", "source_destroyed"):
+            if not isinstance(site.get(key), bool):
+                refuse("missing or malformed generation facts")
+        if site_id in expected and not site["seed_committed"]:
+            refuse("expected population seed is not committed")
+        if "source" not in site or not isinstance(site.get("source_furniture"), str):
+            refuse("missing population source facts")
+        source = site["source"]
+        if source is not None:
+            source = point(source)
+            if not site["source_furniture"] or (source[0] // 24, source[1] // 24, source[2]) not in homes[site_id]:
+                refuse("population source lies outside placed home")
+        members = site.get("members")
+        if not isinstance(members, list):
+            refuse("missing serialized roster")
+        for member in members:
+            if not isinstance(member, dict) or not isinstance(member.get("identity"), dict):
+                refuse("malformed member identity")
+            token = member["identity"]
+            mid, epoch = token.get("member"), token.get("epoch")
+            if (token.get("site") != site_id or point(token.get("anchor")) != anchor or
+                    not isinstance(mid, str) or not mid or mid in members_seen or
+                    isinstance(epoch, bool) or not isinstance(epoch, int) or not 0 <= epoch < 2**64):
+                refuse("foreign, duplicate or malformed member identity")
+            members_seen.add(mid)
+            home = point(member.get("home"))
+            if (home[0] // 24, home[1] // 24, home[2]) not in homes[site_id]:
+                refuse("member home disagrees with placed geometry")
+            for key, values in (("owner", range(4)), ("duty", range(3))):
+                if isinstance(member.get(key), bool) or not isinstance(member.get(key), int) or member[key] not in values:
+                    refuse("malformed serialized owner or duty")
+            if not isinstance(member.get("type"), str) or not member["type"] or isinstance(member.get("hp"), bool) or not isinstance(member.get("hp"), int):
+                refuse("malformed serialized member facts")
+            if isinstance(member.get("birth_sequence"), bool) or not isinstance(member.get("birth_sequence"), int) or not 0 <= member["birth_sequence"] < 2**64:
+                refuse("malformed serialized birth sequence")
+            if member.get("current_position") is not None:
+                point(member["current_position"])  # Away positions are legitimate; not a home footprint.
+        records[site_id] = {
+            "site_id": site_id,
+            "generation_provenance": {k: site[k] for k in ("new_content", "seed_committed", "occupancy_verified")},
+            "population_source": source,
+            "source_furniture": site["source_furniture"],
+            "source_destroyed": site["source_destroyed"],
+            "serialized_roster": [{k: copy.deepcopy(m[k]) for k in (
+                "identity", "type", "home", "owner", "duty", "hp", "birth_sequence", "current_position")
+                if k in m} for m in members],
+            "resident_payloads_checked": False,
+        }
+    if set(expected) - records.keys():
+        refuse("missing expected committed population")
+    facts = [{"site_id": site_id, "placed_floor_terrain": floor_facts[site_id],
+              "population": records.get(site_id),
+              "evidence_ceiling": "Saved geometry/provenance/roster facts, not an initial-state or live-body authentication proof"}
+             for site_id in sorted(homes)]
+    return homes, facts
+
+
 def audit_representative_human_source_geometry(
+    world_dir: Path, transform: Dict[str, Any],
+) -> Dict[str, Any]:
+    if "expected_migo_site_ids" not in transform:
+        return _audit_representative_human_source_geometry(world_dir, transform)
+    # Existing native archive helpers extract next to their input. Stage only
+    # required metadata, never a world/maps/body tree, to keep this audit read-only.
+    player = transform["player_save"]
+    if Path(player).name != player:
+        raise SystemExit("Representative metadata audit needs a local player filename")
+    with tempfile.TemporaryDirectory(prefix="representative-home-metadata-") as temporary:
+        staged = Path(temporary) / world_dir.name
+        (staged / "overmaps").mkdir(parents=True)
+        # zzip uses this filename only to locate its extraction root. It does
+        # not load game options; no held profile/configuration is copied.
+        (staged / "worldoptions.json").write_text("[]", encoding="utf-8")
+        for name in ("dimension_data.gsav", "overmaps.dict", player):
+            shutil.copyfile(world_dir / name, staged / name)
+        for archive in (world_dir / "overmaps").iterdir():
+            if re.fullmatch(r"o\.-?\d+\.-?\d+(?:\.zzip)?", archive.name):
+                shutil.copyfile(archive, staged / "overmaps" / archive.name)
+        return _audit_representative_human_source_geometry(staged, transform)
+
+
+def _audit_representative_human_source_geometry(
     world_dir: Path, transform: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Measure setup geometry, including inherited homes; never assert emission or readiness.
@@ -28133,6 +28348,12 @@ def audit_representative_human_source_geometry(
     if missing:
         raise SystemExit(f"Representative setup is missing expected homes: {sorted(missing)}")
 
+    migo_facts = None
+    if "expected_migo_site_ids" in transform:
+        migo_homes, migo_facts = _representative_migo_home_geometry(
+            world_dir, payload, transform["expected_migo_site_ids"])
+        homes.update(migo_homes)
+
     minimum = transform["minimum_distance_omt"]
     rows = []
     for site_id, footprint in sorted(homes.items()):
@@ -28142,13 +28363,16 @@ def audit_representative_human_source_geometry(
             raise SystemExit(f"Representative source area is only {distance} OMT from {site_id}; needs {minimum}")
         rows.append({"site_id": site_id, "footprint_omt": [list(point) for point in sorted(footprint)],
                      "nearest_footprint_distance_omt": distance})
-    return {"kind": "representative_human_source_geometry", "world": world_dir.name,
+    result = {"kind": "representative_human_source_geometry", "world": world_dir.name,
             "player_omt": list(player_omt), "source_area_omt": [list(point) for point in source_area],
             "source_overmap_terrain": source_terrain,
             "minimum_distance_omt": minimum, "distance_metric": "horizontal_chebyshev_omt",
             "homes": rows, "evidence_class": "setup", "gameplay_credit": False,
             "native_qualification_required": ["usable terrain", "actual source and emission",
                                                "measured native reach", "saved World adoption"]}
+    if migo_facts is not None:
+        result["migo_sites"] = migo_facts
+    return result
 
 
 def apply_player_near_overmap_special_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:

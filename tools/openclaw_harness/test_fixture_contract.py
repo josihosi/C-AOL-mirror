@@ -11666,5 +11666,245 @@ class MaintainedRepresentativeMigrationTest(unittest.TestCase):
         self.assertEqual(default["save_transforms"][-1]["source_area_omt"], [[145, 149, 0]])
 
 
+class RepresentativeTowerGeometryTest(unittest.TestCase):
+    site = "mi-go-tower:(20,20,0)"
+
+    def setUp(self) -> None:
+        import startup_harness as startup
+        self.startup = startup
+        temporary = tempfile.TemporaryDirectory(prefix="native-tower-geometry-")
+        self.addCleanup(temporary.cleanup)
+        self.world = Path(temporary.name) / "World"
+        (self.world / "overmaps").mkdir(parents=True)
+        (self.world / "worldoptions.json").write_text("[]")
+        shutil.copyfile(HARNESS_DIR.parents[1] / "data/raw/compression/overmaps.dict",
+                        self.world / "overmaps.dict")
+        self.guard = {"kind": "representative_human_source_geometry", "player_save": "player.sav.zzip",
+                      "source_area_omt": [[20, 35, 0]], "expected_source_terrain_id": "field",
+                      "expected_home_site_ids": ["human-home"], "minimum_distance_omt": 15,
+                      "expected_migo_site_ids": [self.site]}
+        player = self.world / "player.sav"
+        player.write_text(json.dumps({"player": {"location": [492, 852, 0]}}))
+        startup.run_zzip(player)
+        player.unlink()
+        self.points = [{"p": [20, 20, z]} for z in range(4)]
+        self.placements = [{"special": "Mi-Go Scout Tower", "placements": [{"points": self.points}]}]
+        self.tiles = {(20, 20, z): f"mi-go_scout_tower_{z + 1}_north" for z in range(4)}
+        self.site_record = {"id": self.site, "anchor": [20, 20, 0], "tower": True,
+                            "new_content": True, "seed_committed": True,
+                            "occupancy_verified": True, "source_destroyed": False,
+                            "source": [492, 489, 0], "source_furniture": "f_migo_brood_pod",
+                            "members": [{"identity": {"site": self.site, "member": "native-fixture-token",
+                                          "epoch": 3, "anchor": [20, 20, 0]},
+                                         "type": "mon_mi_go", "home": [488, 490, 0],
+                                         "owner": 2, "duty": 1, "hp": 210,
+                                         "birth_sequence": 0, "current_position": [600, 600, 0]}]}
+        self.dimension = {"overmapbuffer": {
+            "bandit_live_world": {"sites": [{"site_id": "human-home", "footprint": [[4, 35, 0], [5, 35, 0]]}]},
+            "migo_populations": {"sites": [self.site_record]}}}
+        self.write()
+
+    def write(self) -> None:
+        data = {"layers": [], "overmap_special_placements": self.placements}
+        for z in range(-10, 4):
+            flat = ["field" if z == 0 else "open_air" if z > 0 else "empty_rock"] * (180 * 180)
+            for (x, y, tz), terrain in self.tiles.items():
+                if tz == z:
+                    flat[y * 180 + x] = terrain
+            data["layers"].append(encode_overmap_layer(flat))
+        self.overmap = data
+        self.write_overmap()
+        (self.world / "dimension_data.gsav").write_text("# version 37\n" + json.dumps(self.dimension))
+
+    def write_overmap(self) -> None:
+        plain = self.world / "o.0.0"
+        archive = self.world / "overmaps/o.0.0.zzip"
+        archive.unlink(missing_ok=True)
+        plain.write_text("# version 37\n" + json.dumps(self.overmap))
+        self.startup.run_zzip(plain)
+        plain.unlink()
+
+    def snapshot(self) -> dict:
+        return {str(p.relative_to(self.world)): (p.read_bytes(), p.stat().st_mtime_ns)
+                for p in self.world.rglob("*") if p.is_file()}
+
+    def audit(self) -> dict:
+        before = self.snapshot()
+        try:
+            return audit_representative_human_source_geometry(self.world, self.guard)
+        finally:
+            self.assertEqual(self.snapshot(), before)
+
+    def test_native_archives_full_footprint_and_transferred_roster_are_distinct(self) -> None:
+        result = self.audit()
+        self.assertEqual([x["nearest_footprint_distance_omt"] for x in result["homes"]], [15, 15])
+        tower = result["migo_sites"][0]
+        self.assertEqual(len(tower["placed_floor_terrain"]), 4)
+        self.assertEqual(tower["population"]["generation_provenance"],
+                         {"new_content": True, "seed_committed": True, "occupancy_verified": True})
+        self.assertEqual(tower["population"]["serialized_roster"], self.site_record["members"])
+        self.assertFalse(tower["population"]["resident_payloads_checked"])
+        self.assertFalse(result["gameplay_credit"])
+        # No stored spawn slots exist in this fixture: transferred bodies are
+        # legitimate and do not erase their physical home geometry.
+        self.assertFalse((self.world / "maps").exists())
+
+    def test_all_additional_towers_are_measured_not_only_expected(self) -> None:
+        self.placements.append({"special": "Mi-Go Scout Tower", "placements": [
+            {"points": [{"p": [20, 26, z]} for z in range(4)]}]})
+        self.tiles.update({(20, 26, z): f"mi-go_scout_tower_{z + 1}_north" for z in range(4)})
+        self.write()
+        with self.assertRaisesRegex(SystemExit, "only 9 OMT"):
+            self.audit()
+
+    def test_additional_registered_human_home_still_cannot_hide(self) -> None:
+        self.dimension["overmapbuffer"]["bandit_live_world"]["sites"].append(
+            {"site_id": "extra-human", "footprint": [[20, 30, 0]]})
+        self.write()
+        with self.assertRaisesRegex(SystemExit, "only 5 OMT"):
+            self.audit()
+
+    def test_incomplete_duplicate_malformed_or_outside_placement_refuses(self) -> None:
+        for bad in (self.points[:3], self.points[:3] + [self.points[0]],
+                    [{"p": [True, 20, 0]}] + self.points[1:],
+                    [{"p": [180, 20, 0]}] + self.points[1:]):
+            with self.subTest(points=bad):
+                self.placements[0]["placements"][0]["points"] = bad
+                self.write()
+                with self.assertRaises(SystemExit):
+                    self.audit()
+
+    def test_wrong_native_floor_or_mixed_rotation_refuses(self) -> None:
+        for bad in ("field", "mi-go_scout_tower_1_north", "mi-go_scout_tower_4_east"):
+            self.tiles[(20, 20, 3)] = bad
+            self.write()
+            with self.subTest(terrain=bad), self.assertRaisesRegex(SystemExit, "floor"):
+                self.audit()
+        self.tiles.update({(20, 20, z): f"mi-go_scout_tower_{z + 1}_east" for z in range(4)})
+        self.write()
+        self.assertEqual(len(self.audit()["migo_sites"]), 1)
+
+    def test_expected_population_missing_uncommitted_or_anchor_mismatched_refuses(self) -> None:
+        original = json.loads(json.dumps(self.dimension))
+        for change in ("missing", "uncommitted", "anchor"):
+            self.dimension = json.loads(json.dumps(original))
+            record = self.dimension["overmapbuffer"]["migo_populations"]["sites"][0]
+            if change == "missing":
+                self.dimension["overmapbuffer"]["migo_populations"]["sites"] = []
+            elif change == "uncommitted":
+                record["seed_committed"] = False
+            else:
+                record["anchor"] = [21, 20, 0]
+            self.write()
+            with self.subTest(change=change), self.assertRaises(SystemExit):
+                self.audit()
+
+    def test_foreign_duplicate_token_and_bad_home_refuse(self) -> None:
+        original = json.loads(json.dumps(self.site_record))
+        for change in ("foreign", "duplicate", "epoch", "home"):
+            record = json.loads(json.dumps(original))
+            member = record["members"][0]
+            if change == "foreign":
+                member["identity"]["site"] = "foreign"
+            elif change == "duplicate":
+                record["members"].append(json.loads(json.dumps(member)))
+            elif change == "epoch":
+                member["identity"]["epoch"] = True
+            else:
+                member["home"] = [0, 0, 0]
+            self.dimension["overmapbuffer"]["migo_populations"]["sites"] = [record]
+            self.write()
+            with self.subTest(change=change), self.assertRaises(SystemExit):
+                self.audit()
+
+    def test_slot_local_abstract_dead_and_legacy_facts_do_not_recreate_slots(self) -> None:
+        for owner in range(4):
+            self.site_record["members"][0].update(owner=owner, duty=2, hp=0 if owner == 3 else 210)
+            self.site_record["members"][0]["identity"]["epoch"] = owner
+            self.site_record["new_content"] = False
+            self.write()
+            result = self.audit()["migo_sites"][0]["population"]
+            self.assertFalse(result["generation_provenance"]["new_content"])
+            self.assertEqual(result["serialized_roster"][0]["owner"], owner)
+
+    def test_malformed_native_rle_is_not_coerced_or_guessed(self) -> None:
+        for bad in ([["field", True]], [["field", 32400.0]], [["field", 32399]], [["field", 32401]]):
+            self.overmap["layers"][10] = bad
+            self.write_overmap()
+            with self.subTest(rle=bad), self.assertRaises(SystemExit):
+                self.audit()
+
+    def test_real_camp_shape_rotations_and_nearer_second_part_are_measured(self) -> None:
+        original = json.loads(json.dumps(self.placements))
+        tower_tiles = dict(self.tiles)
+        for direction, (dx, dy) in {"north": (1, 0), "east": (0, 1),
+                                    "south": (-1, 0), "west": (0, -1)}.items():
+            self.placements = json.loads(json.dumps(original))
+            self.tiles = dict(tower_tiles)
+            points = [[40, 20, 0], [40, 20, 1]] + [[40 + dx, 20 + dy, z] for z in range(4)]
+            self.placements.append({"special": "Mi-Go Encampment", "placements": [
+                {"points": [{"p": p} for p in points]}]})
+            for x, y, z in points:
+                part = "1" if (x, y) == (40, 20) else "2"
+                suffix = f"-{z}" if z else ""
+                self.tiles[(x, y, z)] = f"mi-go_camp{part}{suffix}_{direction}"
+            self.write()
+            facts = self.audit()["migo_sites"]
+            camp = next(x for x in facts if x["site_id"] == "mi-go-camp:(40,20,0)")
+            self.assertEqual(len(camp["placed_floor_terrain"]), 6)
+            self.assertIsNone(camp["population"])
+        # Anchor15 is insufficient: the real second footprint part is14 away.
+        self.placements = json.loads(json.dumps(original))
+        self.tiles = dict(tower_tiles)
+        points = [[35, 35, 0], [35, 35, 1]] + [[34, 35, z] for z in range(4)]
+        self.placements.append({"special": "Mi-Go Encampment", "placements": [
+            {"points": [{"p": p} for p in points]}]})
+        for x, y, z in points:
+            part = "1" if x == 35 else "2"
+            self.tiles[(x, y, z)] = f"mi-go_camp{part}{f'-{z}' if z else ''}_south"
+        self.write()
+        with self.assertRaisesRegex(SystemExit, "only 14 OMT"):
+            self.audit()
+
+    def test_registry_alone_cannot_invent_geometry_and_missing_native_inputs_refuse(self) -> None:
+        original = json.loads(json.dumps(self.dimension))
+        for change in ("registry-only", "missing-registry", "missing-source", "bad-provenance"):
+            self.dimension = json.loads(json.dumps(original))
+            record = self.dimension["overmapbuffer"]["migo_populations"]["sites"][0]
+            if change == "registry-only":
+                record["id"] = "mi-go-tower:(21,20,0)"
+            elif change == "missing-registry":
+                del self.dimension["overmapbuffer"]["migo_populations"]
+            elif change == "missing-source":
+                del record["source"]
+            else:
+                record["new_content"] = 1
+            self.write()
+            with self.subTest(change=change), self.assertRaises(SystemExit):
+                self.audit()
+
+    def test_corrupt_archive_and_incomplete_encampment_are_not_empty_space(self) -> None:
+        archive = self.world / "overmaps/o.0.0.zzip"
+        archive.write_bytes(b"not an archive")
+        with self.assertRaises(SystemExit):
+            self.audit()
+        self.write()
+        self.placements.append({"special": "Mi-Go Encampment", "placements": []})
+        self.write()
+        with self.assertRaisesRegex(SystemExit, "placement groups"):
+            self.audit()
+
+    def test_default_behavior_and_optional_normalization_stay_compatible(self) -> None:
+        original = {k: v for k, v in self.guard.items() if k != "expected_migo_site_ids"}
+        normalized = normalize_fixture_save_transforms([original], manifest_path=Path("manifest.json"))[0]
+        self.assertNotIn("expected_migo_site_ids", normalized)
+        with mock.patch("startup_harness._representative_migo_home_geometry", side_effect=AssertionError("unexpected tower read")):
+            self.assertNotIn("migo_sites", audit_representative_human_source_geometry(self.world, normalized))
+        for bad in (None, "site", [self.site, self.site], [True], ["mi-go-tower:(20,20,1)"]):
+            with self.subTest(expected=bad), self.assertRaises(SystemExit):
+                normalize_fixture_save_transforms([{**self.guard, "expected_migo_site_ids": bad}],
+                                                 manifest_path=Path("manifest.json"))
+
+
 if __name__ == "__main__":
     unittest.main()
