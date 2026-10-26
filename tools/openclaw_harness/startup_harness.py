@@ -24349,7 +24349,8 @@ def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
     except ValueError as error:
         row.update(status="unsupported_terminal_mode", reason=str(error))
         return row
-    allowed_steps = {"native_semantic_bootstrap", "cockpit_live_session"}
+    allowed_steps = {"native_semantic_bootstrap", "cockpit_live_session",
+                     "audit_saved_bandit_live_world_state"}
     if generation is not None:
         allowed_steps = {"native_world_generation"}
     if sys.platform not in {"darwin", "win32"}:
@@ -24360,6 +24361,24 @@ def terminal_mode_readiness(scenario: Mapping[str, Any], executable: Path, *,
     elif any(step.get("kind") not in allowed_steps
              for step in scenario.get("steps", []) if isinstance(step, Mapping)):
         reason = "terminal launch requires native semantic bootstrap/live steps; other scripted startup controls are unvalidated"
+    if not reason:
+        preceding_kinds: set[str] = set()
+        for step in scenario.get("steps", []):
+            if not isinstance(step, Mapping):
+                continue
+            kind = step.get("kind")
+            if kind == "audit_saved_bandit_live_world_state":
+                # Existing saved-state reader/metadata guard, with no terminal
+                # input or graphical side effects. Keep it before live play.
+                if (step.get("abort_on_metadata_failure") is not True or
+                        step.get("capture_after") or step.get("auto_acknowledge_interruptions")):
+                    reason = "terminal saved-state preflights must abort on metadata failure without capture or automatic input"
+                    break
+                if ("native_semantic_bootstrap" not in preceding_kinds or
+                        "cockpit_live_session" in preceding_kinds):
+                    reason = "terminal saved-state preflights require World bootstrap before live input"
+                    break
+            preceding_kinds.add(kind)
     selected = selected_product_build
     if not reason:
         receipt, error = validate_selected_product_build(executable, selected)

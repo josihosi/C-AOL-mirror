@@ -6862,12 +6862,14 @@ class MixedLoadBootstrapContractTest(unittest.TestCase):
         dimension = self.world / "dimension_data.gsav"
         metadata = dimension.read_bytes()
 
-        def run_preflight(step: Dict[str, Any]) -> Dict[str, Any]:
+        def run_preflight(step: Dict[str, Any], *, following_live: bool = False) -> Dict[str, Any]:
             run_dir = Path(self.temp.name) / "audit-output"
             run_dir.mkdir(exist_ok=True)
             with mock.patch("startup_harness.save_dir_for_profile", return_value=self.world.parent):
                 reports = self.startup.execute_probe_steps(
-                    0, run_dir, [step], profile="disposable", world=self.world.name,
+                    0, run_dir, [step] + ([{"kind": "cockpit_live_session", "label": "must_not_start"}]
+                                         if following_live else []),
+                    profile="disposable", world=self.world.name,
                     grants_gameplay_proof=False,
                 )
             self.assertEqual(len(reports), 1)
@@ -6920,7 +6922,7 @@ class MixedLoadBootstrapContractTest(unittest.TestCase):
                         bodies_only = dict(requirements, required_active_members_found=False)
                         self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
                             self.world, **bodies_only)["status"], "required_state_missing")
-                        rejected_step = run_preflight(step)
+                        rejected_step = run_preflight(step, following_live=True)
                         self.assertEqual(rejected_step["metadata"]["status"], "required_state_missing")
                         self.assertEqual(rejected_step["abort"]["guard"], "metadata")
                         self.assertEqual(dimension.read_bytes(), metadata)
@@ -12692,6 +12694,36 @@ class CanonicalTowerTerminalRouteTest(unittest.TestCase):
         self.assertEqual(reentry["steps"][1]["label"], "verify_r050_tower_saved_reentry")
         self.assertEqual(initial["post_relaunch"]["terminal_save_step_label"],
                          initial["steps"][1]["label"])
+
+    def test_real_readiness_preserves_both_mixed_body_preflights_before_live_input(self) -> None:
+        mixed = self.startup.load_scenario("performance.mixed_hostile_stalker_horde_mcw")
+        audits = [step for step in mixed["steps"]
+                  if step["kind"] == "audit_saved_bandit_live_world_state"]
+        self.assertEqual(len(audits), 2)
+        self.assertTrue(all(step["required_active_member_bodies_found"] for step in audits))
+        steps = self.scenario["steps"]
+        route = {**self.scenario, "steps": [steps[0], *audits, steps[1]]}
+        result = self.readiness(route)
+        self.assertEqual(result["status"], "ready", result)
+        self.assertEqual(result["executable_sha256"], self.selected["executable_sha256"])
+
+    def test_terminal_saved_preflights_cannot_supply_input_or_skip_failure(self) -> None:
+        mixed = self.startup.load_scenario("performance.mixed_hostile_stalker_horde_mcw")
+        audit = next(step for step in mixed["steps"]
+                     if step["kind"] == "audit_saved_bandit_live_world_state")
+        bootstrap, live = self.scenario["steps"]
+        for update in ({"abort_on_metadata_failure": False}, {"abort_on_metadata_failure": "true"},
+                       {"capture_after": True}, {"auto_acknowledge_interruptions": True}):
+            with self.subTest(update=update):
+                bad = {**self.scenario, "steps": [bootstrap, {**audit, **update}, live]}
+                result = self.readiness(bad)
+                self.assertEqual(result["status"], "unsupported_terminal_mode")
+                self.assertIn("without capture or automatic input", result["reason"])
+        for steps in ([audit, bootstrap, live], [bootstrap, live, audit]):
+            with self.subTest(order=[step["kind"] for step in steps]):
+                result = self.readiness({**self.scenario, "steps": steps})
+                self.assertEqual(result["status"], "unsupported_terminal_mode")
+                self.assertIn("World bootstrap before live input", result["reason"])
 
     def test_unsupported_scripted_step_still_refuses_initial_and_reentry(self) -> None:
         from scenario_registry import saved_world_continuation_steps
