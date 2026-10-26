@@ -82,6 +82,49 @@ class PerformanceTest(unittest.TestCase):
                 "kind": kind, "surface_id": "surface-menu", "frame_id": frame_id,
                 "breadcrumbs": ["World", "Wait duration"], "wall_time": wall * 1000}
 
+    def test_selected_interval_retained_at_collection_then_survives_rotation(self):
+        import base64
+        import hashlib
+        from evidence_display import recover
+        from cockpit_archive import Archive, ArchiveMap
+        self.recorder([sample(1, 0)])
+        self.turn_config()
+        path = self.directory / "semantic.native.events.jsonl"
+        raw = json.dumps({"event": "raid_performance_interval", "run_id": "run-a",
+                          "rows": [[11, .01], [12, .02]]}, separators=(",", ":")).encode() + b"\n"
+        path.write_bytes(raw)
+        result = perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "r1"})
+        handle = result["selected_native_packets"][0]
+        self.assertEqual(handle["length"], len(raw))
+        self.assertEqual(handle["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(handle["collected_during_request"], {"request_id": "r1"})
+        files = set(self.evidence_store.iterdir())
+        # Replayed same packet after producer rewind must not make another copy.
+        perf.write_json(self.directory / perf.TURN_STATE_NAME, {})
+        perf.collect_turn_assessment(self.directory, "binding-a", pending={"request_id": "r2"})
+        self.assertEqual(set(self.evidence_store.iterdir()), files)
+        archive = Archive(self.directory / "cockpit-evidence.sqlite", run_id="run-a", binding_id="binding-a")
+        try:
+            self.assertEqual(len(ArchiveMap(archive, "selected_native_packets")), 1)
+        finally:
+            archive.close()
+        path.write_bytes(b"rotated\n")
+        self.assertEqual(base64.b64decode(recover(handle["retained_raw"]["sha256"], self.evidence_store)["raw_base64"]), raw)
+        self.assertEqual(perf.collect_turn_assessment(self.directory, "foreign")["status"], "unavailable")
+
+    def test_selected_packet_failure_does_not_advance_and_foreign_packet_refused(self):
+        self.recorder([sample(1, 0)])
+        path = self.directory / "semantic.native.events.jsonl"
+        path.write_text('{"event":"raid_performance_interval","run_id":"run-a","rows":[]}\n')
+        with patch("evidence_display.retain", side_effect=OSError("full")):
+            result = perf.collect_turn_assessment(self.directory, "binding-a")
+        self.assertEqual(result["reason"], "selected_packet_retention_failed")
+        self.assertFalse((self.directory / perf.TURN_STATE_NAME).exists())
+        self.assertEqual(len(perf.collect_turn_assessment(self.directory, "binding-a")["selected_native_packets"]), 1)
+        path.write_text('{"event":"raid_performance_interval","run_id":"foreign","rows":[]}\n')
+        perf.write_json(self.directory / perf.TURN_STATE_NAME, {})
+        self.assertEqual(perf.collect_turn_assessment(self.directory, "binding-a")["reason"], "native_interval_run_mismatch")
+
     def test_mac_cumulative_time_and_rss_are_not_smoothed_cpu(self):
         with patch("r009_technical_witness.subprocess.run") as run:
             run.return_value.returncode = 0
@@ -526,11 +569,17 @@ class PerformanceTest(unittest.TestCase):
                                   self.turn_event(turn, "end", sequence=turn * 2 + 2, duration=.01))
         else:
             self.waiting_turns(2, [.2] * 99)
+        packet_raw = b'{"event":"raid_performance_interval","run_id":"run-a","rows":[[1,0.1]]}\n'
+        with (session / "semantic.native.events.jsonl").open("ab") as stream:
+            stream.write(packet_raw)
         client = PlayerClient(session)
         with patch("play_cli.Bridge.response_status", return_value={"ok": False, "error": "response_not_available_or_stale"}), \
                 patch("play_cli.Bridge.send_request") as send:
             result = client.collect(wait_seconds=0)
         send.assert_not_called()
+        packet_handle = result["turn_assessment"]["selected_native_packets"][0]
+        import base64
+        self.assertEqual(base64.b64decode(recover(packet_handle["retained_raw"]["sha256"], self.evidence_store)["raw_base64"]), packet_raw)
         self.assertTrue(result["performance_alarm"])
         kind = "spike" if early_spike else "waiting_slow"
         original = next(a for a in result["turn_assessment"]["alarms"] if a["kind"] == kind)

@@ -23,7 +23,11 @@ Protocols are reusable recipes, not scripts whose first unexpected result ends t
 
 Start fresh full-story runs from their coherent initial save. Use compatible checkpoints for
 focused questions and continue the same observed journey through ordinary save/reload. Credit
-what actually happened; a checkpoint cannot prove skipped stages. See [selection and launch](references/selection-and-launch.md).
+what actually happened; a checkpoint cannot prove skipped stages. For mixed-load scaling, reuse
+the qualified current continuation when source/build compatibility, actor population, signal/setup
+state and ownership match the intended comparison. Recheck changed premises only; do not restart
+a proved setup or repeat Luna→chaperone→coordinator summaries without a new decision. Increasing
+load is distinct from replaying a whole story, and inactive actors do not prove active mixed work. See [selection and launch](references/selection-and-launch.md).
 
 Reach the condition being tested and follow it to a judged endpoint. Missing an event or failing
 one tactic means adapt the setup or strategy. A stopped session, first injury, save or partial

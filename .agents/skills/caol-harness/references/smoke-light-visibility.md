@@ -46,6 +46,23 @@ not evidence that the original remote behavior is correct. Fix a demonstrated de
 owner rather than bypass it with easier placement. Coordinate any live setup change with the
 existing input owner and preserve the first divergence and its reproduction context.
 
+## Keep the source alive through the useful scan
+
+Before a sustained fire observation, check physical fuel quantity, the enabled SOURCE_FIREWOOD
+zone's actual coverage, reachable stock and the player's loaded position together. Ignite using
+current native controls and keep the source loaded through the useful sampling window; adjust
+stock, zone or tactical position when those conditions change. One paper or wood item is not a
+sustained-source recipe. Use an existing compatible stocked save when it already supplies the
+needed conditions, rather than rebuilding the scene.
+
+The minute8355 Mixed checkpoint demonstrated eight added firewood pieces on the fire tile,
+an enabled3-by-3 source zone and an adjacent player sustaining a fire for300 turns with actual
+exterior smoke/light samples. This is a practical stocked-fire starting recipe, not a universal
+fuel duration or proof of automatic refuelling. Verify replenishment separately if it matters.
+Source persistence, signal sampling, reception and dispatch are separate observations. A sampled
+source refused by an exit ray or detection check calls for sightline diagnosis, not more identical
+fuel waits or a claim that no source exists.
+
 ## Do not conclude from the first puff
 
 Ignition, smoke fields, a viable signal, observer admission and dispatch are different events.

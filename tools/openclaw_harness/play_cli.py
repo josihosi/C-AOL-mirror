@@ -57,7 +57,8 @@ def _merge_turn_assessments(previous: dict[str, Any] | None, current: dict[str, 
     if previous is None:
         return current
     merged = dict(current)
-    for field, identity in (("alarms", "key"), ("recoveries", "recovered_alarm")):
+    for field, identity in (("alarms", "key"), ("recoveries", "recovered_alarm"),
+                            ("selected_native_packets", "sha256")):
         seen: set[str] = set()
         values: list[dict[str, Any]] = []
         for assessment in (previous, current):

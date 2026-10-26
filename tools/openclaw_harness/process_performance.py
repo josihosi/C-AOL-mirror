@@ -5,6 +5,8 @@ No background process, game input, or inferred gameplay outcomes.
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -273,6 +275,19 @@ def _parse_turn_trace(path: Path, *, start_offset: int, run_id: str,
                 raw = stream.readline(size - stream.tell())
                 if not raw.endswith(b"\n"):
                     break
+                # Selected producer intervals are plain JSON, unlike turn markers.
+                # Keep their exact bytes at the normal collection boundary before
+                # the bounded native journal rotates; never retain every turn.
+                if raw.startswith(b'{"event":"raid_performance_interval"'):
+                    try:
+                        packet = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        return [], start_offset, "malformed_selected_native_interval"
+                    if packet.get("run_id") != run_id:
+                        return [], start_offset, "native_interval_run_mismatch"
+                    events.append({"event": "selected_native_interval", "raw": raw,
+                                   "path": str(path), "offset": cursor,
+                                   "generation": generation, "run_id": run_id})
                 marker = raw.find(TURN_TRACE_PREFIX.encode("utf-8"))
                 if marker >= 0:
                     try:
@@ -424,6 +439,41 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
         return {"status": "unavailable", "reason": trace_error,
                 "trace_path": str(path), "native_receipts_preserved": True}
 
+    # Existing archive owns the compact references; existing display store owns
+    # selected raw bytes. Replayed generations deduplicate by content identity.
+    packet_handles = []
+    for packet in events:
+        if packet.get("event") != "selected_native_interval":
+            continue
+        from cockpit_archive import Archive, ArchiveMap
+        import evidence_display
+        raw = packet["raw"]
+        digest = hashlib.sha256(raw).hexdigest()
+        archive = None
+        try:
+            archive = Archive(directory / "cockpit-evidence.sqlite",
+                              run_id=owner["run_id"], binding_id=binding_id)
+            retained = ArchiveMap(archive, "selected_native_packets")
+            if digest not in retained:
+                artifact = evidence_display.retain(
+                    {"raw_base64": base64.b64encode(raw).decode("ascii")},
+                    directory=evidence_display.STORE)
+                retained[digest] = {"event": "raid_performance_interval",
+                    "run_id": owner["run_id"], "binding_id": binding_id,
+                    "collected_during_request": dict(pending) if pending else None,
+                    "request_correlation": "collection context only; not native request attribution",
+                    "path": packet["path"], "offset": packet["offset"],
+                    "generation": packet["generation"], "length": len(raw),
+                    "sha256": digest, "retained_raw": artifact}
+            packet_handles.append(retained[digest])
+        except (OSError, ValueError, sqlite3.Error) as error:
+            # Do not advance the source cursor past an unretained selected packet.
+            return {"status": "unavailable", "reason": "selected_packet_retention_failed",
+                    "error": str(error), "native_receipts_preserved": True}
+        finally:
+            if archive is not None:
+                archive.close()
+    events = [event for event in events if event.get("event") != "selected_native_interval"]
     completed = list(state.get("completed", []))[-window_turns:]
     waiting_state = state.get("waiting", {})
     waiting_changes = []
@@ -698,6 +748,8 @@ def collect_turn_assessment(directory: Path, binding_id: str, *, pending: Mappin
         "waiting": {key: value for key, value in waiting_state.items() if key not in {"seconds", "measurements", "identity", "last_measurement"}},
         "pending_operation": operation, "observation_uncertainty": observation_uncertainty,
         "note": "Native turn boundaries measure simulation only. Input, pause, load, save and transport phases do not create simulation alarms."}
+    assessment["selected_native_packets"] = packet_handles
+    assessment["selected_packet_archive"] = str(directory / "cockpit-evidence.sqlite")
     assessment["alarm_retention"] = retain_alarm_evidence(
         directory, state, assessment, waiting_windows=waiting_windows, added=added)
     state["assessment"] = assessment
