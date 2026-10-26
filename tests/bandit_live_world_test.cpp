@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -11384,8 +11385,9 @@ TEST_CASE( "bandit_live_world_first_scout_survivor_applies_provisional_receipts_
            bandit_live_world::member_state::at_home );
 }
 
-TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_reload",
-           "[bandit][live_world][scout_state][split_return][save][live_adapter]" )
+namespace
+{
+void run_split_scout_return_reload( const bool compare_aftermath )
 {
     clear_npcs();
     const time_point saved_turn = calendar::turn;
@@ -11485,14 +11487,207 @@ TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_relo
         site.active_outing.report_application_key;
     const std::string cargo_application_key =
         site.active_outing.cargo_application_key;
+    // The opt-in comparison keeps the ordinary adapter assertions below intact.
+    // Each arm is a fresh, identically seeded process. Native geometry preparation
+    // is not part of direct aftermath and is never counted as measured cold I/O.
+    std::string temperature;
+    std::string logging;
+    const int original_level = getDebugLevel();
+    const int original_class = getDebugClass();
+    on_out_of_scope restore_logging( [&]() {
+        if( compare_aftermath ) {
+            deinitDebug();
+            setupDebug( DebugOutput::std_err ); // test_main's native sink
+        }
+        limitDebugLevel( original_level );
+        limitDebugClass( original_class );
+    } );
+    if( compare_aftermath ) {
+        const char *temperature_env = std::getenv( "CAOL_DIRECT_AFTERMATH_TEMPERATURE" );
+        const char *logging_env = std::getenv( "CAOL_DIRECT_AFTERMATH_LOGGING" );
+        REQUIRE( temperature_env );
+        REQUIRE( logging_env );
+        temperature = temperature_env;
+        logging = logging_env;
+        REQUIRE( ( temperature == "cold" || temperature == "resident" ) );
+        REQUIRE( ( logging == "normal" || logging == "no_info" ) );
+        std::set<tripoint_abs_omt> owner_tiles;
+        for( const auto id : member_ids ) {
+            const npc *actor = g->find_npc( id );
+            REQUIRE( actor );
+            REQUIRE_FALSE( get_map().inbounds( actor->pos_abs() ) );
+            owner_tiles.insert( actor->pos_abs_omt() );
+        }
+        for( const auto &tile : owner_tiles ) {
+            tinymap body_map;
+            body_map.load( tile, false );
+            body_map.save();
+        }
+        MAPBUFFER.save();
+        std::filesystem::create_directories( std::filesystem::path( PATH_INFO::debug() ).parent_path() );
+        deinitDebug();
+        setupDebug( DebugOutput::file );
+    }
     overmap_buffer.global_state.bandit_live_world = std::move( world );
+    const auto body_facts = [&]() {
+        std::ostringstream out;
+        JsonOut json( out );
+        json.start_array();
+        for( const auto id : member_ids ) {
+            const npc *actor = g->find_npc( id );
+            REQUIRE( actor );
+            json.start_object();
+            json.member( "id", id.get_value() );
+            json.member( "position", actor->pos_abs() );
+            json.member( "hp", actor->get_hp() );
+            json.member( "moves", actor->get_moves() );
+            json.member( "last_updated", actor->get_last_updated() );
+            json.member( "effects", actor->get_effects() );
+            json.member( "item_uids" );
+            json.start_array();
+            actor->visit_items( [&]( const item * value, const item * ) {
+                json.write( value->uid().get_value() );
+                return VisitResponse::NEXT;
+            } );
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+        return out.str();
+    };
+    const auto snapshot = [&]() {
+        std::ostringstream out;
+        JsonOut json( out );
+        json.start_object();
+        json.member( "world", overmap_buffer.global_state.bandit_live_world );
+        json.member( "turn", calendar::turn );
+        json.member( "bodies" );
+        json.start_array();
+        for( const auto id : member_ids ) {
+            const npc *actor = g->find_npc( id );
+            REQUIRE( actor );
+            json.write( *actor );
+        }
+        json.end_array();
+        json.member( "physical_and_uids", body_facts() );
+        json.end_object();
+        return out.str();
+    };
+    const auto aftermath = [&]( const std::string &stage ) {
+        if( !compare_aftermath ) {
+            return process_live_bandit_aftermath_for_test();
+        }
+        const auto preparation_before = snapshot();
+        std::set<tripoint_abs_sm> owner_cells;
+        for( const auto id : member_ids ) {
+            const npc *actor = g->find_npc( id );
+            REQUIRE( actor );
+            const auto origin = project_to<coords::sm>( actor->pos_abs_omt() );
+            for( int x = 0; x < 2; ++x ) {
+                for( int y = 0; y < 2; ++y ) {
+                    owner_cells.insert( origin + point( x, y ) );
+                }
+            }
+        }
+        MAPBUFFER.clear_outside_reality_bubble();
+        for( const auto &cell : owner_cells ) {
+            REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( cell ) );
+        }
+        const auto preload_started = std::chrono::steady_clock::now();
+        if( temperature == "resident" ) {
+            for( const auto &cell : owner_cells ) {
+                REQUIRE( MAPBUFFER.lookup_submap_existing( cell ) );
+            }
+        }
+        const double preload_seconds = std::chrono::duration<double>(
+                                          std::chrono::steady_clock::now() - preload_started ).count();
+        for( const auto &cell : owner_cells ) {
+            REQUIRE( ( MAPBUFFER.lookup_submap_cached( cell ) != nullptr ) ==
+                     ( temperature == "resident" ) );
+        }
+        REQUIRE( snapshot() == preparation_before );
+        const auto before = snapshot();
+        const auto physical_before = body_facts();
+        std::ostringstream rng_before;
+        rng_before << rng_get_engine();
+        const int saved_level = getDebugLevel();
+        const int saved_class = getDebugClass();
+        bool changed = false;
+        double wall_seconds = 0;
+        double cpu_seconds = 0;
+        debug_sink_statistics sink_before;
+        debug_sink_statistics sink_after;
+        {
+            on_out_of_scope restore_scope( [&]() {
+                limitDebugLevel( saved_level );
+                limitDebugClass( saved_class );
+            } );
+            // Only INFO differs; errors and all original classes remain enabled.
+            limitDebugLevel( logging == "normal" ? saved_level | D_ERROR | D_INFO :
+                             ( saved_level | D_ERROR ) & ~D_INFO );
+            REQUIRE( ( getDebugLevel() & D_ERROR ) != 0 );
+            REQUIRE( ( getDebugLevel() & D_INFO ) == ( logging == "normal" ? D_INFO : 0 ) );
+            sink_before = get_debug_sink_statistics();
+            const auto cpu_started = std::clock();
+            const auto started = std::chrono::steady_clock::now();
+            changed = process_live_bandit_aftermath_for_test();
+            wall_seconds = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - started ).count();
+            cpu_seconds = static_cast<double>( std::clock() - cpu_started ) / CLOCKS_PER_SEC;
+            sink_after = get_debug_sink_statistics();
+        }
+        CHECK( getDebugLevel() == saved_level );
+        CHECK( getDebugClass() == saved_class );
+        CHECK( body_facts() == physical_before );
+        std::ostringstream rng_after;
+        rng_after << rng_get_engine();
+        const auto after = snapshot();
+        if( stage == "unbound_refusal" || stage == "stale_refusal" || stage == "rollback" ||
+            stage == "provisional_repeat" || stage == "final_repeat" ) {
+            // The coarse changed flag also includes a successful already-home
+            // route check. Refusal is established by exact conserved state,
+            // not by that flag (live_bandit_route_member_home's native contract).
+            CHECK( after == before );
+        }
+        if( stage == "provisional_repeat" || stage == "final_repeat" ) {
+            CHECK_FALSE( changed );
+        } else if( stage == "provisional" || stage == "final" ) {
+            CHECK( changed );
+        }
+        std::size_t cached_after = 0;
+        for( const auto &cell : owner_cells ) {
+            cached_after += MAPBUFFER.lookup_submap_cached( cell ) != nullptr;
+        }
+        std::cout << "\nDIRECT_AFTERMATH_CONTROL ";
+        JsonOut result( std::cout );
+        result.start_object();
+        result.member( "stage", stage );
+        result.member( "temperature", temperature );
+        result.member( "logging", logging );
+        result.member( "changed", changed );
+        result.member( "owner_cells", owner_cells.size() );
+        result.member( "owner_cells_cached_after", cached_after );
+        result.member( "preload_seconds", preload_seconds );
+        result.member( "wall_seconds", wall_seconds );
+        result.member( "cpu_seconds", cpu_seconds );
+        result.member( "debug_bytes", sink_after.bytes - sink_before.bytes );
+        result.member( "debug_flushes", sink_after.flushes - sink_before.flushes );
+        result.member( "debug_replacements", sink_after.replacements - sink_before.replacements );
+        result.member( "before", before );
+        result.member( "after", after );
+        result.member( "rng_before", rng_before.str() );
+        result.member( "rng_after", rng_after.str() );
+        result.end_object();
+        std::cout << std::endl;
+        return changed;
+    };
 
     // This adapter fixture declares an already-local owner.  Its durable cursor
     // alone cannot authenticate physical bodies: missing actor claims must refuse
     // without publishing even a provisional return.
     const std::string unbound_state = serialize_world(
                                           overmap_buffer.global_state.bandit_live_world );
-    note_live_bandit_aftermath_for_test();
+    aftermath( "unbound_refusal" );
     CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == unbound_state );
     const auto &local_site = overmap_buffer.global_state.bandit_live_world.sites.front();
     const auto &local_outing = local_site.active_outing;
@@ -11505,7 +11700,30 @@ TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_relo
         } );
     }
 
-    note_live_bandit_aftermath_for_test();
+    if( compare_aftermath ) {
+        const auto lease = first_scout->get_bandit_live_world_projection_lease();
+        auto stale = lease;
+        --stale.handoff_epoch;
+        sync_bandit_live_world_projection_lease_copies( *first_scout, stale );
+        aftermath( "stale_refusal" );
+        sync_bandit_live_world_projection_lease_copies( *first_scout, lease );
+
+        auto &report = overmap_buffer.global_state.bandit_live_world.sites.front().current_scout_report;
+        const auto saved_report = report;
+        report.revision = std::numeric_limits<int>::max();
+        report.action_policy = bandit_live_world::camp_report_policy::bandit_shakedown;
+        report.source_activity_id = activity_id;
+        report.source_generation = generation;
+        report.source_job_type = "scout";
+        report.target_id = local_outing.target_id;
+        report.target_omt = local_outing.target_omt;
+        report.application_key = "overflow-provisional";
+        report.delivered_minutes = 100;
+        report.provisional = true;
+        aftermath( "rollback" );
+        overmap_buffer.global_state.bandit_live_world.sites.front().current_scout_report = saved_report;
+    }
+    aftermath( "provisional" );
     bandit_live_world::site_record &provisional_site =
         overmap_buffer.global_state.bandit_live_world.sites.front();
     REQUIRE( provisional_site.active_outing.is_active() );
@@ -11521,12 +11739,19 @@ TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_relo
     CHECK( provisional_site.returned_cargo_stock.supply_units == 3 );
     CHECK( provisional_site.returned_cargo_stock.trade_value == 60 );
 
+    if( compare_aftermath ) {
+        aftermath( "provisional_repeat" );
+    }
+    const auto before_reload = compare_aftermath ? snapshot() : std::string();
     const std::string serialized_bandit_pre_state = serialize_world(
                 overmap_buffer.global_state.bandit_live_world );
     const std::string serialized_pre_state = serialize_live_bandit_overmap_owner();
     CHECK( serialized_pre_state.find( activity_id ) != std::string::npos );
     CHECK( serialized_pre_state.find( provisional_application_key ) != std::string::npos );
     reload_live_bandit_overmap_owner();
+    if( compare_aftermath ) {
+        CHECK( snapshot() == before_reload );
+    }
     CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) ==
            serialized_bandit_pre_state );
 
@@ -11557,7 +11782,7 @@ TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_relo
 
     second_scout->spawn_at_omt( reloaded_site.anchor );
     calendar::turn += 1_minutes;
-    note_live_bandit_aftermath_for_test();
+    aftermath( "final" );
     bandit_live_world::site_record &final_site =
         overmap_buffer.global_state.bandit_live_world.sites.front();
     CHECK_FALSE( final_site.active_outing.is_active() );
@@ -11591,8 +11816,22 @@ TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_relo
            bandit_live_world::member_state::at_home );
 
     const std::string final_owner_state = serialize_live_bandit_overmap_owner();
-    note_live_bandit_aftermath_for_test();
+    aftermath( "final_repeat" );
     CHECK( serialize_live_bandit_overmap_owner() == final_owner_state );
+}
+
+} // namespace
+
+TEST_CASE( "bandit_live_world_split_scout_return_resumes_after_global_owner_reload",
+           "[bandit][live_world][scout_state][split_return][save][live_adapter]" )
+{
+    run_split_scout_return_reload( false );
+}
+
+TEST_CASE( "direct aftermath cache and INFO controls preserve split return receipts",
+           "[.][bandit_live_world][direct_aftermath_comparison]" )
+{
+    run_split_scout_return_reload( true );
 }
 
 TEST_CASE( "bandit_live_world_report_revision_overflow_is_atomic",
