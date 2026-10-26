@@ -11929,9 +11929,11 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         self.fixture_root.mkdir(parents=True)
         self.fixture = "native_tower_initial"
         self.destination = self.fixture_root / self.fixture
-        self.reference = {"status": "current_saved_world_reference", "retained_copy": False,
-                          "profile": self.profile, "world": self.world.name,
-                          "source": str(self.world), "source_sha256": startup.path_sha256(self.world)}
+        # Use the same no-copy producer as native closeout, rather than a
+        # hand-built reference with the fixture registry's different hash format.
+        with mock.patch("startup_harness.save_dir_for_profile", return_value=self.world.parent):
+            self.reference = startup.describe_saved_world_state(
+                self.profile, self.world.name, self.root, label="original-native-reference")
         # Use this process's deliberately impossible birth as a *negative* in
         # the live-PID test. The successful receipt binds a collected child.
         child = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL)
@@ -11987,13 +11989,16 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
 
     def test_moves_native_payload_once_with_exact_bytes_mtimes_and_inodes(self) -> None:
         before = self.snapshot()
-        digest = self.startup.path_sha256(self.world)
+        digest, error = self.startup.sha256_tree(self.world)
+        self.assertEqual(error, "")
+        registry_digest = self.startup.path_sha256(self.world)
         with mock.patch("startup_harness.shutil.copytree", side_effect=AssertionError("payload must move")):
             result = self.adopt()
         moved = self.destination / "save" / self.world.name
         self.assertFalse(self.world.exists())
         self.assertEqual(self.snapshot(moved), before)
-        self.assertEqual(self.startup.path_sha256(moved), digest)
+        self.assertEqual(self.startup.sha256_tree(moved), (digest, ""))
+        self.assertEqual(self.startup.path_sha256(moved), registry_digest)
         self.assertEqual(result["ownership"], "moved")
         resolved = resolve_fixture_payload(self.fixture, "live-debug")
         self.assertEqual(resolved["save_src"] / self.world.name, moved)
@@ -12013,11 +12018,11 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         self.startup.capture_fixture(self.profile, self.fixture, self.world.name, overwrite=False)
         self.assertEqual(self.snapshot(), before)
         moved = self.destination / "save" / self.world.name
-        self.assertEqual(self.startup.path_sha256(moved), self.reference["source_sha256"])
+        self.assertEqual(self.startup.sha256_tree(moved), (self.reference["source_sha256"], ""))
         shutil.rmtree(self.world)
         self.startup.install_fixture(self.profile, self.fixture, replace=False, fixture_profile="live-debug")
         self.assertTrue(moved.is_dir())
-        self.assertEqual(self.startup.path_sha256(self.world), self.reference["source_sha256"])
+        self.assertEqual(self.startup.sha256_tree(self.world), (self.reference["source_sha256"], ""))
 
     def test_existing_fixture_is_never_overwritten_or_touched(self) -> None:
         self.destination.mkdir()
@@ -12064,6 +12069,52 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         self.assertFalse(self.world.exists())
         self.assertEqual(self.snapshot(self.destination / "save" / self.world.name), before)
         self.assertEqual(result["binding"], self.startup.fixture_source_binding(self.fixture, "live-debug"))
+
+    def test_native_reference_producer_consumer_and_adopter_share_payload_identity(self) -> None:
+        before = self.snapshot_all_entries()
+        with mock.patch("startup_harness.shutil.copytree", side_effect=AssertionError("no payload copy")), \
+                mock.patch("startup_harness.os.replace", side_effect=AssertionError("no payload replace")):
+            native_reference = self.startup.describe_saved_world_state(
+                self.profile, self.world.name, self.root, label="native-current-reference")
+            consumer = self.startup.install_saved_world_snapshot(
+                self.profile, self.world.name, self.world, replace=False)
+            self.assertEqual(consumer["status"], "green_saved_world_snapshot_reused")
+            self.assertEqual(consumer["source_sha256"], native_reference["source_sha256"])
+            self.assertEqual(consumer["installed_sha256"], native_reference["source_sha256"])
+            self.assertEqual(self.snapshot_all_entries(), before)
+            registry_digest = self.startup.path_sha256(self.world)
+            self.assertNotEqual(registry_digest, native_reference["source_sha256"])
+            self.reference = native_reference
+            self.custody["current_saved_reference"] = self.reference
+            self.write_metadata()
+            result = self.adopt()
+        moved = self.destination / "save" / self.world.name
+        self.assertEqual(self.snapshot_all_entries(moved), before)
+        self.assertEqual(result["source_sha256"], native_reference["source_sha256"])
+        self.assertEqual(self.startup.sha256_tree(moved), (native_reference["source_sha256"], ""))
+        self.assertEqual(self.startup.path_sha256(moved), registry_digest)
+        self.assertEqual(result["binding"], self.startup.fixture_source_binding(self.fixture, "live-debug"))
+
+    def test_registry_directory_hash_cannot_replace_a_native_reference_pin(self) -> None:
+        native_digest = self.reference["source_sha256"]
+        self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+        self.assertNotEqual(self.reference["source_sha256"], native_digest)
+        self.write_metadata()
+        self.refuse("source tree binding mismatch")
+
+    def test_native_hash_read_failure_refuses_or_rolls_back_without_copying(self) -> None:
+        with mock.patch("startup_harness.sha256_tree", return_value=("", "forced source read failure")):
+            self.refuse("forced source read failure")
+        native_hash = self.startup.sha256_tree
+
+        def fail_only_at_destination(path: Path) -> Any:
+            if path == self.destination / "save" / self.world.name:
+                return "", "forced moved payload read failure"
+            return native_hash(path)
+
+        with mock.patch("startup_harness.sha256_tree", side_effect=fail_only_at_destination), \
+                mock.patch("startup_harness.shutil.copytree", side_effect=AssertionError("no copy rollback")):
+            self.refuse("forced moved payload read failure")
 
     def test_changed_tree_and_foreign_reference_refuse(self) -> None:
         original = (self.world / "dimension_data.gsav").read_bytes()
@@ -12143,7 +12194,8 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         try:
             shutil.rmtree(self.world)
             os.rename(fixture.world, self.world)
-            self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+            self.reference["source_sha256"], error = self.startup.sha256_tree(self.world)
+            self.assertEqual(error, "")
             self.manifest["save_transforms"] = [fixture.guard]
             self.write_metadata()
             # A stricter distance fails on this *same* physical native scene.
@@ -12183,7 +12235,8 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         self.startup.run_zzip(self.world / "overmaps/o.0.0.zzip")
         self.assertTrue((self.world / "player.sav").is_file())
         self.assertTrue((self.world / "o.0.0").is_file())
-        self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+        self.reference["source_sha256"], error = self.startup.sha256_tree(self.world)
+        self.assertEqual(error, "")
         self.write_metadata()
 
     def snapshot_all_entries(self, root: Optional[Path] = None) -> dict:
@@ -12241,7 +12294,8 @@ class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
         # Native precedence actually consults this pre-existing plaintext. Do
         # not erase it, replace it with the archive, or change the source policy.
         (self.world / "o.0.0").write_text("# version 37\n{malformed existing plaintext")
-        self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+        self.reference["source_sha256"], error = self.startup.sha256_tree(self.world)
+        self.assertEqual(error, "")
         self.write_metadata()
         before, temporary_paths = self.snapshot_all_entries(), []
         with self.staging_temp_tracker(temporary_paths):

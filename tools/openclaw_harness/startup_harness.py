@@ -38898,8 +38898,11 @@ def adopt_closed_world_fixture(
     validate_fixture_save_transform_chain(transforms, source_chain=[(fixture_profile, fixture_name)])
     if any(transform["kind"] != "representative_human_source_geometry" for transform in transforms):
         raise SystemExit("Closed-world adoption permits only read-only geometry guards")
-    if path_sha256(source) != reference["source_sha256"]:
-        raise SystemExit("Closed-world source tree binding mismatch")
+    # current_saved_world_reference is produced by describe_saved_world_state:
+    # its native save digest is sha256_tree, not the registry's directory binding.
+    source_hash, source_error = sha256_tree(source)
+    if source_error or source_hash != reference["source_sha256"]:
+        raise SystemExit("Closed-world source tree binding mismatch" + (": " + source_error if source_error else ""))
     # Use the same profile reservation as native launch/install. No second lease
     # manager or permission to consume another run's save is introduced here.
     try:
@@ -38908,8 +38911,9 @@ def adopt_closed_world_fixture(
             _validate_closed_fixture_custody(reference, custody, profile=profile, world=explicit_world, source=source)
             audits = [_audit_staged_representative_source_geometry(
                 source, transform, preserve_existing_plaintext=True) for transform in transforms]
-            if path_sha256(source) != reference["source_sha256"]:
-                raise SystemExit("Closed-world source changed before transfer")
+            source_hash, source_error = sha256_tree(source)
+            if source_error or source_hash != reference["source_sha256"]:
+                raise SystemExit("Closed-world source changed before transfer" + (": " + source_error if source_error else ""))
             prepared = {
                 **manifest, "profile": fixture_profile, "world": explicit_world,
                 "save_transforms": transforms,
@@ -38934,8 +38938,9 @@ def adopt_closed_world_fixture(
                 (fixture_dir / "manifest.json").write_text(encoded, encoding="utf-8")
                 os.rename(source, dest_save)  # No cross-device copy fallback.
                 moved = True
-                if path_sha256(dest_save) != reference["source_sha256"]:
-                    raise SystemExit("Closed-world transferred payload binding mismatch")
+                moved_hash, moved_error = sha256_tree(dest_save)
+                if moved_error or moved_hash != reference["source_sha256"]:
+                    raise SystemExit("Closed-world transferred payload binding mismatch" + (": " + moved_error if moved_error else ""))
                 result = {
                     "fixture": fixture_name, "fixture_profile": fixture_profile,
                     "fixture_dir": str(fixture_dir), "world": explicit_world,
