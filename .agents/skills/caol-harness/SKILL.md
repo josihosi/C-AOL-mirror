@@ -72,13 +72,13 @@ contains the commands, snapshot/reentry shape, helper prerequisites and conditio
 
 ## Live playtesting belongs to Luna
 
-Sol oversees assigned stories and spawns one direct GPT-6 Luna game owner per game. Only Luna
+GPT-6.1 Terra normally chaperones assigned stories and spawns one direct GPT-6 Luna game owner per game. Only Luna
 operates native input; no additional player/chaperone layer. Give Luna the intended outcome,
 current save/build/input state and relevant recipe, not the whole protocol collection. Luna owns
 movement, waits, survival care, permitted setup, supported recovery, useful saves and native exit
 through the assigned outcome. Ordinary steps do not need parent approval.
 
-Sol handles shared resources, consequential diagnosis and accountable closeout. The coordinator
+The chaperone owns practical diagnosis, supported recovery and accountable story closeout. Sol handles shared resources, cross-task priorities and difficult coupled engineering. The coordinator
 retains scope, priorities, lifecycle, current owner context and capacity. Honor explicit stops and
 original ownership. An unavailable worker or timed-out command does not prove its game ended.
 A real unresolved authority, input or save boundary needs the exact failed operation and a useful

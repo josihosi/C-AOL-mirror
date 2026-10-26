@@ -1,4 +1,4 @@
-Current model direction, 2026-09-30: only GPT-6.1 Sol, GPT-6 Luna and GPT-6 Astra for new work. Coordinator GPT-6.1 Sol low; Luna workers preferred and mandatory for live harness playtests. No GPT-5.6 models or Terra. This supersedes historical model guidance below. Existing records remain evidence, not dispatch choices.
+Current model direction, 2026-10-26: GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Luna and GPT-6 Astra for new work. Coordinator GPT-6.1 Sol low; Terra for straightforward coding/tool-heavy work and chaperoning direct Luna players; Luna remains mandatory for live harness input. Sol owns coupled engineering; Astra owns mutation review. Choose worker thinking intensity separately by task difficulty and available efforts. GPT-5.6 models remain retired. This supersedes historical model guidance below. Existing records remain evidence, not dispatch choices.
 
 # Workspace command and evidence habits
 
@@ -8,7 +8,7 @@ current operation, not indefinite retention or copied handoff archives.
 
 ## Harness playtesting model
 
-Only GPT-6 Luna workers may launch or operate live playtest harness sessions. Sol and Astra
+Only GPT-6 Luna workers may launch or operate live playtest harness sessions. Terra, Sol and Astra
 workers must delegate that work to a GPT-6 Luna subagent, even when the parent owns a complex
 task. Give Luna the test outcome and relevant setup, and use its transcript and findings for
 analysis. Code changes, builds, automated tests and reading existing evidence remain with the
