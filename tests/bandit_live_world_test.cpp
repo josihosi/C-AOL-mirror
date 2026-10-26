@@ -1,4 +1,5 @@
 #include "input.h"
+#include "debug.h"
 #include "bandit_live_world.h"
 #include "bandit_live_world_probe.h"
 #include "scout_observation.h"
@@ -2471,6 +2472,213 @@ TEST_CASE( "live structural bounty watch route read uses overmap geography",
     CHECK( rejected.watch_shared_route.empty() );
     CHECK( rejected_budget == 8 );
     CHECK( rejected.summary == "live structural route abandoned: no bounded safe watch geography" );
+}
+
+TEST_CASE( "native watch route attempts explain the actual first refusal without changing work",
+           "[bandit_live_world][watch_route_attempt_diagnostic]" )
+{
+    const std::string mode = GENERATE( "success", "exhausted", "unpassable", "covert", "overbudget" );
+    CAPTURE( mode );
+    clear_avatar();
+    clear_map_with_vision( -1, 1, false );
+    map &here = get_map();
+    const auto target = project_to<coords::omt>( here.get_abs( tripoint_bub_ms( 84, 66, 0 ) ) );
+    const auto watch = target + tripoint( -3, 0, 0 );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> previous;
+    for( int y = -15; y <= 15; ++y ) {
+        for( int x = -15; x <= 15; ++x ) {
+            const auto omt = target + tripoint( x, y, 0 );
+            previous.emplace_back( omt, overmap_buffer.ter( omt ) );
+            overmap_buffer.ter_set( omt, oter_str_id( "field" ).id() );
+        }
+    }
+    on_out_of_scope restore_terrain( [&]() {
+        for( const auto &entry : previous ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+    } );
+    overmap_buffer.ter_set( watch, oter_str_id( "forest" ).id() );
+    if( mode == "unpassable" ) {
+        // Physically usable dry footing does not make the native OMT water
+        // route passable. Keep actual loaded grass platforms for the lookout.
+        for( int y = -3; y <= 3; ++y ) {
+            for( int x = -3; x <= 3; ++x ) {
+                if( std::max( std::abs( x ), std::abs( y ) ) == 3 ) {
+                    overmap_buffer.ter_set( target + tripoint( x, y, 0 ),
+                                           oter_str_id( "river_center" ).id() );
+                }
+            }
+        }
+    }
+    bandit_live_world::site_record site;
+    site.site_id = "test:native-route-attempt";
+    site.anchor = target + ( mode == "overbudget" ? tripoint( -12, 0, 0 ) :
+                            mode == "covert" ? tripoint( -1, 0, 0 ) : tripoint( -4, -4, 0 ) );
+    site.supply_units = 7;
+    bandit_live_world::structural_outing_plan plan;
+    plan.lead_id = "structural_bounty:route-attempt";
+    plan.target_omt = target;
+    plan.job = bandit_dry_run::job_template::scout;
+    bandit_live_world::camp_map_lead lead;
+    lead.lead_id = plan.lead_id;
+    lead.kind = bandit_live_world::camp_lead_kind::structural_bounty;
+    lead.omt = target;
+    site.intelligence_map.leads.push_back( lead );
+    const auto serialized = []( const auto &value ) {
+        std::ostringstream out;
+        JsonOut json( out );
+        value.serialize( json );
+        return out.str();
+    };
+    const auto site_before = serialized( site );
+    const auto world_before = serialized( overmap_buffer.global_state.bandit_live_world );
+    const auto body_before = serialized( get_avatar() );
+    const auto turn_before = calendar::turn;
+    const int old_level = getDebugLevel();
+    const int old_class = getDebugClass();
+    std::ostringstream output;
+    auto *const old_cerr = std::cerr.rdbuf( output.rdbuf() );
+    on_out_of_scope restore_debug( [&]() {
+        limitDebugLevel( old_level );
+        limitDebugClass( old_class );
+        std::cerr.rdbuf( old_cerr );
+    } );
+    limitDebugClass( DC_ALL );
+    limitDebugLevel( D_ERROR );
+    REQUIRE_FALSE( bandit_live_world_probe::transition_events_enabled() );
+    int off_budget = mode == "exhausted" ? 0 : 8;
+    const auto off = live_bandit_structural_route_read_for_test( site, plan, off_budget );
+    CHECK( output.str().find( "route_attempts=" ) == std::string::npos );
+    output.str( "" );
+    output.clear();
+    limitDebugLevel( D_ERROR | D_INFO );
+    int on_budget = mode == "exhausted" ? 0 : 8;
+    const auto on = [&]() {
+        bandit_live_world_probe::session events(
+            bandit_live_world_probe::collection_mode::transition_events );
+        return live_bandit_structural_route_read_for_test( site, plan, on_budget );
+    }();
+    CHECK_FALSE( bandit_live_world_probe::transition_events_enabled() );
+    CHECK( on_budget == off_budget );
+    CHECK( on.reachable == off.reachable );
+    CHECK( on.complete_route_cost == off.complete_route_cost );
+    CHECK( on.max_segment_risk == off.max_segment_risk );
+    CHECK( on.summary == off.summary );
+    CHECK( on.watch_geography_supplied == off.watch_geography_supplied );
+    CHECK( on.target_footprint == off.target_footprint );
+    CHECK( on.watch_candidates == off.watch_candidates );
+    CHECK( on.watch_shared_route == off.watch_shared_route );
+    CHECK( on.alternate_watch_shared_route == off.alternate_watch_shared_route );
+    CHECK( serialized( site ) == site_before );
+    CHECK( serialized( overmap_buffer.global_state.bandit_live_world ) == world_before );
+    CHECK( serialized( get_avatar() ) == body_before );
+    CHECK( calendar::turn == turn_before );
+    REQUIRE( on.watch_geography_supplied );
+    REQUIRE_FALSE( on.watch_candidates.empty() );
+    REQUIRE( on.watch_candidates.size() <= 4 );
+    if( mode == "success" ) {
+        REQUIRE( on.reachable );
+        REQUIRE( on.watch_shared_route.size() == 5 );
+        CHECK( bandit_live_world::structural_watch_shared_route_is_canonical(
+                   on.watch_shared_route, site.anchor, on.watch_shared_route[2], on.target_footprint ) );
+    } else {
+        CHECK_FALSE( on.reachable );
+    }
+    if( mode == "covert" ) {
+        bandit_live_world::active_outing_state expected_owner;
+        expected_owner.schema_version = 10;
+        expected_owner.phase = bandit_live_world::scout_phase::outbound;
+        expected_owner.target_footprint = { target };
+        expected_owner.selected_watch_omt = watch;
+        REQUIRE( bandit_live_world::covert_scout_travel_minimum_target_distance( expected_owner ) == 2 );
+        REQUIRE( bandit_live_world::target_footprint_watch_distance(
+                     site.anchor, expected_owner.target_footprint ) == 1 );
+        // Same real source and geometry, through the native ordinary visited
+        // endpoint owner: only the scout route imposes the covert exclusion.
+        auto visited_plan = plan;
+        visited_plan.job = bandit_dry_run::job_template::scavenge;
+        int visited_budget = 8;
+        const auto visited = live_bandit_structural_route_read_for_test( site, visited_plan,
+                             visited_budget );
+        CHECK( visited.reachable );
+        CHECK_FALSE( visited.watch_geography_supplied );
+        CHECK( visited_budget == 8 );
+        CHECK( serialized( site ) == site_before );
+        CHECK( serialized( overmap_buffer.global_state.bandit_live_world ) == world_before );
+        CHECK( serialized( get_avatar() ) == body_before );
+        CHECK( calendar::turn == turn_before );
+    }
+    const std::string logged = output.str();
+    const auto marker = logged.find( " route_attempts=" );
+    REQUIRE( marker != std::string::npos );
+    const auto start = marker + std::string( " route_attempts=" ).size();
+    const auto end = logged.find( '\n', start );
+    const auto payload = logged.substr( start, end - start );
+    CHECK( payload.size() < 4096 );
+    std::cout << "WATCH_ROUTE_ATTEMPTS mode=" << mode << " bytes=" << payload.size()
+              << " actual=" << payload << '\n';
+    const auto diagnostic = json_loader::from_string( payload ).get_object();
+    CHECK( diagnostic.get_string( "physical_target" ) == target.to_string() );
+    CHECK( diagnostic.get_int( "route_budget" ) == 18 );
+    CHECK( diagnostic.get_int( "source_cost" ) >= 0 );
+    CHECK( diagnostic.get_int( "omitted" ) == 0 );
+    const auto attempts = diagnostic.get_array( "attempts" );
+    CHECK( attempts.size() == on.watch_candidates.size() );
+    int expected_budget = mode == "exhausted" ? 0 : 8;
+    int index = 0;
+    for( JsonObject attempt : attempts ) {
+        CAPTURE( index, payload );
+        CHECK( attempt.get_string( "candidate" ) == on.watch_candidates[index].omt.to_string() );
+        CHECK( attempt.get_int( "budget_before" ) == expected_budget );
+        if( expected_budget > 0 ) {
+            --expected_budget;
+        }
+        CHECK( attempt.get_int( "budget_after" ) == expected_budget );
+        if( mode == "exhausted" ) {
+            CHECK( attempt.get_string( "first_rejection" ) == "watch_budget_exhausted" );
+            CHECK( attempt.get_string( "raw_cost" ) == "NOT_REACHED" );
+            CHECK( attempt.get_string( "point_count" ) == "NOT_REACHED" );
+        } else {
+            CHECK( attempt.get_int( "raw_cost" ) >= 0 );
+            CHECK( attempt.get_int( "point_count" ) >= 0 );
+        }
+        CHECK( attempt.get_string( "member_route" ) == "NOT_REACHED" );
+        if( mode == "exhausted" ) {
+            CHECK( attempt.get_string( "round_trip" ) == "NOT_REACHED" );
+        }
+        if( mode == "exhausted" ) {
+            CHECK( attempt.get_string( "covert" ) == "NOT_REACHED" );
+            CHECK( attempt.get_string( "shared_route" ) == "NOT_REACHED" );
+        } else if( mode == "overbudget" ) {
+            CHECK( attempt.get_bool( "covert" ) );
+        } else if( mode == "covert" || mode == "unpassable" ) {
+            // Native find_overmap_path returns its default cost0/empty value
+            // for these exclusions. Existing all_of(empty) is true; the first
+            // actual refusing guard is normalization, not cost<0 or covert.
+            CHECK( attempt.get_int( "raw_cost" ) == 0 );
+            CHECK( attempt.get_int( "point_count" ) == 0 );
+            CHECK( attempt.get_bool( "covert" ) );
+            CHECK( attempt.get_int( "round_trip" ) == -1 );
+        }
+        if( mode == "success" ) {
+            CHECK( attempt.get_string( "first_rejection" ) == "NONE" );
+            CHECK( attempt.get_bool( "covert" ) );
+            CHECK( attempt.get_bool( "shared_route" ) );
+            CHECK( attempt.get_int( "round_trip" ) == on.watch_candidates[index].route_cost );
+        } else if( mode == "unpassable" ) {
+            CHECK( attempt.get_string( "first_rejection" ) == "invalid_round_trip_cost" );
+            CHECK( attempt.get_string( "shared_route" ) == "NOT_REACHED" );
+        } else if( mode == "overbudget" ) {
+            CHECK( attempt.get_string( "first_rejection" ) == "round_trip_budget_exceeded" );
+            CHECK( attempt.get_int( "round_trip" ) > 18 );
+            CHECK( attempt.get_string( "shared_route" ) == "NOT_REACHED" );
+        } else if( mode == "covert" ) {
+            CHECK( attempt.get_string( "first_rejection" ) == "invalid_round_trip_cost" );
+            CHECK( attempt.get_string( "shared_route" ) == "NOT_REACHED" );
+        }
+        ++index;
+    }
+    CHECK( expected_budget == on_budget );
 }
 
 TEST_CASE( "live route admission uses the visited endpoint for scavenging and the watch endpoint for scouting",

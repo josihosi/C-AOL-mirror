@@ -13282,11 +13282,53 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
         watch_cached_views += geometry.cached_view_count();
         return terrain;
     };
+    // Four route callbacks is the existing geography owner's bound. Keep only
+    // scalar facts from their original evaluation; the existing transition-event
+    // gate leaves entries unconstructed and emits no payload when disabled.
+    struct watch_route_attempt {
+        tripoint_abs_omt candidate;
+        int budget_before = 0;
+        int budget_after = 0;
+        std::optional<int> raw_cost;
+        std::optional<std::size_t> point_count;
+        std::optional<bool> covert;
+        std::optional<int> round_trip;
+        std::optional<bool> shared_route;
+        std::optional<bool> member_route;
+        const char *first_rejection = "NOT_REACHED";
+    };
+    std::optional<std::array<watch_route_attempt, 4>> route_attempts;
+    if( bandit_live_world_probe::transition_events_enabled() ) {
+        route_attempts.emplace();
+    }
+    std::size_t route_attempt_count = 0;
+    std::size_t route_attempts_omitted = 0;
     const auto watch_route_lookup = [&site, &npc_route, &source_node_cost, &target_footprint,
-                                            &watch_path_budget, route_budget,
+                                            &watch_path_budget, route_budget, &route_attempts,
+                                            &route_attempt_count, &route_attempts_omitted,
            &watch_paths, &member_route_check]( const tripoint_abs_omt & candidate ) {
         bandit_live_world::structural_watch_route_read route;
+        watch_route_attempt *attempt = nullptr;
+        if( route_attempts ) {
+            if( route_attempt_count < route_attempts->size() ) {
+                attempt = &( *route_attempts )[route_attempt_count++];
+                attempt->candidate = candidate;
+                attempt->budget_before = watch_path_budget;
+            } else {
+                // A future caller widening must not overrun the diagnostic or
+                // suppress native work merely because the record is full.
+                ++route_attempts_omitted;
+            }
+        }
+        on_out_of_scope record_budget( [&]() {
+            if( attempt ) {
+                attempt->budget_after = watch_path_budget;
+            }
+        } );
         if( watch_path_budget <= 0 ) {
+            if( attempt ) {
+                attempt->first_rejection = "watch_budget_exhausted";
+            }
             return route;
         }
         watch_path_budget--;
@@ -13305,8 +13347,24 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
         const auto watch_path = overmap_buffer.get_travel_path(
                                     site.anchor, candidate, npc_route,
                                     exclusions );
-        if( watch_path.cost < 0 ||
-            !live_bandit_route_respects_covert_ring( route_owner, watch_path.points ) ) {
+        if( attempt ) {
+            attempt->raw_cost = watch_path.cost;
+            attempt->point_count = watch_path.points.size();
+        }
+        if( watch_path.cost < 0 ) {
+            if( attempt ) {
+                attempt->first_rejection = "path_unreachable";
+            }
+            return route;
+        }
+        const bool covert = live_bandit_route_respects_covert_ring( route_owner, watch_path.points );
+        if( attempt ) {
+            attempt->covert = covert;
+        }
+        if( !covert ) {
+            if( attempt ) {
+                attempt->first_rejection = "covert_ring_refused";
+            }
             return route;
         }
         const bool diagonal_departure = watch_path.points.size() >= 2 &&
@@ -13316,18 +13374,47 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                                         site.anchor.y();
         route.route_cost = bandit_live_world::normalize_structural_live_round_trip_cost_omt(
                                watch_path.cost, source_node_cost, diagonal_departure );
+        if( attempt ) {
+            attempt->round_trip = route.route_cost;
+        }
         route.reachable = route.route_cost >= 0 && route.route_cost <= route_budget;
-        if( !route.reachable ||
-            bandit_live_world::make_structural_watch_shared_route(
-                site.anchor, candidate, watch_path.points, target_footprint ).empty() ) {
+        if( !route.reachable ) {
+            if( attempt ) {
+                attempt->first_rejection = route.route_cost < 0 ? "invalid_round_trip_cost" :
+                                           "round_trip_budget_exceeded";
+            }
             route.reachable = false;
             return route;
         }
-        if( member_route_check && !member_route_check( candidate ) ) {
+        const bool shared_route = !bandit_live_world::make_structural_watch_shared_route(
+                                      site.anchor, candidate, watch_path.points, target_footprint ).empty();
+        if( attempt ) {
+            attempt->shared_route = shared_route;
+        }
+        if( !shared_route ) {
+            if( attempt ) {
+                attempt->first_rejection = "shared_route_invalid";
+            }
             route.reachable = false;
             return route;
+        }
+        if( member_route_check ) {
+            const bool member_route = member_route_check( candidate );
+            if( attempt ) {
+                attempt->member_route = member_route;
+            }
+            if( !member_route ) {
+                if( attempt ) {
+                    attempt->first_rejection = "member_route_refused";
+                }
+                route.reachable = false;
+                return route;
+            }
         }
         watch_paths.emplace_back( candidate, watch_path.points );
+        if( attempt ) {
+            attempt->first_rejection = "NONE";
+        }
         return route;
     };
     bandit_live_world::structural_watch_geography_read watch =
@@ -13354,6 +13441,48 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
     []( const bandit_live_world::watch_selection_candidate & candidate ) {
         return candidate.reachable;
     } ) );
+    const auto render_route_attempts = [&]() {
+        if( !route_attempts ) {
+            return std::string();
+        }
+        // No identity strings or paths are copied. Four fixed-key scalar
+        // entries bound both storage and output, even at extreme coordinates.
+        std::ostringstream output;
+        output << " route_attempts=";
+        JsonOut json( output );
+        json.start_object();
+        json.member( "physical_target", physical_watch_target->to_string() );
+        json.member( "source_cost", source_node_cost );
+        json.member( "route_budget", route_budget );
+        json.member( "omitted", route_attempts_omitted );
+        json.member( "attempts" );
+        json.start_array();
+        for( std::size_t index = 0; index < route_attempt_count; ++index ) {
+            const auto &attempt = ( *route_attempts )[index];
+            json.start_object();
+            json.member( "candidate", attempt.candidate.to_string() );
+            json.member( "budget_before", attempt.budget_before );
+            json.member( "budget_after", attempt.budget_after );
+            const auto optional_fact = [&]( const char *name, const auto &fact ) {
+                if( fact ) {
+                    json.member( name, *fact );
+                } else {
+                    json.member( name, "NOT_REACHED" );
+                }
+            };
+            optional_fact( "raw_cost", attempt.raw_cost );
+            optional_fact( "point_count", attempt.point_count );
+            optional_fact( "covert", attempt.covert );
+            optional_fact( "round_trip", attempt.round_trip );
+            optional_fact( "shared_route", attempt.shared_route );
+            optional_fact( "member_route", attempt.member_route );
+            json.member( "first_rejection", attempt.first_rejection );
+            json.end_object();
+        }
+        json.end_array();
+        json.end_object();
+        return output.str();
+    };
     DebugLog( D_INFO, DC_ALL ) << "bandit_live_world watch_geography_preflight"
                                << " site=" << site.site_id
                                << " target=" << plan.target_omt
@@ -13370,7 +13499,8 @@ bandit_live_world::structural_route_read live_bandit_structural_route_read(
                                        watch.selection.omt.to_string() : "none" )
                                << " selected_route_cost=" << watch.selection.route_cost
                                << " outcome=" << ( watch.selection.valid ? "selected" :
-                                       "no_bounded_safe_watch_geography" ) << '\n';
+                                       "no_bounded_safe_watch_geography" )
+                               << render_route_attempts() << '\n';
     if( !watch.selection.valid ) {
         read.reachable = false;
         read.summary = "live structural route abandoned: no bounded safe watch geography";
