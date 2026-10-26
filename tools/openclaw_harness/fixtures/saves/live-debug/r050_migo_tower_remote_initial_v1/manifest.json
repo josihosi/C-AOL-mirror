@@ -1,0 +1,459 @@
+{
+  "name": "r050_migo_tower_remote_initial_v1",
+  "profile": "live-debug",
+  "world": "TestSetup00",
+  "description": "Reusable native-prepared pre-signal tower start. Native placed/generated/committed tower and all human homes remain unchanged. Player is near the source-OFF charged cone on the real finite roof platform. Setup only: source activation, measured native reach, observation, response and journey remain native work after installation.",
+  "source_parent_fixture": "r050_rural_bandit_remote_v1",
+  "pre_signal": true,
+  "gameplay_credit": false,
+  "native_preparation": {
+    "saved_world_sha256": "d598290e4ed23d78ec5a51bbdf6259cb140e80194dc8f0c0a945a03d850785c7",
+    "turn": 5216251,
+    "saved_minute": 7737,
+    "current_reference_sha256": "14a70d282fd74a81af120f3d1890d61b14e7297b41b3e166b6505727d08e5bf5",
+    "native_closure_sha256": "4c847205af3344d150e5c52b4ca07b5dab09cf3e25df8df6a90d0c3c422693f4",
+    "presave_metadata_sha256": "3aa064a706b05a6ddc0f6ff9920c99d0a758b89c4cf5170b32af1834aee05e46",
+    "persistence_metadata_sha256": "e4f5896358063bcbdce3f5ba67ad4218cdb40f6d569acfeba21c2ad75cdd9208",
+    "owner_reported_source_off": true,
+    "owner_reported_no_operation_decision_or_sourcelead": true,
+    "owner_reported_committed_roster_count": 8,
+    "owner_reported_defensive_reserve": 2,
+    "owner_reported_all_home_count": 3,
+    "evidence_ceiling": "Native preparation/persistence facts from pinned owner compacts; geometry guard is not source emission, body authentication, journey or timing credit."
+  },
+  "save_transforms": [
+    {
+      "kind": "representative_human_source_geometry",
+      "player_save": "#VGVzdDAw.sav.zzip",
+      "source_area_omt": [
+        [
+          145,
+          149,
+          1
+        ]
+      ],
+      "expected_home_site_ids": [
+        "overmap_special:bandit_camp@129,149,0",
+        "overmap_special:bandit_cabin@103,167,0"
+      ],
+      "expected_source_terrain_id": "open_air",
+      "minimum_distance_omt": 15,
+      "expected_migo_site_ids": [
+        "mi-go-tower:(145,134,0)"
+      ]
+    }
+  ],
+  "adoption": {
+    "schema": "caol-closed-world-fixture-adoption-v1",
+    "source_profile": "mixed-pristine-tower-remote15",
+    "source_path": "/Volumes/CodexBulk/Schanigarten/workspaces/Cataclysm-AOL/.userdata/mixed-pristine-tower-remote15/save/TestSetup00",
+    "source_sha256": "d598290e4ed23d78ec5a51bbdf6259cb140e80194dc8f0c0a945a03d850785c7",
+    "world_reference_sha256": "14a70d282fd74a81af120f3d1890d61b14e7297b41b3e166b6505727d08e5bf5",
+    "custody_sha256": "4c847205af3344d150e5c52b4ca07b5dab09cf3e25df8df6a90d0c3c422693f4",
+    "manifest_sha256": "f9f0a58455baddbbedf137ce2bb75c703462fdbbc5549c1f3fc02c80565378ad",
+    "run_id": "7140bf3aa8bd3ac2447b9b28e10653487258381ac13c4ba79715cbf594738482",
+    "binding_id": "10f78e49ffd08b3e4720a945476f55c21d2a09f754756c76a5879e4fabc2c44e",
+    "geometry_audits": [
+      {
+        "kind": "representative_human_source_geometry",
+        "world": "TestSetup00",
+        "player_omt": [
+          145,
+          149,
+          1
+        ],
+        "source_area_omt": [
+          [
+            145,
+            149,
+            1
+          ]
+        ],
+        "source_overmap_terrain": [
+          {
+            "omt": [
+              145,
+              149,
+              1
+            ],
+            "terrain_id": "open_air"
+          }
+        ],
+        "minimum_distance_omt": 15,
+        "distance_metric": "horizontal_chebyshev_omt",
+        "homes": [
+          {
+            "site_id": "mi-go-tower:(145,134,0)",
+            "footprint_omt": [
+              [
+                145,
+                134,
+                0
+              ],
+              [
+                145,
+                134,
+                1
+              ],
+              [
+                145,
+                134,
+                2
+              ],
+              [
+                145,
+                134,
+                3
+              ]
+            ],
+            "nearest_footprint_distance_omt": 15
+          },
+          {
+            "site_id": "overmap_special:bandit_cabin@103,167,0",
+            "footprint_omt": [
+              [
+                103,
+                167,
+                0
+              ],
+              [
+                103,
+                167,
+                1
+              ]
+            ],
+            "nearest_footprint_distance_omt": 42
+          },
+          {
+            "site_id": "overmap_special:bandit_camp@129,149,0",
+            "footprint_omt": [
+              [
+                129,
+                149,
+                0
+              ],
+              [
+                129,
+                149,
+                1
+              ],
+              [
+                129,
+                150,
+                0
+              ],
+              [
+                129,
+                150,
+                1
+              ],
+              [
+                130,
+                149,
+                0
+              ],
+              [
+                130,
+                149,
+                1
+              ],
+              [
+                130,
+                150,
+                0
+              ],
+              [
+                130,
+                150,
+                1
+              ]
+            ],
+            "nearest_footprint_distance_omt": 15
+          }
+        ],
+        "evidence_class": "setup",
+        "gameplay_credit": false,
+        "native_qualification_required": [
+          "usable terrain",
+          "actual source and emission",
+          "measured native reach",
+          "saved World adoption"
+        ],
+        "migo_sites": [
+          {
+            "site_id": "mi-go-tower:(145,134,0)",
+            "placed_floor_terrain": [
+              {
+                "omt": [
+                  145,
+                  134,
+                  0
+                ],
+                "terrain_id": "mi-go_scout_tower_1_north"
+              },
+              {
+                "omt": [
+                  145,
+                  134,
+                  1
+                ],
+                "terrain_id": "mi-go_scout_tower_2_north"
+              },
+              {
+                "omt": [
+                  145,
+                  134,
+                  2
+                ],
+                "terrain_id": "mi-go_scout_tower_3_north"
+              },
+              {
+                "omt": [
+                  145,
+                  134,
+                  3
+                ],
+                "terrain_id": "mi-go_scout_tower_4_north"
+              }
+            ],
+            "population": {
+              "site_id": "mi-go-tower:(145,134,0)",
+              "generation_provenance": {
+                "new_content": true,
+                "seed_committed": true,
+                "occupancy_verified": true
+              },
+              "population_source": [
+                3492,
+                3225,
+                0
+              ],
+              "source_furniture": "f_migo_brood_pod",
+              "source_destroyed": false,
+              "serialized_roster": [
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "bkXMuWfqkxogfrXXELJBkcpFrvnOWhBW",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go",
+                  "home": [
+                    3488,
+                    3226,
+                    0
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 210,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3488,
+                    3226,
+                    0
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "uQuqCRmwUBneclTkQhTESzOZOlkJkZtO",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go",
+                  "home": [
+                    3492,
+                    3228,
+                    0
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 210,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3492,
+                    3228,
+                    0
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "IdUcxSyTOEOIMelSOMIRflByQyrpDyJA",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go",
+                  "home": [
+                    3488,
+                    3226,
+                    1
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 210,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3488,
+                    3226,
+                    1
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "YmRfQXolVBkotDAYHLrHFuVMIBihVsCR",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go",
+                  "home": [
+                    3492,
+                    3228,
+                    1
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 210,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3492,
+                    3228,
+                    1
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "BIswgwDuJeZnZnizNKXaBTQoMkZcxdfL",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go_scout",
+                  "home": [
+                    3487,
+                    3225,
+                    2
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 200,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3487,
+                    3225,
+                    2
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "kjhzBXrqSwnbuMRYeAdBDoCYYcKWbMtz",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go_scout",
+                  "home": [
+                    3492,
+                    3228,
+                    2
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 200,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3492,
+                    3228,
+                    2
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "TaUkmrpidCddpZMTavjhIplACzUapLjP",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go",
+                  "home": [
+                    3488,
+                    3226,
+                    3
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 210,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3488,
+                    3226,
+                    3
+                  ]
+                },
+                {
+                  "identity": {
+                    "site": "mi-go-tower:(145,134,0)",
+                    "member": "LajehDgptiOLLDEMgFkiAgzfpeHbLuuV",
+                    "epoch": 3,
+                    "anchor": [
+                      145,
+                      134,
+                      0
+                    ]
+                  },
+                  "type": "mon_mi_go",
+                  "home": [
+                    3492,
+                    3228,
+                    3
+                  ],
+                  "owner": 2,
+                  "duty": 0,
+                  "hp": 210,
+                  "birth_sequence": 0,
+                  "current_position": [
+                    3492,
+                    3228,
+                    3
+                  ]
+                }
+              ],
+              "resident_payloads_checked": false
+            },
+            "evidence_ceiling": "Saved geometry/provenance/roster facts, not an initial-state or live-body authentication proof"
+          }
+        ]
+      }
+    ]
+  }
+}
