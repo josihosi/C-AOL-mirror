@@ -79,6 +79,7 @@
 #include "map_helpers.h"
 #include "main_menu.h"
 #include "map_helpers_tests.h"
+#include "messages.h"
 #include "monster.h"
 #include "mtype.h"
 #include "monster_helpers.h"
@@ -75152,4 +75153,316 @@ TEST_CASE( "owned signal scout consumed native arrival starts its finite watch o
         }
         CHECK( calendar::turn == before_time );
     }
+}
+
+TEST_CASE( "maintained mixed metrics bootstrap has current reloadable owners and clocks",
+           "[.][bandit][mixed_load_fixture]" )
+{
+    using namespace bandit_live_world;
+    const std::string mode = GENERATE( std::string( "ownership" ), std::string( "clocks" ) );
+    const char *path = std::getenv( "CAOL_MIXED_LOAD_FIXTURE" );
+    REQUIRE( path );
+    std::ifstream input( path );
+    REQUIRE( input.good() );
+    auto fixture = json_loader::from_string(
+                       std::string( std::istreambuf_iterator<char>( input ), {} ) ).get_object();
+    fixture.allow_omitted_members();
+    const int turn = fixture.get_int( "turn" );
+    const int origin = fixture.get_int( "calendar_start" );
+    const int relative = turn - origin;
+    world_state world;
+    world.deserialize( fixture.get_object( "world" ) );
+    std::map<character_id, shared_ptr_fast<npc>> bodies;
+    for( JsonObject record : fixture.get_array( "npcs" ) ) {
+        auto body = make_shared_fast<npc>();
+        body->deserialize( record );
+        REQUIRE( bodies.emplace( body->getID(), body ).second );
+    }
+    REQUIRE( bodies.size() == 16 );
+    REQUIRE( world.sites.size() == 2 );
+    int reserved = 0;
+    int owned = 0;
+    for( auto &site : world.sites ) {
+        CAPTURE( mode, site.site_id );
+        auto &operation = site.active_hostile_operation;
+        auto &outing = operation.reservation;
+        if( mode == "ownership" ) {
+            REQUIRE( operation.is_active() );
+            REQUIRE_FALSE( operation.legacy_unpinned );
+            REQUIRE( operation.phase == hostile_operation_phase::outbound );
+            REQUIRE_FALSE( site.active_outing.is_active() );
+            REQUIRE( outing.owner == simulation_owner::abstract );
+            REQUIRE( outing.handoff_epoch == 0 );
+            REQUIRE( current_external_simulation_cursor( site ) );
+            CHECK( site.count_live_members() == site.living_total );
+            CHECK( site.next_outing_generation > outing.generation );
+            CHECK( outing.shared_route.front() == site.anchor );
+            CHECK( outing.shared_route[1] == operation.rally_omt );
+            CHECK( outing.shared_route.back() == outing.target_omt );
+            CHECK( rl_dist( operation.rally_omt, outing.target_omt ) >= 2 );
+            CHECK( rl_dist( operation.rally_omt, outing.target_omt ) <= 3 );
+            CHECK( operation.source_report_application_key == site.current_scout_report.application_key );
+            CHECK( operation.source_report_generation == site.current_scout_report.source_generation );
+            if( operation.operation_kind == hostile_operation_kind::raid ) {
+                raid_sweep::progress expected;
+                expected.begin( outing.target_omt, outing.generation );
+                CHECK( operation.sweep.candidates.size() == expected.candidates.size() );
+                for( std::size_t i = 0; i < expected.candidates.size(); ++i ) {
+                    CHECK( operation.sweep.candidates[i].position == expected.candidates[i].position );
+                }
+                CHECK( operation.sweep_source_evidence == raid_source_evidence(
+                           site.current_scout_report, 1 ) );
+            }
+        }
+        std::map<character_id, int> anchors;
+        for( const auto &member : site.members ) {
+            REQUIRE( bodies.count( member.npc_id ) );
+            const npc &body = *bodies.at( member.npc_id );
+            const int stamp = to_turn<int>( body.get_last_updated() ) - origin;
+            // This is the native loader's future-body premise, not a rebased
+            // fixture timestamp or an artificial historical-work allowance.
+            REQUIRE( stamp <= relative );
+            if( mode == "ownership" ) {
+                CHECK( body.pos_abs() == member.home_spawn_tile );
+                CHECK_FALSE( body.get_bandit_live_world_projection_lease().present );
+                CHECK( body.goal == tripoint_abs_omt::invalid );
+                CHECK( body.omt_path.empty() );
+                CHECK( body.get_fac_id().str() ==
+                       ( site.site_kind == owned_site_kind::cannibal_camp ? "cannibal_camp" : "hells_raiders" ) );
+                CHECK( std::find( site.footprint.begin(), site.footprint.end(), body.pos_abs_omt() ) !=
+                       site.footprint.end() );
+                ++owned;
+            }
+            if( std::find( outing.member_ids.begin(), outing.member_ids.end(), member.npc_id ) !=
+                outing.member_ids.end() ) {
+                CHECK_FALSE( body.is_dead() );
+                CHECK_FALSE( body.in_sleep_state() );
+                CHECK_FALSE( body.has_activity() );
+                CHECK_FALSE( body.has_effect( efftype_id( "npc_suspend" ) ) );
+                anchors.emplace( member.npc_id, stamp );
+                CHECK( active_operation_duty_site_for( world, member.npc_id ) == &site );
+                ++reserved;
+            }
+        }
+        if( mode == "clocks" ) {
+            auto &clock = outing.activation;
+            REQUIRE_FALSE( clock.initialized() );
+            clock.evaluate( relative, true, outing.activation_anchors(), anchors,
+                            outing.last_advanced_minutes * 60 );
+            CHECK( clock.active_turns == 0 );
+            CHECK( clock.active_delta_turns == 0 );
+        }
+    }
+    if( mode == "ownership" ) {
+        CHECK( owned == 14 );
+        CHECK( reserved == 6 );
+        CHECK( serialize_world( round_trip_world( world ) ) == serialize_world( world ) );
+        CHECK( reconcile_loaded_local_projections( world, {} ) ==
+               local_projection_reconciliation_result::unchanged );
+        for( const bool foreign : { false, true } ) {
+            auto rejected = world;
+            const auto &site = rejected.sites.front();
+            const auto &outing = site.active_hostile_operation.reservation;
+            std::vector<local_projection_claim> claims;
+            for( const auto id : outing.member_ids ) {
+                claims.emplace_back( id, foreign ? "foreign" : site.site_id, outing.activity_id,
+                                     "local", outing.generation, 1, outing.last_advanced_minutes );
+            }
+            const auto before = serialize_world( rejected );
+            CHECK( reconcile_loaded_local_projections( rejected, claims ) ==
+                   local_projection_reconciliation_result::rejected );
+            CHECK( rejected.sites.front().active_hostile_operation.reservation.
+                   local_projection_reconciliation_rejected );
+            // Rejection intentionally quarantines the implicated owner; all
+            // identity, route, report, body and elapsed facts stay conserved.
+            rejected.sites.front().active_hostile_operation.reservation.
+            local_projection_reconciliation_rejected = false;
+            CHECK( serialize_world( rejected ) == before );
+        }
+    } else {
+        world = round_trip_world( world );
+        // Exercise each real producer clock through zero adoption, active,
+        // frozen, reload and repeated-callback native contracts.
+        for( auto &site : world.sites ) {
+            auto &outing = site.active_hostile_operation.reservation;
+            std::map<character_id, int> anchors;
+            for( const auto id : outing.member_ids ) {
+                anchors[id] = to_turn<int>( bodies.at( id )->get_last_updated() ) - origin;
+            }
+            auto &clock = outing.activation;
+            clock.evaluate( relative, true, outing.activation_anchors(), anchors,
+                            outing.last_advanced_minutes * 60 );
+            CHECK( clock.active_turns == 0 );
+            clock.evaluate( relative + 60, true, outing.activation_anchors(), anchors,
+                            outing.last_advanced_minutes * 60 );
+            CHECK( clock.active_turns == 60 );
+            const auto earned = serialize_world( world );
+            clock.evaluate( relative + 60, true, outing.activation_anchors(), anchors,
+                            outing.last_advanced_minutes * 60 );
+            CHECK( serialize_world( world ) == earned );
+            clock.evaluate( relative + 120, false, outing.activation_anchors(), anchors,
+                            outing.last_advanced_minutes * 60 );
+            CHECK( clock.active_turns == 60 );
+        }
+        CHECK( serialize_world( round_trip_world( world ) ) == serialize_world( world ) );
+        auto malformed = world;
+        auto &clock = malformed.sites.front().active_hostile_operation.reservation.activation;
+        REQUIRE_FALSE( clock.bodies.empty() );
+        clock.bodies.begin()->second.world_turn = clock.last_world_turn + 1;
+        CHECK_THROWS( round_trip_world( malformed ) );
+    }
+}
+
+TEST_CASE( "maintained mixed metrics world earns native travel and survives actual reload",
+           "[.][bandit][mixed_load_native_caller]" )
+{
+    namespace fs = std::filesystem;
+    using namespace bandit_live_world;
+    const char *source_path = std::getenv( "CAOL_MIXED_LOAD_WORLD" );
+    REQUIRE( source_path );
+    const fs::path source( source_path );
+    REQUIRE( fs::is_directory( source ) );
+    const std::string original_world = world_generator->active_world->world_name;
+    const auto original_mods = world_generator->active_world->active_mod_order;
+    REQUIRE( g->save() );
+    const std::string name = "mixed-load-disposable";
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        overmap_buffer.clear();
+        MAPBUFFER.clear();
+        world_generator->set_active_world( nullptr );
+        if( WORLD *owned = world_generator->get_world( name ) ) {
+            save_continuity::forget( owned->folder_path().get_unrelative_path() );
+            world_generator->delete_world( name, true );
+        }
+        get_avatar() = avatar();
+        REQUIRE( g->load( original_world ) );
+    } );
+    clear_creatures();
+    overmap_buffer.clear();
+    MAPBUFFER.clear();
+    WORLD *created = world_generator->make_new_world( name, original_mods );
+    REQUIRE( created );
+    const fs::path destination = created->folder_path().get_unrelative_path();
+    for( const auto &entry : fs::recursive_directory_iterator( source ) ) {
+        REQUIRE_FALSE( entry.is_symlink() );
+        if( entry.is_regular_file() ) {
+            const auto target = destination / fs::relative( entry.path(), source );
+            fs::create_directories( target.parent_path() );
+            fs::copy_file( entry.path(), target, fs::copy_options::overwrite_existing );
+        }
+    }
+    // test_main always loads test_data before constructing actors/caches.
+    // Keep that native test prerequisite through definition reloads without
+    // changing the maintained source's ordinary gameplay mod selection.
+    {
+        std::ifstream input( destination / "mods.json" );
+        REQUIRE( input.good() );
+        std::vector<std::string> mods;
+        for( const std::string id : json_loader::from_string(
+                 std::string( std::istreambuf_iterator<char>( input ), {} ) ).get_array() ) {
+            mods.push_back( id );
+        }
+        if( std::find( mods.begin(), mods.end(), "test_data" ) == mods.end() ) {
+            mods.emplace_back( "test_data" );
+        }
+        std::ofstream output( destination / "mods.json" );
+        JsonOut json( output );
+        json.write( mods );
+    }
+    created->add_save( save_t::from_base_path( "#Wm9yYWlkYSBWaWNr" ) );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( name ) );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    REQUIRE( to_turn<int>( calendar::turn ) == 5241593 );
+    const auto site_ids = std::vector<std::string> {
+        "overmap_special:bandit_camp@140,51,0", "overmap_special:cannibal_camp@150,39,0"
+    };
+    const auto check_owners = [&]() {
+        auto &world = overmap_buffer.global_state.bandit_live_world;
+        int count = 0;
+        for( int id = 2; id <= 17; ++id ) {
+            auto actor = overmap_buffer.find_npc( character_id( id ) );
+            REQUIRE( actor );
+            CHECK_FALSE( actor->is_dead() );
+            CHECK( actor->get_last_updated() <= calendar::turn );
+        }
+        for( const auto &site_id : site_ids ) {
+            auto *site = world.find_site( site_id );
+            REQUIRE( site );
+            auto &operation = site->active_hostile_operation;
+            REQUIRE( operation.is_active() );
+            CHECK_FALSE( operation.legacy_unpinned );
+            CHECK_FALSE( site->active_outing.is_active() );
+            REQUIRE( current_external_simulation_cursor( *site ) );
+            for( const auto id : operation.reservation.member_ids ) {
+                auto actor = overmap_buffer.find_npc( id );
+                REQUIRE( actor );
+                CHECK( active_operation_duty_site_for( world, id ) == site );
+                CHECK_FALSE( actor->get_bandit_live_world_projection_lease().present );
+                ++count;
+            }
+        }
+        CHECK( count == 6 );
+    };
+    check_owners();
+    std::map<character_id, tripoint_abs_ms> initial_positions;
+    for( int id = 4; id <= 9; ++id ) {
+        auto actor = overmap_buffer.find_npc( character_id( id ) );
+        REQUIRE( actor );
+        initial_positions.emplace( actor->getID(), actor->pos_abs() );
+    }
+    refresh_live_bandit_activation();
+    for( const auto &site_id : site_ids ) {
+        const auto *site = overmap_buffer.global_state.bandit_live_world.find_site( site_id );
+        CHECK( site->active_hostile_operation.reservation.activation.active_turns == 0 );
+    }
+    // A genuine subsequent native minute, then a five-minute motor cadence.
+    // No body/owner timestamp, route, lease or admission is injected here.
+    calendar::turn = time_point::from_turn( ( to_turn<int>( calendar::turn ) / 60 + 1 ) * 60 );
+    process_overmap_npc_move_for_test();
+    calendar::turn += 5_minutes;
+    process_overmap_npc_move_for_test();
+    check_owners();
+    for( const auto &[id, initial] : initial_positions ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        CAPTURE( id, actor->pos_abs(), actor->goal, actor->omt_path.size() );
+        CHECK( actor->pos_abs() != initial );
+    }
+    const auto progressed = serialize_world( overmap_buffer.global_state.bandit_live_world );
+    std::map<character_id, decltype( r067_handover_actor_key( std::declval<npc>() ) )> actors;
+    for( int id = 2; id <= 17; ++id ) {
+        const auto actor = overmap_buffer.find_npc( character_id( id ) );
+        actors.emplace( actor->getID(), r067_handover_actor_key( *actor ) );
+    }
+    REQUIRE( g->save() );
+    const auto saved_turn = calendar::turn;
+    r067_handover_reload( name );
+    CHECK( calendar::turn == saved_turn );
+    check_owners();
+    CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == progressed );
+    for( const auto &[id, key] : actors ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( actor );
+        CHECK( r067_handover_actor_key( *actor ) == key );
+    }
+}
+
+TEST_CASE( "native message test double consumes history without restoring old messages",
+           "[bandit][mixed_load_message_contract]" )
+{
+    Messages::clear_messages();
+    Messages::add_msg( "current test message" );
+    const auto current = Messages::recent_messages( 1 );
+    {
+        auto saved = json_loader::from_string(
+                         R"({"player_messages":{"messages":[{"turn":1,"message":"old history","count":1,"type":0}],"curmes":1}})" ).get_object();
+        Messages::deserialize( saved );
+    }
+    CHECK( Messages::recent_messages( 1 ) == current );
+    for( const std::string invalid : { "false", "[]", "\"not an object\"" } ) {
+        auto saved = json_loader::from_string( "{\"player_messages\":" + invalid + "}" ).get_object();
+        CHECK_THROWS_AS( Messages::deserialize( saved ), JsonError );
+    }
+    Messages::clear_messages();
 }

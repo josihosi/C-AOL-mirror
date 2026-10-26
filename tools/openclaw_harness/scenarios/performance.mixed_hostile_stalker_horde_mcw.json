@@ -1,6 +1,6 @@
 {
   "name": "performance.mixed_hostile_stalker_horde_mcw",
-  "description": "Mixed hostile performance packet for CAOL-MIXED-HOSTILE-PERF-v0. The fixture pre-stages one active bandit site, one active cannibal site, one writhing stalker, and one overmap horde near the player, then measures a 500-turn sampled local window and a bounded 30-minute wait window. This is a metrics/readability probe for already-promoted hostile systems, not a natural dispatch or horde-attraction proof.",
+  "description": "Close mixed-load metrics control: two current, explicitly pre-staged hostile operations (four bandits and two cannibals), all 16 inherited NPC bodies, one local writhing stalker and one nearby overmap horde. Native parent time and body clocks are preserved. Measures bounded local and cadence windows; not natural dispatch, representative survival travel, horde attraction or a performance-gain claim. Initial six-member travel is checked separately: native active_sites/active_job_mix currently count ordinary outings only and do not count hostile reservations.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "performance_mixed_hostile_stalker_horde_v0_2026-04-30",
@@ -12,14 +12,12 @@
   "artifact_patterns": [
     "bandit_live_world perf:",
     "sites=2",
-    "active_sites=2",
     "active_job_mix=",
-    "camp_style:stalk=1",
-    "cannibal_camp:stalk=1",
     "writhing_stalker target_probe:",
     "writhing_stalker live_plan:",
     "eval_us=",
-    "total_us="
+    "total_us=",
+    "travelling_npcs=6"
   ],
   "steps": [
     {
@@ -34,34 +32,44 @@
       "label": "preflight_mixed_perf_bandit_active_job",
       "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip",
       "required_site_id_contains": "overmap_special:bandit_camp@140,51,0",
-      "required_active_group_id_contains": "fixture_active_pressure",
-      "required_active_target_id_prefix": "performance_mixed:bandit@140,51,0",
-      "required_active_job_type": "stalk",
-      "required_member_count": 4,
+      "required_member_count": 12,
       "required_active_outside_count": 4,
       "required_min_active_member_ids": 4,
       "required_active_members_found": true,
+      "required_active_member_bodies_found": true,
       "abort_on_metadata_failure": true,
       "abort_verdict": "blocked_untrusted_mixed_perf_bandit_active_job",
-      "abort_reason": "preflight saved bandit_live_world site did not contain the active bandit stalk job needed before the mixed hostile performance window",
-      "expected_immediate_state": "saved bandit_live_world contains one active bandit stalk job with live/findable active members before measurement starts"
+      "abort_reason": "Current hostile operation preflight requires the declared physical party, authoritative report/claim tuple and conserved roster before measurement",
+      "expected_immediate_state": "Saved current abstract operation owns four findable bandits among twelve camp members",
+      "required_active_hostile_operation_kind": "shakedown",
+      "required_active_hostile_operation_phase": "outbound",
+      "required_active_hostile_reservation_job_type": "toll",
+      "required_active_hostile_reservation_target_id_exact": "performance_mixed:overmap_special:bandit_camp@140,51,0",
+      "required_active_hostile_reservation_simulation_owner": "abstract",
+      "required_active_hostile_reservation_min_member_ids": 4,
+      "required_report_hostile_operation_claim_match": true
     },
     {
       "kind": "audit_saved_bandit_live_world_state",
       "label": "preflight_mixed_perf_cannibal_active_job",
       "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip",
       "required_site_id_contains": "overmap_special:cannibal_camp@150,39,0",
-      "required_active_group_id_contains": "fixture_active_pressure",
-      "required_active_target_id_prefix": "performance_mixed:cannibal@150,39,0",
-      "required_active_job_type": "stalk",
       "required_member_count": 2,
       "required_active_outside_count": 2,
       "required_min_active_member_ids": 2,
       "required_active_members_found": true,
+      "required_active_member_bodies_found": true,
       "abort_on_metadata_failure": true,
       "abort_verdict": "blocked_untrusted_mixed_perf_cannibal_active_job",
-      "abort_reason": "preflight saved bandit_live_world site did not contain the active cannibal stalk job needed before the mixed hostile performance window",
-      "expected_immediate_state": "saved bandit_live_world contains one active cannibal stalk job with live/findable active members before measurement starts"
+      "abort_reason": "Current hostile operation preflight requires the declared physical party, authoritative report/claim tuple and conserved roster before measurement",
+      "expected_immediate_state": "Saved current abstract operation owns two findable cannibals among two camp members",
+      "required_active_hostile_operation_kind": "raid",
+      "required_active_hostile_operation_phase": "outbound",
+      "required_active_hostile_reservation_job_type": "raid",
+      "required_active_hostile_reservation_target_id_exact": "performance_mixed:overmap_special:cannibal_camp@150,39,0",
+      "required_active_hostile_reservation_simulation_owner": "abstract",
+      "required_active_hostile_reservation_min_member_ids": 2,
+      "required_report_hostile_operation_claim_match": true
     },
     {
       "kind": "audit_saved_active_monsters",
@@ -164,15 +172,13 @@
       "artifact_state_patterns": [
         "bandit_live_world perf:",
         "sites=2",
-        "active_sites=2",
         "active_job_mix=",
-        "camp_style:stalk=1",
-        "cannibal_camp:stalk=1",
         "signals=0",
-        "total_us="
+        "total_us=",
+        "travelling_npcs=6"
       ],
       "expected_visible_fact": "the player waited through a bounded 30-minute hostile overmap cadence window after preflight established one active bandit site, one active cannibal site, one writhing stalker, and one horde",
-      "failure_rule": "If the wait is interrupted or the artifact delta lacks two-active-site perf/cadence lines, the performance row is yellow/red rather than green."
+      "failure_rule": "Interrupted waits or missing same-run six-travelling-NPC cadence evidence remain yellow/red. Current hostile ownership is required by the strict preflight; ordinary-outing active_sites/job_mix counters are not evidence of hostile-reservation counts."
     },
     {
       "kind": "audit_log_contains",
@@ -182,18 +188,16 @@
         [
           "bandit_live_world perf:",
           "sites=2",
-          "active_sites=2",
           "active_job_mix=",
-          "camp_style:stalk=1",
-          "cannibal_camp:stalk=1",
           "signals=0",
-          "total_us="
+          "total_us=",
+          "travelling_npcs=6"
         ]
       ],
       "abort_on_metadata_failure": true,
       "abort_verdict": "blocked_mixed_perf_cadence_artifact_missing",
       "abort_reason": "same-run debug artifact did not contain compact mixed hostile two-site perf counters after the 30-minute wait",
-      "expected_visible_fact": "same-run debug artifact proves the hostile overmap cadence emitted compact perf counters for one bandit active job and one cannibal active job"
+      "expected_visible_fact": "Same-run native perf rows include six travelling NPCs; exact current hostile ownership and party identities come from the preceding saved-state preflights, not ordinary-outing active_sites/job_mix counters"
     },
     {
       "kind": "audit_player_save_mtime",

@@ -5,6 +5,7 @@
 
 #include "calendar.h"
 #include "coords_fwd.h"
+#include "json.h"
 #include "messages.h"
 
 class Creature;
@@ -62,7 +63,16 @@ bool Messages::has_undisplayed_messages()
 void Messages::display_messages() {}
 void Messages::display_messages( const catacurses::window &, int, int, int, int ) {}
 void Messages::serialize( JsonOut & ) {}
-void Messages::deserialize( const JsonObject & ) {}
+void Messages::deserialize( const JsonObject &json )
+{
+    // The native loader owns this field even though the test double keeps
+    // only messages emitted by the current test. Consume the known history
+    // object so strict loading of a real saved character remains meaningful.
+    if( json.has_member( "player_messages" ) ) {
+        JsonObject history = json.get_object( "player_messages" );
+        history.allow_omitted_members();
+    }
+}
 void add_msg( std::string m )
 {
     Messages::add_msg( std::move( m ) );

@@ -6673,6 +6673,286 @@ def player_save_error(path: Path) -> str:
     return ""
 
 
+class MixedLoadBootstrapContractTest(unittest.TestCase):
+    fixture = "performance_mixed_hostile_stalker_horde_v0_2026-04-30"
+
+    def setUp(self) -> None:
+        import startup_harness as startup
+        self.startup = startup
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.resolved = startup.resolve_fixture_payload(self.fixture, "live-debug")
+        self.source = self.resolved["save_src"]
+        self.source_hash = startup.path_sha256(self.source)
+        self.world = Path(self.temp.name) / "save" / "McWilliams"
+        shutil.copytree(self.source / "McWilliams", self.world)
+        transforms = self.resolved["save_transforms"]
+        index = next(i for i, transform in enumerate(transforms)
+                     if transform["kind"] == "bandit_mixed_load_bootstrap")
+        startup.apply_fixture_save_transforms(self.world, transforms[:index])
+        self.transform = transforms[index]
+        self.before_bodies = self.read_bodies(self.world)
+
+    def tearDown(self) -> None:
+        self.assertEqual(self.startup.path_sha256(self.source), self.source_hash)
+
+    def read_bodies(self, world: Path) -> Dict[int, Any]:
+        bodies = {}
+        for archive in sorted((world / "overmaps").glob("o.*.*.zzip")):
+            plain, _, payload = self.startup.extract_overmap_payload(archive)
+            try:
+                for body in payload.get("npcs", []):
+                    self.assertNotIn(body["id"], bodies)
+                    bodies[body["id"]] = body
+            finally:
+                self.startup.cleanup_extracted_overmap(plain, keep=False)
+        return bodies
+
+    def read_world(self) -> Dict[str, Any]:
+        return json.loads((self.world / "dimension_data.gsav").read_text().partition("\n")[2])["overmapbuffer"]["bandit_live_world"]
+
+    def test_actual_resolved_install_has_current_owners_without_rewinding_time(self) -> None:
+        # Exercise the supported installer and complete inherited transform
+        # chain, including the real archive reader/writer and monster owners.
+        destination = Path(self.temp.name) / "installed"
+        with mock.patch("startup_harness.save_dir_for_profile", return_value=destination):
+            installed = self.startup.install_fixture("disposable", self.fixture, False, "live-debug")
+        self.assertEqual(installed["fixture"], self.fixture)
+        self.world = destination / "McWilliams"
+        _, _, player, _ = self.startup.load_saved_player_payload(self.world)
+        self.assertEqual(player["turn"], 5241593)
+        self.assertFalse(any(t["kind"] == "game_turn" for t in self.resolved["save_transforms"]))
+        world = self.read_world()
+        bodies = self.read_bodies(self.world)
+        self.assertEqual(set(bodies), set(self.before_bodies))
+        self.assertEqual(len(bodies), 16)
+        selected = []
+        owned = []
+        allowed_changes = {"location", "mission", "previous_mission", "goalx", "goaly", "goalz",
+                           "guard_pos", "destination_point", "omt_path", "path", "automoveroute",
+                           "my_fac", "bandit_live_world_projection_lease"}
+        for npc_id, body in bodies.items():
+            self.assertLessEqual(body["last_updated"], player["turn"])
+            self.assertEqual({k: v for k, v in body.items() if k not in allowed_changes},
+                             {k: v for k, v in self.before_bodies[npc_id].items() if k not in allowed_changes})
+        for site in world["sites"]:
+            operation = site["active_hostile_operation"]
+            outing = operation["reservation"]
+            self.assertEqual(site["schema_version"], 12)
+            self.assertEqual(operation["phase"], "outbound")
+            self.assertFalse(operation["legacy_unpinned"])
+            self.assertEqual(site["active_outing"]["kind"], "none")
+            self.assertEqual(site["active_outing"]["member_ids"], [])
+            self.assertNotIn("activation", outing)
+            self.assertEqual(outing["simulation_owner"], "abstract")
+            self.assertEqual(outing["handoff_epoch"], 0)
+            self.assertEqual(outing["last_advanced_minutes"], (player["turn"] - player["calendar_start"]) // 60)
+            self.assertEqual(len(site["members"]), site["living_total"])
+            self.assertEqual(sum(tile["assigned_living_total"] for tile in site["spawn_tiles"]), site["living_total"])
+            for member in site["members"]:
+                npc_id = member["npc_id"]
+                owned.append(npc_id)
+                body = bodies[npc_id]
+                self.assertEqual(body["location"], member["home_spawn_tile"])
+                pos = body["location"]
+                self.assertIn([pos[0] // 24, pos[1] // 24, pos[2]], site["footprint"])
+                self.assertNotIn("bandit_live_world_projection_lease", body)
+                self.assertEqual(body["omt_path"], [])
+            selected.extend(outing["member_ids"])
+            claim = next(claim for claim in world["hostile_target_opportunities"]
+                         if claim["target_id"] == outing["target_id"])
+            self.assertEqual(claim["consumed_operation_id"], outing["activity_id"])
+            self.assertEqual(claim["consumed_generation"], outing["generation"])
+            self.assertEqual(operation["source_report_application_key"], site["current_scout_report"]["application_key"])
+        self.assertEqual(sorted(selected), [4, 5, 6, 7, 8, 9])
+        self.assertEqual(sorted(owned), list(range(4, 18)))
+        self.assertEqual(bodies[2], self.before_bodies[2])
+        self.assertEqual(bodies[3], self.before_bodies[3])
+
+    def test_missing_body_refuses_before_any_owner_or_archive_write(self) -> None:
+        self.transform["cohorts"][1]["member_ids"] = [8, 99999]
+        before = self.startup.path_sha256(self.world)
+        with self.assertRaisesRegex(SystemExit, "missing/duplicate member authority"):
+            self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        self.assertEqual(self.startup.path_sha256(self.world), before)
+        self.assertFalse(any(path.suffix != ".zzip" for path in
+                             (self.world / "overmaps").glob("o.*.*")))
+
+    def test_future_native_body_is_not_rebased_or_admitted(self) -> None:
+        original = self.startup.load_saved_player_payload
+        def rewound(*args: Any, **kwargs: Any) -> Any:
+            save, path, payload, stat = original(*args, **kwargs)
+            payload["turn"] = 5227200
+            return save, path, payload, stat
+        before = self.startup.path_sha256(self.world)
+        with mock.patch("startup_harness.load_saved_player_payload", side_effect=rewound):
+            with self.assertRaisesRegex(SystemExit, "future or missing native body clocks"):
+                self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        self.assertEqual(self.startup.path_sha256(self.world), before)
+
+    def test_invalid_approach_and_overlapping_cohorts_refuse(self) -> None:
+        self.transform["cohorts"][1]["rally_omt"] = [150, 39, 0]
+        before = self.startup.path_sha256(self.world)
+        with self.assertRaisesRegex(SystemExit, "native target approach envelope"):
+            self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        self.assertEqual(self.startup.path_sha256(self.world), before)
+        self.transform["cohorts"][1]["member_ids"] = [4, 8]
+        with self.assertRaisesRegex(SystemExit, "disjoint members"):
+            self.startup.normalize_fixture_save_transforms([self.transform], manifest_path=Path("test.json"))
+
+    def test_injured_selected_body_is_not_healed_or_forced_into_work(self) -> None:
+        archive = next((self.world / "overmaps").glob("o.*.*.zzip"))
+        plain, version, data = self.startup.extract_overmap_payload(archive)
+        body = next(body for body in data["npcs"] if body["id"] == 4)
+        body["body"]["arm_l"]["hp_cur"] -= 1
+        self.startup.write_overmap_payload(plain, version, data)
+        before = self.startup.path_sha256(self.world)
+        with self.assertRaisesRegex(SystemExit, "injured or occupied operation body"):
+            self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        self.assertEqual(self.startup.path_sha256(self.world), before)
+
+    def test_current_native_owner_preflight_requires_real_bodies_and_consumed_claim(self) -> None:
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        dimension = self.world / "dimension_data.gsav"
+        for index, cohort in enumerate(self.transform["cohorts"]):
+            requirements = {
+                "player_save": self.transform["player_save"],
+                "required_site_id_contains": cohort["site_id"],
+                "required_member_count": 12 if index == 0 else 2,
+                "required_active_outside_count": len(cohort["member_ids"]),
+                "required_active_members_found": True,
+                "required_active_hostile_operation_kind": "shakedown" if index == 0 else "raid",
+                "required_active_hostile_operation_phase": "outbound",
+                "required_active_hostile_reservation_job_type": "toll" if index == 0 else "raid",
+                "required_active_hostile_reservation_target_id_exact": f"performance_mixed:{cohort['site_id']}",
+                "required_active_hostile_reservation_simulation_owner": "abstract",
+                "required_active_hostile_reservation_min_member_ids": len(cohort["member_ids"]),
+                "required_report_hostile_operation_claim_match": True,
+            }
+            original = dimension.read_bytes()
+            before = self.startup.path_sha256(self.world)
+            result = self.startup.audit_saved_bandit_live_world_state(self.world, **requirements)
+            self.assertEqual(result["status"], "required_state_present")
+            self.assertEqual(self.startup.path_sha256(self.world), before)
+            for condition in ("missing_reservation_member", "foreign_claim"):
+                with self.subTest(camp=cohort["site_id"], refusal=condition):
+                    header, _, raw = original.decode().partition("\n")
+                    payload = json.loads(raw)
+                    world = payload["overmapbuffer"]["bandit_live_world"]
+                    if condition == "missing_reservation_member":
+                        site = next(site for site in world["sites"] if site["site_id"] == cohort["site_id"])
+                        site["active_hostile_operation"]["reservation"]["member_ids"][0] = 999999
+                    else:
+                        claim = next(claim for claim in world["hostile_target_opportunities"]
+                                     if claim["target_id"] == requirements["required_active_hostile_reservation_target_id_exact"])
+                        claim["consumed_operation_id"] = "foreign-operation"
+                    dimension.write_text(header + "\n" + json.dumps(payload), encoding="utf-8")
+                    refused_before = self.startup.path_sha256(self.world)
+                    refused = self.startup.audit_saved_bandit_live_world_state(self.world, **requirements)
+                    self.assertEqual(refused["status"], "required_state_missing")
+                    self.assertEqual(self.startup.path_sha256(self.world), refused_before)
+            dimension.write_bytes(original)
+
+    def test_mixed_preflight_requires_actual_bodies_without_changing_abstract_defaults(self) -> None:
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        scenario = self.startup.load_scenario("performance.mixed_hostile_stalker_horde_mcw")
+        steps = [step for step in scenario["steps"]
+                 if step["kind"] == "audit_saved_bandit_live_world_state"]
+        self.assertEqual(len(steps), 2)
+        dimension = self.world / "dimension_data.gsav"
+        metadata = dimension.read_bytes()
+
+        def run_preflight(step: Dict[str, Any]) -> Dict[str, Any]:
+            run_dir = Path(self.temp.name) / "audit-output"
+            run_dir.mkdir(exist_ok=True)
+            with mock.patch("startup_harness.save_dir_for_profile", return_value=self.world.parent):
+                reports = self.startup.execute_probe_steps(
+                    0, run_dir, [step], profile="disposable", world=self.world.name,
+                    grants_gameplay_proof=False,
+                )
+            self.assertEqual(len(reports), 1)
+            return reports[0]
+
+        for step, cohort in zip(steps, self.transform["cohorts"]):
+            with self.subTest(camp=cohort["site_id"]):
+                requirements = {key: value for key, value in step.items()
+                                if key.startswith("required_") or key == "player_save"}
+                positive = self.startup.audit_saved_bandit_live_world_state(self.world, **requirements)
+                self.assertEqual(positive["status"], "required_state_present")
+                self.assertTrue(requirements["required_active_member_bodies_found"])
+                accepted_step = run_preflight(step)
+                self.assertNotIn("abort", accepted_step)
+                self.assertTrue(accepted_step["metadata"]["required_fields"]["required_active_member_bodies_found"])
+                removed_id = cohort["member_ids"][0]
+                removed = False
+                for archive in sorted((self.world / "overmaps").glob("o.*.*.zzip")):
+                    original = archive.read_bytes()
+                    plain, version, payload = self.startup.extract_overmap_payload(archive)
+                    try:
+                        if not any(body["id"] == removed_id for body in payload.get("npcs", [])):
+                            continue
+                        payload["npcs"] = [body for body in payload["npcs"] if body["id"] != removed_id]
+                        self.startup.write_overmap_payload(plain, version, payload)
+                        removed = True
+                        self.assertNotIn(removed_id, self.read_bodies(self.world))
+                        self.assertEqual(dimension.read_bytes(), metadata)
+                        before_audit = self.startup.path_sha256(self.world)
+                        # Ordinary abstract ownership keeps its existing metadata
+                        # contract. Only the explicit physical-body opt-in fails.
+                        legacy = dict(requirements)
+                        legacy.pop("required_active_member_bodies_found", None)
+                        default = self.startup.audit_saved_bandit_live_world_state(self.world, **legacy)
+                        self.assertEqual(default["status"], "required_state_present")
+                        rejected = self.startup.audit_saved_bandit_live_world_state(self.world, **requirements)
+                        site = next(site for site in rejected["observed_sites"]
+                                    if site["site_id"] == cohort["site_id"])
+                        self.assertEqual(site["active_outside_count"], len(cohort["member_ids"]))
+                        self.assertEqual(site["active_member_ids"], cohort["member_ids"])
+                        missing = next(row for row in site["active_member_saved_lookup"]
+                                       if row["id"] == removed_id)
+                        self.assertFalse(missing["found_in_saved_overmap"])
+                        self.assertFalse(site["active_member_bodies_all_found_in_saved_overmap"])
+                        self.assertEqual(self.startup.path_sha256(self.world), before_audit)
+                        self.assertEqual(dimension.read_bytes(), metadata)
+                        self.assertEqual(rejected["status"], "required_state_missing")
+                        # The new opt-in must initiate its own body scan, rather
+                        # than rely on the older membership requirement.
+                        bodies_only = dict(requirements, required_active_members_found=False)
+                        self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
+                            self.world, **bodies_only)["status"], "required_state_missing")
+                        rejected_step = run_preflight(step)
+                        self.assertEqual(rejected_step["metadata"]["status"], "required_state_missing")
+                        self.assertEqual(rejected_step["abort"]["guard"], "metadata")
+                        self.assertEqual(dimension.read_bytes(), metadata)
+                        self.assertEqual(self.startup.path_sha256(self.world), before_audit)
+                    finally:
+                        self.startup.cleanup_extracted_overmap(plain, keep=False)
+                        archive.write_bytes(original)
+                    if removed:
+                        break
+                self.assertTrue(removed)
+
+    def test_maintained_scenario_uses_the_generated_current_owner_contract(self) -> None:
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        scenario = self.startup.load_scenario("performance.mixed_hostile_stalker_horde_mcw")
+        steps = [step for step in scenario["steps"]
+                 if step["kind"] == "audit_saved_bandit_live_world_state"]
+        self.assertEqual(len(steps), 2)
+        for step, expected_total, expected_active in zip(steps, (12, 2), (4, 2)):
+            requirements = {key: value for key, value in step.items()
+                            if key.startswith("required_") or key == "player_save"}
+            self.assertTrue(requirements["required_report_hostile_operation_claim_match"])
+            self.assertTrue(requirements["required_active_members_found"])
+            self.assertTrue(requirements["required_active_member_bodies_found"])
+            self.assertEqual(requirements["required_member_count"], expected_total)
+            self.assertEqual(requirements["required_active_outside_count"], expected_active)
+            self.assertEqual(requirements["required_active_hostile_reservation_min_member_ids"], expected_active)
+            self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
+                self.world, **requirements)["status"], "required_state_present")
+        self.assertIn("travelling_npcs=6", scenario["artifact_patterns"])
+        self.assertNotIn("active_sites=2", scenario["artifact_patterns"])
+
+
 class ScenarioFixtureContractTest(unittest.TestCase):
     def test_r037_safe_fixture_normalizes_explicit_pickup_rule(self) -> None:
         resolved = resolve_fixture_payload(

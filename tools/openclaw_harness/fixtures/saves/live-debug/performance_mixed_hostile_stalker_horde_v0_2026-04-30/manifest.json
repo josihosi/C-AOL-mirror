@@ -2,7 +2,7 @@
   "name": "performance_mixed_hostile_stalker_horde_v0_2026-04-30",
   "source_fixture": "performance_two_site_bandit_cannibal_v0_2026-04-29",
   "source_profile": "live-debug",
-  "description": "Mixed hostile performance footing for CAOL-MIXED-HOSTILE-PERF-v0: starts from the green two-site bandit+cannibal performance fixture, materializes the cannibal live-world site, pre-stages one active bandit stalk job and one active cannibal stalk job, places exactly one writhing stalker near the player, stages one overmap zombie horde near the player, and pins the local clock to noon to keep the measurement window readable. This is a pre-staged active hostile-load fixture, not proof of natural dispatch or horde signal attraction.",
+  "description": "Close mixed-load metrics control: preserves native parent time and all 16 NPC bodies, stages current zero-credit abstract hostile-operation ownership for four bandits and two cannibals, retains eight additional home members and two unrelated NPCs, one local writhing stalker and one nearby zombie horde. Manufactured setup, not natural dispatch, representative travel or performance-gain proof.",
   "save_transforms": [
     {
       "kind": "bandit_clone_site",
@@ -40,33 +40,37 @@
       ]
     },
     {
-      "kind": "bandit_site_roster_shape",
+      "kind": "bandit_mixed_load_bootstrap",
       "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip",
-      "site_id": "overmap_special:bandit_camp@140,51,0",
-      "living_member_count": 4,
-      "member_start_index": 0,
-      "wounded_or_unready_count": 0,
-      "active_outside_member_count": 4,
-      "active_job_type": "stalk",
-      "active_target_id": "performance_mixed:bandit@140,51,0",
-      "headcount_override": 4
-    },
-    {
-      "kind": "bandit_site_roster_shape",
-      "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip",
-      "site_id": "overmap_special:cannibal_camp@150,39,0",
-      "living_member_count": 2,
-      "member_start_index": 4,
-      "wounded_or_unready_count": 0,
-      "active_outside_member_count": 2,
-      "active_job_type": "stalk",
-      "active_target_id": "performance_mixed:cannibal@150,39,0",
-      "headcount_override": 4
-    },
-    {
-      "kind": "game_turn",
-      "player_save": "#Wm9yYWlkYSBWaWNr.sav.zzip",
-      "turn": 5227200
+      "source_site_id": "overmap_special:bandit_camp@140,51,0",
+      "cohorts": [
+        {
+          "site_id": "overmap_special:bandit_camp@140,51,0",
+          "member_ids": [
+            4,
+            5,
+            6,
+            7
+          ],
+          "rally_omt": [
+            140,
+            42,
+            0
+          ]
+        },
+        {
+          "site_id": "overmap_special:cannibal_camp@150,39,0",
+          "member_ids": [
+            8,
+            9
+          ],
+          "rally_omt": [
+            140,
+            42,
+            0
+          ]
+        }
+      ]
     },
     {
       "kind": "active_monsters_near_player",

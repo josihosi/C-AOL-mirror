@@ -16435,6 +16435,7 @@ def audit_saved_bandit_live_world_state(
     required_active_outside_count: Optional[int] = None,
     required_min_active_member_ids: Optional[int] = None,
     required_active_members_found: bool = False,
+    required_active_member_bodies_found: bool = False,
     required_active_member_max_abs_offset_ms: Optional[List[int]] = None,
     required_active_member_abs_omt: Optional[List[int]] = None,
     player_save: str = "",
@@ -16533,7 +16534,9 @@ def audit_saved_bandit_live_world_state(
     player_abs_omt: List[int] = []
     active_member_scan_error = ""
     active_member_npcs_by_id: Dict[str, Dict[str, Any]] = {}
-    should_scan_active_members = bool(required_active_members_found or required_active_member_max_abs_offset_ms is not None or required_active_member_abs_omt is not None)
+    should_scan_active_members = bool(required_active_members_found or required_active_member_bodies_found or
+                                      required_active_member_max_abs_offset_ms is not None or
+                                      required_active_member_abs_omt is not None)
     if should_scan_active_members:
         try:
             selected_player_save, _player_save_path, player_payload, _player_stat = load_saved_player_payload(world_dir, selected_player_save)
@@ -16592,7 +16595,8 @@ def audit_saved_bandit_live_world_state(
                         cleanup_extracted_overmap(plain_path, keep=False)
         except Exception as exc:
             active_member_scan_error = str(exc)
-            if (required_active_members_found or required_active_member_max_abs_offset_ms is not None or
+            if (required_active_members_found or required_active_member_bodies_found or
+                    required_active_member_max_abs_offset_ms is not None or
                     required_active_member_abs_omt is not None):
                 raise
 
@@ -16637,9 +16641,10 @@ def audit_saved_bandit_live_world_state(
                 row["at_required_abs_omt"] = row.get("abs_omt", []) == normalized_active_member_abs_omt
             lookups.append(row)
         site["active_member_saved_lookup"] = lookups
-        site["active_members_all_found_in_saved_overmap"] = bool(active_ids) and all(
+        site["active_member_bodies_all_found_in_saved_overmap"] = bool(active_ids) and all(
             bool(row.get("found_in_saved_overmap")) for row in lookups
         )
+        site["active_members_all_found_in_saved_overmap"] = site["active_member_bodies_all_found_in_saved_overmap"]
         observed_operation = site.get("active_hostile_operation", {})
         observed_reservation = observed_operation.get("reservation", {}) \
             if isinstance(observed_operation, dict) else {}
@@ -16882,6 +16887,8 @@ def audit_saved_bandit_live_world_state(
             return False
         if required_active_members_found and not bool(site.get("active_members_all_found_in_saved_overmap")):
             return False
+        if required_active_member_bodies_found and not bool(site.get("active_member_bodies_all_found_in_saved_overmap")):
+            return False
         if normalized_max_abs_offset is not None and not bool(site.get("active_members_within_required_max_abs_offset_ms")):
             return False
         if normalized_active_member_abs_omt is not None and not bool(
@@ -17030,6 +17037,7 @@ def audit_saved_bandit_live_world_state(
         "required_active_outside_count": required_active_outside_count,
         "required_min_active_member_ids": required_min_active_member_ids,
         "required_active_members_found": required_active_members_found,
+        "required_active_member_bodies_found": required_active_member_bodies_found,
         "required_active_member_max_abs_offset_ms": normalized_max_abs_offset,
         "required_active_member_abs_omt": normalized_active_member_abs_omt,
         "required_remembered_target_or_mark_prefix": required_remembered_target_or_mark_prefix,
@@ -25237,6 +25245,33 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
             })
             continue
 
+        if kind == "bandit_mixed_load_bootstrap":
+            if set(raw) != {"kind", "player_save", "source_site_id", "cohorts"}:
+                raise SystemExit(f"Fixture mixed-load bootstrap has unexpected/missing fields in {manifest_path}")
+            cohorts = raw["cohorts"]
+            if not isinstance(cohorts, list) or len(cohorts) != 2:
+                raise SystemExit("Mixed-load bootstrap needs exactly two declared camp cohorts")
+            all_ids = []
+            site_ids = []
+            for cohort in cohorts:
+                if not isinstance(cohort, dict) or set(cohort) != {"site_id", "member_ids", "rally_omt"}:
+                    raise SystemExit("Mixed-load cohort needs site_id, member_ids and rally_omt")
+                ids, rally = cohort["member_ids"], cohort["rally_omt"]
+                if (not isinstance(cohort["site_id"], str) or not cohort["site_id"] or
+                        not isinstance(ids, list) or not 2 <= len(ids) <= 4 or
+                        not isinstance(rally, list) or len(rally) != 3 or
+                        any(type(value) is not int for value in ids + rally) or
+                        any(value <= 0 for value in ids)):
+                    raise SystemExit("Mixed-load cohort IDs/route are malformed")
+                all_ids.extend(ids)
+                site_ids.append(cohort["site_id"])
+            if (len(set(all_ids)) != len(all_ids) or len(set(site_ids)) != 2 or
+                    raw["source_site_id"] != site_ids[0]):
+                raise SystemExit("Mixed-load bootstrap needs disjoint members and an exact source camp")
+            transforms.append({"kind": kind, "player_save": player_save,
+                               "source_site_id": raw["source_site_id"], "cohorts": cohorts})
+            continue
+
         if kind == "bandit_scheduler_response_candidate":
             unexpected_keys = sorted(set(raw) - {"kind", "player_save", "site_id", "target_id", "target_omt", "target_lead_id", "member_ids", "generation", "current_minutes", "branch", "report_policy", "preserve_member_records"})
             if unexpected_keys:
@@ -32247,7 +32282,177 @@ def apply_bandit_registered_staffed_observer_bootstrap_transform(
     }
 
 
-def apply_bandit_scheduler_response_candidate_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
+def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
+    """Prepare fresh metrics ownership, not a naturally earned dispatch or story.
+
+    Preserve the parent's native time and every body.  Legacy roster-shaping is
+    deliberately left available for historical migration/refusal controls.
+    """
+    _, _, player, _ = load_saved_player_payload(world_dir, str(transform["player_save"]))
+    turn, origin = player.get("turn"), player.get("calendar_start")
+    if type(turn) is not int or type(origin) is not int or turn < origin:
+        raise SystemExit("Mixed-load bootstrap needs the native player/calendar clock")
+    minute = (turn - origin) // 60
+    dimension = world_dir / "dimension_data.gsav"
+    version, separator, text = dimension.read_text(encoding="utf-8").partition("\n")
+    if not separator:
+        raise SystemExit("Mixed-load dimension data is malformed")
+    payload = json.loads(text)
+    world = payload["overmapbuffer"]["bandit_live_world"]
+    sites = {site["site_id"]: site for site in world["sites"]}
+    source = sites.get(transform["source_site_id"])
+    cohorts = transform["cohorts"]
+    if source is None or len(sites) != 2 or set(sites) != {c["site_id"] for c in cohorts}:
+        raise SystemExit("Mixed-load bootstrap needs exactly the declared two camps")
+    original_members = source.get("members", [])
+    members = {member["npc_id"]: member for member in original_members}
+    active_ids = [npc_id for cohort in cohorts for npc_id in cohort["member_ids"]]
+    if (len(members) != len(original_members) or len(set(active_ids)) != len(active_ids) or
+            not set(active_ids) <= set(members)):
+        raise SystemExit("Mixed-load bootstrap has missing/duplicate member authority")
+    source_anchor = source["anchor"]
+    cohort_members = {}
+    positions = {}
+    for index, cohort in enumerate(cohorts):
+        site = sites[cohort["site_id"]]
+        expected_kind = "bandit_camp" if index == 0 else "cannibal_camp"
+        if site.get("site_kind") != expected_kind:
+            raise SystemExit("Mixed-load bootstrap camp profiles do not match the declared cohorts")
+        ids = ([npc_id for npc_id in members if npc_id not in cohorts[1]["member_ids"]]
+               if index == 0 else cohort["member_ids"])
+        cohort_members[site["site_id"]] = ids
+        offset = [(site["anchor"][axis] - source_anchor[axis]) * (24 if axis < 2 else 1)
+                  for axis in range(3)]
+        for npc_id in ids:
+            home = members[npc_id].get("home_spawn_tile", [])
+            if len(home) != 3 or any(type(value) is not int for value in home):
+                raise SystemExit("Mixed-load member has no exact home tile")
+            position = [value + delta for value, delta in zip(home, offset)]
+            if [position[0] // 24, position[1] // 24, position[2]] not in site["footprint"]:
+                raise SystemExit("Mixed-load home is outside its actual declared footprint")
+            positions[npc_id] = position
+        location = player["player"]["location"]
+        target = [location[0] // 24, location[1] // 24, location[2]]
+        rally = cohort["rally_omt"]
+        if (rally == site["anchor"] or not 2 <= max(abs(rally[a] - target[a]) for a in range(3)) <= 3):
+            raise SystemExit("Mixed-load rally must satisfy the native target approach envelope")
+    # Read and validate all concrete authorities before writing either owner.
+    archives = []
+    found = {}
+    for archive in sorted((world_dir / "overmaps").glob("o.*.*.zzip")):
+        plain, header, data = extract_overmap_payload(archive)
+        try:
+            for body in data.get("npcs", []):
+                npc_id = body.get("id")
+                if npc_id in found:
+                    raise SystemExit("Mixed-load bootstrap refuses duplicate concrete NPC IDs")
+                found[npc_id] = body
+                if type(body.get("last_updated")) is not int or body["last_updated"] > turn:
+                    raise SystemExit("Mixed-load bootstrap refuses future or missing native body clocks")
+            archives.append((plain, header, data))
+        finally:
+            cleanup_extracted_overmap(plain, keep=False)
+    if not set(members) <= set(found):
+        raise SystemExit("Mixed-load bootstrap cannot authenticate every camp member body")
+    for npc_id in active_ids:
+        body = found[npc_id]
+        parts = body.get("body", {})
+        if (body.get("dead", False) or body.get("marked_for_death", False) or body.get("effects") or
+                body.get("activity", {}).get("type") != "ACT_NULL" or not parts or
+                any(part.get("hp_cur", 0) <= 0 or part.get("hp_cur") != part.get("hp_max") or
+                    part.get("wounds") for part in parts.values())):
+            raise SystemExit("Mixed-load bootstrap refuses an injured or occupied operation body")
+    for cohort in cohorts:
+        site = sites[cohort["site_id"]]
+        ids = cohort_members[site["site_id"]]
+        site["members"] = []
+        for npc_id in ids:
+            member = dict(members[npc_id])
+            member.update(home_spawn_tile=positions[npc_id], state="at_home",
+                          wounded_or_unready=False, last_writeback_summary="fresh mixed-load setup")
+            site["members"].append(member)
+            body = found[npc_id]
+            body.update(location=positions[npc_id], mission=11, previous_mission=11,
+                        goalx=-2147483648, goaly=-2147483648, goalz=-2147483648,
+                        guard_pos=None, destination_point=None, omt_path=[], path=[], automoveroute=[],
+                        my_fac="cannibal_camp" if site["site_kind"] == "cannibal_camp" else "hells_raiders")
+            body.pop("bandit_live_world_projection_lease", None)
+        site["spawn_tiles"] = [{"tile": positions[npc_id], "assigned_living_total": 1} for npc_id in ids]
+        site.update(schema_version=12, living_total=len(ids), supply_units=len(ids) * 7,
+                    supply_last_update_minutes=-1, supply_accounted_living_total=len(ids),
+                    supply_member_minute_remainder=0, last_shakedown_outcome="",
+                    next_outing_generation=2, applied_return_generation=0,
+                    applied_report_generation=0, applied_cargo_generation=0)
+        for key in ("headcount", "active_member_ids", "active_group_id", "active_job_type",
+                    "active_target_id", "active_started_minutes", "active_local_contact_minutes",
+                    "active_outing", "active_hostile_operation", "home_activation", "home_rally"):
+            site.pop(key, None)
+    dimension.write_text(version + "\n" + json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    for plain, header, data in archives:
+        if any(body.get("id") in members for body in data.get("npcs", [])):
+            write_overmap_payload(plain, header, data)
+    operations = []
+    for cohort in cohorts:
+        site_id = cohort["site_id"]
+        candidate = {"site_id": site_id, "target_id": f"performance_mixed:{site_id}",
+                     "target_omt": target, "member_ids": cohort["member_ids"], "generation": 2,
+                     "current_minutes": minute, "branch": "metrics_bootstrap", "preserve_member_records": True,
+                     "report_policy": "cannibal_night_raid" if sites[site_id]["site_kind"] == "cannibal_camp" else "bandit_shakedown"}
+        apply_bandit_scheduler_response_candidate_transform(world_dir, candidate, _preserve_other_sites=True)
+        operation = {**candidate, "phase": "outbound", "rally_omt": cohort["rally_omt"],
+                     "member_rally_positions_ms": {npc_id: positions[npc_id] for npc_id in cohort["member_ids"]}}
+        operations.append(apply_bandit_hostile_operation_bootstrap_transform(
+            world_dir, operation, _outbound_from_home=True))
+    # Match the native raid plan's initial finite source search; the generic
+    # historical bootstrap intentionally retains its original semantics.
+    payload = json.loads(dimension.read_text(encoding="utf-8").partition("\n")[2])
+    for site in payload["overmapbuffer"]["bandit_live_world"]["sites"]:
+        site["next_outing_generation"] = 3
+        # Explicitly empty current ordinary owner. Absence invokes the native
+        # legacy importer even when the hostile reservation is already current.
+        site["active_outing"] = {"schema_version": 5, "kind": "none", "member_ids": [],
+                                  "phase": "assembling", "simulation_owner": "abstract",
+                                  "handoff_epoch": 0, "last_advanced_minutes": -1,
+                                  "started_minutes": -1, "local_contact_minutes": -1,
+                                  "last_progress_minutes": -1}
+        if site["site_kind"] != "cannibal_camp":
+            continue
+        operation = site["active_hostile_operation"]
+        ring = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1),
+                (-1, -1), (1, -1), (-1, 1), (1, 1)]
+        cross = [(12, 12), (6, 12), (18, 12), (12, 6), (12, 18)]
+        candidates = [{"position": [(target[0] + x) * 24 + dx,
+                                    (target[1] + y) * 24 + dy, z],
+                       "state": 0, "geometry_revision": 0, "reconsidered": False,
+                       "available_members_at_exclusion": []}
+                      for x, y in ring for z in ([0] if target[2] == 0 else [0, target[2]])
+                      for dx, dy in cross]
+        operation["sweep"] = {"source": target, "generation": 2, "candidates": candidates,
+                              "cursor": 0, "active_elapsed": 0, "last_progress": 0,
+                              "candidate_started": 0, "last_world": -1, "movement": {},
+                              "retry_after_active": 1800}
+        # Native raid_sweep::fingerprint({"episode:1"}), checked by the
+        # serialized native contract test rather than treated as a fresh signal.
+        evidence = 14695981039346656037
+        for byte in b"9:episode:1":
+            evidence = ((evidence ^ byte) * 1099511628211) & ((1 << 64) - 1)
+        operation["sweep_source_evidence"] = str(evidence)
+        site["raid_sources"] = {"outcomes": [{"area": [target[0], target[1], 0],
+                                             "generation": 0, "episode": 1, "source_active": True,
+                                             "absent_world": -1, "evidence": "", "outcome": "",
+                                             "finished_active": 0, "retry_after_active": 0}],
+                                "active_elapsed": 0, "last_world": -1, "prior": [0] * 8,
+                                "last_eviction_active": -1}
+    dimension.write_text(version + "\n" + json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    return {"kind": "bandit_mixed_load_bootstrap", "gameplay_credit": False,
+            "classification": "close metrics control, not a representative story",
+            "turn": turn, "current_minutes": minute, "concrete_npc_count": len(found),
+            "camp_member_count": len(members), "active_member_count": len(active_ids),
+            "operations": operations}
+
+
+def apply_bandit_scheduler_response_candidate_transform(world_dir: Path, transform: Dict[str, Any],
+                                                       *, _preserve_other_sites: bool = False) -> Dict[str, Any]:
     """Install a schema-current, zero-credit candidate for scheduler-owned response."""
     dimension_path = world_dir / "dimension_data.gsav"
     if not dimension_path.exists():
@@ -32291,7 +32496,8 @@ def apply_bandit_scheduler_response_candidate_transform(world_dir: Path, transfo
     site.setdefault("origin_summary", "")
     # This narrow operation witness has one authoritative camp; inherited
     # legacy shells would otherwise fail current-schema load validation.
-    sites[:] = [site]
+    if not _preserve_other_sites:
+        sites[:] = [site]
     member_ids = list(transform["member_ids"])
     members = {int(member.get("npc_id")): member for member in site.get("members", []) if isinstance(member, dict) and str(member.get("npc_id", "")).lstrip("-").isdigit()}
     missing_member_ids = sorted(set(member_ids) - set(members))
@@ -32352,7 +32558,8 @@ def apply_bandit_scheduler_response_candidate_transform(world_dir: Path, transfo
     return {"kind": "bandit_scheduler_response_candidate", "world": world_dir.name, "site_id": site_id, "report_activity_id": report_activity_id, "report_generation": report_generation, "candidate_member_source_count": len(member_ids), "active_operation": False, "active_reservation": False, "scheduler_hour": scheduler_hour, "routine_scheduler_last_hour": scheduler_hour - 1, "branch": str(transform["branch"]), "target_id": target_id, "target_omt": target_omt}
 
 
-def apply_bandit_hostile_operation_bootstrap_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
+def apply_bandit_hostile_operation_bootstrap_transform(world_dir: Path, transform: Dict[str, Any],
+                                                     *, _outbound_from_home: bool = False) -> Dict[str, Any]:
     """Install one explicitly declared, zero-credit raid operation owner."""
     dimension_path = world_dir / "dimension_data.gsav"
     version_line, separator, payload_text = dimension_path.read_text(encoding="utf-8").partition("\n")
@@ -32404,7 +32611,7 @@ def apply_bandit_hostile_operation_bootstrap_transform(world_dir: Path, transfor
         raise SystemExit("Hostile-operation bootstrap report target mismatch")
     activity_id = f"{site_id}#hostile:{generation}"
     operation_phase = str(transform.get("phase", "rallying"))
-    if operation_phase not in {"rallying", "committed_contact"}:
+    if operation_phase not in ({"outbound"} if _outbound_from_home else {"rallying", "committed_contact"}):
         raise SystemExit("Hostile-operation bootstrap supports rallying or committed_contact only")
     direct_local_contact = operation_phase == "committed_contact"
     simulation_owner = str(transform.get("simulation_owner", "local" if direct_local_contact else "abstract"))
@@ -32429,7 +32636,9 @@ def apply_bandit_hostile_operation_bootstrap_transform(world_dir: Path, transfor
     expected_member_omt = target_omt if direct_local_contact else route[1]
     if (set(member_positions) != set(member_ids) or
             any(len(position) != 3 for position in member_positions.values()) or
-            any([position[0] // 24, position[1] // 24, position[2]] != expected_member_omt
+            any(([position[0] // 24, position[1] // 24, position[2]] not in site.get("footprint", [])
+                 if _outbound_from_home else
+                 [position[0] // 24, position[1] // 24, position[2]] != expected_member_omt)
                 for position in member_positions.values())):
         raise SystemExit(f"Hostile-operation bootstrap requires each concrete member at its exact {('contact' if direct_local_contact else 'rally')} OMT")
     member_state = "local_contact" if direct_local_contact else "outbound"
@@ -32514,6 +32723,8 @@ def apply_bandit_hostile_operation_bootstrap_transform(world_dir: Path, transfor
                 npc_payload["omt_path"] = []
                 npc_payload["path"] = []
                 npc_payload["automoveroute"] = []
+                if _outbound_from_home:
+                    npc_payload.pop("bandit_live_world_projection_lease", None)
                 if direct_local_contact:
                     npc_payload["bandit_live_world_projection_lease"] = {
                         "site_id": site_id,
@@ -32702,6 +32913,9 @@ def apply_fixture_save_transforms(world_dir: Path, transforms: List[Dict[str, An
             continue
         if kind == "bandit_registered_staffed_observer_bootstrap":
             reports.append(apply_bandit_registered_staffed_observer_bootstrap_transform(world_dir, transform))
+            continue
+        if kind == "bandit_mixed_load_bootstrap":
+            reports.append(apply_bandit_mixed_load_bootstrap_transform(world_dir, transform))
             continue
         if kind == "bandit_scheduler_response_candidate":
             reports.append(apply_bandit_scheduler_response_candidate_transform(world_dir, transform))
@@ -37230,6 +37444,7 @@ def execute_probe_steps(
                     ).strip(),
                     required_min_active_member_ids=required_min_active_member_ids,
                     required_active_members_found=bool(step.get("required_active_members_found", False)),
+                    required_active_member_bodies_found=bool(step.get("required_active_member_bodies_found", False)),
                     required_active_member_max_abs_offset_ms=required_max_offset,
                     required_active_member_abs_omt=required_active_member_abs_omt,
                     required_scout_report_present=required_scout_report_present,
@@ -37306,6 +37521,7 @@ def execute_probe_steps(
                     ).strip(),
                     "required_min_active_member_ids": required_min_active_member_ids,
                     "required_active_members_found": bool(step.get("required_active_members_found", False)),
+                    "required_active_member_bodies_found": bool(step.get("required_active_member_bodies_found", False)),
                     "required_active_member_max_abs_offset_ms": required_max_offset,
                     "required_active_member_abs_omt": required_active_member_abs_omt,
                     "required_scout_report_present": required_scout_report_present,
