@@ -63,6 +63,7 @@ class navigation_view : public map
         };
         submap unknown;
         std::set<tripoint_abs_sm> available;
+        std::set<tripoint_abs_sm> missing;
         std::vector<binding> bindings;
         view_bounds bounds;
         static bool accepted( submap *sm, const tripoint_abs_sm &p ) {
@@ -96,6 +97,9 @@ class navigation_view : public map
                         if( usable ) {
                             available.insert( p );
                         } else {
+                            if( eligible && !sm ) {
+                                missing.insert( p );
+                            }
                             sm = &unknown;
                         }
                         const tripoint_rel_sm grid( x, y, z );
@@ -126,6 +130,9 @@ class navigation_view : public map
         bool known( const tripoint_abs_ms &p ) const {
             return inbounds( p ) && available.count( project_to<coords::sm>( p ) ) != 0;
         }
+        bool unavailable( const tripoint_abs_ms &p ) const {
+            return inbounds( p ) && missing.count( project_to<coords::sm>( p ) ) != 0;
+        }
 };
 
 } // namespace
@@ -140,7 +147,7 @@ preparation::~preparation() = default;
 
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                      const std::function<bool( const tripoint_abs_ms & )> &occupied, preparation *prepared,
-                     segment *retained )
+                     segment *retained, bool approach_unknown_goal )
 {
     // Includes every refusal and locally owned view destruction. A retained
     // service workspace tears down under its inclusive operation parent.
@@ -207,11 +214,33 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         return here->inbounds( p ) && ( !remote || remote->known( here->get_abs( p ) ) );
     };
     const auto from = here->get_bub( origin );
+    const auto request_frontier = [&]() {
+        if( !remote ) {
+            return;
+        }
+        if( !remote->known( origin ) ) {
+            if( remote->unavailable( origin ) ) {
+                out.missing_geometry = origin;
+            }
+            // Existing unsupported geometry (notably vehicles) is not an
+            // invitation to load a different neighboring column.
+            return;
+        }
+        // Preserve the existing native approach ordering. This only requests
+        // physical facts; the retry must still prove every actual step.
+        for( const auto &p : squares_closer_to( origin, goal ) ) {
+            if( p.z() == origin.z() && rl_dist( origin, p ) <= 1 && remote->unavailable( p ) ) {
+                out.missing_geometry = p;
+                return;
+            }
+        }
+    };
     if( !known( from ) ) {
         if( retained ) {
             retained->clear();
         }
         out.reason = "origin_geometry_unknown";
+        request_frontier();
         raid_perf_note_query( raid_perf_query_event::unknown_geometry );
         return out;
     }
@@ -332,7 +361,11 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         // An unshortened goal still requires its actual square; neither an
         // unknown tile nor a nearby substitute can count as arrival.
         const int reach = std::min( length, segment );
-        const int last = length > segment ? 1 : reach;
+        // A movement proposal may approach an unknown goal through a real
+        // known prefix. The original goal remains authoritative for arrival;
+        // ordinary read-only callers keep their exact-endpoint semantics.
+        const int last = length > segment || ( approach_unknown_goal &&
+                         !known( here->get_bub( goal ) ) ) ? 1 : reach;
         for( int distance = reach; distance >= last; --distance ) {
             const auto approach = origin + tripoint_rel_ms( delta.x() * distance / length,
                                   delta.y() * distance / length, 0 );
@@ -351,12 +384,14 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
         }
         if( !out.known ) {
             out.reason = "segment_geometry_unknown";
+            request_frontier();
             raid_perf_note_query( raid_perf_query_event::unknown_geometry );
             return out;
         }
     }
     if( route.empty() ) {
         out.reason = "no_existing_safe_native_route";
+        request_frontier();
         if( origin.z() == aim.z() && known( here->get_bub( aim ) ) ) {
             // Diagnose the same short approach; this second route is never
             // executed. A fire-excluded route is a hazard, not a searched
@@ -433,6 +468,25 @@ step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                           out.next == action::open_door ? raid_perf_query_event::open_door :
                           raid_perf_query_event::other_refusal );
     return out;
+}
+
+bool acquire_movement_geometry( const tripoint_abs_ms &origin, const step_read &request )
+{
+    if( request.next != action::none || request.position != origin ||
+        !request.missing_geometry ) {
+        return false;
+    }
+    const auto p = *request.missing_geometry;
+    if( p.z() != origin.z() || rl_dist( origin, p ) > 1 || get_map().inbounds( p ) ||
+        MAPBUFFER.lookup_submap_cached( project_to<coords::sm>( p ) ) ) {
+        return false;
+    }
+    // The native loader preserves resident/saved layers, generates the normal
+    // vertical column and runs its normal extras/spawn/actualization policy.
+    // Its map borrows MAPBUFFER owners; never install a second submap copy.
+    tinymap terrain;
+    terrain.load( project_to<coords::omt>( p ), true, false );
+    return MAPBUFFER.lookup_submap_cached( project_to<coords::sm>( p ) ) != nullptr;
 }
 
 bool commit_door( const monster &body, const tripoint_abs_ms &door )

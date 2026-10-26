@@ -1983,32 +1983,62 @@ void overmapbuffer::move_hordes()
     // activation while this batch runs. No steady all-history range scan.
     const auto active_sites = global_state.migo_populations.active_sites;
     for( const auto &id : active_sites ) {
-        const auto *site = global_state.migo_towers.find( id );
-        const auto *population = global_state.migo_populations.find( id );
-        if( !population || !site ) {
-            continue;
-        }
-        if( site->operation && !site->operation->resolved && site->operation->activity.active ) {
+        // Native movement may generate another Mi-go home and grow the
+        // population vector. Carry only bounded IDs/generation across that
+        // call, never a site, member, lease or vector iterator.
+        std::vector<std::string> operation_members;
+        std::uint64_t operation_generation = 0;
+        if( const auto *site = global_state.migo_towers.find( id );
+            site && site->operation && !site->operation->resolved && site->operation->activity.active ) {
+            operation_generation = site->operation->generation;
             for( const auto &member : site->operation->members ) {
-                const auto *lease = population->find( member.member_id );
-                if( member.settled || member.returned || !lease || !lease->current_position ||
-                    lease->assignment == migo_population::duty::available ||
-                    lease->owner != migo_population::representation::abstract ) {
-                    continue;
-                }
-                overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
-                if( owner && migo_processed.insert( owner ).second ) {
-                    owner->move_hordes( true );
-                }
+                operation_members.push_back( member.member_id );
             }
         }
-        if( !site->response_home_rally ) {
-            continue;
+        for( const auto &member_id : operation_members ) {
+            const auto *site = global_state.migo_towers.find( id );
+            const auto *population = global_state.migo_populations.find( id );
+            if( !site || !population || !site->operation || site->operation->resolved ||
+                !site->operation->activity.active || site->operation->generation != operation_generation ) {
+                continue;
+            }
+            const auto &members = site->operation->members;
+            const auto member = std::find_if( members.begin(), members.end(), [&]( const auto &current ) {
+                return current.member_id == member_id;
+            } );
+            const auto *lease = population->find( member_id );
+            if( member == members.end() || member->settled || member->returned ||
+                !lease || !lease->current_position ||
+                lease->assignment == migo_population::duty::available ||
+                lease->owner != migo_population::representation::abstract ) {
+                continue;
+            }
+            overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
+            if( owner && migo_processed.insert( owner ).second ) {
+                owner->move_hordes( true );
+            }
         }
-        const auto &rally = *site->response_home_rally;
-        for( const auto &member : rally.members ) {
-            const auto *lease = population->find( member.member_id );
-            if( !member.working() || !member.active || member.last_world != to_turn<int>( calendar::turn ) ||
+        // Reacquire even for the operation-to-recall sibling transition, then
+        // apply the same rule between each recalled member's native owner.
+        std::vector<std::string> rally_members;
+        std::uint64_t rally_generation = 0;
+        if( const auto *site = global_state.migo_towers.find( id ); site && site->response_home_rally ) {
+            rally_generation = site->response_home_rally->generation;
+            for( const auto &member : site->response_home_rally->members ) {
+                rally_members.push_back( member.member_id );
+            }
+        }
+        for( const auto &member_id : rally_members ) {
+            const auto *site = global_state.migo_towers.find( id );
+            const auto *population = global_state.migo_populations.find( id );
+            if( !site || !population || !site->response_home_rally ||
+                site->response_home_rally->generation != rally_generation ) {
+                continue;
+            }
+            const auto *member = site->response_home_rally->find( member_id );
+            const auto *lease = population->find( member_id );
+            if( !member || !member->working() || !member->active ||
+                member->last_world != to_turn<int>( calendar::turn ) ||
                 !lease || !lease->current_position || lease->hp <= 0 ||
                 lease->owner != migo_population::representation::abstract ||
                 lease->assignment != migo_population::duty::returning ) {
@@ -2023,10 +2053,10 @@ void overmapbuffer::move_hordes()
             const monster *body = entry ? entry->monster_data.get() : nullptr;
             const auto *intent = body ? body->migo_intent() : nullptr;
             if( body && intent && body->pos_abs() == *lease->current_position &&
-                body->population_identity().member_id == member.member_id &&
-                intent->generation == rally.generation &&
+                body->population_identity().member_id == member_id &&
+                intent->generation == rally_generation &&
                 ( !site->operation || site->operation->resolved ||
-                  site->operation->generation != rally.generation ) &&
+                  site->operation->generation != rally_generation ) &&
                 migo_tower::owns_intent( *body, migo_population::representation::abstract ) &&
                 migo_processed.insert( owner ).second ) {
                 owner->move_hordes( true );

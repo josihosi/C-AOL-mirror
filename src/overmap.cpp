@@ -1737,6 +1737,15 @@ void overmap::move_hordes( bool migo_operations_only, bool predators_only )
             ++mon;
             continue;
         }
+        if( mon->second.monster_data &&
+            !mon->second.monster_data->population_identity().empty() &&
+            g->has_loaded_handoff_actor( mon->second.monster_data->population_identity().member_id ) ) {
+            // A conflicting loaded body must not authorize either native
+            // geometry acquisition or a prepared abstract body/clock commit.
+            mon->second.last_processed = calendar::turn;
+            ++mon;
+            continue;
+        }
         // A predator handoff prepares a private heavy snapshot.  In
         // particular, exact local placement may fail; no movement debit,
         // payload position, or intent update may then leak into its abstract
@@ -1846,6 +1855,50 @@ void overmap::move_hordes( bool migo_operations_only, bool predators_only )
                 intent.retreat();
             }
             migo_step = migo_tower::prepare_step( body, migo_population::representation::abstract );
+            if( native_elapsed > 0 && migo_step.missing_geometry ) {
+                const auto origin = mon->first;
+                monster *const canonical = mon->second.monster_data.get();
+                const auto token = body.population_identity();
+                const auto *home = overmap_buffer.global_state.migo_populations.find( token.site_id );
+                const auto *member = home ? home->find( token.member_id ) : nullptr;
+                if( canonical && canonical->pos_abs() == origin && member &&
+                    member->current_position == origin &&
+                    migo_tower::owns_intent( *canonical, migo_population::representation::abstract ) &&
+                    !g->has_loaded_handoff_actor( token.member_id ) &&
+                    physical_navigation::acquire_movement_geometry( origin, migo_step ) ) {
+                    // Native mapgen may alter world containers. Reacquire the
+                    // source iterator/lease; generation never commits the
+                    // private payload, an epoch, or movement energy.
+                    // Keep the original active-only iterator flavor. find()
+                    // returns an all-flavor iterator and would subsequently
+                    // admit unrelated idle/dormant entries into this pass.
+                    mon = hordes.get_view( horde_map_flavors::active ).begin();
+                    while( mon != hordes.end() && mon->first != origin ) {
+                        ++mon;
+                    }
+                    if( mon == hordes.end() ) {
+                        break;
+                    }
+                    home = overmap_buffer.global_state.migo_populations.find( token.site_id );
+                    member = home ? home->find( token.member_id ) : nullptr;
+                    if( mon->second.monster_data.get() != canonical || !member ||
+                        member->current_position != origin ||
+                        canonical->pos_abs() != origin || canonical->population_identity().epoch != token.epoch ||
+                        canonical->population_identity().site_id != token.site_id ||
+                        canonical->population_identity().member_id != token.member_id ||
+                        canonical->population_identity().site_anchor != token.site_anchor ||
+                        !canonical->migo_intent() ||
+                        canonical->migo_intent()->generation != body.migo_intent()->generation ||
+                        !migo_tower::owns_intent( *canonical, migo_population::representation::abstract ) ||
+                        g->has_loaded_handoff_actor( token.member_id ) ||
+                        !migo_tower::activity_for( body, migo_population::representation::abstract,
+                                now ) ) {
+                        ++mon;
+                        continue;
+                    }
+                    migo_step = migo_tower::prepare_step( body, migo_population::representation::abstract );
+                }
+            }
             // A route refusal consumed no physical action. Credit only an
             // executable step, so blocked owners retain their energy guard
             // without accumulating a delayed movement budget.

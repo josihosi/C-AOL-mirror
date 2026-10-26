@@ -202,7 +202,7 @@ static_assert( sizeof( observation_buffer ) + sizeof( receiver_observation ) +
 constexpr int sensing_interval = 5 * 60;
 physical_navigation::step_read read_owned_step( monster &body,
         const tripoint_abs_ms &goal, migo_population::representation owner,
-        physical_navigation::preparation *prepared = nullptr )
+        physical_navigation::preparation *prepared = nullptr, bool movement = false )
 {
     auto &intent = *body.migo_intent();
     const auto &identity = body.population_identity();
@@ -241,7 +241,7 @@ physical_navigation::step_read read_owned_step( monster &body,
         overmap *existing = overmap_buffer.get_existing( om_position );
         const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
         return resident && !resident->is_active();
-    }, prepared, &intent.navigation );
+    }, prepared, &intent.navigation, movement );
 }
 
 physical_navigation::step_read read_service_step( monster &body,
@@ -1539,7 +1539,7 @@ physical_navigation::step_read prepare_step( monster &body, migo_population::rep
             raid_perf_scope scope( owner == migo_population::representation::local ?
                                    raid_perf_stage::migo_local_prepare_navigation :
                                    raid_perf_stage::migo_abstract_prepare_navigation );
-            result = read_owned_step( body, intent.home, owner );
+            result = read_owned_step( body, intent.home, owner, nullptr, true );
         }
         intent.waypoint = result.next == physical_navigation::action::none ?
                           body.pos_abs() : result.position;
@@ -1585,7 +1585,7 @@ physical_navigation::step_read prepare_step( monster &body, migo_population::rep
         raid_perf_scope scope( owner == migo_population::representation::local ?
                                raid_perf_stage::migo_local_prepare_navigation :
                                raid_perf_stage::migo_abstract_prepare_navigation );
-        result = read_owned_step( body, *goal, owner );
+        result = read_owned_step( body, *goal, owner, nullptr, true );
     }
     intent.waypoint = result.next == physical_navigation::action::none ?
                       body.pos_abs() : result.position;
@@ -1646,7 +1646,33 @@ bool move_local( monster &body )
         return true;
     }
     monster candidate( body );
-    const auto step = prepare_step( candidate, migo_population::representation::local );
+    auto step = prepare_step( candidate, migo_population::representation::local );
+    if( step.missing_geometry ) {
+        const auto token = body.population_identity();
+        const auto origin = body.pos_abs();
+        const auto *home = overmap_buffer.global_state.migo_populations.find( token.site_id );
+        const auto *member = home ? home->find( token.member_id ) : nullptr;
+        if( member && confirmed_body( *home, *member ) == &body &&
+            physical_navigation::acquire_movement_geometry( origin, step ) ) {
+            // Map loading may run native world work. No borrowed home/intent
+            // or view survives it, and ownership must still be exact.
+            home = overmap_buffer.global_state.migo_populations.find( token.site_id );
+            member = home ? home->find( token.member_id ) : nullptr;
+            if( !member || confirmed_body( *home, *member ) != &body ||
+                body.pos_abs() != origin || body.population_identity().epoch != token.epoch ||
+                body.population_identity().site_id != token.site_id ||
+                body.population_identity().member_id != token.member_id ||
+                body.population_identity().site_anchor != token.site_anchor ||
+                !body.migo_intent() ||
+                body.migo_intent()->generation != candidate.migo_intent()->generation ||
+                !owns_intent( body, migo_population::representation::local ) ||
+                !activity_for( candidate, migo_population::representation::local,
+                               to_turn<int>( calendar::turn ) ) ) {
+                return true;
+            }
+            step = prepare_step( candidate, migo_population::representation::local );
+        }
+    }
     if( step.next == physical_navigation::action::none ) {
         retire_route( body );
         body.set_migo_intent( *candidate.migo_intent() );
@@ -1691,6 +1717,10 @@ bool move_local( monster &body )
         body.migo_intent()->last_refused_world = to_turn<int>( calendar::turn );
         return true;
     }
+    // prepare_step and on_unload only prepare navigation/time; they do not
+    // transform inventory. Preserve the actual item's identity only after
+    // destination admission and the ownership transfer have both succeeded.
+    body.transfer_owned_items_to( *retained->monster_data );
     owner->refresh_monster_schedule( step.position );
     g->remove_zombie( body );
     body.set_hp( 0 ); // yield the released local handle; no biological death

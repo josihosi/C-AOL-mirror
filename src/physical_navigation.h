@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 #include "coordinates.h"
 #include "pathfinding.h"
@@ -25,6 +26,9 @@ struct step_read {
     bool known = false;
     std::string reason;
     std::uint64_t hazard_revision = 0;
+    // A request for facts at the actor's immediate frontier, never a route
+    // certificate. Only an authenticated movement owner may acquire it.
+    std::optional<tripoint_abs_ms> missing_geometry;
 };
 class preparation;
 // Disposable positive path value. No map/actor pointers, failures or history.
@@ -38,7 +42,7 @@ class segment
         std::vector<tripoint_abs_ms> points;
         std::vector<int> costs;
         friend step_read read_step( const monster &, const tripoint_abs_ms &,
-                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation *, segment * );
+                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation *, segment *, bool );
     public:
         void clear() { *this = segment(); }
         std::size_t size() const { return points.size(); }
@@ -51,7 +55,7 @@ class preparation
         struct implementation;
         std::unique_ptr<implementation> impl;
         friend step_read read_step( const monster &, const tripoint_abs_ms &,
-                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation *, segment * );
+                                    const std::function<bool( const tripoint_abs_ms & )> &, preparation *, segment *, bool );
     public:
         preparation();
         ~preparation();
@@ -62,7 +66,13 @@ class preparation
 // short physical route only, never perception or the destination's identity.
 step_read read_step( const monster &body, const tripoint_abs_ms &goal,
                      const std::function<bool( const tripoint_abs_ms & )> &occupied = {},
-                     preparation *prepared = nullptr, segment *retained = nullptr );
+                     preparation *prepared = nullptr, segment *retained = nullptr,
+                     bool approach_unknown_goal = false );
+// Actual movement owners only, after authenticating the canonical source and
+// active opportunity. Loads at most one current/adjacent OMT through the normal
+// native loader. All read/preparation views must have ended before this call.
+// Loading has native world effects, but confers no actor/action/time credit.
+bool acquire_movement_geometry( const tripoint_abs_ms &origin, const step_read &request );
 // Caller must first authenticate the current physical owner and spend this
 // action once. This opens one adjacent native door, and never moves the body.
 bool commit_door( const monster &body, const tripoint_abs_ms &door );
