@@ -11906,5 +11906,394 @@ class RepresentativeTowerGeometryTest(unittest.TestCase):
                                                  manifest_path=Path("manifest.json"))
 
 
+class ClosedWorldFixtureAdoptionTest(unittest.TestCase):
+    """Exercise the real fixture transfer/resolver, using disposable native bytes."""
+
+    def setUp(self) -> None:
+        import startup_harness as startup
+        self.startup = startup
+        temporary = tempfile.TemporaryDirectory(prefix="closed-fixture-adoption-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.profile = "native-closed-owner"
+        self.userdir = self.root / self.profile
+        self.world = self.userdir / "save/TestSetup00"
+        self.world.mkdir(parents=True)
+        (self.world / "worldoptions.json").write_text("[]")
+        (self.world / "dimension_data.gsav").write_text('# version 37\n{"turn":5216251}')
+        player = self.world / "player.sav"
+        player.write_text('# version 37\n{"player":{"location":[3492,3588,1]}}')
+        startup.run_zzip(player)
+        player.unlink()
+        self.fixture_root = self.root / "fixtures/live-debug"
+        self.fixture_root.mkdir(parents=True)
+        self.fixture = "native_tower_initial"
+        self.destination = self.fixture_root / self.fixture
+        self.reference = {"status": "current_saved_world_reference", "retained_copy": False,
+                          "profile": self.profile, "world": self.world.name,
+                          "source": str(self.world), "source_sha256": startup.path_sha256(self.world)}
+        # Use this process's deliberately impossible birth as a *negative* in
+        # the live-PID test. The successful receipt binds a collected child.
+        child = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.DEVNULL)
+        self.assertEqual(child.wait(timeout=10), 0)
+        self.closed_pid = child.pid
+        self.custody = {"current_saved_reference": self.reference, "run_id": "closed-native-run",
+                        "binding_id": "native-binding", "roles": [
+                            {"role": "game_process_generation", "pid": child.pid,
+                             "birth_identity": "collected-test-child", "executable_path": sys.executable,
+                             "os_absent": True}],
+                        "endpoints": [{"path": str(self.root / "closed-endpoint/input.sock"),
+                                       "endpoint_absent": True, "directory_absent": True}],
+                        "report": {"consumer_pass": True, "clean_terminal_exit_reconciliation": {
+                            "status": "accepted", "exit_code": 0, "issues": [],
+                            "run_id": "closed-native-run", "binding_id": "native-binding"}}}
+        self.manifest = {"name": self.fixture, "pre_signal": True, "gameplay_credit": False,
+                         "source_parent_fixture": "original-maintained-parent", "save_transforms": []}
+        self.metadata = {key: self.root / (key + ".json") for key in ("reference", "custody", "manifest")}
+        self.write_metadata()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch("startup_harness.userdir_for_profile", return_value=self.userdir).start()
+        mock.patch("startup_harness.save_dir_for_profile", return_value=self.userdir / "save").start()
+        mock.patch("startup_harness.profile_fixture_root", return_value=self.fixture_root).start()
+
+    def write_metadata(self) -> None:
+        for key in self.metadata:
+            self.metadata[key].write_text(json.dumps(getattr(self, key)))
+
+    def arguments(self) -> dict:
+        return {"fixture_profile": "live-debug", "world_reference": self.metadata["reference"],
+                "world_reference_sha256": self.startup.path_sha256(self.metadata["reference"]),
+                "custody_path": self.metadata["custody"],
+                "custody_sha256": self.startup.path_sha256(self.metadata["custody"]),
+                "manifest_path": self.metadata["manifest"],
+                "manifest_sha256": self.startup.path_sha256(self.metadata["manifest"])}
+
+    def adopt(self, **overrides: Any) -> dict:
+        return self.startup.adopt_closed_world_fixture(
+            self.profile, self.fixture, self.world.name, **{**self.arguments(), **overrides})
+
+    def snapshot(self, root: Optional[Path] = None) -> dict:
+        root = root or self.world
+        return {str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_ino)
+                for p in root.rglob("*") if p.is_file()}
+
+    def refuse(self, reason: str, **overrides: Any) -> None:
+        before = self.snapshot()
+        with self.assertRaisesRegex((SystemExit, OSError, ValueError), reason):
+            self.adopt(**overrides)
+        self.assertTrue(self.world.is_dir())
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.destination.exists())
+
+    def test_moves_native_payload_once_with_exact_bytes_mtimes_and_inodes(self) -> None:
+        before = self.snapshot()
+        digest = self.startup.path_sha256(self.world)
+        with mock.patch("startup_harness.shutil.copytree", side_effect=AssertionError("payload must move")):
+            result = self.adopt()
+        moved = self.destination / "save" / self.world.name
+        self.assertFalse(self.world.exists())
+        self.assertEqual(self.snapshot(moved), before)
+        self.assertEqual(self.startup.path_sha256(moved), digest)
+        self.assertEqual(result["ownership"], "moved")
+        resolved = resolve_fixture_payload(self.fixture, "live-debug")
+        self.assertEqual(resolved["save_src"] / self.world.name, moved)
+        self.assertEqual(resolved["source_chain"], [("live-debug", self.fixture)])
+        self.assertEqual(resolved["save_transforms"], [])
+        self.assertEqual(result["binding"], self.startup.fixture_source_binding(self.fixture, "live-debug"))
+        manifest = json.loads((self.destination / "manifest.json").read_text())
+        self.assertFalse(manifest["gameplay_credit"])
+        self.assertEqual(manifest["adoption"]["source_sha256"], digest)
+        self.assertEqual(manifest["source_parent_fixture"], "original-maintained-parent")
+        # A second invocation cannot fall back to another profile world/copy.
+        with self.assertRaisesRegex(SystemExit, "existing unaliased source"):
+            self.adopt()
+
+    def test_ordinary_capture_and_install_still_copy_without_adoption(self) -> None:
+        before = self.snapshot()
+        self.startup.capture_fixture(self.profile, self.fixture, self.world.name, overwrite=False)
+        self.assertEqual(self.snapshot(), before)
+        moved = self.destination / "save" / self.world.name
+        self.assertEqual(self.startup.path_sha256(moved), self.reference["source_sha256"])
+        shutil.rmtree(self.world)
+        self.startup.install_fixture(self.profile, self.fixture, replace=False, fixture_profile="live-debug")
+        self.assertTrue(moved.is_dir())
+        self.assertEqual(self.startup.path_sha256(self.world), self.reference["source_sha256"])
+
+    def test_existing_fixture_is_never_overwritten_or_touched(self) -> None:
+        self.destination.mkdir()
+        sentinel = self.destination / "user-data"
+        sentinel.write_bytes(b"keep")
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "never overwrites"):
+            self.adopt()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(sentinel.read_bytes(), b"keep")
+
+    def test_missing_or_changed_pinned_metadata_refuses(self) -> None:
+        self.refuse("metadata binding mismatch", custody_sha256="0" * 64)
+        self.refuse("metadata binding mismatch", world_reference_sha256="0" * 64)
+        self.refuse("metadata binding mismatch", manifest_sha256="0" * 64)
+        self.metadata["custody"].unlink()
+        # Supply the formerly pinned digest without trying to hash a missing file.
+        args = {
+            "fixture_profile": "live-debug", "world_reference": self.metadata["reference"],
+            "world_reference_sha256": self.startup.path_sha256(self.metadata["reference"]),
+            "custody_path": self.metadata["custody"], "custody_sha256": "0" * 64,
+            "manifest_path": self.metadata["manifest"],
+            "manifest_sha256": self.startup.path_sha256(self.metadata["manifest"])}
+        before = self.snapshot()
+        with self.assertRaisesRegex(SystemExit, "regular unaliased file"):
+            self.startup.adopt_closed_world_fixture(self.profile, self.fixture, self.world.name, **args)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.destination.exists())
+
+    def test_cli_success_uses_the_same_pinned_move_and_binding(self) -> None:
+        before = self.snapshot()
+        arguments = self.arguments()
+        argv = ["startup_harness.py", "capture-fixture", self.fixture,
+                "--adopt-closed-world", "--profile", self.profile, "--world", self.world.name,
+                "--fixture-profile", "live-debug", "--world-reference", str(self.metadata["reference"]),
+                "--world-reference-sha256", arguments["world_reference_sha256"],
+                "--custody", str(self.metadata["custody"]), "--custody-sha256", arguments["custody_sha256"],
+                "--manifest", str(self.metadata["manifest"]), "--manifest-sha256", arguments["manifest_sha256"]]
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+            self.assertEqual(self.startup.main(), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["ownership"], "moved")
+        self.assertFalse(self.world.exists())
+        self.assertEqual(self.snapshot(self.destination / "save" / self.world.name), before)
+        self.assertEqual(result["binding"], self.startup.fixture_source_binding(self.fixture, "live-debug"))
+
+    def test_changed_tree_and_foreign_reference_refuse(self) -> None:
+        original = (self.world / "dimension_data.gsav").read_bytes()
+        (self.world / "dimension_data.gsav").write_bytes(original + b" ")
+        self.refuse("source tree binding mismatch")
+        self.reference["profile"] = "foreign"
+        self.write_metadata()
+        self.refuse("reference/custody")
+
+    def test_incomplete_or_wrong_exit_custody_cannot_authorize(self) -> None:
+        original = json.loads(json.dumps(self.custody))
+        mutations = [lambda x: x["report"]["clean_terminal_exit_reconciliation"].update(exit_code=1),
+                     lambda x: x["report"]["clean_terminal_exit_reconciliation"].update(run_id="foreign"),
+                     lambda x: x["report"].update(consumer_pass=False),
+                     lambda x: x.update(roles=[]), lambda x: x.update(endpoints=[]),
+                     lambda x: x["roles"][0].update(os_absent=False),
+                     lambda x: x["roles"][0].update(birth_identity=""),
+                     lambda x: x["endpoints"][0].update(directory_absent=False)]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                self.custody = json.loads(json.dumps(original))
+                mutate(self.custody)
+                self.write_metadata()
+                self.refuse("custody|generations|endpoint")
+
+    def test_live_process_and_returned_endpoint_refuse_without_cleanup(self) -> None:
+        self.custody["roles"][0]["pid"] = os.getpid()
+        self.write_metadata()
+        self.refuse("process is still present")
+        self.custody["roles"][0]["pid"] = self.closed_pid
+        self.write_metadata()
+        endpoint_dir = Path(self.custody["endpoints"][0]["path"]).parent
+        endpoint_dir.mkdir()
+        self.refuse("endpoint/directory is still present")
+        self.assertTrue(endpoint_dir.is_dir())
+
+    def test_existing_native_profile_reservation_blocks_adoption(self) -> None:
+        # Separate process really holds the same native root inode lock, even
+        # though a stale closed receipt names only a previously returned run.
+        code = ("import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDONLY); "
+                "fcntl.flock(fd,fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.readline()")
+        child = subprocess.Popen([sys.executable, "-c", code, str(self.userdir)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "locked")
+            self.refuse("overlaps an inherited owner")
+        finally:
+            child.communicate("done\n", timeout=10)
+        self.assertEqual(child.returncode, 0)
+
+    def test_aliases_refuse_before_following_native_payload_or_metadata(self) -> None:
+        target = self.root / "external"
+        target.write_bytes(b"outside")
+        link = self.world / "alias"
+        link.symlink_to(target)
+        self.refuse("alias or unsupported")
+        link.unlink()
+        alias = self.root / "reference-alias.json"
+        alias.symlink_to(self.metadata["reference"])
+        self.refuse("regular unaliased", world_reference=alias)
+        self.assertEqual(target.read_bytes(), b"outside")
+
+    def test_inheritance_and_mutating_transform_cannot_modify_a_native_base(self) -> None:
+        self.manifest["source_fixture"] = "old-derived-fixture"
+        self.write_metadata()
+        self.refuse("without inherited transforms")
+        del self.manifest["source_fixture"]
+        self.manifest["save_transforms"] = [{"kind": "player_location_offset_ms", "player_save": "player.sav.zzip",
+                                             "offset_ms": [0, 24, 0]}]
+        self.write_metadata()
+        self.refuse("only read-only geometry")
+
+    def test_native_geometry_guard_succeeds_before_move_and_refusal_keeps_payload(self) -> None:
+        # Use the actual current native metadata fixture/reader, not a mock audit.
+        fixture = RepresentativeTowerGeometryTest()
+        fixture.setUp()
+        try:
+            shutil.rmtree(self.world)
+            os.rename(fixture.world, self.world)
+            self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+            self.manifest["save_transforms"] = [fixture.guard]
+            self.write_metadata()
+            # A stricter distance fails on this *same* physical native scene.
+            self.manifest["save_transforms"][0]["minimum_distance_omt"] = 16
+            self.write_metadata()
+            self.refuse("only 15 OMT")
+            self.manifest["save_transforms"][0]["minimum_distance_omt"] = 15
+            self.write_metadata()
+            before = self.snapshot()
+            self.adopt()
+            moved = self.destination / "save" / self.world.name
+            self.assertEqual(self.snapshot(moved), before)
+            manifest = json.loads((self.destination / "manifest.json").read_text())
+            audit = manifest["adoption"]["geometry_audits"][0]
+            self.assertEqual(len(audit["homes"]), 2)
+            self.assertEqual(audit["migo_sites"][0]["site_id"], fixture.site)
+            self.assertFalse(audit["gameplay_credit"])
+        finally:
+            fixture.doCleanups()
+
+    def test_move_or_postmove_failure_restores_single_original_owner(self) -> None:
+        import errno
+        with mock.patch("startup_harness.os.rename", side_effect=OSError(errno.EXDEV, "no copy fallback")):
+            self.refuse("no copy fallback")
+        with mock.patch("startup_harness.fixture_source_binding", side_effect=OSError("binding read failed")):
+            self.refuse("binding read failed")
+
+    def prepare_human_only_guard_with_existing_plaintext(self) -> None:
+        fixture = RepresentativeTowerGeometryTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        shutil.rmtree(self.world)
+        os.rename(fixture.world, self.world)
+        self.manifest["save_transforms"] = [
+            {key: value for key, value in fixture.guard.items() if key != "expected_migo_site_ids"}]
+        self.startup.run_zzip(self.world / "player.sav.zzip")
+        self.startup.run_zzip(self.world / "overmaps/o.0.0.zzip")
+        self.assertTrue((self.world / "player.sav").is_file())
+        self.assertTrue((self.world / "o.0.0").is_file())
+        self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+        self.write_metadata()
+
+    def snapshot_all_entries(self, root: Optional[Path] = None) -> dict:
+        root = root or self.world
+        return {str(path.relative_to(root)): (
+            "file" if path.is_file() else "directory", path.stat().st_mtime_ns,
+            path.stat().st_ino, path.read_bytes() if path.is_file() else None)
+            for path in [root, *root.rglob("*")]}
+
+    def staging_temp_tracker(self, paths: list) -> Any:
+        native_temporary_directory = tempfile.TemporaryDirectory
+
+        def create(*args: Any, **kwargs: Any) -> Any:
+            temporary = native_temporary_directory(*args, **kwargs)
+            paths.append(Path(temporary.name))
+            return temporary
+
+        return mock.patch("startup_harness.tempfile.TemporaryDirectory", side_effect=create)
+
+    def test_human_only_adoption_preserves_existing_plaintext_and_semantics(self) -> None:
+        self.prepare_human_only_guard_with_existing_plaintext()
+        before, temporary_paths = self.snapshot_all_entries(), []
+        with self.staging_temp_tracker(temporary_paths):
+            self.adopt()
+        moved = self.destination / "save" / self.world.name
+        self.assertEqual(self.snapshot_all_entries(moved), before)
+        audit = json.loads((self.destination / "manifest.json").read_text())["adoption"]["geometry_audits"][0]
+        self.assertNotIn("migo_sites", audit)
+        self.assertEqual([home["site_id"] for home in audit["homes"]], ["human-home"])
+        self.assertEqual(audit["homes"][0]["nearest_footprint_distance_omt"], 15)
+        self.assertTrue(temporary_paths)
+        self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_human_only_extraction_failure_keeps_plaintext_and_all_entries(self) -> None:
+        self.prepare_human_only_guard_with_existing_plaintext()
+        before, temporary_paths = self.snapshot_all_entries(), []
+        native_extract = self.startup.run_zzip
+
+        def fail_after_native_extraction(path: Path) -> None:
+            native_extract(path)
+            if path.name == "player.sav.zzip":
+                raise RuntimeError("forced failure after actual player extraction")
+
+        with self.staging_temp_tracker(temporary_paths), \
+                mock.patch("startup_harness.run_zzip", side_effect=fail_after_native_extraction):
+            with self.assertRaisesRegex(RuntimeError, "forced failure after actual"):
+                self.adopt()
+        self.assertEqual(self.snapshot_all_entries(), before)
+        self.assertFalse(self.destination.exists())
+        self.assertTrue(temporary_paths)
+        self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_human_only_parse_failure_keeps_plaintext_and_all_entries(self) -> None:
+        self.prepare_human_only_guard_with_existing_plaintext()
+        # Native precedence actually consults this pre-existing plaintext. Do
+        # not erase it, replace it with the archive, or change the source policy.
+        (self.world / "o.0.0").write_text("# version 37\n{malformed existing plaintext")
+        self.reference["source_sha256"] = self.startup.path_sha256(self.world)
+        self.write_metadata()
+        before, temporary_paths = self.snapshot_all_entries(), []
+        with self.staging_temp_tracker(temporary_paths):
+            with self.assertRaises(json.JSONDecodeError):
+                self.adopt()
+        self.assertEqual(self.snapshot_all_entries(), before)
+        self.assertFalse(self.destination.exists())
+        self.assertTrue(temporary_paths)
+        self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_tower_variant_uses_same_disposable_metadata_on_refusal_and_success(self) -> None:
+        self.prepare_human_only_guard_with_existing_plaintext()
+        self.manifest["save_transforms"][0]["expected_migo_site_ids"] = ["mi-go-tower:(20,20,0)"]
+        self.write_metadata()
+        before, temporary_paths = self.snapshot_all_entries(), []
+        native_overmap_extract = self.startup.extract_overmap_payload
+
+        def fail_after_overmap_read(path: Path) -> Any:
+            native_overmap_extract(path)
+            raise RuntimeError("forced failure after native overmap read")
+
+        with self.staging_temp_tracker(temporary_paths), \
+                mock.patch("startup_harness.extract_overmap_payload", side_effect=fail_after_overmap_read):
+            with self.assertRaisesRegex(RuntimeError, "after native overmap read"):
+                self.adopt()
+        self.assertEqual(self.snapshot_all_entries(), before)
+        self.assertFalse(self.destination.exists())
+        with self.staging_temp_tracker(temporary_paths):
+            self.adopt()
+        moved = self.destination / "save" / self.world.name
+        self.assertEqual(self.snapshot_all_entries(moved), before)
+        audit = json.loads((self.destination / "manifest.json").read_text())["adoption"]["geometry_audits"][0]
+        self.assertEqual(audit["migo_sites"][0]["site_id"], "mi-go-tower:(20,20,0)")
+        self.assertEqual(len(audit["homes"]), 2)
+        self.assertTrue(temporary_paths)
+        self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_cli_demands_optin_and_all_pins_before_any_capture(self) -> None:
+        base = ["startup_harness.py", "capture-fixture", self.fixture, "--profile", self.profile,
+                "--world", self.world.name]
+        for suffix in (["--custody", "unselected"], ["--adopt-closed-world"],
+                       ["--adopt-closed-world", "--overwrite"]):
+            with self.subTest(args=suffix), mock.patch.object(sys, "argv", base + suffix):
+                self.refuse_cli()
+
+    def refuse_cli(self) -> None:
+        before = self.snapshot()
+        with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()):
+            self.startup.main()
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.destination.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

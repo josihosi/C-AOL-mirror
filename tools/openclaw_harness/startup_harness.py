@@ -28271,6 +28271,12 @@ def audit_representative_human_source_geometry(
 ) -> Dict[str, Any]:
     if "expected_migo_site_ids" not in transform:
         return _audit_representative_human_source_geometry(world_dir, transform)
+    return _audit_staged_representative_source_geometry(world_dir, transform)
+
+
+def _audit_staged_representative_source_geometry(
+    world_dir: Path, transform: Dict[str, Any], *, preserve_existing_plaintext: bool = False,
+) -> Dict[str, Any]:
     # Existing native archive helpers extract next to their input. Stage only
     # required metadata, never a world/maps/body tree, to keep this audit read-only.
     player = transform["player_save"]
@@ -28282,9 +28288,22 @@ def audit_representative_human_source_geometry(
         # zzip uses this filename only to locate its extraction root. It does
         # not load game options; no held profile/configuration is copied.
         (staged / "worldoptions.json").write_text("[]", encoding="utf-8")
-        for name in ("dimension_data.gsav", "overmaps.dict", player):
+        names = ["dimension_data.gsav", player]
+        if (world_dir / "overmaps.dict").exists() or not preserve_existing_plaintext:
+            names.append("overmaps.dict")
+        if preserve_existing_plaintext:
+            # The legacy native readers can prefer an existing plain overmap,
+            # and player extraction can overwrite/unlink an existing sibling.
+            # Preserve that input precedence only inside the disposable view.
+            plain_player = Path(player).with_suffix("").name
+            if plain_player != player and (world_dir / plain_player).exists():
+                names.append(plain_player)
+            names.extend(entry.name for entry in world_dir.iterdir()
+                         if re.fullmatch(r"o\.-?\d+\.-?\d+", entry.name))
+        for name in names:
             shutil.copyfile(world_dir / name, staged / name)
-        for archive in (world_dir / "overmaps").iterdir():
+        overmaps = world_dir / "overmaps"
+        for archive in overmaps.iterdir() if overmaps.exists() else ():
             if re.fullmatch(r"o\.-?\d+\.-?\d+(?:\.zzip)?", archive.name):
                 shutil.copyfile(archive, staged / "overmaps" / archive.name)
         return _audit_representative_human_source_geometry(staged, transform)
@@ -38766,6 +38785,179 @@ def choose_world_for_fixture(profile: str, explicit_world: str) -> WorldInfo:
     raise SystemExit(f"No worlds found under {save_dir_for_profile(profile)}")
 
 
+def _closed_fixture_json(path: Path, expected_sha256: str) -> Dict[str, Any]:
+    """Read a caller-pinned value, without following an alias or repairing it."""
+    path = Path(path).absolute()
+    if path.resolve() != path or not path.is_file():
+        raise SystemExit(f"Closed-world metadata must be a regular unaliased file: {path}")
+    raw = path.read_bytes()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256) or hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise SystemExit(f"Closed-world metadata binding mismatch: {path}")
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, ValueError) as error:
+        raise SystemExit(f"Malformed closed-world metadata: {path}") from error
+    if not isinstance(value, dict):
+        raise SystemExit(f"Closed-world metadata must be an object: {path}")
+    return value
+
+
+def _validate_closed_fixture_custody(
+    reference: Mapping[str, Any], custody: Mapping[str, Any], *,
+    profile: str, world: str, source: Path,
+) -> None:
+    """A closed native receipt is authority for this exact world, not another run."""
+    if (reference.get("status") != "current_saved_world_reference"
+            or reference.get("retained_copy") is not False
+            or reference.get("profile") != profile or reference.get("world") != world
+            or reference.get("source") != str(source)
+            or not isinstance(reference.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", reference["source_sha256"])
+            or custody.get("current_saved_reference") != reference):
+        raise SystemExit("Closed-world reference/custody does not match the requested source")
+    report = custody.get("report")
+    terminal = report.get("clean_terminal_exit_reconciliation") if isinstance(report, dict) else None
+    if (not isinstance(terminal, dict) or terminal.get("status") != "accepted"
+            or type(terminal.get("exit_code")) is not int or terminal["exit_code"] != 0
+            or terminal.get("issues") != [] or report.get("consumer_pass") is not True
+            or not isinstance(custody.get("run_id"), str) or not custody["run_id"]
+            or not isinstance(custody.get("binding_id"), str) or not custody["binding_id"]
+            or terminal.get("run_id") != custody["run_id"]
+            or terminal.get("binding_id") != custody["binding_id"]):
+        raise SystemExit("Closed-world custody lacks a matching accepted native exit")
+    roles, endpoints = custody.get("roles"), custody.get("endpoints")
+    if not isinstance(roles, list) or not roles or not isinstance(endpoints, list) or not endpoints:
+        raise SystemExit("Closed-world custody lacks process/endpoint ownership")
+    pids: Set[int] = set()
+    for role in roles:
+        if (not isinstance(role, dict) or type(role.get("pid")) is not int or role["pid"] <= 0
+                or role["pid"] in pids or role.get("os_absent") is not True
+                or not isinstance(role.get("birth_identity"), str) or not role["birth_identity"]
+                or not isinstance(role.get("executable_path"), str) or not role["executable_path"]
+                or not isinstance(role.get("role"), str) or not role["role"]):
+            raise SystemExit("Closed-world custody has incomplete process generations")
+        pids.add(role["pid"])
+        # Refuse even a reused live PID; adoption has no process cleanup authority.
+        if pid_is_alive(role["pid"]):
+            raise SystemExit(f"Closed-world process is still present: {role['pid']}")
+    if not any(role["role"] == "game_process_generation" for role in roles):
+        raise SystemExit("Closed-world custody lacks the native game generation")
+    for endpoint in endpoints:
+        if (not isinstance(endpoint, dict) or not isinstance(endpoint.get("path"), str)
+                or not endpoint["path"] or endpoint.get("endpoint_absent") is not True
+                or endpoint.get("directory_absent") is not True):
+            raise SystemExit("Closed-world custody has incomplete endpoint closure")
+        path = Path(endpoint["path"])
+        if not path.is_absolute() or os.path.lexists(path) or os.path.lexists(path.parent):
+            raise SystemExit("Closed-world endpoint/directory is still present or unbound")
+
+
+def adopt_closed_world_fixture(
+    profile: str, fixture_name: str, explicit_world: str, *, fixture_profile: str,
+    world_reference: Path, world_reference_sha256: str, custody_path: Path,
+    custody_sha256: str, manifest_path: Path, manifest_sha256: str,
+) -> Dict[str, Any]:
+    """Transfer one closed world to its canonical fixture; never copy its payload.
+
+    This opt-in uses the existing writable-profile lease and ordinary fixture
+    resolver. It grants neither native input nor any initial-state/gameplay credit.
+    """
+    if (not explicit_world or Path(explicit_world).name != explicit_world
+            or explicit_world in {".", ".."}
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", fixture_name)
+            or profile != resolve_profile_name(profile)
+            or not fixture_profile or fixture_profile != resolve_profile_name(fixture_profile)):
+        raise SystemExit("Closed-world adoption requires explicit canonical profile/world/fixture names")
+    source_root = userdir_for_profile(profile).absolute()
+    source = save_dir_for_profile(profile).absolute() / explicit_world
+    fixture_root = profile_fixture_root(fixture_profile).absolute()
+    fixture_dir = fixture_root / fixture_name
+    if (source_root.resolve() != source_root or source.resolve() != source or not source.is_dir()
+            or fixture_root.resolve() != fixture_root or not fixture_root.is_dir()):
+        raise SystemExit("Closed-world adoption requires existing unaliased source and fixture roots")
+    if os.path.lexists(fixture_dir):
+        raise SystemExit(f"Closed-world adoption never overwrites a fixture: {fixture_dir}")
+    # Reject aliases and non-file payloads before the hash machinery can follow one.
+    for entry in source.rglob("*"):
+        if entry.is_symlink() or not (entry.is_dir() or entry.is_file()):
+            raise SystemExit(f"Closed-world payload contains an alias or unsupported entry: {entry}")
+    if source.stat().st_dev != fixture_root.stat().st_dev:
+        raise SystemExit("Closed-world adoption requires same-filesystem atomic movement")
+    if source_root == fixture_root or source_root in fixture_root.parents or fixture_root in source_root.parents:
+        raise SystemExit("Closed-world source and fixture ownership roots must be separate")
+    reference = _closed_fixture_json(world_reference, world_reference_sha256)
+    custody = _closed_fixture_json(custody_path, custody_sha256)
+    manifest = _closed_fixture_json(manifest_path, manifest_sha256)
+    _validate_closed_fixture_custody(reference, custody, profile=profile, world=explicit_world, source=source)
+    if (manifest.get("name") != fixture_name or manifest.get("gameplay_credit") is not False
+            or any(key in manifest for key in ("source_fixture", "source_profile", "adoption"))
+            or ("world" in manifest and manifest["world"] != explicit_world)
+            or ("profile" in manifest and manifest["profile"] != fixture_profile)):
+        raise SystemExit("Closed-world manifest must own this payload without inherited transforms or credit")
+    transforms = normalize_fixture_save_transforms(manifest.get("save_transforms", []), manifest_path=manifest_path)
+    validate_fixture_save_transform_chain(transforms, source_chain=[(fixture_profile, fixture_name)])
+    if any(transform["kind"] != "representative_human_source_geometry" for transform in transforms):
+        raise SystemExit("Closed-world adoption permits only read-only geometry guards")
+    if path_sha256(source) != reference["source_sha256"]:
+        raise SystemExit("Closed-world source tree binding mismatch")
+    # Use the same profile reservation as native launch/install. No second lease
+    # manager or permission to consume another run's save is introduced here.
+    try:
+        with own_writable_root(source_root, "fixture-adoption-" + uuid.uuid4().hex,
+                               process_generation_snapshot, process_generation_matches):
+            _validate_closed_fixture_custody(reference, custody, profile=profile, world=explicit_world, source=source)
+            audits = [_audit_staged_representative_source_geometry(
+                source, transform, preserve_existing_plaintext=True) for transform in transforms]
+            if path_sha256(source) != reference["source_sha256"]:
+                raise SystemExit("Closed-world source changed before transfer")
+            prepared = {
+                **manifest, "profile": fixture_profile, "world": explicit_world,
+                "save_transforms": transforms,
+                "adoption": {
+                    "schema": "caol-closed-world-fixture-adoption-v1",
+                    "source_profile": profile, "source_path": str(source),
+                    "source_sha256": reference["source_sha256"],
+                    "world_reference_sha256": world_reference_sha256,
+                    "custody_sha256": custody_sha256, "manifest_sha256": manifest_sha256,
+                    "run_id": custody["run_id"], "binding_id": custody["binding_id"],
+                    "geometry_audits": audits,
+                },
+            }
+            # Complete/encode all metadata before moving any world bytes. The
+            # exclusive mkdir reserves a new owner and makes overwrite impossible.
+            encoded = json.dumps(prepared, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+            fixture_dir.mkdir()
+            dest_save = fixture_dir / "save" / explicit_world
+            moved = False
+            try:
+                dest_save.parent.mkdir()
+                (fixture_dir / "manifest.json").write_text(encoded, encoding="utf-8")
+                os.rename(source, dest_save)  # No cross-device copy fallback.
+                moved = True
+                if path_sha256(dest_save) != reference["source_sha256"]:
+                    raise SystemExit("Closed-world transferred payload binding mismatch")
+                result = {
+                    "fixture": fixture_name, "fixture_profile": fixture_profile,
+                    "fixture_dir": str(fixture_dir), "world": explicit_world,
+                    "source_path": str(source), "source_sha256": reference["source_sha256"],
+                    "ownership": "moved", "gameplay_credit": False,
+                    "binding": fixture_source_binding(fixture_name, fixture_profile),
+                }
+            except BaseException:
+                # Under the same source lease, restore an uncommitted move. Never
+                # delete the payload or use copying as rollback/backup.
+                if moved:
+                    os.rename(dest_save, source)
+                (fixture_dir / "manifest.json").unlink(missing_ok=True)
+                if dest_save.parent.exists():
+                    dest_save.parent.rmdir()
+                fixture_dir.rmdir()
+                raise
+            return result
+    except WritableRootConflict as error:
+        raise SystemExit(str(error)) from error
+
+
 def capture_fixture(profile: str, fixture_name: str, explicit_world: str, overwrite: bool) -> Dict[str, Any]:
     fixture_dir = profile_fixture_root(profile) / fixture_name
     if fixture_dir.exists() and not overwrite:
@@ -44512,6 +44704,15 @@ def build_parser() -> argparse.ArgumentParser:
     capture_p.add_argument("--profile", default="", help="Profile name (defaults to sanitized current branch).")
     capture_p.add_argument("--world", default="", help="Explicit world name to capture.")
     capture_p.add_argument("--overwrite", action="store_true", help="Overwrite an existing fixture.")
+    capture_p.add_argument("--adopt-closed-world", action="store_true",
+                           help="Move a specifically bound closed world into canonical fixture ownership; never copy/overwrite.")
+    capture_p.add_argument("--fixture-profile", default="", help="Canonical destination profile for closed-world adoption.")
+    capture_p.add_argument("--world-reference", default="", help="Pinned current saved-world reference JSON for adoption.")
+    capture_p.add_argument("--world-reference-sha256", default="", help="Expected SHA256 of the saved-world reference.")
+    capture_p.add_argument("--custody", default="", help="Pinned closed native ownership/exit JSON for adoption.")
+    capture_p.add_argument("--custody-sha256", default="", help="Expected SHA256 of the closed native custody JSON.")
+    capture_p.add_argument("--manifest", default="", help="Prepared canonical fixture manifest for adoption.")
+    capture_p.add_argument("--manifest-sha256", default="", help="Expected SHA256 of the prepared manifest.")
 
     install_p = subparsers.add_parser("install-fixture", help="Install a captured fixture into the target profile save dir.")
     install_p.add_argument("fixture", help="Fixture name to install.")
@@ -44658,7 +44859,20 @@ def main() -> int:
         return 0
     if args.command == "capture-fixture":
         profile = resolve_profile_name(args.profile)
-        result = capture_fixture(profile, args.fixture, args.world, overwrite=args.overwrite)
+        adoption_values = (args.fixture_profile, args.world_reference, args.world_reference_sha256,
+                           args.custody, args.custody_sha256, args.manifest, args.manifest_sha256)
+        if args.adopt_closed_world:
+            if args.overwrite or not args.profile or not args.world or not all(adoption_values):
+                raise SystemExit("Closed-world adoption requires explicit profile/world and all pinned metadata; no overwrite")
+            result = adopt_closed_world_fixture(
+                profile, args.fixture, args.world, fixture_profile=args.fixture_profile,
+                world_reference=Path(args.world_reference), world_reference_sha256=args.world_reference_sha256,
+                custody_path=Path(args.custody), custody_sha256=args.custody_sha256,
+                manifest_path=Path(args.manifest), manifest_sha256=args.manifest_sha256)
+        else:
+            if any(adoption_values):
+                raise SystemExit("Adoption metadata requires --adopt-closed-world")
+            result = capture_fixture(profile, args.fixture, args.world, overwrite=args.overwrite)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     if args.command == "install-fixture":
