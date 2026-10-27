@@ -22,6 +22,7 @@
 #include "colony.h"
 #include "cuboid_rectangle.h"
 #include "debug.h"
+#include "do_turn.h"
 #include "field.h"
 #include "fragment_cloud.h" // IWYU pragma: keep
 #include "game.h"
@@ -900,6 +901,10 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
     const sunlight_projection no_sun = []( const tripoint_bub_ms & ) {
         return std::optional<four_quadrants>( four_quadrants{} );
     };
+    const auto native_pass = [&]( const sunlight_projection & projection ) {
+        raid_perf_scope diagnostic( raid_perf_stage::scout_light_native );
+        generate_lightmap( target.z(), true, &projection, &target );
+    };
     const auto publish_source = [&]() {
         if( source_light ) {
             // Native sm is written only at an emitting cell, not by incoming
@@ -912,7 +917,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         if( source_light ) {
             // A field overrides ambient only. Creature::light_at still gives
             // a genuine bright source priority over that final ambient scalar.
-            generate_lightmap( target.z(), true, &no_sun, &target );
+            native_pass( no_sun );
             publish_source();
         }
         return local_override;
@@ -920,16 +925,19 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
     // Include one buffered-source peer halo. This is a fixed native caster
     // input plane, not the optical ray or an unbounded history enumeration.
     bool plane_complete = true;
-    for( int dx = -MAX_VIEW_DISTANCE - 1; plane_complete && dx <= MAX_VIEW_DISTANCE + 1; ++dx ) {
-        for( int dy = -MAX_VIEW_DISTANCE - 1; dy <= MAX_VIEW_DISTANCE + 1; ++dy ) {
-            const auto p = target + tripoint( dx, dy, 0 );
-            if( !inbounds( p ) ) {
-                continue; // Same fixed native array clipping as castLight.
-            }
-            if( !require_cell( p ) ||
-                ( target.z() < OVERMAP_HEIGHT && !require_cell( p + tripoint::above ) ) ) {
-                plane_complete = false;
-                break;
+    {
+        raid_perf_scope diagnostic( raid_perf_stage::scout_light_dependencies );
+        for( int dx = -MAX_VIEW_DISTANCE - 1; plane_complete && dx <= MAX_VIEW_DISTANCE + 1; ++dx ) {
+            for( int dy = -MAX_VIEW_DISTANCE - 1; dy <= MAX_VIEW_DISTANCE + 1; ++dy ) {
+                const auto p = target + tripoint( dx, dy, 0 );
+                if( !inbounds( p ) ) {
+                    continue; // Same fixed native array clipping as castLight.
+                }
+                if( !require_cell( p ) ||
+                    ( target.z() < OVERMAP_HEIGHT && !require_cell( p + tripoint::above ) ) ) {
+                    plane_complete = false;
+                    break;
+                }
             }
         }
     }
@@ -943,7 +951,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
     // cannot change this scalar result and need not be requested.
     std::optional<float> artificial_floor;
     if( plane_complete ) {
-        generate_lightmap( target.z(), true, &no_sun, &target );
+        native_pass( no_sun );
         publish_source();
         const float artificial = ambient_light_at( target );
         artificial_floor = artificial;
@@ -1223,7 +1231,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         if( source_light ) {
             // Set the authenticated source fact before the caller evaluates its
             // native actor predicate, even when incoming ambient stays unknown.
-            generate_lightmap( target.z(), true, &no_sun, &target );
+            native_pass( no_sun );
             publish_source();
         }
         const auto solar = project( target );
@@ -1236,7 +1244,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         // Missing sources/occluders may affect incoming light, so the partial
         // ambient result is deliberately discarded instead of treated as exact.
         if( !source_light ) {
-            generate_lightmap( target.z(), true, &no_sun, &target );
+            native_pass( no_sun );
         }
         const float local_source = get_cache_ref( target.z() ).sm[target.x()][target.y()];
         if( local_source > lower ) {
@@ -1249,7 +1257,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         complete &= value.has_value();
         return value;
     };
-    generate_lightmap( target.z(), true, &required, &target );
+    native_pass( required );
     // A missing solar/aperture input returns before emitters, after sm was
     // cleared. Keep the authenticated source from the completed no-sun pass;
     // this partial cache does not prove source absence or exact ambient.

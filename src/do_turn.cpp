@@ -399,6 +399,8 @@ static void raid_perf_flush_after_wait()
     js.member( "run_id", std::string( std::getenv( "OPENCLAW_HARNESS_RUN_ID" ) ) );
     js.member( "stage_scope",
                "WALL durations: signal_total includes discovery and horde delivery; overmap_npcs includes npc_site_bootstrap, npc_signal_copy and npc_channel_audit; watch_preflight includes disjoint watch_optical_read and watch_record_view children; Mi-go service navigation children split local/abstract physical owners; migo_local_plan and migo_local_move cover full native monster plan/move calls with an existing Mi-go intent, including pre-hook targeting; migo_plan_native_targeting and migo_plan_species_hook are disjoint children of that plan, with migo_plan_hostile_recognition nested inside the species hook; migo_local_plan and migo_local_move are disjoint local creature children containing authenticated migo_local_prepare_navigation; migo_abstract_prepare_navigation measures the abstract transport prepare_step route child; physical_navigation_read includes early returns and locally owned remote-view destruction; retained service-workspace destruction belongs to the inclusive migo_operations parent, not each read. Read contains disjoint physical_navigation_view_build and physical_navigation_native_route children; view_build is construction only, native_route includes callbacks and caches, not pure A-star CPU; direct arrival checks may have no service/prepare parent; do not add nested stages" );
+    js.member( "scout_scope",
+               "WALL: scout_actor_read includes geometry build/cache, light_read and actor_predicate. view_build covers actor geometry/probe and light view construction; view_cache covers geometry preparation and dirty native lighting cache rebuilds. light_read includes light dependencies and native passes; light_native includes solar callbacks, whose physical summaries also count in light_dependencies. Dependencies groups plane admission and uncached solar-summary reads, not physical disk time. reader_retire includes owned views/readers disposal. These stages also observe other shared scout callers; do not add nested durations or infer actor identity. No extra queries or events." );
     js.member( "watch_scope",
                "Actual preflight/read/record_view calls; eligible record_view calls are not confirmed writes; cached views sum each preflight's retained geometry/lighting views, including failed lighting, not per-read allocations or unique world cells" );
     js.member( "debug_sink_scope",
@@ -420,7 +422,9 @@ static void raid_perf_flush_after_wait()
         "migo_local_prepare_navigation", "migo_abstract_prepare_navigation",
         "physical_navigation_read", "physical_navigation_view_build", "physical_navigation_native_route",
         "nav_view_lookup", "nav_view_miss_load", "nav_view_level_setup",
-        "migo_plan_native_targeting", "migo_plan_species_hook", "migo_plan_hostile_recognition"
+        "migo_plan_native_targeting", "migo_plan_species_hook", "migo_plan_hostile_recognition",
+        "scout_actor_read", "scout_view_build", "scout_view_cache", "scout_light_read",
+        "scout_light_dependencies", "scout_light_native", "scout_actor_predicate", "scout_reader_retire"
     } );
     js.member( "rows" );
     js.start_array();

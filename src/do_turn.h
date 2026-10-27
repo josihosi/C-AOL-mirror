@@ -36,7 +36,9 @@ enum class raid_perf_stage : std::size_t {
     migo_local_prepare_navigation, migo_abstract_prepare_navigation,
     physical_navigation_read, physical_navigation_view_build, physical_navigation_native_route,
     nav_view_lookup, nav_view_miss_load, nav_view_level_setup,
-    migo_plan_native_targeting, migo_plan_species_hook, migo_plan_hostile_recognition, count
+    migo_plan_native_targeting, migo_plan_species_hook, migo_plan_hostile_recognition,
+    scout_actor_read, scout_view_build, scout_view_cache, scout_light_read,
+    scout_light_dependencies, scout_light_native, scout_actor_predicate, scout_reader_retire, count
 };
 enum class raid_perf_nav_event : std::size_t {
     resident_hit, resident_null, buffer_miss, archive_load_calls,

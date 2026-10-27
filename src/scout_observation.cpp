@@ -11,6 +11,7 @@
 #include "avatar.h"
 #include "bandit_live_world.h"
 #include "effect.h"
+#include "do_turn.h"
 #include "field.h"
 #include "flag.h"
 #include "lightmap.h"
@@ -221,6 +222,7 @@ class existing_view : public map
                 return false; // Native floor may be supplied by furniture below.
             }
             if( !lighting_dirty.empty() ) {
+                raid_perf_scope diagnostic( raid_perf_stage::scout_view_cache );
                 rebuild_vehicle_level_caches();
                 for( int z : lighting_dirty ) {
                     build_outside_cache( z );
@@ -254,6 +256,7 @@ class existing_view : public map
             if( !reader ) {
                 reader = std::make_unique<mapbuffer::existing_submap_reader>( MAPBUFFER );
             }
+            raid_perf_scope diagnostic( raid_perf_stage::scout_light_dependencies );
             auto physical = reader->read_sunlight_input( pos, get_weather().weather_id->sight_penalty );
             std::optional<submap_sunlight_input> value;
             if( physical ) {
@@ -438,6 +441,7 @@ class existing_view : public map
             if( lighting_view ) {
                 return; // Native point projection requests its actual dependencies.
             }
+            raid_perf_scope diagnostic( raid_perf_stage::scout_view_cache );
             rebuild_vehicle_level_caches();
             for( int z = low; z <= high; ++z ) {
                 build_outside_cache( z );
@@ -584,13 +588,18 @@ std::optional<float> existing_ambient( const tripoint_abs_ms &point,
                                        const std::function<bool( float )> *sufficient = nullptr,
                                        std::optional<float> *source_light = nullptr )
 {
+    raid_perf_scope diagnostic( raid_perf_stage::scout_light_read );
     ( void )footprint; // Site/ray ownership is not an illumination boundary.
     for( const auto &view : views ) {
         if( view->light_matches( point ) ) {
             return view->native_ambient( point, sufficient, source_light );
         }
     }
-    auto view = std::make_unique<existing_view>( vehicles, point, point, false, true, true );
+    std::unique_ptr<existing_view> view;
+    {
+        raid_perf_scope build( raid_perf_stage::scout_view_build );
+        view = std::make_unique<existing_view>( vehicles, point, point, false, true, true );
+    }
     view->prepare_visibility();
     const auto light = view->native_ambient( point, sufficient, source_light );
     views.push_back( std::move( view ) );
@@ -844,7 +853,11 @@ struct site_reader::implementation {
     std::vector<std::unique_ptr<existing_view>> views;
 };
 site_reader::site_reader() : impl( std::make_unique<implementation>() ) {}
-site_reader::~site_reader() = default;
+site_reader::~site_reader()
+{
+    raid_perf_scope diagnostic( raid_perf_stage::scout_reader_retire );
+    impl.reset();
+}
 visibility_read site_reader::read( const Character &observer, const tripoint_abs_ms &origin,
                                    const tripoint_abs_ms &target,
                                    const std::vector<tripoint_abs_omt> &footprint )
@@ -861,6 +874,7 @@ visibility_read site_reader::read_character( const Character &observer, const Ch
 visibility_read site_reader::read_actor( const Creature &observer, const Creature &target,
                                        const actor_capability &capability )
 {
+    raid_perf_scope diagnostic( raid_perf_stage::scout_actor_read );
     const auto origin = observer.pos_abs();
     const auto endpoint = target.pos_abs();
     if( observer.is_dead_state() || target.is_dead_state() || capability.maximum_range <= 0 ||
@@ -889,8 +903,12 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
             }
         }
         if( !view ) {
-            auto owned = std::make_unique<existing_view>( impl->vehicles, origin, endpoint, true,
-                         false, false, &footprint );
+            std::unique_ptr<existing_view> owned;
+            {
+                raid_perf_scope build( raid_perf_stage::scout_view_build );
+                owned = std::make_unique<existing_view>( impl->vehicles, origin, endpoint, true,
+                        false, false, &footprint );
+            }
             owned->prepare_visibility();
             view = owned.get();
             impl->views.push_back( std::move( owned ) );
@@ -909,8 +927,11 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
             return false;
         }
         if( !probe ) {
-            probe = std::make_unique<existing_view>( impl->vehicles, origin, endpoint, true,
+            {
+                raid_perf_scope build( raid_perf_stage::scout_view_build );
+                probe = std::make_unique<existing_view>( impl->vehicles, origin, endpoint, true,
                                                    false, false, &footprint );
+            }
             probe->prepare_visibility();
         }
         if( !probe->has_ray( origin, endpoint ) ||
@@ -925,6 +946,7 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
                                              capability.native_range_scale ) ) );
         set_view_ambient( *probe, endpoint, lower );
         set_view_source( *probe, endpoint, *target_source );
+        raid_perf_scope predicate( raid_perf_stage::scout_actor_predicate );
         if( observer.sees_site_with_range( *probe, target, lower_range, footprint ) ) {
             proven = true;
         } else {
@@ -951,6 +973,7 @@ visibility_read site_reader::read_actor( const Creature &observer, const Creatur
     // outdoor cells. A second range penalty also penalizes fully indoor rays.
     const int range = std::min( capability.maximum_range, static_cast<int>( std::floor(
                                    observer.sight_range( *light ) * capability.native_range_scale ) ) );
+    raid_perf_scope predicate( raid_perf_stage::scout_actor_predicate );
     return { true, observer.sees_site_with_range( *here, target, range, footprint ),
              "actor_light_weather_cover_visibility" };
 }

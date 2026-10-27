@@ -34,6 +34,7 @@
 #include "json_loader.h"
 #include "live_light.h"
 #include "line.h"
+#include "level_cache.h"
 #include "map.h"
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
@@ -6879,6 +6880,87 @@ TEST_CASE( "active_native_migo_plan_separates_hostile_recognition_from_targeting
     }
     std::cout << "MIGO_PLAN_COMPARISON " << out.str() << '\n';
 
+    // One immutable physical scene, three fresh decisions, each followed by a
+    // second read within that same synchronous decision. This is a cache-path
+    // discriminator, not permission to retain geometry between game turns.
+    reset();
+    const auto main_lm = here.get_cache_ref( 0 ).lm;
+    const auto main_sm = here.get_cache_ref( 0 ).sm;
+    const auto resident_count = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    // These native physical planes are genuinely resident before observation;
+    // this control does not label cache eviction as cold disk I/O.
+    const auto first_light_sm = project_to<coords::sm>( enemy.pos_abs() ) -
+                                point( MAPSIZE / 2, MAPSIZE / 2 );
+    for( int z = 0; z <= 2; ++z ) {
+        for( int x = 0; x < MAPSIZE; ++x ) {
+            for( int y = 0; y < MAPSIZE; ++y ) {
+                REQUIRE( MAPBUFFER.lookup_submap_cached( tripoint_abs_sm(
+                        first_light_sm.x() + x, first_light_sm.y() + y, z ) ) );
+            }
+        }
+    }
+    for( int repeat = 0; repeat < 3; ++repeat ) {
+        double first = 0.0;
+        double reused = 0.0;
+        double retire = 0.0;
+        const auto cpu = std::clock();
+        auto reader = std::make_unique<scout_observation::site_reader>();
+        scout_observation::visibility_read a;
+        scout_observation::visibility_read b;
+        first = timed( [&]() {
+            a = reader->read_actor( body, enemy, {MAX_VIEW_DISTANCE * 2, 2.0f} );
+        } );
+        const auto views = reader->cached_view_count();
+        const auto physical = reader->cached_lighting_submap_count();
+        const auto summaries = reader->cached_sunlight_summary_count();
+        const auto paths = reader->cached_lighting_path_group_count();
+        reused = timed( [&]() {
+            b = reader->read_actor( body, enemy, {MAX_VIEW_DISTANCE * 2, 2.0f} );
+        } );
+        CHECK( a.known );
+        CHECK( a.visible );
+        CHECK( a.known == b.known );
+        CHECK( a.visible == b.visible );
+        CHECK( a.reason == b.reason );
+        CHECK( views == reader->cached_view_count() );
+        CHECK( physical == reader->cached_lighting_submap_count() );
+        CHECK( summaries == reader->cached_sunlight_summary_count() );
+        CHECK( paths == reader->cached_lighting_path_group_count() );
+        retire = timed( [&]() {
+            reader.reset();
+        } );
+        const double cpu_seconds = double( std::clock() - cpu ) / CLOCKS_PER_SEC;
+        CHECK( bytes( body ) == bytes( initial ) );
+        CHECK( bytes( enemy ) == peer );
+        CHECK( rng_get_engine() == seed );
+        CHECK( bytes( overmap_buffer.global_state.migo_populations ) == world );
+        CHECK( bytes( overmap_buffer.global_state.migo_towers ) == towers );
+        CHECK( calendar::turn == now );
+        CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == resident_count );
+        std::ostringstream sample;
+        {
+            JsonOut js( sample );
+            js.start_object();
+            js.member( "repeat", repeat );
+            js.member( "fresh_seconds", first );
+            js.member( "reused_seconds", reused );
+            js.member( "retire_seconds", retire );
+            js.member( "whole_pair_process_cpu_seconds", cpu_seconds );
+            js.member( "views", views );
+            js.member( "physical_submaps", physical );
+            js.member( "solar_summaries", summaries );
+            js.member( "path_groups", paths );
+            js.end_object();
+        }
+        std::cout << "MIGO_OPTICAL_COMPARISON " << sample.str() << '\n';
+    }
+    for( int x = 0; x < MAPSIZE_X; ++x ) {
+        for( int y = 0; y < MAPSIZE_Y; ++y ) {
+            REQUIRE( here.get_cache_ref( 0 ).lm[x][y].values == main_lm[x][y].values );
+            REQUIRE( here.get_cache_ref( 0 ).sm[x][y] == main_sm[x][y] );
+        }
+    }
+
 #if !defined(TILES)
     // Exercise the real advancing turn producer and its normal input flush;
     // no diagnostic test-row API or additional event stream is introduced.
@@ -6981,7 +7063,11 @@ TEST_CASE( "active_native_migo_plan_separates_hostile_recognition_from_targeting
                 return durations.get_float( indexes.at( name ) );
             };
             for( const std::string &name : { "migo_local_plan", "migo_plan_native_targeting",
-                                            "migo_plan_species_hook", "migo_plan_hostile_recognition" } ) {
+                                            "migo_plan_species_hook", "migo_plan_hostile_recognition",
+                     "scout_actor_read", "scout_view_build", "scout_view_cache",
+                     "scout_light_read", "scout_light_dependencies", "scout_light_native",
+                     "scout_actor_predicate", "scout_reader_retire"
+                 } ) {
                 REQUIRE( indexes.count( name ) == 1 );
                 CHECK( calls.get_int( indexes.at( name ) ) > 0 );
             }
@@ -6989,6 +7075,9 @@ TEST_CASE( "active_native_migo_plan_separates_hostile_recognition_from_targeting
                    seconds( "migo_plan_native_targeting" ) + seconds( "migo_plan_species_hook" ) );
             CHECK( seconds( "migo_plan_species_hook" ) + 0.00002 >=
                    seconds( "migo_plan_hostile_recognition" ) );
+            CHECK( seconds( "scout_actor_read" ) >= seconds( "scout_light_read" ) );
+            CHECK( seconds( "scout_light_read" ) >= seconds( "scout_light_native" ) );
+            CHECK( seconds( "migo_plan_hostile_recognition" ) >= seconds( "scout_actor_read" ) );
             std::cout << "MIGO_PLAN_ROW " << row.str() << '\n';
         }
     }
