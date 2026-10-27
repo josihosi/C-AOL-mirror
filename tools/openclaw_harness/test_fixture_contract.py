@@ -7031,6 +7031,159 @@ class MixedLoadBootstrapContractTest(unittest.TestCase):
         self.assertNotIn("active_sites=2", scenario["artifact_patterns"])
 
 
+class FourSitePhysicalLoadContractTest(unittest.TestCase):
+    fixture = "performance_four_site_prestaged_active_v0_2026-04-29"
+    setUp = MixedLoadBootstrapContractTest.setUp
+    tearDown = MixedLoadBootstrapContractTest.tearDown
+    read_bodies = MixedLoadBootstrapContractTest.read_bodies
+    read_world = MixedLoadBootstrapContractTest.read_world
+
+    def test_recommended_caller_and_evidence_describe_its_four_human_parties(self) -> None:
+        import shlex
+        declared = self.startup.load_scenario("performance.four_site_prestaged_active_wait_30m")
+        # Parse the advertised command through the real CLI and resolve its
+        # actual recipe, rather than checking only a display string or lint.
+        argv = shlex.split(declared["recommended_test_command"])
+        self.assertEqual(Path(argv[1]).name, "startup_harness.py")
+        args = self.startup.build_parser().parse_args(argv[2:])
+        called = self.startup.load_scenario(args.scenario)
+        self.assertEqual(called["name"], declared["name"])
+        self.assertEqual(called["fixture"], self.fixture)
+        resolved = self.startup.resolve_fixture_payload(called["fixture"], called["fixture_profile"])
+        cohorts = next(t["cohorts"] for t in resolved["save_transforms"]
+                       if t["kind"] == "bandit_mixed_load_bootstrap")
+        audits = [step for step in called["steps"]
+                  if step["kind"] == "audit_saved_bandit_live_world_state"]
+        self.assertEqual(len(cohorts), 4)
+        self.assertEqual({step["required_site_id_contains"] for step in audits},
+                         {cohort["site_id"] for cohort in cohorts})
+        self.assertEqual(sum(len(c["member_ids"]) for c in cohorts), 10)
+        self.assertTrue(all(step["required_active_member_bodies_found"] and
+                            step["required_report_hostile_operation_claim_match"] and
+                            step["abort_on_metadata_failure"] for step in audits))
+        evidence = called["evidence_contract"]
+        self.assertIn("four human parties", evidence["claim"].lower())
+        self.assertIn("All four", evidence["failure_rule"])
+        self.assertNotIn("both", evidence["failure_rule"].lower())
+        self.assertNotIn("mi-go", json.dumps(evidence).lower())
+        self.assertNotIn("migo", json.dumps(evidence).lower())
+
+    def test_supported_install_partitions_real_bodies_into_four_current_owners(self) -> None:
+        destination = Path(self.temp.name) / "installed"
+        with mock.patch("startup_harness.save_dir_for_profile", return_value=destination):
+            self.startup.install_fixture("disposable", self.fixture, False, "live-debug")
+        self.world = destination / "McWilliams"
+        _, _, player, _ = self.startup.load_saved_player_payload(self.world)
+        self.assertEqual(player["turn"], 5241593)
+        self.assertEqual([v // 24 if i < 2 else v for i, v in
+                          enumerate(player["player"]["location"])], [140, 39, 0])
+        bodies = self.read_bodies(self.world)
+        self.assertEqual(set(bodies), set(self.before_bodies))
+        self.assertEqual(len(bodies), 16)
+        world = self.read_world()
+        self.assertEqual(len(world["sites"]), 4)
+        owned, selected = [], []
+        mutable = {"location", "mission", "previous_mission", "goalx", "goaly", "goalz",
+                   "guard_pos", "destination_point", "omt_path", "path", "automoveroute",
+                   "my_fac", "bandit_live_world_projection_lease"}
+        for npc_id, body in bodies.items():
+            self.assertEqual({k: v for k, v in body.items() if k not in mutable},
+                             {k: v for k, v in self.before_bodies[npc_id].items() if k not in mutable})
+        for i, site in enumerate(world["sites"]):
+            reservation = site["active_hostile_operation"]["reservation"]
+            self.assertEqual(len(site["members"]), 8 if i == 0 else 2)
+            self.assertEqual(site["living_total"], len(site["members"]))
+            self.assertEqual(sum(t["assigned_living_total"] for t in site["spawn_tiles"]),
+                             len(site["members"]))
+            self.assertEqual(site["schema_version"], 12)
+            self.assertEqual(site["active_outing"]["kind"], "none")
+            self.assertEqual(reservation["simulation_owner"], "abstract")
+            self.assertEqual(reservation["handoff_epoch"], 0)
+            self.assertEqual(reservation["last_advanced_minutes"], 8159)
+            self.assertNotIn("activation", reservation)
+            self.assertEqual(reservation["shared_route"], [site["anchor"], [140, 42, 0], [140, 39, 0]])
+            selected += reservation["member_ids"]
+            for member in site["members"]:
+                npc_id = member["npc_id"]
+                owned.append(npc_id)
+                self.assertEqual(bodies[npc_id]["location"], member["home_spawn_tile"])
+                pos = member["home_spawn_tile"]
+                self.assertIn([pos[0] // 24, pos[1] // 24, pos[2]], site["footprint"])
+                self.assertNotIn("bandit_live_world_projection_lease", bodies[npc_id])
+                self.assertEqual(bodies[npc_id]["omt_path"], [])
+        self.assertEqual(sorted(owned), list(range(4, 18)))
+        self.assertEqual(sorted(selected), list(range(4, 14)))
+        self.assertEqual(len(set(selected)), 10)
+
+    def test_all_four_actual_preflights_reject_missing_body_and_foreign_claim(self) -> None:
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        scenario = self.startup.load_scenario("performance.four_site_prestaged_active_wait_30m")
+        steps = [s for s in scenario["steps"] if s["kind"] == "audit_saved_bandit_live_world_state"]
+        self.assertEqual(len(steps), 4)
+        dimension = self.world / "dimension_data.gsav"
+        original = dimension.read_bytes()
+        for step, cohort in zip(steps, self.transform["cohorts"]):
+            requirements = {k: v for k, v in step.items() if k.startswith("required_") or k == "player_save"}
+            self.assertTrue(requirements["required_active_member_bodies_found"])
+            self.assertTrue(requirements["required_report_hostile_operation_claim_match"])
+            self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
+                self.world, **requirements)["status"], "required_state_present")
+            run_dir = Path(self.temp.name) / "preflight"
+            run_dir.mkdir(exist_ok=True)
+            def invoke():
+                with mock.patch("startup_harness.save_dir_for_profile", return_value=self.world.parent):
+                    return self.startup.execute_probe_steps(0, run_dir, [step], profile="disposable",
+                        world=self.world.name, grants_gameplay_proof=False)[0]
+            self.assertNotIn("abort", invoke())
+            removed = cohort["member_ids"][0]
+            for archive in sorted((self.world / "overmaps").glob("o.*.*.zzip")):
+                saved = archive.read_bytes()
+                plain, header, data = self.startup.extract_overmap_payload(archive)
+                if not any(body["id"] == removed for body in data.get("npcs", [])):
+                    self.startup.cleanup_extracted_overmap(plain, keep=False)
+                    continue
+                try:
+                    data["npcs"] = [body for body in data["npcs"] if body["id"] != removed]
+                    self.startup.write_overmap_payload(plain, header, data)
+                    before = self.startup.path_sha256(self.world)
+                    rejected = invoke()
+                    self.assertIn("abort", rejected)
+                    self.assertEqual(rejected["metadata"]["status"], "required_state_missing")
+                    self.assertEqual(dimension.read_bytes(), original)
+                    self.assertEqual(self.startup.path_sha256(self.world), before)
+                finally:
+                    self.startup.cleanup_extracted_overmap(plain, keep=False)
+                    archive.write_bytes(saved)
+                break
+            else:
+                self.fail("control never removed an actual concrete body")
+            header, _, text = original.decode().partition("\n")
+            raw = json.loads(text)
+            claim = next(c for c in raw["overmapbuffer"]["bandit_live_world"]["hostile_target_opportunities"]
+                         if c["target_id"] == requirements["required_active_hostile_reservation_target_id_exact"])
+            claim["consumed_operation_id"] = "foreign-owner"
+            dimension.write_text(header + "\n" + json.dumps(raw))
+            before = self.startup.path_sha256(self.world)
+            self.assertIn("abort", invoke())
+            self.assertEqual(self.startup.path_sha256(self.world), before)
+            dimension.write_bytes(original)
+
+    def test_four_cohort_extension_retains_missing_duplicate_and_route_refusals(self) -> None:
+        before = self.startup.path_sha256(self.world)
+        self.transform["cohorts"][3]["member_ids"] = [12, 99999]
+        with self.assertRaisesRegex(SystemExit, "missing/duplicate member authority"):
+            self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        self.assertEqual(self.startup.path_sha256(self.world), before)
+        self.transform["cohorts"][3]["member_ids"] = [4, 13]
+        with self.assertRaisesRegex(SystemExit, "disjoint members"):
+            self.startup.normalize_fixture_save_transforms([self.transform], manifest_path=Path("test.json"))
+        self.transform["cohorts"][3]["member_ids"] = [12, 13]
+        self.transform["cohorts"][3]["rally_omt"] = [140, 29, 0]
+        with self.assertRaisesRegex(SystemExit, "native target approach envelope"):
+            self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        self.assertEqual(self.startup.path_sha256(self.world), before)
+
+
 class ScenarioFixtureContractTest(unittest.TestCase):
     def test_r037_safe_fixture_normalizes_explicit_pickup_rule(self) -> None:
         resolved = resolve_fixture_payload(

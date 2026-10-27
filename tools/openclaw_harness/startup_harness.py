@@ -25276,8 +25276,8 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
             if set(raw) != {"kind", "player_save", "source_site_id", "cohorts"}:
                 raise SystemExit(f"Fixture mixed-load bootstrap has unexpected/missing fields in {manifest_path}")
             cohorts = raw["cohorts"]
-            if not isinstance(cohorts, list) or len(cohorts) != 2:
-                raise SystemExit("Mixed-load bootstrap needs exactly two declared camp cohorts")
+            if not isinstance(cohorts, list) or len(cohorts) not in {2, 4}:
+                raise SystemExit("Mixed-load bootstrap needs two or four declared camp cohorts")
             all_ids = []
             site_ids = []
             for cohort in cohorts:
@@ -25292,7 +25292,7 @@ def normalize_fixture_save_transforms(raw_value: Any, *, manifest_path: Path) ->
                     raise SystemExit("Mixed-load cohort IDs/route are malformed")
                 all_ids.extend(ids)
                 site_ids.append(cohort["site_id"])
-            if (len(set(all_ids)) != len(all_ids) or len(set(site_ids)) != 2 or
+            if (len(set(all_ids)) != len(all_ids) or len(set(site_ids)) != len(cohorts) or
                     raw["source_site_id"] != site_ids[0]):
                 raise SystemExit("Mixed-load bootstrap needs disjoint members and an exact source camp")
             transforms.append({"kind": kind, "player_save": player_save,
@@ -32329,8 +32329,9 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
     sites = {site["site_id"]: site for site in world["sites"]}
     source = sites.get(transform["source_site_id"])
     cohorts = transform["cohorts"]
-    if source is None or len(sites) != 2 or set(sites) != {c["site_id"] for c in cohorts}:
-        raise SystemExit("Mixed-load bootstrap needs exactly the declared two camps")
+    if (source is None or len(cohorts) not in {2, 4} or len(sites) != len(cohorts) or
+            set(sites) != {c["site_id"] for c in cohorts}):
+        raise SystemExit("Mixed-load bootstrap needs exactly the declared two or four camps")
     original_members = source.get("members", [])
     members = {member["npc_id"]: member for member in original_members}
     active_ids = [npc_id for cohort in cohorts for npc_id in cohort["member_ids"]]
@@ -32338,6 +32339,7 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
             not set(active_ids) <= set(members)):
         raise SystemExit("Mixed-load bootstrap has missing/duplicate member authority")
     source_anchor = source["anchor"]
+    transferred_ids = {npc_id for cohort in cohorts[1:] for npc_id in cohort["member_ids"]}
     cohort_members = {}
     positions = {}
     for index, cohort in enumerate(cohorts):
@@ -32345,7 +32347,7 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
         expected_kind = "bandit_camp" if index == 0 else "cannibal_camp"
         if site.get("site_kind") != expected_kind:
             raise SystemExit("Mixed-load bootstrap camp profiles do not match the declared cohorts")
-        ids = ([npc_id for npc_id in members if npc_id not in cohorts[1]["member_ids"]]
+        ids = ([npc_id for npc_id in members if npc_id not in transferred_ids]
                if index == 0 else cohort["member_ids"])
         cohort_members[site["site_id"]] = ids
         offset = [(site["anchor"][axis] - source_anchor[axis]) * (24 if axis < 2 else 1)

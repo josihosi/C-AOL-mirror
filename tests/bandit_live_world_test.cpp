@@ -75480,11 +75480,17 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         json.end_object();
         output << '\n';
     };
-    const auto site_ids = std::vector<std::string> {
+    const bool four_sites = std::getenv( "CAOL_FOUR_SITE_LOAD" ) != nullptr;
+    auto site_ids = std::vector<std::string> {
         "overmap_special:bandit_camp@140,51,0", "overmap_special:cannibal_camp@150,39,0"
     };
+    if( four_sites ) {
+        site_ids.emplace_back( "overmap_special:cannibal_camp@130,39,0" );
+        site_ids.emplace_back( "overmap_special:cannibal_camp@140,29,0" );
+    }
     const auto check_owners = [&]() {
         auto &world = overmap_buffer.global_state.bandit_live_world;
+        CHECK( world.sites.size() == site_ids.size() );
         int count = 0;
         for( int id = 2; id <= 17; ++id ) {
             auto actor = overmap_buffer.find_npc( character_id( id ) );
@@ -75508,11 +75514,37 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
                 ++count;
             }
         }
-        CHECK( count == 6 );
+        CHECK( count == ( four_sites ? 10 : 6 ) );
     };
     check_owners();
+    if( four_sites ) {
+        const auto &world = overmap_buffer.global_state.bandit_live_world;
+        const auto original = serialize_world( world );
+        auto checked = world;
+        CHECK( reconcile_loaded_local_projections( checked, {} ) ==
+               local_projection_reconciliation_result::unchanged );
+        for( const auto &site : world.sites ) {
+            const auto &outing = site.active_hostile_operation.reservation;
+            for( const auto id : outing.member_ids ) {
+                const auto actor = overmap_buffer.find_npc( id );
+                REQUIRE( actor );
+                REQUIRE( site.find_member( id ) );
+                CHECK( actor->pos_abs() == site.find_member( id )->home_spawn_tile );
+            }
+            // An abstract owner must not accept a stray current or foreign local
+            // lease. Probe copies only; the actual loaded world stays unchanged.
+            for( const auto &activity : { outing.activity_id, std::string( "foreign" ) } ) {
+                auto invalid = world;
+                CHECK( reconcile_loaded_local_projections( invalid, { {
+                    outing.member_ids.front(), site.site_id, activity, "local",
+                    outing.generation, 1, outing.last_advanced_minutes
+                } } ) == local_projection_reconciliation_result::rejected );
+            }
+        }
+        CHECK( serialize_world( world ) == original );
+    }
     std::map<character_id, tripoint_abs_ms> initial_positions;
-    for( int id = 4; id <= 9; ++id ) {
+    for( int id = 4; id <= ( four_sites ? 13 : 9 ); ++id ) {
         auto actor = overmap_buffer.find_npc( character_id( id ) );
         REQUIRE( actor );
         initial_positions.emplace( actor->getID(), actor->pos_abs() );
@@ -75642,4 +75674,38 @@ TEST_CASE( "native message test double consumes history without restoring old me
         CHECK_THROWS_AS( Messages::deserialize( saved ), JsonError );
     }
     Messages::clear_messages();
+}
+
+TEST_CASE( "legacy four-site producer requests local owners without body leases",
+           "[.][bandit][four_site_legacy_owner]" )
+{
+    using namespace bandit_live_world;
+    const char *path = std::getenv( "CAOL_FOUR_SITE_LEGACY_WORLD" );
+    REQUIRE( path );
+    std::ifstream input( std::filesystem::path( path ) / "dimension_data.gsav" );
+    REQUIRE( input.good() );
+    std::string version;
+    std::getline( input, version );
+    const auto document = json_loader::from_string(
+                              std::string( std::istreambuf_iterator<char>( input ), {} ) );
+    auto root = document.get_object();
+    auto buffer = root.get_object( "overmapbuffer" );
+    world_state world;
+    world.deserialize( buffer.get_object( "bandit_live_world" ) );
+    buffer.allow_omitted_members();
+    root.allow_omitted_members();
+    REQUIRE( world.sites.size() == 4 );
+    int members = 0;
+    for( const auto &site : world.sites ) {
+        const auto *outing = site.active_external_outing();
+        REQUIRE( outing );
+        CHECK( outing->owner == simulation_owner::local );
+        CHECK( outing->local_contact_minutes == 0 );
+        members += outing->member_ids.size();
+    }
+    CHECK( members == 10 );
+    // The actual produced bodies have no projection leases. This is the same
+    // empty claim set the startup collector supplies, not a gameplay path test.
+    CHECK( reconcile_loaded_local_projections( world, {} ) ==
+           local_projection_reconciliation_result::rejected );
 }
