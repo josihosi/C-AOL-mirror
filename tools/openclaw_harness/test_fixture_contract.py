@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import copy
 import ctypes
 import ctypes.util
 import io
@@ -6807,6 +6808,232 @@ class MixedLoadBootstrapContractTest(unittest.TestCase):
         self.assertEqual(bodies[2], self.before_bodies[2])
         self.assertEqual(bodies[3], self.before_bodies[3])
 
+    def test_prepared_physical_preflight_requires_the_terminal_intelligence_tuple(self) -> None:
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        scenario_name = ("performance.four_site_prestaged_active_wait_30m"
+                         if len(self.transform["cohorts"]) == 4
+                         else "performance.mixed_hostile_stalker_horde_mcw")
+        steps = [step for step in self.startup.load_scenario(scenario_name)["steps"]
+                 if step["kind"] == "audit_saved_bandit_live_world_state"]
+        dimension = self.world / "dimension_data.gsav"
+        original = dimension.read_bytes()
+        for step, cohort in zip(steps, self.transform["cohorts"]):
+            requirements = {key: value for key, value in step.items()
+                            if key.startswith("required_") or key == "player_save"}
+            positive = self.startup.audit_saved_bandit_live_world_state(self.world, **requirements)
+            site = next(row for row in positive["matching_sites"] if row["site_id"] == cohort["site_id"])
+            self.assertTrue(site["prepared_hostile_operation_complete"])
+            self.assertTrue(site["report_hostile_operation_lead_matches"])
+            for condition in ("missing_lead", "foreign_lead", "foreign_omt", "foreign_reservation_lead",
+                              "foreign_report", "foreign_claim"):
+                with self.subTest(camp=cohort["site_id"], condition=condition):
+                    header, _, text = original.decode().partition("\n")
+                    payload = json.loads(text)
+                    world = payload["overmapbuffer"]["bandit_live_world"]
+                    raw = next(row for row in world["sites"] if row["site_id"] == cohort["site_id"])
+                    reservation = raw["active_hostile_operation"]["reservation"]
+                    leads = raw["intelligence_map"]["leads"]
+                    lead = next(value for value in leads if value["lead_id"] == reservation["target_lead_id"])
+                    if condition == "missing_lead":
+                        leads.remove(lead)
+                    elif condition == "foreign_lead":
+                        lead["target_id"] += "-foreign"
+                    elif condition == "foreign_omt":
+                        lead["omt"][0] += 1
+                    elif condition == "foreign_reservation_lead":
+                        reservation["target_lead_id"] += "-foreign"
+                    elif condition == "foreign_report":
+                        raw["camp_decision"]["source_report_application_key"] += "-foreign"
+                    else:
+                        claim = next(value for value in world["hostile_target_opportunities"]
+                                     if value["target_id"] == reservation["target_id"])
+                        claim["consumed_operation_id"] += "-foreign"
+                    dimension.write_text(header + "\n" + json.dumps(payload))
+                    before = self.startup.path_sha256(self.world)
+                    run_dir = Path(self.temp.name) / "tuple-preflight"
+                    run_dir.mkdir(exist_ok=True)
+                    with mock.patch("startup_harness.save_dir_for_profile", return_value=self.world.parent):
+                        report = self.startup.execute_probe_steps(
+                            0, run_dir, [step, {"kind": "cockpit_live_session", "label": "must_not_start"}],
+                            profile="disposable", world=self.world.name, grants_gameplay_proof=False)
+                    self.assertEqual(len(report), 1)
+                    self.assertIn("abort", report[0])
+                    self.assertEqual(report[0]["metadata"]["status"], "required_state_missing")
+                    self.assertEqual(self.startup.path_sha256(self.world), before)
+                    # Abstract-owner callers did not opt into prepared physical
+                    # terminal completeness. Their ordinary defaults stay intact.
+                    if condition == "missing_lead":
+                        legacy = dict(requirements)
+                        legacy.pop("required_active_member_bodies_found")
+                        self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
+                            self.world, **legacy)["status"], "required_state_present")
+            dimension.write_bytes(original)
+
+    def test_mixed_bootstrap_rejects_foreign_seed_tuple_before_any_native_write(self) -> None:
+        dimension = self.world / "dimension_data.gsav"
+        original = dimension.read_bytes()
+        for cohort in self.transform["cohorts"]:
+            for condition in ("foreign_lead", "malformed_lead", "duplicate_lead", "foreign_report",
+                              "foreign_decision", "foreign_claim", "existing_operation",
+                              "foreign_report_policy", "boolean_lead_z", "completed_generation", "orphan_consumption"):
+                with self.subTest(camp=cohort["site_id"], condition=condition):
+                    header, _, text = original.decode().partition("\n")
+                    payload = json.loads(text)
+                    world = payload["overmapbuffer"]["bandit_live_world"]
+                    site = next(row for row in world["sites"] if row["site_id"] == cohort["site_id"])
+                    lead = {"lead_id": "r029-fixture-player-opportunity", "target_id": "foreign"}
+                    if condition in {"foreign_lead", "duplicate_lead"}:
+                        site.setdefault("intelligence_map", {}).setdefault("leads", []).append(lead)
+                        if condition == "duplicate_lead":
+                            site["intelligence_map"]["leads"].append(dict(lead))
+                    elif condition == "malformed_lead":
+                        site["intelligence_map"] = {"leads": [False]}
+                    elif condition == "boolean_lead_z":
+                        _, _, player, _ = self.startup.load_saved_player_payload(
+                            self.world, self.transform["player_save"])
+                        loc = player["player"]["location"]
+                        target = [loc[0] // 24, loc[1] // 24, loc[2]]
+                        lead = self.startup._mixed_load_response_lead(site, target, 8159, [])
+                        lead["omt"][2] = False
+                        site.setdefault("intelligence_map", {}).setdefault("leads", []).append(lead)
+                    elif condition == "foreign_report_policy":
+                        _, _, player, _ = self.startup.load_saved_player_payload(
+                            self.world, self.transform["player_save"])
+                        loc = player["player"]["location"]
+                        report_id = f"{cohort['site_id']}#fixture_scout:1"
+                        site["current_scout_report"] = {
+                            "revision": 1, "source_generation": 1, "source_activity_id": report_id,
+                            "application_key": f"{report_id}:report:1",
+                            "target_id": f"performance_mixed:{cohort['site_id']}",
+                            "target_omt": [loc[0] // 24, loc[1] // 24, loc[2]],
+                            "target_lead_id": "r029-fixture-player-opportunity", "target_lead_revision": 1,
+                            "action_policy": "cannibal_night_raid" if site["site_kind"] == "bandit_camp"
+                            else "bandit_shakedown"}
+                    elif condition == "foreign_report":
+                        site["current_scout_report"] = {"application_key": "foreign"}
+                    elif condition == "foreign_decision":
+                        site["camp_decision"] = {"source_report_application_key": "foreign"}
+                    elif condition == "foreign_claim":
+                        world["hostile_target_opportunities"] = [{
+                            "target_id": f"performance_mixed:{cohort['site_id']}",
+                            "consumed_operation_id": "foreign"}]
+                    elif condition == "completed_generation":
+                        site["applied_return_generation"] = 2
+                    elif condition == "orphan_consumption":
+                        _, _, player, _ = self.startup.load_saved_player_payload(
+                            self.world, self.transform["player_save"])
+                        loc = player["player"]["location"]
+                        world["hostile_target_opportunities"] = [{
+                            "target_id": f"performance_mixed:{cohort['site_id']}",
+                            "target_omt": [loc[0] // 24, loc[1] // 24, loc[2]],
+                            "revision": 1, "goods_value": 1, "population": 1, "activity": 1,
+                            "consumed_operation_id": f"{cohort['site_id']}#hostile:2",
+                            "consumed_report_key": f"{cohort['site_id']}#fixture_scout:1:report:1",
+                            "consumed_generation": 2}]
+                    else:
+                        site["active_hostile_operation"] = {"operation_kind": "shakedown",
+                                                            "reservation": {"activity_id": "foreign"}}
+                    dimension.write_text(header + "\n" + json.dumps(payload))
+                    def snapshot():
+                        return {str(path.relative_to(self.world)): (
+                            path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino)
+                            for path in self.world.rglob("*") if path.is_file()}
+                    before = snapshot()
+                    with self.assertRaisesRegex(SystemExit, "Mixed-load bootstrap refuses"):
+                        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+                    self.assertEqual(snapshot(), before)
+        dimension.write_bytes(original)
+
+    def test_matching_report_and_decision_do_not_authorize_orphan_consumption(self) -> None:
+        dimension = self.world / "dimension_data.gsav"
+        prefix = dimension.read_bytes()
+        archives = {path: path.read_bytes() for path in (self.world / "overmaps").glob("o.*.*.zzip")}
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        complete = self.read_world()
+        for cohort in self.transform["cohorts"]:
+            with self.subTest(camp=cohort["site_id"]):
+                header, _, text = prefix.decode().partition("\n")
+                payload = json.loads(text)
+                world = payload["overmapbuffer"]["bandit_live_world"]
+                world["hostile_target_opportunities"] = copy.deepcopy(complete["hostile_target_opportunities"])
+                for claim in world["hostile_target_opportunities"]:
+                    if claim["target_id"] != f"performance_mixed:{cohort['site_id']}":
+                        claim.update(consumed_operation_id="", consumed_report_key="", consumed_generation=0)
+                for site in world["sites"]:
+                    generated = next(row for row in complete["sites"] if row["site_id"] == site["site_id"])
+                    for key in ("current_scout_report", "camp_decision", "intelligence_map"):
+                        site[key] = copy.deepcopy(generated[key])
+                    # Matching report and decision are evidence, not an owner
+                    # of the consumed generation. No operation owns this claim.
+                    self.assertEqual(site.get("active_hostile_operation", {}).get("operation_kind", "none"), "none")
+                for path, data in archives.items():
+                    path.write_bytes(data)
+                dimension.write_text(header + "\n" + json.dumps(payload))
+                def snapshot():
+                    return {str(path.relative_to(self.world)): (
+                        path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino)
+                        for path in self.world.rglob("*") if path.is_file()}
+                before = snapshot()
+                with self.assertRaisesRegex(SystemExit, "consumed opportunity"):
+                    self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+                self.assertEqual(snapshot(), before)
+
+    def test_direct_bootstrap_rejects_one_member_cohorts_before_any_native_write(self) -> None:
+        for index, cohort in enumerate(self.transform["cohorts"]):
+            with self.subTest(camp=cohort["site_id"]):
+                transform = copy.deepcopy(self.transform)
+                transform["cohorts"][index]["member_ids"] = cohort["member_ids"][:1]
+                def snapshot():
+                    return {str(path.relative_to(self.world)): (
+                        path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ino)
+                        for path in self.world.rglob("*") if path.is_file()}
+                before = snapshot()
+                with self.assertRaisesRegex(SystemExit, "Mixed-load bootstrap.*cohort"):
+                    self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, transform)
+                self.assertEqual(snapshot(), before)
+
+    def test_matching_seed_lead_is_preserved_and_ordinary_bootstrap_default_is_unchanged(self) -> None:
+        dimension = self.world / "dimension_data.gsav"
+        prefix = dimension.read_bytes()
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        complete = self.read_world()
+        header, _, text = prefix.decode().partition("\n")
+        payload = json.loads(text)
+        payload["overmapbuffer"]["bandit_live_world"]["hostile_target_opportunities"] = complete["hostile_target_opportunities"]
+        for claim in payload["overmapbuffer"]["bandit_live_world"]["hostile_target_opportunities"]:
+            claim.update(consumed_operation_id="", consumed_report_key="", consumed_generation=0)
+        for site in payload["overmapbuffer"]["bandit_live_world"]["sites"]:
+            generated = next(row for row in complete["sites"] if row["site_id"] == site["site_id"])
+            site["current_scout_report"] = generated["current_scout_report"]
+            site["camp_decision"] = generated["camp_decision"]
+            lead = next(value for value in generated["intelligence_map"]["leads"]
+                        if value["lead_id"] == generated["current_scout_report"]["target_lead_id"])
+            lead["last_outcome"] = "preserve matching seed"
+            site.setdefault("intelligence_map", {}).setdefault("leads", []).append(lead)
+        # Restore only this disposable test's prefix owner/body state, not a
+        # native continuation. The independent fresh setup supplies its bodies.
+        dimension.write_bytes(prefix)
+        original_bodies = self.before_bodies
+        for archive in sorted((self.world / "overmaps").glob("o.*.*.zzip")):
+            plain, version, data = self.startup.extract_overmap_payload(archive)
+            data["npcs"] = [original_bodies.get(body["id"], body) for body in data["npcs"]]
+            self.startup.write_overmap_payload(plain, version, data)
+        dimension.write_text(header + "\n" + json.dumps(payload))
+        self.startup.apply_bandit_mixed_load_bootstrap_transform(self.world, self.transform)
+        for site in self.read_world()["sites"]:
+            lead_id = site["current_scout_report"]["target_lead_id"]
+            leads = [lead for lead in site["intelligence_map"]["leads"] if lead["lead_id"] == lead_id]
+            self.assertEqual(len(leads), 1)
+            self.assertEqual(leads[0]["last_outcome"], "preserve matching seed")
+        # The shared historical transform has no new implicit lead policy.
+        historical = dict(self.transform["cohorts"][0], target_id="historical-control",
+                          target_omt=[140, 39, 0], generation=2, current_minutes=8159,
+                          branch="historical", preserve_member_records=True)
+        self.startup.apply_bandit_scheduler_response_candidate_transform(self.world, historical)
+        site = next(row for row in self.read_world()["sites"] if row["site_id"] == historical["site_id"])
+        self.assertFalse(any(lead["target_id"] == "historical-control"
+                             for lead in site["intelligence_map"]["leads"]))
+
     def test_native_migo_setup_is_complete_terrain_not_fabricated_population(self) -> None:
         # setUp has applied the real inherited terrain/player transforms.
         before = self.startup.path_sha256(self.world)
@@ -7037,6 +7264,12 @@ class FourSitePhysicalLoadContractTest(unittest.TestCase):
     tearDown = MixedLoadBootstrapContractTest.tearDown
     read_bodies = MixedLoadBootstrapContractTest.read_bodies
     read_world = MixedLoadBootstrapContractTest.read_world
+
+    test_prepared_physical_preflight_requires_the_terminal_intelligence_tuple = MixedLoadBootstrapContractTest.test_prepared_physical_preflight_requires_the_terminal_intelligence_tuple
+    test_mixed_bootstrap_rejects_foreign_seed_tuple_before_any_native_write = MixedLoadBootstrapContractTest.test_mixed_bootstrap_rejects_foreign_seed_tuple_before_any_native_write
+    test_matching_report_and_decision_do_not_authorize_orphan_consumption = MixedLoadBootstrapContractTest.test_matching_report_and_decision_do_not_authorize_orphan_consumption
+    test_direct_bootstrap_rejects_one_member_cohorts_before_any_native_write = MixedLoadBootstrapContractTest.test_direct_bootstrap_rejects_one_member_cohorts_before_any_native_write
+    test_matching_seed_lead_is_preserved_and_ordinary_bootstrap_default_is_unchanged = MixedLoadBootstrapContractTest.test_matching_seed_lead_is_preserved_and_ordinary_bootstrap_default_is_unchanged
 
     def test_recommended_caller_and_evidence_describe_its_four_human_parties(self) -> None:
         import shlex

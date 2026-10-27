@@ -16116,6 +16116,7 @@ def summarize_bandit_active_outing(site: Dict[str, Any]) -> Dict[str, Any]:
         "native_path_evaluated": False,
         "target_id": str(outing.get("target_id", "") or ""),
         "target_omt": outing.get("target_omt", []),
+        "target_lead_id": str(outing.get("target_lead_id", "") or ""),
         "target_lead_revision": integer_field(outing, "target_lead_revision", 0),
         "job_type": str(outing.get("job_type", "") or ""),
         "phase": str(outing.get("phase", "") or ""),
@@ -16184,6 +16185,7 @@ def summarize_bandit_live_world_site(site: Dict[str, Any]) -> Dict[str, Any]:
                     continue
                 leads.append({
                     "lead_id": lead.get("lead_id", ""),
+                    "revision": lead.get("revision", 0),
                     "kind": lead.get("kind", ""),
                     "origin": lead.get("origin", ""),
                     "status": lead.get("status", ""),
@@ -16397,6 +16399,47 @@ def summarize_bandit_live_world_site(site: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _prepared_hostile_operation_binding(site: Dict[str, Any],
+                                       opportunities: List[Dict[str, Any]]) -> Dict[str, bool]:
+    """Project existing identities; never invent a missing camp lead or claim."""
+    report = site.get("current_scout_report", {})
+    operation = site.get("active_hostile_operation", {})
+    reservation = operation.get("reservation", {})
+    identity = bool(report.get("present") and operation.get("is_active") and
+                    all(operation.get(op_key) == report.get(report_key) for op_key, report_key in (
+                        ("source_report_revision", "revision"),
+                        ("source_report_generation", "source_generation"),
+                        ("source_report_activity_id", "source_activity_id"),
+                        ("source_report_application_key", "application_key"))) and
+                    all(reservation.get(key) == report.get(key) for key in (
+                        "target_id", "target_omt", "target_lead_revision")))
+    claim = identity and any(
+        isinstance(value, dict) and
+        value.get("target_id") == reservation.get("target_id") and
+        value.get("target_omt") == reservation.get("target_omt") and
+        value.get("consumed_operation_id") == reservation.get("activity_id") and
+        value.get("consumed_report_key") == operation.get("source_report_application_key") and
+        value.get("consumed_generation") == reservation.get("generation")
+        for value in opportunities)
+    leads = [lead for lead in site.get("leads", [])
+             if lead.get("lead_id") == reservation.get("target_lead_id")]
+    lead_matches = bool(
+        site.get("lead_entries_valid") and len(leads) == 1 and
+        reservation.get("target_lead_id") and
+        reservation.get("target_lead_id") == report.get("target_lead_id") and
+        type(leads[0].get("revision")) is int and
+        leads[0]["revision"] == reservation.get("target_lead_revision") and
+        leads[0].get("target_id") == reservation.get("target_id") and
+        leads[0].get("omt") == reservation.get("target_omt"))
+    return {
+        "report_hostile_operation_identity_matches": identity,
+        "report_hostile_operation_claim_matches": bool(claim),
+        "report_hostile_operation_lead_matches": lead_matches,
+        "prepared_hostile_operation_complete": bool(
+            claim and lead_matches and site.get("report_decision_identity_matches")),
+    }
+
+
 def audit_saved_bandit_live_world_state(
     world_dir: Path,
     *,
@@ -16508,34 +16551,7 @@ def audit_saved_bandit_live_world_state(
     if not isinstance(raw_hostile_opportunities, list):
         raw_hostile_opportunities = []
     for observed_site in observed_sites:
-        report = observed_site.get("current_scout_report", {})
-        operation = observed_site.get("active_hostile_operation", {})
-        reservation = operation.get("reservation", {}) if isinstance(operation, dict) else {}
-        source_identity_matches = bool(
-            isinstance(report, dict)
-            and isinstance(operation, dict)
-            and isinstance(reservation, dict)
-            and report.get("present")
-            and operation.get("is_active")
-            and operation.get("source_report_revision") == report.get("revision")
-            and operation.get("source_report_generation") == report.get("source_generation")
-            and operation.get("source_report_activity_id") == report.get("source_activity_id")
-            and operation.get("source_report_application_key") == report.get("application_key")
-            and reservation.get("target_id") == report.get("target_id")
-            and reservation.get("target_omt") == report.get("target_omt")
-            and reservation.get("target_lead_revision") == report.get("target_lead_revision")
-        )
-        claim_matches = source_identity_matches and any(
-            isinstance(opportunity, dict)
-            and opportunity.get("target_id") == reservation.get("target_id")
-            and opportunity.get("target_omt") == reservation.get("target_omt")
-            and opportunity.get("consumed_operation_id") == reservation.get("activity_id")
-            and opportunity.get("consumed_report_key") == operation.get("source_report_application_key")
-            and opportunity.get("consumed_generation") == reservation.get("generation")
-            for opportunity in raw_hostile_opportunities
-        )
-        observed_site["report_hostile_operation_identity_matches"] = source_identity_matches
-        observed_site["report_hostile_operation_claim_matches"] = claim_matches
+        observed_site.update(_prepared_hostile_operation_binding(observed_site, raw_hostile_opportunities))
 
     selected_player_save = str(player_save or "").strip()
     player_location_ms: List[int] = []
@@ -16896,6 +16912,11 @@ def audit_saved_bandit_live_world_state(
         if required_active_members_found and not bool(site.get("active_members_all_found_in_saved_overmap")):
             return False
         if required_active_member_bodies_found and not bool(site.get("active_member_bodies_all_found_in_saved_overmap")):
+            return False
+        # Together these existing opt-ins claim a prepared physical response,
+        # including its native terminal consumer, rather than abstract staffing.
+        if (required_active_member_bodies_found and required_report_hostile_operation_claim_match is True
+                and not site.get("prepared_hostile_operation_complete")):
             return False
         if normalized_max_abs_offset is not None and not bool(site.get("active_members_within_required_max_abs_offset_ms")):
             return False
@@ -32309,6 +32330,71 @@ def apply_bandit_registered_staffed_observer_bootstrap_transform(
     }
 
 
+def _mixed_load_response_lead(site: Dict[str, Any], target: List[int], minute: int,
+                              opportunities: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Authenticate fresh metrics setup without overwriting another purpose."""
+    site_id = site["site_id"]
+    target_id = f"performance_mixed:{site_id}"
+    report_id = f"{site_id}#fixture_scout:1"
+    report_key = f"{report_id}:report:1"
+    policy = "bandit_shakedown" if site["site_kind"] == "bandit_camp" else "cannibal_night_raid"
+    def matches(value: Dict[str, Any], expected: Dict[str, Any]) -> bool:
+        # JSON identity is typed: False/0 and 1.0/1 are not interchangeable
+        # native fields, even though Python equality treats them alike.
+        return all(json.dumps(value.get(key), sort_keys=True) == json.dumps(want, sort_keys=True)
+                   for key, want in expected.items())
+    returned = site.get("applied_return_generation", 0)
+    if type(returned) is not int or returned >= 2:
+        raise SystemExit("Mixed-load bootstrap refuses an already returned generation")
+    lead = {"lead_id": "r029-fixture-player-opportunity", "revision": 1,
+            "kind": "human_activity", "origin": "returned_report", "status": "scout_confirmed",
+            "target_id": target_id, "omt": list(target), "source_key": report_key,
+            "source_summary": "Zero-credit mixed-load fixture report; not a native observation",
+            "first_seen_minutes": minute, "last_seen_minutes": minute,
+            "last_scouted_minutes": minute, "bounty": 3, "threat": 1, "confidence": 3}
+    intelligence = site.get("intelligence_map", {})
+    if not isinstance(intelligence, dict) or not isinstance(intelligence.get("leads", []), list):
+        raise SystemExit("Mixed-load bootstrap refuses malformed camp intelligence")
+    leads = intelligence.get("leads", [])
+    if not all(isinstance(value, dict) for value in leads):
+        raise SystemExit("Mixed-load bootstrap refuses malformed camp intelligence")
+    matching = [value for value in leads if value.get("lead_id") == lead["lead_id"]]
+    if len(matching) > 1 or any(not matches(value, lead) for value in matching):
+        raise SystemExit("Mixed-load bootstrap refuses conflicting pinned camp lead")
+    for key in ("active_outing", "active_hostile_operation"):
+        owner = site.get(key, {})
+        if not isinstance(owner, dict) or (owner and owner.get(
+                "kind" if key == "active_outing" else "operation_kind", "none") != "none"):
+            raise SystemExit("Mixed-load bootstrap refuses an existing operation owner")
+    expected = {"target_id": target_id, "target_omt": list(target),
+                "target_lead_id": lead["lead_id"], "target_lead_revision": 1}
+    for key, identity in (
+        ("current_scout_report", {**expected, "action_policy": policy, "revision": 1, "source_generation": 1,
+                                  "source_activity_id": report_id, "application_key": report_key}),
+        ("camp_decision", {**expected, "report_policy": policy, "source_report_revision": 1, "source_report_generation": 1,
+                            "source_report_activity_id": report_id,
+                            "source_report_application_key": report_key}),
+    ):
+        value = site.get(key, {})
+        if not isinstance(value, dict) or (value and not matches(value, identity)):
+            raise SystemExit("Mixed-load bootstrap refuses conflicting report/decision identity")
+        if key == "camp_decision" and value and value.get("state") not in {
+                "report_awaiting_assessment", "preparing_follow_on"}:
+            raise SystemExit("Mixed-load bootstrap refuses a closed report/decision identity")
+    claims = [value for value in opportunities if value.get("target_id") == target_id]
+    if len(claims) > 1:
+        raise SystemExit("Mixed-load bootstrap refuses conflicting consumed opportunity")
+    for value in claims:
+        empty = {"consumed_operation_id": "", "consumed_report_key": "", "consumed_generation": 0}
+        if (not matches(value, {"target_omt": target, "revision": 1,
+                                "goods_value": 1, "population": 1, "activity": 1}) or
+                not matches(value, empty)):
+            # This fresh bootstrap refuses existing operation owners above.
+            # A matching report/decision cannot own a consumed opportunity.
+            raise SystemExit("Mixed-load bootstrap refuses conflicting consumed opportunity")
+    return matching[0] if matching else lead
+
+
 def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
     """Prepare fresh metrics ownership, not a naturally earned dispatch or story.
 
@@ -32332,6 +32418,14 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
     if (source is None or len(cohorts) not in {2, 4} or len(sites) != len(cohorts) or
             set(sites) != {c["site_id"] for c in cohorts}):
         raise SystemExit("Mixed-load bootstrap needs exactly the declared two or four camps")
+    # Direct callers must meet the downstream operation's member bounds before
+    # any body, roster, report or claim is written, just like manifest callers.
+    for cohort in cohorts:
+        ids = cohort.get("member_ids")
+        if (not isinstance(ids, list) or not 2 <= len(ids) <= 4 or
+                any(type(npc_id) is not int or npc_id <= 0 for npc_id in ids) or
+                len(set(ids)) != len(ids)):
+            raise SystemExit("Mixed-load bootstrap requires 2-4 distinct positive member IDs per cohort")
     original_members = source.get("members", [])
     members = {member["npc_id"]: member for member in original_members}
     active_ids = [npc_id for cohort in cohorts for npc_id in cohort["member_ids"]]
@@ -32365,6 +32459,11 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
         rally = cohort["rally_omt"]
         if (rally == site["anchor"] or not 2 <= max(abs(rally[a] - target[a]) for a in range(3)) <= 3):
             raise SystemExit("Mixed-load rally must satisfy the native target approach envelope")
+    opportunities = world.get("hostile_target_opportunities", [])
+    if not isinstance(opportunities, list) or not all(isinstance(v, dict) for v in opportunities):
+        raise SystemExit("Mixed-load bootstrap refuses malformed consumed opportunities")
+    response_leads = {site_id: _mixed_load_response_lead(site, target, minute, opportunities)
+                      for site_id, site in sites.items()}
     # Read and validate all concrete authorities before writing either owner.
     archives = []
     found = {}
@@ -32395,6 +32494,9 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
         site = sites[cohort["site_id"]]
         ids = cohort_members[site["site_id"]]
         site["members"] = []
+        leads = site.setdefault("intelligence_map", {}).setdefault("leads", [])
+        if not any(value.get("lead_id") == response_leads[site["site_id"]]["lead_id"] for value in leads):
+            leads.append(response_leads[site["site_id"]])
         for npc_id in ids:
             member = dict(members[npc_id])
             member.update(home_spawn_tile=positions[npc_id], state="at_home",
@@ -32435,7 +32537,12 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
     # Match the native raid plan's initial finite source search; the generic
     # historical bootstrap intentionally retains its original semantics.
     payload = json.loads(dimension.read_text(encoding="utf-8").partition("\n")[2])
-    for site in payload["overmapbuffer"]["bandit_live_world"]["sites"]:
+    final_world = payload["overmapbuffer"]["bandit_live_world"]
+    for site in final_world["sites"]:
+        if not _prepared_hostile_operation_binding(
+                summarize_bandit_live_world_site(site), final_world["hostile_target_opportunities"]
+        )["prepared_hostile_operation_complete"]:
+            raise SystemExit("Mixed-load bootstrap composed an incomplete response tuple")
         site["next_outing_generation"] = 3
         # Explicitly empty current ordinary owner. Absence invokes the native
         # legacy importer even when the hostile reservation is already current.

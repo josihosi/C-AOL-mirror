@@ -75517,6 +75517,139 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         CHECK( count == ( four_sites ? 10 : 6 ) );
     };
     check_owners();
+    if( std::getenv( "CAOL_MIXED_LOAD_TERMINAL_RETURN" ) ) {
+        // Import the actual generated fixture through g->load above. Only the
+        // paid/home endpoint is component setup; no payment or journey credit.
+        // All terminal settlement runs through the unchanged public caller.
+        auto &world = overmap_buffer.global_state.bandit_live_world;
+        auto *site = world.find_site( site_ids.front() );
+        REQUIRE( site );
+        const auto cursor = current_external_simulation_cursor( *site );
+        REQUIRE( cursor );
+        calendar::turn += 1_minutes;
+        REQUIRE( transition_hostile_operation_phase( *site, *cursor,
+                 hostile_operation_phase::outbound, hostile_operation_phase::returning_home,
+                 to_minutes<int>( calendar::turn - calendar::start_of_cataclysm ),
+                 "component paid-return endpoint" ) == hostile_operation_transition_result::applied );
+        auto &operation = site->active_hostile_operation;
+        operation.shakedown_pending_branch = "paid";
+        operation.shakedown_pending_demanded_value = 1447;
+        operation.shakedown_pending_surrendered_value = 1447;
+        operation.shakedown_pending_reachable_value = 2951;
+        const std::string operation_id = operation.reservation.activity_id;
+        const int generation = operation.reservation.generation;
+        const std::string lead_id = operation.reservation.target_lead_id;
+        const auto ids = operation.reservation.member_ids;
+        for( const auto id : ids ) {
+            auto actor = overmap_buffer.find_npc( id );
+            REQUIRE( actor );
+            actor->spawn_at_precise( site->find_member( id )->home_spawn_tile );
+            // The old last member's home tile lies in another home OMT. The
+            // current return caller explicitly requires the anchor itself.
+            actor->spawn_at_precise( project_to<coords::ms>( site->anchor ) +
+                                    point( id.get_value() - ids.front().get_value(), 12 ) );
+            actor->goal = npc::no_goal_point;
+            actor->omt_path.clear();
+            actor->set_mission( NPC_MISSION_GUARD );
+        }
+        calendar::turn += 1_minutes;
+        // The endpoint setup advanced the calendar, so run its ordinary clock
+        // owner before comparing persistence. Do not rewrite timer fields.
+        refresh_live_bandit_activation();
+        CHECK( site->home_activation.active_turns == 120 );
+        const auto prepared = world;
+        for( const std::string condition : { "present", "missing_lead", "foreign_lead",
+                 "foreign_omt", "foreign_report", "foreign_claim", "non_home" } ) {
+            CAPTURE( four_sites, condition );
+            world = prepared;
+            site = world.find_site( site_ids.front() );
+            REQUIRE( site );
+            auto *lead = site->intelligence_map.find_lead( lead_id );
+            if( condition == "missing_lead" ) {
+                auto &leads = site->intelligence_map.leads;
+                leads.erase( std::remove_if( leads.begin(), leads.end(), [&]( const auto & value ) {
+                    return value.lead_id == lead_id;
+                } ), leads.end() );
+            } else if( condition == "foreign_lead" && lead ) {
+                lead->target_id += "-foreign";
+            } else if( condition == "foreign_omt" && lead ) {
+                lead->omt += point( 1, 0 );
+            } else if( condition == "foreign_report" ) {
+                site->camp_decision.source_report_application_key += "-foreign";
+            } else if( condition == "foreign_claim" ) {
+                auto &claim = world.hostile_target_opportunities.front();
+                REQUIRE( claim.consumed_operation_id == operation_id );
+                claim.consumed_operation_id += "-foreign";
+            }
+            auto first = overmap_buffer.find_npc( ids.front() );
+            REQUIRE( first );
+            const auto home = project_to<coords::ms>( site->anchor ) + point( 0, 12 );
+            first->spawn_at_precise( home );
+            first->goal = npc::no_goal_point;
+            first->omt_path.clear();
+            first->set_mission( NPC_MISSION_GUARD );
+            if( condition == "non_home" ) {
+                const auto away = site->anchor + point( 0, -1 );
+                first->spawn_at_precise( project_to<coords::ms>( away ) );
+                first->goal = site->anchor;
+                first->omt_path = { site->anchor, away };
+                first->set_mission( NPC_MISSION_TRAVELLING );
+            }
+            const std::string before = serialize_world( world );
+            std::map<character_id, std::string> bodies;
+            for( const auto id : ids ) {
+                bodies.emplace( id, r054_actor_bytes( *overmap_buffer.find_npc( id ) ) );
+            }
+            const bool changed = advance_live_bandit_hostile_returns_for_test();
+            if( condition != "present" ) {
+                CHECK_FALSE( changed );
+                CHECK( serialize_world( world ) == before );
+                for( const auto &[id, bytes] : bodies ) {
+                    CHECK( r054_actor_bytes( *overmap_buffer.find_npc( id ) ) == bytes );
+                }
+                continue;
+            }
+            CHECK( lead );
+            REQUIRE( changed );
+            site = world.find_site( site_ids.front() );
+            REQUIRE( site );
+            CHECK_FALSE( site->active_hostile_operation.is_active() );
+            CHECK( site->applied_return_generation == generation );
+            CHECK( site->last_shakedown_outcome == "paid" );
+            CHECK( site->shakedown_loot_value == prepared.find_site( site_ids.front() )->shakedown_loot_value + 1447 );
+            CHECK( site->camp_decision.state == camp_decision_state::cooldown );
+            for( const auto id : ids ) {
+                CHECK( site->find_member( id )->state == member_state::at_home );
+            }
+            const auto settled = serialize_world( world );
+            CHECK_FALSE( advance_live_bandit_hostile_returns_for_test() );
+            CHECK( serialize_world( world ) == settled );
+            // Returning the bodies changes which existing home activation owner
+            // tracks them. Native reload evaluates this owner too; prepare it at
+            // the same unchanged turn, preserving all of its actual fields.
+            const auto active_before = site->home_activation.active_turns;
+            refresh_live_bandit_activation();
+            CHECK( site->home_activation.active_turns == active_before );
+            for( const auto id : ids ) {
+                CHECK( site->home_activation.bodies.count( id ) == 1 );
+            }
+            const auto ready_to_save = serialize_world( world );
+            REQUIRE( g->save() );
+            const auto saved_turn = calendar::turn;
+            r067_handover_reload( name );
+            CHECK( calendar::turn == saved_turn );
+            CHECK( serialize_world( world ) == ready_to_save );
+            CHECK_FALSE( advance_live_bandit_hostile_returns_for_test() );
+            CHECK( serialize_world( world ) == ready_to_save );
+            for( int id = 2; id <= 17; ++id ) {
+                const auto actor = overmap_buffer.find_npc( character_id( id ) );
+                REQUIRE( actor );
+                CHECK_FALSE( actor->is_dead() );
+                CHECK( actor->get_last_updated() <= calendar::turn );
+            }
+        }
+        return;
+    }
     if( four_sites ) {
         const auto &world = overmap_buffer.global_state.bandit_live_world;
         const auto original = serialize_world( world );
