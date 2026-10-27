@@ -1,6 +1,10 @@
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <ctime>
+#include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -22,6 +26,7 @@
 #include "json_loader.h"
 #include "level_cache.h"
 #include "map.h"
+#include "mapbuffer.h"
 #include "map_helpers.h"
 #include "map_helpers_tests.h"
 #include "memory_fast.h"
@@ -41,6 +46,171 @@
 #include "weather.h"
 #include "weather_type.h"
 #include "writhing_stalker_ai.h"
+
+TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
+           "[.][writhing_stalker][stalker_optical_lifetime]" )
+{
+    // Diagnostic only: the retained-reader arm uses the existing optical API,
+    // not a changed native planner. No physical mutation/turn spans this batch.
+    clear_map( -2, 2 );
+    clear_npcs();
+    clear_avatar();
+    const auto old_turn = calendar::turn;
+    const auto old_rng = rng_get_engine();
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        set_time( old_turn );
+        rng_get_engine() = old_rng;
+    } );
+    set_time( calendar::turn_zero + 12_hours );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    map &here = get_map();
+    auto &you = get_avatar();
+    you.setpos( here, tripoint_bub_ms( 66, 60, 0 ) );
+    monster &stalker = spawn_test_monster( "mon_writhing_stalker", tripoint_bub_ms( 60, 60, 0 ) );
+    monster &near = spawn_test_monster( "mon_zombie", tripoint_bub_ms( 66, 64, 0 ) );
+    monster &blocked = spawn_test_monster( "mon_zombie", tripoint_bub_ms( 68, 66, 0 ) );
+    here.ter_set( tripoint_bub_ms( 67, 65, 0 ), ter_str_id( "t_wall" ) );
+    for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) {
+        here.build_map_cache( z );
+    }
+    REQUIRE( stalker.friendly == 0 );
+    REQUIRE( stalker.can_see() );
+    REQUIRE_FALSE( stalker.is_dead() );
+    const scout_observation::actor_capability capability{
+        72, 72.0f / std::max( 1, std::max( stalker.type->vision_day, stalker.type->vision_night ) )
+    };
+    const std::vector<const Creature *> targets{ &you, &near, &you, &blocked,
+                &near, &blocked, &you, &near };
+    const auto bytes = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut js( out ); value.serialize( js ); }
+        return out.str();
+    };
+    const auto body = bytes( stalker );
+    const auto prey = bytes( you );
+    const auto peer = bytes( near );
+    const auto occluded = bytes( blocked );
+    const auto world = bytes( overmap_buffer.global_state );
+    const auto now = calendar::turn;
+    const auto seed = rng_get_engine();
+    const auto residents = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto cache_values = [&]() {
+        std::vector<float> result;
+        for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) {
+            const auto &cache = here.get_cache_ref( z );
+            for( int x = 0; x < MAPSIZE_X; ++x ) {
+                for( int y = 0; y < MAPSIZE_Y; ++y ) {
+                    for( float q : cache.lm[x][y].values ) { result.push_back( q ); }
+                    result.push_back( cache.sm[x][y] );
+                    result.push_back( cache.transparency_cache[x][y] );
+                    result.push_back( cache.outside_cache[x][y] );
+                    result.push_back( cache.floor_cache[x][y] );
+                }
+            }
+        }
+        return result;
+    };
+    const auto main_cache = cache_values();
+    const auto conserved = [&]() {
+        CHECK( bytes( stalker ) == body );
+        CHECK( bytes( you ) == prey );
+        CHECK( bytes( near ) == peer );
+        CHECK( bytes( blocked ) == occluded );
+        CHECK( bytes( overmap_buffer.global_state ) == world );
+        CHECK( calendar::turn == now );
+        CHECK( rng_get_engine() == seed );
+        CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == residents );
+        CHECK( cache_values() == main_cache );
+    };
+    for( int repeat = 0; repeat < 3; ++repeat ) {
+        std::vector<bool> native;
+        std::vector<scout_observation::visibility_read> fresh;
+        std::vector<scout_observation::visibility_read> retained;
+        const auto timed = [&]( const auto &call ) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto cpu = std::clock();
+            call();
+            const std::pair<double, double> result{
+                std::chrono::duration<double>( std::chrono::steady_clock::now() - start ).count(),
+                double( std::clock() - cpu ) / CLOCKS_PER_SEC
+            };
+            conserved(); // Outside timing and before another arm can run.
+            return result;
+        };
+        size_t fresh_views = 0, fresh_physical = 0, fresh_summaries = 0;
+        size_t reused_views = 0, reused_physical = 0, reused_summaries = 0;
+        const auto public_arm = [&]() {
+            for( const auto *target : targets ) {
+                native.push_back( writhing_stalker::can_observe_actor( stalker, *target ) );
+            }
+        };
+        const auto fresh_arm = [&]() {
+            for( const auto *target : targets ) {
+                scout_observation::site_reader reader;
+                fresh.push_back( reader.read_actor( stalker, *target, capability ) );
+                fresh_views += reader.cached_view_count();
+                fresh_physical += reader.cached_lighting_submap_count();
+                fresh_summaries += reader.cached_sunlight_summary_count();
+            }
+        };
+        const auto retained_arm = [&]() {
+            scout_observation::site_reader reader;
+            for( const auto *target : targets ) {
+                retained.push_back( reader.read_actor( stalker, *target, capability ) );
+            }
+            reused_views = reader.cached_view_count();
+            reused_physical = reader.cached_lighting_submap_count();
+            reused_summaries = reader.cached_sunlight_summary_count();
+        };
+        std::pair<double, double> public_time, fresh_time, retained_time;
+        // Reverse arm order as a bounded warm-order countercontrol.
+        if( repeat == 1 ) {
+            retained_time = timed( retained_arm );
+            fresh_time = timed( fresh_arm );
+            public_time = timed( public_arm );
+        } else {
+            public_time = timed( public_arm );
+            fresh_time = timed( fresh_arm );
+            retained_time = timed( retained_arm );
+        }
+        REQUIRE( native.size() == targets.size() );
+        REQUIRE( fresh.size() == targets.size() );
+        REQUIRE( retained.size() == targets.size() );
+        CHECK( native[0] );
+        CHECK( native[1] );
+        CHECK_FALSE( native[3] );
+        for( size_t i = 0; i < targets.size(); ++i ) {
+            CHECK( fresh[i].known );
+            CHECK( fresh[i].visible == native[i] );
+            CHECK( retained[i].known == fresh[i].known );
+            CHECK( retained[i].visible == fresh[i].visible );
+            CHECK( retained[i].reason == fresh[i].reason );
+        }
+        CHECK( reused_physical <= fresh_physical );
+        CHECK( reused_summaries <= fresh_summaries );
+        std::ostringstream out;
+        { JsonOut js( out );
+            js.start_object();
+            js.member( "repeat", repeat );
+            js.member( "queries", targets.size() );
+            js.member( "public_fresh_wall_seconds", public_time.first );
+            js.member( "public_fresh_process_cpu_seconds", public_time.second );
+            js.member( "direct_fresh_wall_seconds", fresh_time.first );
+            js.member( "direct_fresh_process_cpu_seconds", fresh_time.second );
+            js.member( "decision_retained_wall_seconds", retained_time.first );
+            js.member( "decision_retained_process_cpu_seconds", retained_time.second );
+            js.member( "fresh_views_sum", fresh_views );
+            js.member( "fresh_physical_sum", fresh_physical );
+            js.member( "fresh_summaries_sum", fresh_summaries );
+            js.member( "retained_views", reused_views );
+            js.member( "retained_physical", reused_physical );
+            js.member( "retained_summaries", reused_summaries );
+            js.end_object();
+        }
+        std::cout << "STALKER_OPTICAL_LIFETIME " << out.str() << '\n';
+    }
+}
 
 static const damage_type_id damage_cut( "cut" );
 static const mongroup_id GROUP_ZOMBIE( "GROUP_ZOMBIE" );
@@ -263,6 +433,159 @@ monster round_trip_writhing_stalker( const monster &stalker )
 }
 
 } // namespace
+
+TEST_CASE( "stalker_native_plan_reader_parity_and_cost",
+           "[.][writhing_stalker][stalker_plan_reader_parity]" )
+{
+    // The same test is run before/after the private caller change. It emits
+    // bounded full state for an external byte-equality comparison, not a new
+    // gameplay switch or a test-only production planner.
+    const std::string scene = GENERATE( std::string( "open" ), std::string( "roof" ),
+                                       std::string( "occluded" ), std::string( "unknown" ) );
+    CAPTURE( scene );
+    clear_map( -2, 2 );
+    clear_npcs();
+    clear_avatar();
+    const auto old_turn = calendar::turn;
+    const auto old_rng = rng_get_engine();
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        clear_npcs();
+        writhing_stalker::reset_transient_pressure_history();
+        set_time( old_turn );
+        rng_get_engine() = old_rng;
+    } );
+    set_time( calendar::turn_zero + ( scene == "unknown" ? 0_hours : 12_hours ) );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    map &here = get_map();
+    const tripoint_bub_ms center( scene == "unknown" ? 45 : 65, 65, 0 );
+    get_avatar().setpos( here, center );
+    monster &stalker = spawn_new_stalker_fixture( scene == "unknown" ?
+                       tripoint_bub_ms( 10, 65, 0 ) : center + point( 20, 0 ) );
+    stalker.anger = 100;
+    stalker.aggro_character = true;
+    std::vector<monster *> pressure;
+    for( const point offset : { point( -1, 0 ), point( 1, 0 ), point( 0, -1 ) } ) {
+        monster &zombie = spawn_test_monster( "mon_zombie", center + offset );
+        zombie.aggro_character = true;
+        zombie.set_dest( get_avatar().pos_abs() );
+        pressure.push_back( &zombie );
+    }
+    npc &ally = spawn_npc( point_bub_ms( ( center + point( 0, 2 ) ).xy() ), "test_talker" );
+    ally.set_fac( faction_id( "your_followers" ) );
+    ally.set_attitude( NPCATT_FOLLOW );
+    if( scene == "roof" ) {
+        for( const auto &p : here.points_in_radius( center + tripoint::above, 7 ) ) {
+            if( p.z() == 1 ) { here.ter_set( p, ter_str_id( "t_floor" ) ); }
+        }
+    }
+    if( scene == "occluded" ) {
+        for( int y = 50; y <= 80; ++y ) {
+            here.ter_set( tripoint_bub_ms( 75, y, 0 ), ter_str_id( "t_wall" ) );
+        }
+    }
+    if( scene == "unknown" ) {
+        // A real nonuniform native terrain owner with no generated physical
+        // submaps in the required off-ray illumination plane. Missing is not
+        // air; neither the original nor candidate may generate it to see.
+        const auto first = project_to<coords::sm>( get_avatar().pos_abs() ) -
+                           point( MAPSIZE / 2, 0 );
+        REQUIRE_FALSE( MAPBUFFER.lookup_submap_cached( first ) );
+        overmap_buffer.ter_set( project_to<coords::omt>( first ), oter_id( "forest" ) );
+    }
+    for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) { here.build_map_cache( z ); }
+    const auto bytes = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut js( out ); value.serialize( js ); }
+        return out.str();
+    };
+    scout_observation::visibility_read observed;
+    size_t summaries = 0;
+    {
+        scout_observation::site_reader reader;
+        observed = reader.read_actor( stalker, get_avatar(),
+        { 72, 72.0f / std::max( 1, std::max( stalker.type->vision_day, stalker.type->vision_night ) ) } );
+        summaries = reader.cached_sunlight_summary_count();
+    }
+    if( scene == "unknown" ) {
+        CHECK_FALSE( observed.known );
+        CHECK_FALSE( observed.visible );
+    } else {
+        CHECK( observed.known );
+        CHECK( observed.visible == ( scene != "occluded" ) );
+    }
+    if( scene == "roof" ) { CHECK( summaries > 0 ); }
+    const monster initial( stalker );
+    const auto initial_world = overmap_buffer.global_state;
+    const auto initial_player = bytes( get_avatar() );
+    const auto initial_ally = bytes( ally );
+    std::vector<std::string> initial_pressure;
+    for( const auto *zombie : pressure ) { initial_pressure.push_back( bytes( *zombie ) ); }
+    const auto seed = rng_get_engine();
+    const auto now = calendar::turn;
+    const auto residents = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    const auto cache_values = [&]() {
+        std::vector<float> values;
+        for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) {
+            const auto &cache = here.get_cache_ref( z );
+            for( int x = 0; x < MAPSIZE_X; ++x ) {
+                for( int y = 0; y < MAPSIZE_Y; ++y ) {
+                    for( float q : cache.lm[x][y].values ) { values.push_back( q ); }
+                    values.push_back( cache.sm[x][y] );
+                    values.push_back( cache.transparency_cache[x][y] );
+                    values.push_back( cache.outside_cache[x][y] );
+                    values.push_back( cache.floor_cache[x][y] );
+                }
+            }
+        }
+        return values;
+    };
+    const auto native_cache = cache_values();
+    for( int repeat = 0; repeat < 3; ++repeat ) {
+        stalker = initial;
+        overmap_buffer.global_state = initial_world;
+        rng_get_engine() = seed;
+        writhing_stalker::reset_transient_pressure_history();
+        get_creature_tracker().invalidate_reachability_cache();
+        const auto started = std::chrono::steady_clock::now();
+        const auto cpu = std::clock();
+        stalker.plan(); // Actual public native target selection and planner.
+        const double cpu_seconds = double( std::clock() - cpu ) / CLOCKS_PER_SEC;
+        const double seconds = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - started ).count();
+        CHECK( bytes( get_avatar() ) == initial_player );
+        CHECK( bytes( ally ) == initial_ally );
+        for( size_t i = 0; i < pressure.size(); ++i ) {
+            CHECK( bytes( *pressure[i] ) == initial_pressure[i] );
+        }
+        CHECK( calendar::turn == now );
+        CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == residents );
+        CHECK( cache_values() == native_cache );
+        std::ostringstream rng_state;
+        rng_state << rng_get_engine();
+        std::ostringstream out;
+        { JsonOut js( out );
+            js.start_object();
+            js.member( "scene", scene );
+            js.member( "repeat", repeat );
+            js.member( "wall_seconds", seconds );
+            js.member( "process_cpu_seconds", cpu_seconds );
+            js.member( "known", observed.known );
+            js.member( "visible", observed.visible );
+            js.member( "reason", observed.reason );
+            js.member( "probe_solar_summaries", summaries );
+            js.member( "stalker", bytes( stalker ) );
+            js.member( "player", bytes( get_avatar() ) );
+            js.member( "ally", bytes( ally ) );
+            js.member( "pressure", initial_pressure );
+            js.member( "world", bytes( overmap_buffer.global_state ) );
+            js.member( "rng", rng_state.str() );
+            js.member( "pressure_samples", writhing_stalker::transient_pressure_sample_count() );
+            js.end_object();
+        }
+        std::cout << "STALKER_PLAN_PARITY " << out.str() << '\n';
+    }
+}
 
 TEST_CASE( "stalker_new_fixture_birth_keeps_foreign_native_token_authority",
            "[writhing_stalker][monster][fixture_ownership]" )

@@ -762,9 +762,12 @@ static void writhing_stalker_prune_pressure_memories( const int now_turn )
     }
 }
 
+static bool writhing_stalker_watches( const monster &stalker, const Creature &target,
+                                     scout_observation::site_reader &reader );
+
 static const std::vector<writhing_stalker_pressure_position> &writhing_stalker_observe_pressure(
     const monster &stalker,
-    map &here, const Creature &target )
+    map &here, const Creature &target, scout_observation::site_reader *reader = nullptr )
 {
     const int now = to_turn<int>( calendar::turn );
     writhing_stalker_prune_pressure_memories( now );
@@ -792,7 +795,8 @@ static const std::vector<writhing_stalker_pressure_position> &writhing_stalker_o
             other.is_hallucination() || other.attitude_to( target ) != Creature::Attitude::HOSTILE ) {
             continue;
         }
-        const bool visible = writhing_stalker::can_observe_actor( stalker, other ) &&
+        const bool visible = ( reader ? writhing_stalker_watches( stalker, other, *reader ) :
+                               writhing_stalker::can_observe_actor( stalker, other ) ) &&
                              other.sees( here, target );
         const bool recent_attack = writhing_stalker::has_recent_observed_attack( &stalker, &other,
                                    &target, now, 3 );
@@ -854,7 +858,7 @@ std::size_t writhing_stalker::transient_pressure_sample_count()
 }
 
 static int writhing_stalker_allied_support_nearby( const monster &stalker, map &here,
-        const Creature &target )
+        const Creature &target, scout_observation::site_reader &reader )
 {
     const Character *target_character = target.as_character();
     if( target_character == nullptr ) {
@@ -868,7 +872,7 @@ static int writhing_stalker_allied_support_nearby( const monster &stalker, map &
         }
         if( guy.attitude_to( target ) == Creature::Attitude::FRIENDLY &&
             rl_dist( guy.pos_abs(), target.pos_abs() ) <= 6 && guy.sees( here, target ) &&
-            writhing_stalker::can_observe_actor( stalker, guy ) ) {
+            writhing_stalker_watches( stalker, guy, reader ) ) {
             ++support;
         }
     };
@@ -981,7 +985,8 @@ void writhing_stalker::record_counterpressure_attempt( monster &stalker,
 }
 
 static writhing_stalker::live_context writhing_stalker_live_context( monster &stalker,
-        map &here, Creature &target, const bool sees_target )
+        map &here, Creature &target, const bool sees_target,
+        scout_observation::site_reader &reader )
 {
     writhing_stalker::live_context ctx;
     const writhing_stalker::persistent_state &state = stalker.writhing_stalker_state();
@@ -1035,8 +1040,9 @@ static writhing_stalker::live_context writhing_stalker_live_context( monster &st
     ctx.forced_no_cover = ctx.direct_open_route_available && !ctx.cover_route_available &&
                           !ctx.edge_route_available;
     ctx.open_exposure = ctx.forced_no_cover;
-    ctx.zombie_pressure = writhing_stalker::observed_zombie_pressure( stalker, here, target );
-    ctx.allied_support_nearby = writhing_stalker_allied_support_nearby( stalker, here, target );
+    ctx.zombie_pressure = static_cast<int>( writhing_stalker_observe_pressure( stalker, here, target,
+                                          &reader ).size() );
+    ctx.allied_support_nearby = writhing_stalker_allied_support_nearby( stalker, here, target, reader );
     ctx.quiet_side_cutoff_available = ctx.zombie_pressure > 0 &&
                                       ( ctx.cover_route_available || ctx.edge_route_available );
     ctx.near_cover_or_clutter = writhing_stalker_has_cover_or_clutter( here, target_pos );
@@ -1581,28 +1587,34 @@ static bool apply_writhing_stalker_plan( monster &stalker, map &here, Creature &
     const int now_turn = to_turn<int>( calendar::turn );
     writhing_stalker::advance_active_work( stalker, now_turn );
     // A stale target pointer from mon_plan is not proof of current sight.
-    scout_observation::site_reader reader;
+    // Reuse physical inputs only through this synchronous observation phase.
+    // Evidence bookkeeping does not invalidate geometry/light; each native
+    // predicate still reads the current observer/target. No reader survives
+    // into action, destination/effect writes, movement or another plan.
+    std::optional<scout_observation::site_reader> reader( std::in_place );
     const Character *character = target.as_character();
-    const bool visible = character ? writhing_stalker_watches( stalker, *character, reader ) :
+    const bool visible = character ? writhing_stalker_watches( stalker, *character, *reader ) :
                          stalker.sees( here, target );
     if( visible ) {
         writhing_stalker_record_live_evidence( stalker, target );
     } else {
+        reader.reset();
         return apply_writhing_stalker_no_target_plan( stalker, here );
     }
     const auto perf_started = std::chrono::steady_clock::now();
     const writhing_stalker::live_context ctx = writhing_stalker_live_context( stalker, here, target,
-            visible );
+            visible, *reader );
     writhing_stalker::live_response response = writhing_stalker::evaluate_live_response( ctx );
     bool attacking_target = false;
     for( const monster &other : g->all_monsters() ) {
         if( &other != &stalker && other.type->in_species( species_ZOMBIE ) &&
             writhing_stalker::has_recent_observed_attack( &stalker, &other, &target, now_turn, 2 ) &&
-            writhing_stalker::can_observe_actor( stalker, other ) ) {
+            writhing_stalker_watches( stalker, other, *reader ) ) {
             attacking_target = true;
             break;
         }
     }
+    reader.reset();
     const bool opening = ( !ctx.target_in_bright_exposure && !ctx.stalker_in_bright_exposure &&
                            ctx.allied_support_nearby == 0 ) || attacking_target;
     if( !opening && ( response.next == writhing_stalker::decision::strike ||
