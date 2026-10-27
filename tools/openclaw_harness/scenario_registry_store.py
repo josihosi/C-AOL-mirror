@@ -1499,6 +1499,7 @@ def build_registry_query_candidate_snapshot(
                 "manifest": {
                     "manifest_id": manifest_id,
                     "name": declaration.get("name"),
+                    "catalogue": declaration.get("catalogue"),
                     "source_path": str(manifest["source_path"]),
                     "present": bool(manifest["present"]),
                     "revision": int(manifest["revision"]),

@@ -1,5 +1,7 @@
 # Long-running natural-play soak
 
+<!-- caol-catalogue-family: {"family_id":"natural-play-endurance","title":"Natural-play endurance","purpose":"Observe crashes, dispatch and performance across varied journeys and reloads.","kind":"maintained","starting_save":"Starting save not yet defined"} -->
+
 Owner-selected final batch under `R-REL-RELEASE-PLAYTESTS-S001`. Run after the planned
 mechanism/regression playtests. This is a broad crash, stuck-dispatch and performance-spike test, not another
 full assertion suite or proof of unobserved faction behavior.

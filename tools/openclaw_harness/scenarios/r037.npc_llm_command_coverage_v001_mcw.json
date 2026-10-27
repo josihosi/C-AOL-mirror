@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_coverage_v001_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "companion-commands", "family_title": "Companion commands", "family_purpose": "Observe model responses and their native action consequences.", "variant": "Local command coverage"},
   "description": "Companion command coverage from a prepared living camp: allied actor 2 is near the player with wearable, melee, firearm and bow equipment, ammunition and activation/drop candidates. One unowned pickup and one foreign-owned pickup are staged. Each command needs its own model response, native application and consequence.",
   "profile": "harness-npc-llm-coverage",
   "config_profile": "dev-harness",

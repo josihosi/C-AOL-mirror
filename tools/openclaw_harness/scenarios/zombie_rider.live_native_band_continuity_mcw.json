@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_band_continuity_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "rider-pursuit", "family_title": "Rider pursuit and contact", "family_purpose": "Observe rider movement, attack and continuity.", "variant": "Two-rider sight-loss continuity"},
   "description": "Rider sight-loss continuation from McWilliams: two tagged hostile riders occupy reciprocal east lanes, but only the east rider sees the avatar. A two-by-two southeast wall screen preserves rider-to-rider sight and a route; a native southward path tests loss of sight and later pressure without replaying persistence.",
   "profile": "rider-band-continuity-001",
   "world": "McWilliams",

@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_hunt_continuity_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "rider-pursuit", "family_title": "Rider pursuit and contact", "family_purpose": "Observe rider movement, attack and continuity.", "variant": "Single-rider pursuit and reload"},
   "description": "Rider pursuit and reload from an open McWilliams approach: a full-health player and one hostile finite-ammunition rider start on the same level, ten tiles east and four south. Observe firing, approach, sight loss and typed pursuit state through native save/reload.",
   "profile": "dev-harness",
   "world": "McWilliams",

@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.camp_defense_shakedown_v004_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "camp-payment-defense", "family_title": "Camp payment and defense", "family_purpose": "Observe camp-stock payment, patrol and defense through native play.", "variant": "Shakedown defense"},
   "description": "Camp defense against a bandit shakedown, continuing the saved R032 Locker camp at 162,36. Character 25 and nearby storage remain; the fixture adds ten RobofacCoin in follower storage 31 map squares east. Set character 25’s patrol-only priority before creating CAMP_PATROL; orders, dispatch, contact and outcome remain native.",
   "profile": "r032-camp-defense-shakedown-exp008-20260924",
   "config_profile": "dev-harness",

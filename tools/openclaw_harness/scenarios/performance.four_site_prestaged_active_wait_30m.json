@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.four_site_prestaged_active_wait_30m",
+  "catalogue": {"kind": "diagnostic", "family_id": "mixed-load-controls", "family_title": "Mixed-world workload controls", "family_purpose": "Measure staged active workloads and native behavior separately from natural journeys.", "variant": "Four-site prestaged workload"},
   "description": "Manufactured four-site performance test from the McWilliams extortion save at turn 5241593. Player 140,39; bandit camp 140,51; cannibal camps 150,39, 130,39 and 140,29. Four bandits and three cannibal pairs are prepared at their homes; all 16 inherited human bodies are preserved. In component tests all ten selected bodies moved and retained ownership across save/reload; live workload and timing remain unqualified. The earlier 05c67 ownership rejection was from the old fixture; see four-site-checkpoint.prepared.json.",
   "profile": "four-site-metrics",
   "world": "McWilliams",

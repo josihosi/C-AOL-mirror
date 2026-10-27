@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.camp_payment_return_v001_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "camp-payment-defense", "family_title": "Camp payment and defense", "family_purpose": "Observe camp-stock payment, patrol and defense through native play.", "variant": "Camp-stock payment and return"},
   "description": "Bandit payment and return from the saved R032 Locker camp at 162,36. Character 25 and nearby storage remain; ten RobofacCoin are placed in follower storage 31 map squares east. The setup creates no bandit lead or encounter; payment, departure and renewed contact require native play.",
   "profile": "r032-camp-payment-return-exp001-20260924",
   "config_profile": "dev-harness",

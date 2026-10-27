@@ -468,7 +468,7 @@ def require_payload(
     require((harness.parent / "requirements.txt").is_file(), "missing tools/openclaw_harness/requirements.txt")
 
     proc = subprocess.run(
-        [sys.executable, str(harness), "list-scenarios"],
+        [sys.executable, str(harness), "list-scenarios", "--all"],
         cwd=str(game_root),
         capture_output=True,
         text=True,

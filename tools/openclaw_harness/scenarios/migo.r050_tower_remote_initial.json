@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "migo.r050_tower_remote_initial",
+  "catalogue": {"kind": "maintained", "family_id": "migo-tower-journey", "family_title": "Mi-go tower signal and response", "family_purpose": "Observe a real source, tower response and physical journey.", "variant": "Pre-signal tower"},
   "setup_classification": {
     "kind": "representative_native_prepared_initial",
     "pre_signal_scope": "mi-go-tower:(145,134,0); no tower director site/operation/lead before source activation",

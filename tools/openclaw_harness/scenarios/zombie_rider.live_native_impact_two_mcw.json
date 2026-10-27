@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_impact_two_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "rider-pursuit", "family_title": "Rider pursuit and contact", "family_purpose": "Observe rider movement, attack and continuity.", "variant": "Two-rider contact"},
   "description": "Two-rider impact test from McWilliams: a full-health armored player faces two hostile riders on separate three-tile approaches, with finite bow ammunition and no setup-time movement. Observe closing, impact, cooldown, re-approach and independent attack arbitration.",
   "profile": "dev-harness",
   "world": "McWilliams",

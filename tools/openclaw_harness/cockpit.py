@@ -44,7 +44,7 @@ from playtest_witness import (
 )
 
 _FORBIDDEN = {"token", "tokens", "token_id", "query_sha256", "offset", "offsets", "candidate_offsets", "pid", "pids", "ocr", "logs", "raw_logs", "physical_key", "physical_keys", "source_path", "draft_path", "manual", "full_manual", "executable", "executables", "executable_path", "manifest_sha256", "hash", "hashes", "sha256", "path", "paths", "key", "subprocess"}
-_ALLOWED = {"action", "frontier", "capability", "scenario", "requirements", "preferences", "id", "name", "detail", "declaration", "world", "required_typeid", "candidate_offsets", "player_save", "handle", "observation_id", "action_id", "stable_id", "parameters", "recovery", "run_id", "scenario_id", "selection_id", "binding_id", "blocked_intent", "missing_kind", "evidence", "reusable_outcome", "affected_scenarios", "expected_signal", "bound", "stop_reason", "unused_authority", "wait", "keep_watch", "raw_wait", "move_relative", "raw_move_relative", "guarded_move_relative", "player_fire_setup", "r019_acceptance_matrix", "witness", "witness_statement", "outcome", "target_delta_game_minutes", "abort"}
+_ALLOWED = {"action", "frontier", "capability", "scenario", "requirements", "preferences", "id", "name", "detail", "declaration", "world", "required_typeid", "candidate_offsets", "player_save", "handle", "observation_id", "action_id", "stable_id", "parameters", "recovery", "run_id", "scenario_id", "selection_id", "binding_id", "blocked_intent", "missing_kind", "evidence", "reusable_outcome", "affected_scenarios", "expected_signal", "bound", "stop_reason", "unused_authority", "wait", "keep_watch", "raw_wait", "move_relative", "raw_move_relative", "guarded_move_relative", "player_fire_setup", "r019_acceptance_matrix", "witness", "witness_statement", "outcome", "target_delta_game_minutes", "abort", "family", "view", "search"}
 
 _DANGER_HANDLING_MODES = {
     "stop_on_interruption",
@@ -4482,6 +4482,15 @@ class CockpitService:
                         fixture_install=fixture_install,
                     )
                     return {"ok": True, "result": _public(result)}
+                if action == "scenario.browse" or (action == "scenario" and not any(
+                        request.get(key) for key in ("requirements", "preferences", "scenario_id", "id"))):
+                    from catalogue_view import family_view, recipe_families
+                    view = str(request.get("view", "maintained"))
+                    result = family_view(startup_harness.list_scenarios(), kind=view,
+                                         family=str(request.get("family", "")),
+                                         search=str(request.get("search", "")),
+                                         recipes=recipe_families(startup_harness.repo_root() / ".agents" / "skills" / "caol-harness" / "references"))
+                    return {"ok": True, "result": _public({"kind": "scenario_families", **result})}
                 kind = request.get("capability") or request.get("scenario")
                 if action in {"capability", "capability_search", "capability_summary"}:
                     kind = "capability"
@@ -4490,14 +4499,18 @@ class CockpitService:
                 if kind is None:
                     return {"ok": False, "error": "one continuation is required"}
                 query = {"requirements": request.get("requirements", []), "preferences": request.get("preferences", [])}
-                execution = execute_registry_query(connection, parse_registry_query_request(query))
+                selected_id = str(request.get("scenario_id", request.get("id", ""))).strip() if action == "scenario.select" else ""
+                execution = execute_registry_query(connection, parse_registry_query_request(query), **(
+                    {"scenario_id": selected_id} if selected_id else {}))
                 candidates = execution.evaluation.candidates
                 rows = [{"id": c.scenario_id, "facts": _public(c.facts), "lifecycle": c.lifecycle_state}
                         for c in candidates]
-                selected = rows[0] if rows else None
+                selected = next((row for row in rows if row["id"] == getattr(execution, "selected_scenario_id", None)), None)
+                if selected is None and not selected_id:
+                    selected = rows[0] if rows else None
                 result: Dict[str, Any] = {"kind": "capability" if request.get("capability") else "scenario", "matches": rows}
                 if request.get("detail") and selected:
-                    snap = candidates[0]
+                    snap = next(c for c in candidates if c.scenario_id == selected["id"])
                     result["detail"] = _public(snap.explanation)
                 if action == "scenario.select" and execution.selection_id:
                     selection = connection.execute(
@@ -4507,6 +4520,7 @@ class CockpitService:
                     if selection is not None:
                         result["selection"] = {
                             "id": execution.selection_id,
+                            "scenario_id": execution.selected_scenario_id,
                             "fit_reason": str(selection["fit_reason"]),
                             "evidence_effect": "none_for_manufactured_state",
                         }

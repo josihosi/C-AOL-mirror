@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r050_representative_remote_reach_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "human-signal-journeys", "family_title": "Human signal and scout journeys", "family_purpose": "Trace real signal discovery, scouting, report and response.", "variant": "Rural field, 11-OMT minimum-distance control"},
   "setup_classification": {
     "kind": "representative_candidate",
     "native_source_qualified": false,

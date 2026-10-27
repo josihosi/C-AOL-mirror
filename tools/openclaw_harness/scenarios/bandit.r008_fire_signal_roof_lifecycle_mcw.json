@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r008_fire_signal_roof_lifecycle_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "human-signal-journeys", "family_title": "Human signal and scout journeys", "family_purpose": "Trace real signal discovery, scouting, report and response.", "variant": "Roof fire, 20-OMT nearest home"},
   "setup_classification": {"kind": "representative_candidate", "native_source_qualified": false, "native_prepared_save_adopted": false},
   "description": "Representative R008 bandit roof journey with unchanged source140,31 and nearest full home edge20 verified after all inherited transforms; native source reach and adoption must still qualify.",
   "profile": "dev-harness",

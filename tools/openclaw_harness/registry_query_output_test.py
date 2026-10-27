@@ -15,6 +15,7 @@ import scenario_registry_cli as cli
 import scenario_registry_cli_test as fixtures
 import evidence_display
 from registry_query_output import _compact_candidate_detail, _run_observation, plain_registry_output, query_page
+from scenario_registry_store import manifest_identity
 
 
 class RegistryQueryOutputTest(unittest.TestCase):
@@ -148,11 +149,22 @@ class RegistryQueryOutputTest(unittest.TestCase):
     def test_query_preserves_build_and_binding_metadata(self):
         readiness = {"status": "ready", "build_entrypoint": {"argv": ["python", "verified-builder.py"]},
                      "executable_sha256": "a" * 64, "product_source_sha256": "b" * 64}
+        root = self.root / "ready-selection"
+        root.mkdir()
+        registry, scenarios, _ = fixtures.ScenarioRegistryCliTest().issue_selection_token(root)
+        identity = manifest_identity(scenarios / "cli.json")
+        binding = {"schema": 1, "executable_path": str(root / "cataclysm-tiles"),
+                   "executable_sha256": "a" * 64, "runtime_source_sha256": "b" * 64}
+        query = {"requirements": [{"key": "player.injured", "op": "eq", "value": False,
+                                    "minimum_evidence": "declared"}], "preferences": []}
         out = io.StringIO()
-        with redirect_stdout(out), mock.patch.object(cli, "_current_source_executable_readiness", return_value=readiness):
-            self.assertEqual(cli.main(["--json", "--registry", str(self.registry), "registry-query", "--query-json", json.dumps({"requirements": [], "preferences": []})]), 0)
-        projected = json.loads(out.getvalue())["result"]["source_executable_readiness"]
-        self.assertEqual(projected, readiness)
+        with redirect_stdout(out), mock.patch.object(cli, "_resolve_run_build", return_value=binding), \
+                mock.patch.object(cli, "_current_source_executable_readiness", return_value=readiness) as check:
+            self.assertEqual(cli.main(["--json", "--registry", str(registry), "registry-query", "--scenario-id", identity, "--query-json", json.dumps(query)]), 0)
+        result = json.loads(out.getvalue())["result"]
+        self.assertEqual(result["selected_scenario_id"], identity)
+        self.assertEqual(result["source_executable_readiness"], readiness)
+        check.assert_called_once()
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -222,12 +234,15 @@ class RegistryQueryOutputTest(unittest.TestCase):
         self.registry, self.scenarios, issued_token = helper.issue_selection_token(root)
         (self.scenarios / "cli.registry.fixture.json").write_bytes((self.scenarios / "cli.json").read_bytes())
         result = self.query()["result"]
-        self.assertEqual(result["token_id"], issued_token)
-        before = helper.token_events(self.registry, issued_token)
+        query_token = result["token_id"]
+        self.assertIsNotNone(query_token)
+        before = helper.token_events(self.registry, query_token)
+        original_before = helper.token_events(self.registry, issued_token)
         page = self.call("registry-query-page", "--sha256", result["artifact"]["sha256"],
                          "--offset", "1")["result"]
-        self.assertEqual(page["token_id"], issued_token)
-        self.assertEqual(helper.token_events(self.registry, issued_token), before)
+        self.assertEqual(page["token_id"], query_token)
+        self.assertEqual(helper.token_events(self.registry, query_token), before)
+        self.assertEqual(helper.token_events(self.registry, issued_token), original_before)
 
     def test_full_recovery_is_exact_and_tampering_is_rejected(self):
         result = self.query()["result"]

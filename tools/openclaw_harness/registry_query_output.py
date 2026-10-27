@@ -38,7 +38,16 @@ def plain_registry_output(value: Mapping[str, Any]) -> str | None:
     if value.get("command") == "registry-query":
         candidates = result.get("candidates", [])
         lines = []
+        previous_family = None
         for candidate in candidates:
+            catalogue = candidate.get("catalogue")
+            if isinstance(catalogue, Mapping) and catalogue.get("family_title"):
+                family = str(catalogue["family_title"])
+                if family != previous_family:
+                    lines.append("Family: " + family + (" (diagnostic)" if catalogue.get("kind") == "diagnostic" else ""))
+                previous_family = family
+            else:
+                previous_family = None
             name = candidate.get("name") or candidate.get("source_path") or candidate["scenario_id"]
             selected = candidate.get("scenario_id") == result.get("selected_scenario_id")
             lines.append(("Selected: " if selected else "Candidate: ") + str(name))
@@ -334,6 +343,7 @@ def query_page(payload: Mapping[str, Any], receipt: Mapping[str, Any], *,
         candidates.append({
             "rank": ranks.get(identity),
             "scenario_id": identity, "name": manifest.get("name"),
+            "catalogue": manifest.get("catalogue"),
             "revision": manifest.get("revision"), "manifest_sha256": manifest.get("sha256"),
             "source_path": manifest.get("source_path"),
             "lifecycle_state": snapshot["lifecycle_state"],

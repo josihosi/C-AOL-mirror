@@ -33064,10 +33064,12 @@ def scenario_blocker_info(scenario: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_scenarios() -> List[Dict[str, Any]]:
+    from scenario_registry_store import manifest_identity
     root = scenarios_root()
     if not root.exists():
         return []
     scenarios = []
+    fixture_manifests: Dict[Path, Dict[str, Any]] = {}
     for path in sorted(root.glob("*.json"), key=lambda p: p.name.lower()):
         loaded = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
@@ -33093,9 +33095,42 @@ def list_scenarios() -> List[Dict[str, Any]]:
                 },
             }
         blocker_info = scenario_blocker_info(loaded)
+        catalogue = loaded.get("catalogue")
+        membership = catalogue.get("kind", "unknown") if isinstance(catalogue, dict) else "unknown"
+        if membership not in {"maintained", "diagnostic", "historical", "continuation"}:
+            membership = "unknown"
+        if membership in {"maintained", "diagnostic"} and any(
+                not isinstance(catalogue.get(key), str) or not catalogue[key].strip()
+                for key in ("family_id", "family_title", "family_purpose", "variant")):
+            membership = "unknown"
+        fixture_name = str(loaded.get("fixture", ""))
+        fixture_profile = str(loaded.get("fixture_profile") or loaded.get("profile") or "")
+        fixture_manifest = profile_fixture_root(fixture_profile) / fixture_name / "manifest.json" if fixture_name else None
+        present = fixture_manifest.is_file() if fixture_manifest else None
+        fixture_data: Dict[str, Any] = {}
+        if fixture_manifest and present:
+            if fixture_manifest not in fixture_manifests:
+                try:
+                    value = json.loads(fixture_manifest.read_text(encoding="utf-8"))
+                    fixture_manifests[fixture_manifest] = value if isinstance(value, dict) else {}
+                except (OSError, ValueError):
+                    fixture_manifests[fixture_manifest] = {}
+            fixture_data = fixture_manifests[fixture_manifest]
         scenarios.append({
             "name": str(loaded.get("name", path.stem)),
             "path": str(path),
+            "scenario_id": manifest_identity(path),
+            "catalogue": copy.deepcopy(loaded.get("catalogue")),
+            "membership": membership,
+            "fixture": {
+                "name": fixture_name,
+                "profile": fixture_profile,
+                "manifest_path": str(fixture_manifest) if fixture_manifest else "",
+                "manifest_present": present,
+                "source_fixture": str(fixture_data.get("source_fixture", "")),
+                "source_profile": str(fixture_data.get("source_profile") or fixture_profile) if fixture_data.get("source_fixture") else "",
+                "qualification": "unknown",
+            },
             "description": str(loaded.get("description", "")).strip(),
             "artifact_source": str(loaded.get("artifact_source", "debug.log")).strip() or "debug.log",
             "step_count": len(loaded.get("steps", [])) if isinstance(loaded.get("steps"), list) else 0,
@@ -44948,6 +44983,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_p = subparsers.add_parser("list-fixtures", help="List harness-owned save fixtures for a profile.")
     list_p.add_argument("--profile", default="", help="Profile name (defaults to sanitized current branch).")
+    list_p.add_argument("--all", action="store_true", help="Include every fixture, including unlinked historical inputs.")
+    list_p.add_argument("--diagnostic", action="store_true", help="Show fixtures declared by diagnostic controls.")
 
     capture_p = subparsers.add_parser("capture-fixture", help="Capture a world save into harness-owned fixture storage.")
     capture_p.add_argument("fixture", help="Fixture name to create/update.")
@@ -44972,6 +45009,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     scenarios_p = subparsers.add_parser("list-scenarios", help="List packaged live-probe scenario contracts.")
     scenarios_p.add_argument("--profile", default="", help="Ignored today; reserved for future per-profile scenario filtering.")
+    scenarios_p.add_argument("--all", action="store_true", help="Include historical, diagnostic and unclassified declarations.")
+    scenarios_p.add_argument("--diagnostic", action="store_true", help="Show maintained diagnostic controls.")
+    scenarios_p.add_argument("--family", default="", help="Expand one exact family ID.")
+    scenarios_p.add_argument("--search", default="", help="Search all declarations by name, description or family.")
+    scenarios_p.add_argument("--scenario-id", default="", help="Inspect one exact registry scenario ID or name.")
 
     probe_p = subparsers.add_parser("probe", help="Run a packaged live-probe scenario contract.")
     probe_p.add_argument("scenario", help="Scenario name, e.g. locker.weather_wait")
@@ -45105,7 +45147,25 @@ def main() -> int:
         return run_startup(args)
     if args.command == "list-fixtures":
         profile = resolve_profile_name(args.profile)
-        print(json.dumps({"profile": profile, "fixtures": list_fixtures(profile)}, indent=2, ensure_ascii=False))
+        fixtures = list_fixtures(profile)
+        links: Dict[str, List[Dict[str, str]]] = {}
+        for scenario in list_scenarios():
+            metadata = scenario.get("catalogue")
+            footing = scenario["fixture"]
+            if isinstance(metadata, dict) and scenario["membership"] in {"maintained", "diagnostic"} and footing["profile"] == profile:
+                links.setdefault(footing["name"], []).append({
+                    "scenario_id": scenario["scenario_id"], "name": scenario["name"],
+                    "family_id": metadata["family_id"], "kind": metadata["kind"],
+                })
+        for fixture in fixtures:
+            fixture["declared_variants"] = links.get(fixture["fixture"], [])
+            fixture["manifest_present"] = (Path(fixture["path"]) / "manifest.json").is_file()
+            fixture["qualification"] = "unknown"
+        if not args.all:
+            fixtures = [fixture for fixture in fixtures if any(
+                item["kind"] == ("diagnostic" if args.diagnostic else "maintained")
+                for item in fixture["declared_variants"])]
+        print(json.dumps({"profile": profile, "fixtures": fixtures}, indent=2, ensure_ascii=False))
         return 0
     if args.command == "capture-fixture":
         profile = resolve_profile_name(args.profile)
@@ -45131,7 +45191,20 @@ def main() -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     if args.command == "list-scenarios":
-        print(json.dumps({"scenarios": list_scenarios()}, indent=2, ensure_ascii=False))
+        from catalogue_view import family_view, recipe_families
+        scenarios = list_scenarios()
+        if args.scenario_id:
+            matches = [item for item in scenarios if args.scenario_id in (item["name"], item["scenario_id"])]
+            if len(matches) != 1:
+                raise SystemExit("Scenario identity is missing or ambiguous")
+            result = {"scenarios": matches}
+        elif args.all and not args.search and not args.family:
+            result = {"scenarios": scenarios}
+        else:
+            kind = "all" if args.all or args.search else "diagnostic" if args.diagnostic else "maintained"
+            recipes = recipe_families(repo_root() / ".agents" / "skills" / "caol-harness" / "references")
+            result = family_view(scenarios, kind=kind, family=args.family, search=args.search, recipes=recipes)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     if args.command == "probe":
         return run_probe(args)

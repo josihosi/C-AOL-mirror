@@ -811,6 +811,18 @@ def validate_manifest(manifest: Any, *, path: Path) -> Dict[str, Any]:
     if not isinstance(source_manifest, dict) or source_manifest != manifest:
         raise _error(path, "provided declaration does not match the source bytes")
 
+    catalogue = manifest.get("catalogue")
+    if catalogue is not None:
+        if not isinstance(catalogue, dict):
+            raise _error(path, "catalogue must be an object")
+        kind = catalogue.get("kind")
+        if kind not in ("maintained", "diagnostic", "historical", "continuation"):
+            raise _error(path, "catalogue.kind is invalid")
+        if kind in ("maintained", "diagnostic"):
+            for field in ("family_id", "family_title", "family_purpose", "variant"):
+                if not isinstance(catalogue.get(field), str) or not catalogue[field].strip():
+                    raise _error(path, "catalogue." + field + " must be a non-empty string")
+
     _validate_post_relaunch_reference(manifest, path=path)
     _validate_saved_world_start(manifest, path=path)
     _validate_performance_contract(manifest, path=path)

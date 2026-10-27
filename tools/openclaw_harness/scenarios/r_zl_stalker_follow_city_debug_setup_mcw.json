@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r_zl_stalker_follow_city_debug_setup_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "stalker-pursuit", "family_title": "Stalker pursuit", "family_purpose": "Observe stalking and pursuit as the player moves through the world.", "variant": "City following after one setup spawn"},
   "description": "Hybrid closure account: a single, explicitly zero-credit native debug spawn installs one writhing stalker into a fresh disposable copy of the natively-cleaned City-042 world. All following, city-zombie pressure, and any attack attempt must then arise through same-world native play.",
   "profile": "r-zl-stalker-follow-city-debug-setup-012",
   "world": "zl-natural-stalker-city-042-missed",

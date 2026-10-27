@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_050_rural_roof_bandit_only",
+  "catalogue": {"kind": "maintained", "family_id": "human-signal-journeys", "family_title": "Human signal and scout journeys", "family_purpose": "Trace real signal discovery, scouting, report and response.", "variant": "Rural field, bandit homes"},
   "setup_classification": {"kind": "representative_candidate", "native_source_qualified": false, "native_prepared_save_adopted": false},
   "description": "R050 representative bandit journey from a pre-signal save: the recipe moves the initial player to existing field 145,149,0 while preserving both homes, terrain and rosters. Establish a real source and measure native range and reload; no emission or response is supplied. The old roof at 131,143 is a separate control.",
   "profile": "first-smoke-050-rural-bandit-only-20260930",

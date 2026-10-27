@@ -1,6 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_api_control_v001_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "companion-commands", "family_title": "Companion commands", "family_purpose": "Observe model responses and their native action consequences.", "variant": "API command control"},
   "description": "R-037 same-case API control route. It uses the same disposable safe fixture and native semantic session as the local E4B route, but requests only OpenAI gpt-4.1-mini through the harness child-only secure credential provisioner. API results remain independent from E4B verdicts.",
   "profile": "harness-npc-llm-coverage",
   "config_profile": "dev-harness",

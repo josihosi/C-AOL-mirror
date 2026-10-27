@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.mixed_hostile_stalker_horde_mcw",
+  "catalogue": {"kind": "diagnostic", "family_id": "mixed-load-controls", "family_title": "Mixed-world workload controls", "family_purpose": "Measure staged active workloads and native behavior separately from natural journeys.", "variant": "Mixed hostile, stalker and horde workload"},
   "description": "Manufactured close mixed performance test from McWilliams: four bandits and two cannibals are prepared alongside Mi-go encampment terrain, a stalker and a horde. Eight other home members and two unrelated NPCs remain distinct. Mi-go actors must be generated after load. A prior 1,800-turn interval reported six humans travelling with local Mi-go work and reload; watch, horde activity and scaling remain unproved. See root-four-site-return-checkpoint.prepared.json.",
   "profile": "mixed-hostile-metrics",
   "world": "McWilliams",

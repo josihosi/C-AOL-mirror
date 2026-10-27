@@ -1,6 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.camp_defense_zombie_v003_mcw",
+  "catalogue": {"kind": "maintained", "family_id": "camp-payment-defense", "family_title": "Camp payment and defense", "family_purpose": "Observe camp-stock payment, patrol and defense through native play.", "variant": "Zombie patrol defense"},
   "description": "Camp defense against zombies from the saved R032 Locker world: the Assignment Camp and character 25 are retained. No patrol order, zombie, bandit or inventory change is supplied; set up patrol and observe defense through native play.",
   "profile": "r032-camp-defense-zombie-exp003-20260924",
   "config_profile": "dev-harness",

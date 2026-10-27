@@ -4,6 +4,20 @@ Current playtest practice starts at [the living game manual](../../.agents/skill
 
 _Practical control notes for automation. Not a full CDDA controls manual; only the stuff we actually care about for harness authoring._
 
+## Find a playtest
+
+`python3 tools/openclaw_harness/startup_harness.py list-scenarios` shows maintained families.
+Use `--family FAMILY_ID` for the exact variants and their declared fixture owners; `--diagnostic`
+shows maintained controls. `--search TEXT` searches all packaged declarations, and `--all`
+retains the complete flat list. `--scenario-id ID` inspects one exact registry ID or unique name.
+The cockpit offers `scenario.browse` with `family`, `view` (`maintained`, `diagnostic`, or `all`)
+and `search`; `scenario.select` accepts the returned `scenario_id` and typed requirements.
+Use `list-fixtures --profile PROFILE` for fixture declarations linked to maintained variants,
+or add `--diagnostic` or `--all` for broader inspection. A present manifest is not a validated
+save; membership is not a build, fixture or gameplay qualification. A recipe-only family has
+no selectable variant until an actual start is declared. For launch, pass the exact variant ID
+and the actual requirements through the existing registry query and follow its decision.
+
 ## Principles
 - These are **pragmatic automation notes**, not authoritative game documentation.
 - Context matters. The same key may do something slightly different depending on UI state, quest prompts, nearby NPCs, or branch-specific menu differences.
