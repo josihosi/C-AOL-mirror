@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r021_repaired_clean_closed_smoke_regression",
-  "description": "R011 independent fresh closed smoke regression on immutable source-bound R021 build; controlled camp geometry remains disclosed setup.",
+  "description": "Historical recipe: R011 independent fresh closed smoke regression on immutable source-bound R021 build; controlled camp geometry remains disclosed setup. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r021-closed-smoke-regression-20260928",
   "world": "TestSetup00",
   "observer_character": true,

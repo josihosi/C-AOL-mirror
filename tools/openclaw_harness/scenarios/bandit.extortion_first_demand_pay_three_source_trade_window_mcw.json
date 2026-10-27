@@ -1,6 +1,6 @@
 {
   "name": "bandit.extortion_first_demand_pay_three_source_trade_window_mcw",
-  "description": "Bandit shakedown Pay proof: choose Pay, keep the actual NPC trade UI open, prove distinct player/basecamp-NPC/basecamp-storage payment markers, then satisfy the debt through the same trade offer.",
+  "description": "Bandit Pay trade from a local-contact fixture with three payment markers: player binoculars, a camp NPC’s saxophone and 200 follower-owned gold watches in CAMP_STORAGE. Open the native trade window, compare the three sources and satisfy the actual debt through the same offer.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_pay_trade_pool_markers_v0_2026-05-03",

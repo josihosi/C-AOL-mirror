@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r019.keep_watch_meaningful_event_validation_mcw",
-  "description": "Fresh, separately authorized R-019 guarded-stop validation. It consumes the already-proved staged hostile-sighting fixture but has its own registry authority and immutable report. The first hostile-sighting classification must stop Keep watch before any unsafe continuation.",
+  "description": "R019 guarded-stop validation using the staged hostile dog six map squares east in a clean wait fixture. A separate native run must classify the first sighting and stop Keep watch before unsafe continuation; fixture setup is not the result.",
   "profile": "r009-m095",
   "config_profile": "dev-harness",
   "world": "McWilliams",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.extortion_committed_contact_bootstrap_mcw",
-  "description": "Bootstrap one ordinary production cadence from the current-executable R-009 pre-opportunity McWilliams save, then perform a normal full save and capture the resulting world for the next committed-contact setup stage. The dedicated profile deliberately sends no post-load Return key because this build binds Return to the Actions menu; this route never rewrites a save or authoritatively invents hostile state.",
+  "description": "Bootstrap one ordinary production cadence from the current-executable R-009 pre-opportunity McWilliams save, then perform a normal full save and capture the resulting world for the next committed-contact setup stage. The dedicated profile deliberately sends no post-load Return key because this build binds Return to the Actions menu; the fixture adds observer debug traits, but does not author hostile state.",
   "profile": "r009-m068",
   "world": "McWilliams",
   "fixture": "r009_m059_preopportunity_bootstrap",

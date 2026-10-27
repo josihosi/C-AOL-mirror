@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r013.cockpit_transaction_bootstrap_mcw",
-  "description": "Zero-credit R-013 setup route.  It binds the source fixture, reaches a clean ordinary gameplay frame, and stops after the authorized public wait exposes the native activity interruption.  It does not dispatch recovery.",
+  "description": "R013 wait-transaction setup: the fixture clears inherited monsters and stages one hostile zombie dog six map squares east. Reach World and stop when the public wait exposes an activity interruption; do not dispatch recovery.",
   "profile": "r009-m095",
   "world": "McWilliams",
   "fixture": "r013_wait_activity_interrupt_bootstrap_v1",

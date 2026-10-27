@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r_zl_stalker_natural_opportunity_012_mcw",
-  "description": "Fresh ordinary current-source account for a player-visible urban or town-edge night opportunity. It installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The route, if any, is selected only from the native frames after ordinary generation.",
+  "description": "Historical recipe: Fresh ordinary current-source account for a player-visible urban or town-edge night opportunity. It installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The route, if any, is selected only from the native frames after ordinary generation. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "zl-stalker-opportunity-012",
   "world": "zl-stalker-opportunity-012-world",
   "capabilities": {"runtime.entry_mode": "cockpit_live_session", "capabilities.r_zl_playtest.natural_stalker_opportunism": "fresh_ordinary_native_account"},

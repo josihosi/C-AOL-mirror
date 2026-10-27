@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r026_min8597_short_trace_build106fcec6_20260928",
-  "description": "One bounded trace-enabled native continuation from a new byte-exact disposable copy of the R024 min8597 committed-contact checkpoint on the R026 repair build.",
+  "description": "Historical recipe: One bounded trace-enabled native continuation from a new byte-exact disposable copy of the R024 min8597 committed-contact checkpoint on the R026 repair build. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-026-r026-min8597-short-trace-20260928",
   "world": "TestSetup00",
   "observer_character": true,

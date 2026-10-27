@@ -1,6 +1,6 @@
 {
   "name": "zombie_rider.live_no_camp_light_control_mcw",
-  "description": "Live camp-light negative-control rider row: same mature-world/two-rider footing as the positive camp-light row, but no staged fire fields. The bounded live window must not emit the bandit horde-light signal or zombie-rider camp-light convergence trace.",
+  "description": "No-fire control for the mature midnight camp-light setup: the same two hostile riders are staged and human NPC targets removed, but no fire or light fields are added. Observe whether light-signal and convergence traces remain absent.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

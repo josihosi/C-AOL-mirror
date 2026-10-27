@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r038_min9065_roof_approach_stairs_20260929",
-  "description": "Fresh R038 native continuation from exact min9065 roof report: observe selected hostile party, connected ground approach, real doorway and stairs, upstairs search and combat; safe-wait only for real prompts.",
+  "description": "Historical recipe: Fresh R038 native continuation from exact min9065 roof report: observe selected hostile party, connected ground approach, real doorway and stairs, upstairs search and combat; safe-wait only for real prompts. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-038-r038-roof-response-20260929",
   "world": "TestSetup00",
   "observer_character": true,

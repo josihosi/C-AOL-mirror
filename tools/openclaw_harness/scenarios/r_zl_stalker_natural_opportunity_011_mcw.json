@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r_zl_stalker_natural_opportunity_011_mcw",
-  "description": "Fresh ordinary current-source rerun after run010 identified safe-mode route use rather than a movement obstruction. It installs no fixture and makes no actor, attention, contact, attack, time, or route intervention.",
+  "description": "Historical recipe: Fresh ordinary current-source rerun after run010 identified safe-mode route use rather than a movement obstruction. It installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "zl-stalker-opportunity-011",
   "world": "zl-stalker-opportunity-011-world",
   "capabilities": {"runtime.entry_mode": "cockpit_live_session", "capabilities.r_zl_playtest.natural_stalker_opportunism": "fresh_ordinary_native_account"},

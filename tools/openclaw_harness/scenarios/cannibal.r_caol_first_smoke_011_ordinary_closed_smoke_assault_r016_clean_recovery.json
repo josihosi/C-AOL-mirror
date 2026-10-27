@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_ordinary_closed_smoke_assault_r016_clean_recovery",
-  "description": "R016 clean full-dependency rebuild recovery check for the R011 ordinary-view closed-window smoke-to-cannibal-assault arm, from a 45-file byte-exact prelaunch save copy.",
+  "description": "Historical recipe: R016 clean full-dependency rebuild recovery check for the R011 ordinary-view closed-window smoke-to-cannibal-assault arm, from a 45-file byte-exact prelaunch save copy. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-016-r011-clean-retry-20260927",
   "world": "TestSetup00",
   "observer_character": true,

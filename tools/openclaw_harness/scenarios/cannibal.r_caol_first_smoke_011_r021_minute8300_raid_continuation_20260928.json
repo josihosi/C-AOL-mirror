@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r021_minute8300_raid_continuation_20260928",
-  "description": "Separate R021 run on a byte-exact disposable copy of saved minute8300/turn5250037; continue admitted raid operation hostile:2 toward native night approach/contact.",
+  "description": "Historical recipe: Separate R021 run on a byte-exact disposable copy of saved minute8300/turn5250037; continue admitted raid operation hostile:2 toward native night approach/contact. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r021-minute8300-continuation-20260928",
   "world": "TestSetup00",
   "observer_character": true,

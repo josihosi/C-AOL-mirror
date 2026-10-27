@@ -1,6 +1,6 @@
 {
   "name": "manual.phase4_ecology_observer_mcw",
-  "description": "One-command manual ecology-observer handoff on the Phase-4 structural signal footing. Fixture installation keeps inherited DEBUG_CLOAK and adds exactly DEBUG_CLAIRVOYANCE, then the launch-only handoff starts McWilliams without scripted gameplay input. Ordinary starts and source fixtures are untouched.",
+  "description": "Manual Phase-4 ecology-observer handoff from the structural signal fixture: player starts on road 137,48,0 with fitted outdoor clothing, full health, needs and temperature controls. The fixture declares ordinary hostile perception and no clairvoyance. The harness launches without scripted gameplay input.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_phase4_ecology_observer_handoff_v0_2026-08-05",

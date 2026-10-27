@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_020_clean_roof_combined_light_smoke_assault",
-  "description": "R020 independent ordinary-view combined roof-fire light-plus-smoke cannibal arm from clean closed-window prepared save; camp geometry remains controlled setup.",
+  "description": "Historical recipe: R020 independent ordinary-view combined roof-fire light-plus-smoke cannibal arm from clean closed-window prepared save; camp geometry remains controlled setup. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-020-clean-roof-combined-20260928",
   "world": "TestSetup00",
   "observer_character": true,

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.extortion_committed_contact_movement_seed_route_confirm_mcw",
-  "description": "Superseding R-009 seed route: ordinary overmap pan plus the game's documented two-step efficient-route confirmation reaches the M061 basecamp-adjacent footing before native Save-and-Quit. No fixture data is transformed.",
+  "description": "Superseding R-009 seed route: ordinary overmap pan plus the game's documented two-step efficient-route confirmation reaches the M061 basecamp-adjacent footing before native Save-and-Quit. The fixture adds observer debug traits; native travel supplies the new location.",
   "profile": "r009-m069",
   "world": "McWilliams",
   "fixture": "r009_m059_preopportunity_bootstrap",

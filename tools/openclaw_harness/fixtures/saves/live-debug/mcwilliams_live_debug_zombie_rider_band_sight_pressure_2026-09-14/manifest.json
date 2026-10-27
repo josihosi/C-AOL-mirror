@@ -2,7 +2,7 @@
   "name": "mcwilliams_live_debug_zombie_rider_band_sight_pressure_2026-09-14",
   "source_fixture": "mcwilliams_live_debug_zombie_rider_impact_multi_recovery_controls_2026-09-12",
   "source_profile": "live-debug",
-  "description": "Two tagged riders start on reciprocal, route-connected east lanes.  The east rider has direct sight of the avatar; a small wall screen blocks the southeast rider's avatar line while preserving rider-to-rider sight and route.  The avatar can then move north behind the screen, so bounded relayed old-location routing and later native pressure are observable without state injection.",
+  "description": "Two tagged riders start on route-connected east lanes: the east rider sees the avatar, while a wall screen blocks the southeast rider’s view. The transform places floor at player-relative 0,1 and 0,2 and walls at 1,1 through 2,2. The former fixture description said north; the scenario objective says south. Native direction and sight loss need confirmation.",
   "save_transforms": [
     {
       "kind": "map_terrain_near_player",

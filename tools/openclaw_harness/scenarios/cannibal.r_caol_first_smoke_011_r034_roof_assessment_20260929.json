@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r034_roof_assessment_20260929",
-  "description": "Fresh byte-exact R031 min8720 continuation on immutable R034; recalculate roof watch assessment with existing scouts4/5 already at watch, then follow return/report and response.",
+  "description": "Historical recipe: Fresh byte-exact R031 min8720 continuation on immutable R034; recalculate roof watch assessment with existing scouts4/5 already at watch, then follow return/report and response. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-034-r011-roof-assessment-luna",
   "world": "TestSetup00",
   "observer_character": true,

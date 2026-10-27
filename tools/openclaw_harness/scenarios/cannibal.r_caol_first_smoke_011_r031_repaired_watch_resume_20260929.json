@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r031_repaired_watch_resume_20260929",
-  "description": "Continuation of the repaired R031 disposable profile at native turn5274100/min8701; verify persisted exact-pair lease cleanup, begin the watch at observed assessment start, and follow IDs4/5 through return/report.",
+  "description": "Historical recipe: Continuation of the repaired R031 disposable profile at native turn5274100/min8701; verify persisted exact-pair lease cleanup, begin the watch at observed assessment start, and follow IDs4/5 through return/report. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r031-roof-watch-reconcile-20260929",
   "world": "TestSetup00",
   "observer_character": true,

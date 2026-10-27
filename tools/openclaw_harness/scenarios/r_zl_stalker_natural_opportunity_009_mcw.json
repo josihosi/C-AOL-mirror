@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r_zl_stalker_natural_opportunity_009_mcw",
-  "description": "One fresh ordinary current-source account for the writhing-stalker opportunism question, distinct from exhausted 005, 006, 007, and 008 accounts. Its world is created natively from raw seed 2026091615 before this account; it installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The player may choose an ordinary visible night-time edge route after seeing the native overmap, but no actor position or save data is inspected.",
+  "description": "Historical recipe: One fresh ordinary current-source account for the writhing-stalker opportunism question, distinct from exhausted 005, 006, 007, and 008 accounts. Its world is created natively from raw seed 2026091615 before this account; it installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The player may choose an ordinary visible night-time edge route after seeing the native overmap, but no actor position or save data is inspected. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "zl-stalker-opportunity-009",
   "world": "zl-stalker-opportunity-009-world",
   "capabilities": {"runtime.entry_mode": "cockpit_live_session", "capabilities.r_zl_playtest.natural_stalker_opportunism": "fresh_ordinary_native_account"},

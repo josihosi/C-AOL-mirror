@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r009_m091_native_basecamp_foothold_mcw",
-  "description": "R-009 M091 disposable setup: load the current-executable pre-opportunity save, use the harness's current-build debug follower setup primitive only because that save has no physical follower, then use ordinary follower dialogue to create a real player basecamp at the player OMT (162,36,0), within the hostile camp's production search radius. This setup declares no hostile outcome and performs no save transform.",
+  "description": "R009 M091 setup from the pre-opportunity McWilliams save. The fixture adds observer debug traits; native debug creates a follower because the saved footing has none, then ordinary dialogue creates a player camp at 162,36. This is setup and declares no hostile outcome.",
   "profile": "r009-m091",
   "world": "McWilliams",
   "fixture": "r009_m059_preopportunity_bootstrap",

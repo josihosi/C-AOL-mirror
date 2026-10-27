@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r019.scheduler_pre_endpoint_observation_mcw",
-  "description": "Zero-credit R-019 pre-endpoint scheduler observation.  Its separately declared clean fixture schedules exactly the same popup EOC thirty turns into the advertised native minute, allowing a scheduler observation to distinguish an inactive trace from endpoint timing.  It cannot supply guarded or primitive gameplay proof.",
+  "description": "R019 scheduler diagnostic from a clean wait fixture with no staged active monsters. One conditionless popup is scheduled 30 turns after the first live frame, before the one-minute wait endpoint. Inspect scheduler timing; it is not guarded or primitive gameplay proof.",
   "profile": "r009-m095",
   "config_profile": "dev-harness",
   "world": "McWilliams",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r026.living_npc_package_v001_mcw",
-  "description": "Current-source R-026 living-base package route: start from the audited established-base fixture and use only current native semantic owners to bind free-text recipient selection, ambient LLM handling, snapshots, and basecamp request context.",
+  "description": "R026 living-base package from a prepared camp with one nearby ordinary follower who has no camp assignment. Exercise free-text recipient selection, ambient LLM handling, snapshots and basecamp request context through the native session.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r031_living_non_camp_follower_v1",

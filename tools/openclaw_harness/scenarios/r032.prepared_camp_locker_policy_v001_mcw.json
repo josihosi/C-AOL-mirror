@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.prepared_camp_locker_policy_v001_mcw",
-  "description": "R-032 focused established-camp Locker route.  A disposable prepared fixture supplies the Food, Storage, and Locker zones plus one helmet on the Locker tile as zero-credit footing.  The live run must use native semantic owners to observe exact pre/post item location, change one Locker Policy slot, and advance only through native World time until a worker-downtime service result is observed.  Policy mutation alone does not establish service.",
+  "description": "Locker policy and service from a prepared camp with Food, Storage and Locker zones and one Robofac military helmet on the Locker tile. Change one policy slot, advance native time through worker downtime and compare the exact item location; changing policy alone does not prove service.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r032_prepared_camp_locker_service_v1",

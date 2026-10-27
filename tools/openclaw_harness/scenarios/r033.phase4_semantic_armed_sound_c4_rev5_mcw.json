@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r033.phase4_semantic_armed_sound_c4_rev5_mcw",
-  "description": "R-033 current-source phase-4 reentry route. The disposable fixture begins from the exact captured abstract pair and one active C-4; native semantic waits establish the fresh callback and native save/reload continuation.",
+  "description": "R033 reentry from the captured generation-1 abstract pair 4 and 5, owner epoch 2, with one active C-4 staged at offset 24,48,0 from the passive avatar. Native waits must establish the fresh sound callback and later save/reload; the staged explosive is not an observation.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",
   "world": "McWilliams",

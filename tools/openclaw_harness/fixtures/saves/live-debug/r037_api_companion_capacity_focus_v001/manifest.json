@@ -2,7 +2,7 @@
   "name": "r037_api_companion_capacity_focus_v001",
   "source_profile": "live-debug",
   "source_fixture": "r037_api_companion_dense_stock_v001",
-  "description": "Same-task focused intake/command preparation only. Separate safe branch from existing R037 recipe, not a recovery/resurrection of casualty84e55f, danger/return replay or new suite round. Clears the recipe artificial panic and loaded threats and adds identifiable native capacity probes. Setup earns zero model/outcome credit; actual capacity/store/wear/wield/refusal must be observed.",
+  "description": "R037 focused capacity setup derived from the dense-stock fixture: the recipe clears the staged panic and active monsters, then adds a heavy anvil, 66 rounds of 9mm and three sponges. Actual capacity, transfer and refusal remain native observations.",
   "save_transforms": [
     {
       "kind": "npc_llm_panic_state",

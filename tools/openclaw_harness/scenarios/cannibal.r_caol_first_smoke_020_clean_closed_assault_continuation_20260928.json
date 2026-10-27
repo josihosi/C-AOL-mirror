@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_020_clean_closed_assault_continuation_20260928",
-  "description": "R020 ordinary-view closed-window continuation from the saved committed-contact checkpoint after the clean smoke/scout/report/attack stages; not a fresh discovery start.",
+  "description": "Historical recipe: R020 ordinary-view closed-window continuation from the saved committed-contact checkpoint after the clean smoke/scout/report/attack stages; not a fresh discovery start. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-020-clean-closed-assault-continuation-20260928",
   "world": "TestSetup00",
   "observer_character": true,

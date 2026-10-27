@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r_surface_006.inventory_selector_tiles",
-  "description": "Zero-credit source-bound observation route for the focused inventory selector.  Fixture manufacture is only bootstrap; every asserted item target must be rediscovered as a fresh native UID descriptor.",
+  "description": "Tiles inventory-selector control: the fixture puts a rock in a worn container and a plastic bottle in the wielded slot. Rediscover both as fresh native item UIDs; setup alone does not validate the selector.",
   "profile": "r-surface-004-world-children-tiles",
   "config_profile": "dev-harness",
   "world": "McWilliams",

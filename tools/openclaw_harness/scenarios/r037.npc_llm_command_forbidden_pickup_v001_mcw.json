@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_forbidden_pickup_v001_mcw",
-  "description": "R-037 source-bound, isolated forbidden-pickup control. The fixture offers a single named, foreign-owned item on an enabled NO_NPC_PICKUP tile; setup has no gameplay credit.",
+  "description": "R037 pickup control: one Hells Raiders-owned bandage lies on the player tile inside an enabled NO_NPC_PICKUP zone; the allied recipient has a machete. Observe the model selection, native skip or block and lack of transfer; setup alone is not a result.",
   "profile": "harness-npc-llm-coverage",
   "config_profile": "dev-harness",
   "world": "McWilliams",

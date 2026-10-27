@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r008_closure_046_source_bound_m095_mcw",
-  "description": "R-008 closure M095 continues the exact ordinary seed-830205385 world without a terrain, actor, ecology, lead, lifecycle, or save transform.  It first binds the source world and player location, then permits only native wait, save-and-quit, and relaunch actions until the first persisted production boundary fails.",
+  "description": "R008 M095 observation from seed 830205385: camp 177,13, hostile origin 177,9 and watch 174,13. The linked fixture declares needs, temperature, stamina, cardio, clairvoyance and night-vision debug traits; its scenario previously described the save as transform-free. Bind the world and player, then use native waits, save/quit and relaunch to observe the next persisted boundary.",
   "profile": "r008-closure-046",
   "world": "R008Closure045Seed830205385",
   "fixture": "r008_closure_046_source_bound_m095",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "writhing_stalker.live_hit_fade_retreat_mcw",
-  "description": "Live hit-fade-retreat row: vulnerable midnight scene records a bounded strike burst followed by withdraw/cooling-off retreat with about 8+ tile retreat intent visible in current-build live-plan logs.",
+  "description": "Hit/fade control at midnight: a vulnerable player and one hostile stalker begin on a passable east lane, with the stalker four tiles away. Observe a bounded strike burst and withdrawal or cooling, including its retreat intent.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

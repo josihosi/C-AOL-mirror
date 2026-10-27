@@ -2,7 +2,7 @@
   "name": "tmp_bandit_live_world_owned_site2_road_probe_2026-04-22",
   "source_fixture": "bandit_phase4_quiet_current_schema_v0_2026-08-05",
   "source_profile": "live-debug",
-  "description": "Disposable probe footing: start from the claimed nearby-owned-site save, then move the player onto the adjacent road 9 OMT south of site2 so dispatch pathing is tested against a routable-looking player OMT instead of the faction-camp tile itself.",
+  "description": "R029 rolling-ambush setup from the quiet current-schema bandit fixture. The recipe places the player nine OMT from camp 140,51 and prepares generation-2 members 4 and 5 for a rolling ambush toward 140,42, with rally at 140,43. These are setup transforms; actual dispatch, movement and contact require native evidence.",
   "save_transforms": [
     {
       "kind": "player_near_overmap_special",

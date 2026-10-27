@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams save captured from the R027 unchanged-read bootstrap on 2026-09-02. Linked controls describe an in-range retained signal lead; the manifest does not enumerate its saved source or lead.",
   "profile": "r027-unchanged-dedup-bootstrap-001",
   "world": "McWilliams",
   "captured_at": "2026-09-02T23:26:05+0200",

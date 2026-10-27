@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_multi_recovery_controls_mcw",
-  "description": "Native multi-rider impact control with identified empty-bow and stocked-bow riders, a standing susceptible player, clear legal recovery lanes and no injected attack/effect state.",
+  "description": "Two-rider recovery control: a full-health standing player faces identified hostile riders on clear east and south lanes. The east rider has an empty bow; the south rider has 18 arrows. Downing, recovery and later actions remain native outcomes.",
   "profile": "rider-impact-multirider-closure-001",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

@@ -1,4 +1,5 @@
 {
+  "description": "Sandy Creek save captured from the dev profile on 2026-04-06. The linked weather-wait scenario calls it a locker-ready baseline; its manifest does not enumerate locker contents.",
   "profile": "dev",
   "world": "Sandy Creek",
   "captured_at": "2026-04-06T12:48:17+0200",

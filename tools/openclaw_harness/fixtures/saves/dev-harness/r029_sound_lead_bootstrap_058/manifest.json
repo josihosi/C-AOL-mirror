@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams save captured from dev-harness on 2026-09-07. The R029 continuation child describes it as a no-shot world with camp 140,40 and at-home NPC 18; this capture manifest does not enumerate the saved roster or signal.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "captured_at": "2026-09-07T06:04:16+0200",

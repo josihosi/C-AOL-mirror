@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams save captured from the R027 safe-footing bootstrap on 2026-09-02. The linked cleanup route expects an on-fire avatar effect; this manifest does not enumerate the saved effects.",
   "profile": "r027-avatar-safe-footing-bootstrap-015",
   "world": "McWilliams",
   "captured_at": "2026-09-02T20:17:45+0200",

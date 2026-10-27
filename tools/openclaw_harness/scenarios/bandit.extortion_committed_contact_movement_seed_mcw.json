@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.extortion_committed_contact_movement_seed_mcw",
-  "description": "Create a distinct current-executable R-009 seed by ordinary overmap travel from the production-created pre-opportunity save to the known adjacent player-basecamp footing, then use the native Save-and-Quit path.  No save data is transformed or authored by the harness.",
+  "description": "Create a distinct current-executable R-009 seed by ordinary overmap travel from the production-created pre-opportunity save to the known adjacent player-basecamp footing, then use the native Save-and-Quit path.  The fixture adds observer debug traits; native travel supplies the new location.",
   "profile": "r009-m069",
   "world": "McWilliams",
   "fixture": "r009_m059_preopportunity_bootstrap",

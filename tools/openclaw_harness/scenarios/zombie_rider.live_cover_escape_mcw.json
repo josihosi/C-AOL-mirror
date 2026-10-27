@@ -1,6 +1,6 @@
 {
   "name": "zombie_rider.live_cover_escape_mcw",
-  "description": "Live cover/LOS rider row: one staged hostile rider behind an opaque wall records no target/no sight and no bow pressure, proving cover/indoor-style LOS break disrupts shooting instead of deleting the player through walls.",
+  "description": "Rider cover control at local noon: one hostile rider is staged behind a thick opaque locker wall east of the player, with human NPC targets removed. Observe whether the wall blocks sight and bow pressure.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

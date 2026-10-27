@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r031_roof_watch_reconcile_20260929",
-  "description": "R031 same-save roof watch continuation from native turn5274040/min8700; recover only the attested old pair leases for IDs4/5, then time a new 120-minute assessment from its observed start.",
+  "description": "Historical recipe: R031 same-save roof watch continuation from native turn5274040/min8700; recover only the attested old pair leases for IDs4/5, then time a new 120-minute assessment from its observed start. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r031-roof-watch-reconcile-20260929",
   "world": "TestSetup00",
   "observer_character": true,

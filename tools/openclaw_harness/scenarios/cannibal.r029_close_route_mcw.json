@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "cannibal.r029_close_route_mcw",
   "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
-  "description": "R-029 close source/camp pairing for native brazier-fire signal observation. Fixture supplies only roof, tools, and a close cannibal footprint; all signal, lead, memory, scout, report, and ownership transitions must be production-created.",
+  "description": "R029 close signal control: the roof setup has fire tools, logs and a cannibal camp footprint one OMT from the source. The current recipe also prepares a staffed observer with binoculars; the older fixture description says no roster is supplied. Native fire, signal and response still require observation. This is a close control, not a representative remote start.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",
   "world": "McWilliams",

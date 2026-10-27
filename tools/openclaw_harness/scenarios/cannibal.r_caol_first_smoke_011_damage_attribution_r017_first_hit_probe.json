@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_damage_attribution_r017_first_hit_probe",
-  "description": "R017 harness-opt-in attribution probe and ordinary-view raid continuation from the exact sealed R011 first-hit checkpoint.",
+  "description": "Historical recipe: R017 harness-opt-in attribution probe and ordinary-view raid continuation from the exact sealed R011 first-hit checkpoint. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-017-r011-first-hit-probe-20260927",
   "world": "TestSetup00",
   "observer_character": true,

@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "bandit.r033_pure_smoke_channel_mcw",
   "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
-  "description": "Current-source R-033 isolated smoke channel witness. The disposable fixture contributes one zero-credit primed smoke grenade whose native item processing begins emission immediately before the first eligible callback, plus an eligible-observer footing. Placement and ordinary structural roster materialization are zero-credit; the run must retain native emission, a current production scan, and the first later staffed-observer result without conflating fire, light, sound, memory, dispatch, report, operation or contact.",
+  "description": "R033 smoke-channel control: a primed smoke grenade is staged two map squares east on a solid roof, with a nearby bandit camp and candidate observer. Its native item processing supplies emission; inspect the production scan and staffed read separately from fire, light, dispatch and contact.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",
   "world": "McWilliams",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r041_roof_response_checkpoint_20260929",
-  "description": "R041 stage 1 native continuation from exact min9065 roof report: identify the newly reserved hostile response party and preserve a pre-sleep/pre-harm checkpoint.",
+  "description": "Historical recipe: R041 stage 1 native continuation from exact min9065 roof report: identify the newly reserved hostile response party and preserve a pre-sleep/pre-harm checkpoint. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-041-r041-roof-response-20260929",
   "world": "TestSetup00",
   "observer_character": true,

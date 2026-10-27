@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "bandit.r033_pure_light_channel_mcw",
   "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
-  "description": "Current-source R-033 isolated nighttime lamp channel witness. The disposable fixture contributes exactly one f_exodii_lamp source, a night turn and an eligible-observer footing. Placement and ordinary structural roster materialization are zero-credit; the run must retain a current production scan and the first later staffed-observer result without conflating fire, smoke, sound, memory, dispatch, report, operation or contact.",
+  "description": "R033 nighttime light-channel control: the fixture adds one Exodii lamp with native light emission 90, a nearby bandit camp and an observer/escort candidate pair. Observe the production scan and later staffed read separately from smoke, sound, dispatch and contact.",
   "profile": "dev-harness",
   "config_profile": "dev-harness",
   "world": "McWilliams",

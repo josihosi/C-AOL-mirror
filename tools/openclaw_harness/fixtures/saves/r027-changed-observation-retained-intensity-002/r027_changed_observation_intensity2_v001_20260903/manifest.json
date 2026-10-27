@@ -1,4 +1,5 @@
 {
+  "description": "R027 intensity-change fixture with production-origin metadata. The linked validation describes a retained lead and intensity-2 source; the manifest does not itself enumerate their saved state.",
   "name": "r027_changed_observation_intensity2_v001_20260903",
   "production_origin": {
     "anti_promotion": true,

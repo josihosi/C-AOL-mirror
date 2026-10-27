@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r027_absent_source_validation_v001_mcw",
-  "description": "Independent R-027 production-cadence validation from a sealed absent-source fixture.",
+  "description": "R027 source-absent cadence control: the saved fixture records removal of the fire at 138,49,0, one tile west of the player. Observe ordinary production cadence independently; the removal itself is setup.",
   "status": "active",
   "profile": "r027-absent-source-validation-001",
   "world": "McWilliams",

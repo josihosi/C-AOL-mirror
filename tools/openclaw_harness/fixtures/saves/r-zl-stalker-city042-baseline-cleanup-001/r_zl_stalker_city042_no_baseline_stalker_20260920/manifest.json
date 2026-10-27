@@ -1,4 +1,5 @@
 {
+  "description": "City-042 cleanup fixture with production-origin metadata. The linked follow-up describes removal of one pre-existing stalker before a later native debug spawn; the manifest does not itself enumerate the saved actor census.",
   "name": "r_zl_stalker_city042_no_baseline_stalker_20260920",
   "production_origin": {
     "anti_promotion": true,

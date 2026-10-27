@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.extortion_committed_contact_movement_seed_traced_route_mcw",
-  "description": "R-009 M072 strict successor: prove the overmap input-resolution seam receives the explicit keyboard-character W binding as CHOOSE_DESTINATION before confirming ordinary travel to M061's basecamp-adjacent footing and preserving it with native Save-and-Quit. No fixture data is transformed.",
+  "description": "R-009 M072 strict successor: prove the overmap input-resolution seam receives the explicit keyboard-character W binding as CHOOSE_DESTINATION before confirming ordinary travel to M061's basecamp-adjacent footing and preserving it with native Save-and-Quit. The fixture adds observer debug traits; native travel supplies the new location.",
   "profile": "r009-m069",
   "world": "McWilliams",
   "fixture": "r009_m059_preopportunity_bootstrap",

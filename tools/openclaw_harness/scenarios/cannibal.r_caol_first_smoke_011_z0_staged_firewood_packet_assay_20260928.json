@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_z0_staged_firewood_packet_assay_20260928",
-  "description": "Bounded source-bound feasibility assay: stage exactly one splintered-wood unit as recorded setup in a disposable copy, place it on a verified safe exposed z0 tile, ignite through ordinary lighter gameplay, then measure fire/smoke and live-light/live-smoke caps before any camp response.",
+  "description": "Historical recipe: Bounded source-bound feasibility assay: stage exactly one splintered-wood unit as recorded setup in a disposable copy, place it on a verified safe exposed z0 tile, ignite through ordinary lighter gameplay, then measure fire/smoke and live-light/live-smoke caps before any camp response. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-z0-firewood-staged-assay-20260928",
   "world": "TestSetup00",
   "observer_character": true,

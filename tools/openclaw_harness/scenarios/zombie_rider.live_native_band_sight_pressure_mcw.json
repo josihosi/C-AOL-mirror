@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_band_sight_pressure_mcw",
-  "description": "Focused post-continuity native proof: one tagged rider directly sees the avatar while the other is screen-blocked, then their reciprocal route-connected encounter may relay only the observed location/timestamp/expiry.  After the avatar moves south behind the same screen, both riders must route from bounded evidence rather than unseen coordinates before later native pressure is observed.",
+  "description": "Focused rider sight-pressure continuation: one tagged rider directly sees the avatar while the other is screen-blocked. Observe whether their route-connected encounter relays only the old location, time and expiry, then test sight loss and later native pressure. The fixture description and action objective disagree on movement direction; check the terrain and live controls.",
   "profile": "rider-band-sight-pressure-001",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

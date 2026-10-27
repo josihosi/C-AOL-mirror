@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r027_blocked_control_validation_v002_mcw",
-  "description": "Independent R-027 blocked-line-of-sight control using the source-current denied-read receipt boundary and the sealed native rock-border fixture.",
+  "description": "R027 blocked sight control: saved audit records fire at 138,49, camp 140,51 and an opaque rock border at 139,50. Inspect the denied-read receipt and production cadence independently.",
   "status": "active",
   "profile": "r027-blocked-control-validation-002",
   "world": "McWilliams",

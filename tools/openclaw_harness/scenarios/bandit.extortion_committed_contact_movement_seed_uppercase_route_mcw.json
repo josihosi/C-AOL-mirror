@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.extortion_committed_contact_movement_seed_uppercase_route_mcw",
-  "description": "R-009 M071 strict successor: deliver the overmap owner's explicit keyboard-character W binding for efficient-route preview and confirmation, then preserve the ordinary M061 basecamp-adjacent footing with native Save-and-Quit. No fixture data is transformed.",
+  "description": "R-009 M071 strict successor: deliver the overmap owner's explicit keyboard-character W binding for efficient-route preview and confirmation, then preserve the ordinary M061 basecamp-adjacent footing with native Save-and-Quit. The fixture adds observer debug traits; native travel supplies the new location.",
   "profile": "r009-m069",
   "world": "McWilliams",
   "fixture": "r009_m059_preopportunity_bootstrap",

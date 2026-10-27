@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r019.keep_watch_meaningful_event_bootstrap_mcw",
-  "description": "Zero-credit R-019 bootstrap. It installs one deterministic hostile-sighting scene for a separately authorized guarded Keep watch probe. The bootstrap proves setup, binding, and cleanup only; it cannot grant guarded-stop, gameplay, matrix, or acceptance credit.",
+  "description": "R019 hostile-sighting setup from the clean wait fixture: all inherited active monsters are cleared and one hostile zombie dog is staged six map squares east. This zero-credit bootstrap supplies the scene for a separate guarded-stop test.",
   "profile": "r009-m095",
   "world": "McWilliams",
   "fixture": "r019_keep_watch_meaningful_event_bootstrap_v1",

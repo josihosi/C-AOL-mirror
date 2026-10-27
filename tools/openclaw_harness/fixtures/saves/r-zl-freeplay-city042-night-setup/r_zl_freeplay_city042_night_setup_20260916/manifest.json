@@ -1,4 +1,5 @@
 {
+  "description": "City-042 save captured on 2026-09-16. Linked scenarios use it as a zero-credit nighttime footing for travel, light and rider setup; the manifest does not enumerate current actors or flashlight state.",
   "profile": "r-zl-freeplay-city042-night-setup",
   "world": "zl-natural-stalker-city-042-missed",
   "captured_at": "2026-09-16T03:49:48+0200",

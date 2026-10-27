@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r020_repaired_roof_distance7_combined_control",
-  "description": "R011 fresh roof fire smoke/light control on original OMT distance-7 geometry; no camp relocation.",
+  "description": "Historical recipe: R011 fresh roof fire smoke/light control on original OMT distance-7 geometry; no camp relocation. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r020-roof-distance7-control-20260928",
   "world": "TestSetup00",
   "observer_character": true,

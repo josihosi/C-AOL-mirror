@@ -1,6 +1,6 @@
 {
   "name": "tmp.bandit_owned_site2_road_dispatch_probe_1860",
-  "description": "Disposable probe: claimed nearby-owned-site save, player on adjacent road 9 OMT south, advance 1860 one-second turns to cross the 30-minute dispatch cadence, then save-and-quit for outing inspection.",
+  "description": "Historical nearby-site road probe: the current linked fixture prepares a generation-2 rolling ambush for members 4 and 5 and places the player nine OMT from camp 140,51. This recipe advances 1,860 turns and saves; whether it exercises its original dispatch question needs qualification on this changed fixture.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "tmp_bandit_live_world_owned_site2_road_probe_2026-04-22",

@@ -11,7 +11,7 @@
     "capabilities.r014.run_cleanup": "bound_process_and_session_cleanup",
     "runtime.r014.source_binding": "r013_wait_activity_interrupt_bootstrap_v1:r009-m095"
   },
-  "description": "Zero-credit R-014 bootstrap. It validates the current source-bound fixture and declares the smallest live cockpit surface needed to observe, issue one native action, recover only the advertised activity interruption, return a fresh observation, retain long-activity boundaries, finish, ingest, and clean up. Setup and this bootstrap grant no gameplay or certification credit.",
+  "description": "R014 cockpit bootstrap from a fixture that clears active monsters and stages a hostile zombie dog six map squares east. Observe, issue one native action, recover only an advertised interruption, return a fresh observation, retain long-activity boundaries, finish, ingest and clean up. Setup grants no gameplay or certification credit.",
   "evidence_contract": {
     "claim": "the current source-bound R-014 prototype footing is selectable and may receive exactly one canonical live cockpit authority; setup and bootstrap artifacts remain zero-credit",
     "failure_rule": "a changed source or fixture, missing required stabilizer, unadvertised native action or recovery, missing fresh observation or long-activity boundary, absent terminal report/ingestion, or failed cleanup leaves the R-014 live route unproved; no setup artifact may be promoted"

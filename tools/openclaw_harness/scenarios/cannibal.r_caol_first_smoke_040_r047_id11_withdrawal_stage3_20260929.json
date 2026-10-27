@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_040_r047_id11_withdrawal_stage3_20260929",
-  "description": "R040 stage-three selected-ID11 continuation from the verified R043 final saved roof fight checkpoint, using the fresh current-source R047-repair build.",
+  "description": "Historical recipe: R040 stage-three selected-ID11 continuation from the verified R043 final saved roof fight checkpoint, using the fresh current-source R047-repair build. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-040-r047-stage3-id11-20260929",
   "world": "TestSetup00",
   "observer_character": true,

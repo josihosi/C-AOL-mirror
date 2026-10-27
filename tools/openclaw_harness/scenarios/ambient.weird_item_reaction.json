@@ -1,6 +1,6 @@
 {
   "name": "ambient.weird_item_reaction",
-  "description": "Stage a small uncanny local event near the shipped McWilliams basecamp/NPC fixture and watch for any ambient reaction path. The current fixture already carries nearby follower/camp state, so this contract is runnable today even though stronger restaging helpers would still help future variants.",
+  "description": "Ambient NPC reaction in a captured McWilliams save: spawn and drop a monster tooth near the player, then advance turns and inspect any reaction. The saved NPC and camp contents are not described by the fixture manifest; confirm the actual scene before relying on them.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

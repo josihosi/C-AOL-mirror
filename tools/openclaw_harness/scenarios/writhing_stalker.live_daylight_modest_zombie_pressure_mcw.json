@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "writhing_stalker.live_daylight_modest_zombie_pressure_mcw",
-  "description": "Native daylight modest-pressure comparison: two saved alive non-hallucinatory hostile zombies must be perceptible to the stalker and aimed at the same player target before their pressure is considered.",
+  "description": "Daylight pressure comparison: one stalker and two alive hostile zombies are staged on clear lanes around a vulnerable player. Verify their actual perception and shared target before attributing pressure to them.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

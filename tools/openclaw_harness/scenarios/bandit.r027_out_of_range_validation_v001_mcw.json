@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.r027_out_of_range_validation_v001_mcw",
-  "description": "Independent R-027 production-cadence validation from a sealed absent-source fixture.",
+  "description": "R027 cadence control from the out-of-range fixture: the saved audit records the original fire removed at 138,49 and a replacement intensity-3 fire at 152,49. This version audits only absence one tile west of the player before the cadence; it does not audit the replacement source.",
   "status": "active",
   "profile": "r027-out-of-range-validation-001",
   "world": "McWilliams",

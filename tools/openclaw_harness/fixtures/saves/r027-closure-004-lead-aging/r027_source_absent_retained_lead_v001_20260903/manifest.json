@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams save captured from the R027 lead-aging profile on 2026-09-03. The linked validation describes a retained lead with the source absent; the manifest does not enumerate the saved source or lead.",
   "profile": "r027-closure-004-lead-aging",
   "world": "McWilliams",
   "captured_at": "2026-09-03T00:00:49+0200",

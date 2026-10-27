@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_r011_actor_diagnostic_5277095",
-  "description": "Source-bound, no-clair native diagnostic continuation from the exact 5277095 save; record only reserved NPC5/NPC7 target/action/goto/path state. No replay of scout/report stages and no gameplay outcome credit.",
+  "description": "Historical recipe: Source-bound, no-clair native diagnostic continuation from the exact 5277095 save; record only reserved NPC5/NPC7 target/action/goto/path state. No replay of scout/report stages and no gameplay outcome credit. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-actor-diagnostics-5277095-20260926",
   "world": "TestSetup00",
   "observer_character": true,

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r021_clean_closed_dual_clair_viewer_smoke_assault_20260928",
-  "description": "Separate R021 dual-clairvoyance viewer smoke and cannibal response arm from byte-exact clean closed-window setup; not ordinary-view evidence.",
+  "description": "Historical recipe: Separate R021 dual-clairvoyance viewer smoke and cannibal response arm from byte-exact clean closed-window setup; not ordinary-view evidence. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-021-clean-closed-viewer-20260928",
   "world": "TestSetup00",
   "observer_character": true,

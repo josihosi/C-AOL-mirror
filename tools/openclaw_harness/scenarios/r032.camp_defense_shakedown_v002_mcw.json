@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.camp_defense_shakedown_v002_mcw",
-  "description": "Native peaceful/hostile R032 camp-defense branch from the accepted Locker save plus the independently prepared payment stock footing. The fixture adds only ten RobofacCoin on a follower-owned CAMP_STORAGE tile; all guard orders, bandit dispatch/contact, branch choice and outcomes are native.",
+  "description": "R032 shakedown defense from the saved Locker camp at 162,36, with character 25 and nearby storage. The fixture adds ten RobofacCoin in follower CAMP_STORAGE 31 map squares east; patrol orders, dispatch, contact, branch and outcome remain native. The repeated local-pair handoff receipt rejection was observed in this version.",
   "profile": "r032-camp-defense-shakedown-exp005-20260924",
   "config_profile": "dev-harness",
   "world": "McWilliams",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r022_min8406_leader_casualty_continuation_20260928",
-  "description": "R022 source-bound disposable continuation from exact min8406 dual-clair viewer save; test leader4 casualty reconciliation and surviving raid IDs8/9 physical movement/contact/combat.",
+  "description": "Historical recipe: R022 source-bound disposable continuation from exact min8406 dual-clair viewer save; test leader4 casualty reconciliation and surviving raid IDs8/9 physical movement/contact/combat. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-022-min8406-leader-casualty-20260928",
   "world": "TestSetup00",
   "observer_character": true,

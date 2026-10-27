@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r027_roof_combined_20260928",
-  "description": "Fresh R027 ordinary-view roof brazier light-plus-smoke arm from byte-exact clean prepared save; maintain fire and follow natural camp response.",
+  "description": "Historical recipe: Fresh R027 ordinary-view roof brazier light-plus-smoke arm from byte-exact clean prepared save; maintain fire and follow natural camp response. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-027-r027-roof-combined-20260928",
   "world": "TestSetup00",
   "observer_character": true,

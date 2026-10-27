@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_ordinary_smoke_homeward_r001_continuation",
-  "description": "R011 continuation from the exact minute8043 homeward boundary save. Preserve existing smoke/dispatch/watch state; continue paired NPC4/5 return/report and same ordinary-view journey through night raid.",
+  "description": "Historical recipe: R011 continuation from the exact minute8043 homeward boundary save. Preserve existing smoke/dispatch/watch state; continue paired NPC4/5 return/report and same ordinary-view journey through night raid. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-homeward-r001-20260927",
   "world": "TestSetup00",
   "observer_character": true,

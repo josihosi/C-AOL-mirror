@@ -1,6 +1,6 @@
 {
   "name": "theme.mixed_hostile_camp_siege_mcw",
-  "description": "Full-scene thematic stress playtest: a McWilliams camp-adjacent scene carries active bandit pressure, cannibal pressure, a writhing stalker, a zombie horde, a zombie rider, a flesh-raptor, and a night fire/smoke cue so the tester can judge whether CAOL hostile systems compose into tension or incoherent noise.",
+  "description": "Mixed-hostile camp stress test in McWilliams: the recipe stages a bandit camp and cloned cannibal camp, fire/smoke, a stalker, rider, raptor and horde. It prepares legacy four-bandit and two-cannibal stalk jobs; current ownership and live activity require qualification before judging the scene.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "theme_mixed_hostile_camp_siege_v0_2026-05-18",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_r051_r067_post_report_8341_service_continuation_20261004",
-  "description": "Same R051 branch continuing from the native post-report saved world at game minute 8341 on immutable R067; inspect one next camp service and, if it advances, continue the natural raid.",
+  "description": "Historical R051/R067 continuation from the native post-report save at game minute 8341: inspect the next camp service and, if it advances, continue the natural raid. The current declaration fails saved-world continuation validation.",
   "profile": "r051-r067-report-continuation-20261004",
   "world": "TestSetup00",
   "observer_character": true,

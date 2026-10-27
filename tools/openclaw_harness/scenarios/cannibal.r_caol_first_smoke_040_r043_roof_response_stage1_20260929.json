@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_040_r043_roof_response_stage1_20260929",
-  "description": "R040 stage-one disposable continuation from the byte-exact minute9065 roof report on R043: identify actual reserved response members and preserve a pre-harm checkpoint for selected R041 trace replay.",
+  "description": "Historical recipe: R040 stage-one disposable continuation from the byte-exact minute9065 roof report on R043: identify actual reserved response members and preserve a pre-harm checkpoint for selected R041 trace replay. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-041-r041-roof-response-20260929",
   "world": "TestSetup00",
   "observer_character": true,

@@ -1,6 +1,6 @@
 {
   "name": "zombie_rider.live_camp_light_band_mcw",
-  "description": "Live camp-light rider row: staged mature-world fires feed the real live light signal hook, two staged riders are observed by the overmap AI bridge, and the artifact records bounded band formation with circle-harass posture rather than permanent camp doom.",
+  "description": "Camp-light rider control in a mature midnight McWilliams save: two hostile riders and nearby bright fire fields are staged, with human NPC targets removed. Observe the live overmap light signal and any band formation or circle-harass posture. Historical run 20260501_030432 recorded a two-rider circle-harass band; run 20260519_025151 also recorded a band with that posture.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_combined_owner_openref_near_camp_dual_brazier",
-  "description": "R011 disposable two-source combined fire signal arm from owner open-reference save; a controlled cannibal camp footprint is one OMT from the house. Downstairs fire supplies same-level smoke and roof fire supplies exposed light; setup is not natural generation.",
+  "description": "Historical recipe: R011 disposable two-source combined fire signal arm from owner open-reference save; a controlled cannibal camp footprint is one OMT from the house. Downstairs fire supplies same-level smoke and roof fire supplies exposed light; setup is not natural generation. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-combined-openref-dual-brazier-20260928",
   "world": "TestSetup00",
   "observer_character": true,

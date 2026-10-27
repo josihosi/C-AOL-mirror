@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "writhing_stalker.live_zombie_distraction_mcw",
-  "description": "Live zombie-distraction positive row: nearby zombies raise opportunity only in a vulnerable/evidenced scene.",
+  "description": "Zombie-distraction control at midnight: two zombies and a stalker are staged near a vulnerable player; the stalker starts on a walkable interior floor. Observe whether local zombie pressure affects a plausible strike opportunity.",
   "capabilities": {
     "runtime.entry_mode": "cockpit_live_session",
     "capabilities.r_zl_stalker.darkness_control": "matched_dark_modest_zombie_pressure_native_attack"

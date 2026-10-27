@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_020_ordinary_assault_8426_safe_continuation_20260928",
-  "description": "Safe-wait continuation from byte-exact saved turn5257591/minute8426 outdoor state; continue toward same-ID raid contact.",
+  "description": "Historical recipe: Safe-wait continuation from byte-exact saved turn5257591/minute8426 outdoor state; continue toward same-ID raid contact. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-020-8426-safe-continuation-20260928",
   "world": "TestSetup00",
   "observer_character": true,

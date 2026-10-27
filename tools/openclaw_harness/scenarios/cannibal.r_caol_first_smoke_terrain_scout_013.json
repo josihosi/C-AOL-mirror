@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_terrain_scout_013",
-  "description": "Continue the exact source-off minute13560 report-awaiting-assessment camp copy to natural report expiry at15120 and the next eligible scheduler pass; preserve prior run and do not replay signal/admission.",
+  "description": "Historical recipe: Continue the exact source-off minute13560 report-awaiting-assessment camp copy to natural report expiry at15120 and the next eligible scheduler pass; preserve prior run and do not replay signal/admission. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-013-road-report-expiry-20260927",
   "world": "TestSetup00",
   "observer_character": true,

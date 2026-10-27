@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r_surface_008.target_tiles",
-  "description": "Source-bound Tiles route for native ranged targeting. Fixture manufacture is zero-credit; the staged hostile must be selected only by its current opaque target token.",
+  "description": "Tiles ranged-targeting control: the fixture equips a loaded revolver and stages one visible hostile east of the avatar. Select it only through the current native target token; staged footing is not combat proof.",
   "profile": "r-surface-004-world-children-tiles",
   "config_profile": "dev-harness",
   "world": "McWilliams",

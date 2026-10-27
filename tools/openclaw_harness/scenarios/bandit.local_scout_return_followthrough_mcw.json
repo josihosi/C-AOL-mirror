@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "bandit.local_scout_return_followthrough_mcw",
-  "description": "Disposable live follow-through probe for the finite scout-return packet: start from the real nearby-owned-site local-contact footing with the scout sortie clock pre-aged, trip the return-home decision, advance a bounded 2600-turn travel window, then save/copy the world for writeback inspection.",
+  "description": "Historical local-return follow-through: the current fixture is a captured two-person structural sortie under local ownership, with projection-lease and clairvoyance setup. The original recipe calls for a pre-aged scout return and 2,600-turn follow-through; the linked fixture no longer declares that footing, so this caller needs qualification.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_phase4_ecology_dispatch_observer_v0_2026-08-05",

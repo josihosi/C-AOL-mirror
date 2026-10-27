@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.assigned_camp_locker_transfer_char25_v001_mcw",
-  "description": "R-032 native transfer trial from the accepted saved R032 Assignment Camp. The copied world retains character:25 and the matching assigned camp; fixture stock is placed on the map only. Native UI zones, camp policy, worker downtime, exact transfer/accounting and save/reload are observed separately.",
+  "description": "Locker transfer from the natively saved Assignment Camp at 162,36, with character 25. The fixture places an army helmet, Glock 19, three magazines and 30 rounds of 9mm on four separate camp tiles; it adds no zones or NPC inventory. Establish native Locker/Storage zones and observe policy, transfer, accounting and save/reload.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r032_assigned_camp_locker_transfer_char25_v1",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r_zl_stalker_natural_opportunity_010_mcw",
-  "description": "A fresh ordinary current-source account for rerunning the run-009 night-and-edge route after its measured advancing-turn loaded-light performance obstruction. The native world is created from raw seed 2026091616. It installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The player may choose an ordinary player-visible night-time edge route after seeing the native overmap, but no actor position or save data is inspected.",
+  "description": "Historical recipe: A fresh ordinary current-source account for rerunning the run-009 night-and-edge route after its measured advancing-turn loaded-light performance obstruction. The native world is created from raw seed 2026091616. It installs no fixture and makes no actor, attention, contact, attack, time, or route intervention. The player may choose an ordinary player-visible night-time edge route after seeing the native overmap, but no actor position or save data is inspected. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "zl-stalker-opportunity-010",
   "world": "zl-stalker-opportunity-010-world",
   "capabilities": {"runtime.entry_mode": "cockpit_live_session", "capabilities.r_zl_playtest.natural_stalker_opportunism": "fresh_ordinary_native_account"},

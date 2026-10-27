@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r019.keep_watch_acceptance_mcw",
-  "description": "Safe-start R-019 acceptance route for one declared flavour interruption. Unsafe controls use separate manifests and authority. Setup is zero-credit; native receipts, immutable journals, and cited witnesses are the only route evidence.",
+  "description": "R019 safe-interruption route from a clean wait fixture: one conditionless popup is scheduled 30 turns after the first native frame. Unsafe interruptions have separate scenarios; native receipts and cited witnesses establish the outcome.",
   "profile": "r009-m095",
   "config_profile": "dev-harness",
   "world": "McWilliams",

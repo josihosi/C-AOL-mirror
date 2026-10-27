@@ -1,4 +1,5 @@
 {
+  "description": "City-042 Missed save captured from the baseline-cleanup profile on 2026-09-19. This manifest does not enumerate the saved stalker, other actors or supplies.",
   "profile": "r-zl-stalker-city042-baseline-cleanup-001",
   "world": "zl-natural-stalker-city-042-missed",
   "captured_at": "2026-09-19T22:34:50+0200",

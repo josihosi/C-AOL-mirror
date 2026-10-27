@@ -1,6 +1,6 @@
 {
   "name": "manual.writhing_stalker_hit_fade_mcw",
-  "description": "Manual playtest handoff: vulnerable midnight writhing-stalker scene with one hostile stalker staged south of the player. The harness only loads the save and audits footing; it sends no gameplay keys after load.",
+  "description": "Manual midnight stalker handoff from McWilliams: the recipe stages one hostile stalker four tiles east of a vulnerable player on a passable lane. The harness loads and audits the scene without sending gameplay keys after load.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "mcwilliams_live_debug_hit_fade_retreat_stalker_2026-05-02",

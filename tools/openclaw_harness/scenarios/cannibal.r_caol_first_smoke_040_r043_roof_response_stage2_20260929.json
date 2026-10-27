@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_040_r043_roof_response_stage2_20260929",
-  "description": "R040 stage-two selected-ID continuation from the verified R043 minute9120 dispatch checkpoint: trace actual raiders10/11 from first resumed turn through physical approach and any combat/house/stairs outcome.",
+  "description": "Historical recipe: R040 stage-two selected-ID continuation from the verified R043 minute9120 dispatch checkpoint: trace actual raiders10/11 from first resumed turn through physical approach and any combat/house/stairs outcome. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-041-r043-stage2-selected-10-11-20260929",
   "world": "TestSetup00",
   "observer_character": true,

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_impact_one_clear_mcw",
-  "description": "Native single-rider impact with clear approach, survivable separation, cooldown and fresh reapproach.",
+  "description": "Single-rider impact from a clear-floor McWilliams setup: one hostile rider with finite ammunition starts three tiles away. Observe approach, impact, separation, cooldown and reapproach through native play.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

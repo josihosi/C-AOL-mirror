@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_020_posthit_raid_outcome_20260928",
-  "description": "Disposable continuation from the saved first ID7 raid hit at turn5257293; follow the same raid through a natural combat outcome without replaying discovery stages.",
+  "description": "Historical recipe: Disposable continuation from the saved first ID7 raid hit at turn5257293; follow the same raid through a natural combat outcome without replaying discovery stages. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-020-posthit-raid-continuation-20260928",
   "world": "TestSetup00",
   "observer_character": true,

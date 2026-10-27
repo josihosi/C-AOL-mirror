@@ -1,6 +1,6 @@
 {
   "name": "patrol.disconnected_live",
-  "description": "Load the disconnected-post patrol probe fixture, arm Bruna and Ricky with patrol priority 1, capture a tighter runtime crop after the active guard settles onto the route, then capture a second dwell-later crop and package the pair as a blink-comparison GIF plus a small `probe.patrol_summary.txt` explainer so the loop movement, uncovered posts, and off-shift count read without spelunking raw patrol trace logs.",
+  "description": "Disconnected patrol control in the Sandy Creek camp fixture: four separate single-tile posts are prepared. Set Bruna and Ricky to priority 1, observe the active guard’s loop and uncovered posts, then capture a later comparison as a blink GIF with a patrol summary.",
   "profile": "dev-harness",
   "world": "Sandy Creek",
   "profile_snapshot": "basecamp_dev_manual_2026-04-02",

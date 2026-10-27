@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r030_roof_watch_continuation_20260929",
-  "description": "R030 native continuation from exact turn5264260 admitted roof-smoke outing with bounded selected-NPC decisions for scouts4/5 through approach, watch, return/report and any actual later assault.",
+  "description": "Historical recipe: R030 native continuation from exact turn5264260 admitted roof-smoke outing with bounded selected-NPC decisions for scouts4/5 through approach, watch, return/report and any actual later assault. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r028-final-save-r030-trace-20260929",
   "world": "TestSetup00",
   "observer_character": true,

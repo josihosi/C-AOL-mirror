@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_r020_repaired_clean_closed_smoke_early_recovery",
-  "description": "R011 fresh closed smoke regression on immutable R020; one prompt-at-a-time early recovery within bridge startup window is explicitly observed and logged.",
+  "description": "Historical recipe: R011 fresh closed smoke regression on immutable R020; one prompt-at-a-time early recovery within bridge startup window is explicitly observed and logged. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-r020-closed-smoke-early-recovery-20260928",
   "world": "TestSetup00",
   "observer_character": true,

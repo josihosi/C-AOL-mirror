@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.prepared_camp_storage_gather_v001_mcw",
-  "description": "R-032 focused established-camp Storage route. A disposable prepared fixture supplies the existing Food and Storage zones and cooked food solely as zero-credit setup. The live run must use the currently advertised native three-hour gather-materials companion mission and matching native recovery, then compare the first native Storage destination's exact item state before and after return.",
+  "description": "Storage gather from a prepared camp with existing Food and Storage zones and 80 cooked meat on the Food tile. Send the advertised three-hour gather-materials mission, recover it through native UI and compare the destination item state before and after return.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r032_prepared_camp_food_storage_v1",

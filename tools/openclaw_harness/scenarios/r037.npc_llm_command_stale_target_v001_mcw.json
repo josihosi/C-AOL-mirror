@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_stale_target_v001_mcw",
-  "description": "R-037 source-bound stale-target control. A scenario-authored fragile target may naturally die only after the local E4B exact-target request is accepted and applied; ordinary native turns then decide the target-loss grace disposition.",
+  "description": "R037 stale-target control: a fragile, initially friendly zombie dog replaces the combat target, and the allied recipient has a machete. After an actual E4B exact-target request, native combat may kill the dog; ordinary turns then determine target-loss handling.",
   "profile": "harness-npc-llm-coverage-combat",
   "config_profile": "dev-harness",
   "world": "McWilliams",

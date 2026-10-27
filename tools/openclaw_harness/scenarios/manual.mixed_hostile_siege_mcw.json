@@ -1,6 +1,6 @@
 {
   "name": "manual.mixed_hostile_siege_mcw",
-  "description": "Manual playtest handoff: dense midnight McWilliams siege with active bandit pressure, cannibal pressure, writhing stalker, zombie rider, flesh raptor, horde, and fire/smoke cues staged. The harness only loads the save and audits footing; it sends no gameplay keys after load.",
+  "description": "Manual midnight mixed-siege setup in McWilliams: the recipe stages a bandit camp and cloned cannibal camp, fire/smoke, a stalker, rider, raptor and horde. It prepares legacy four-bandit and two-cannibal stalk jobs; current ownership and live activity require qualification. The harness loads and audits the footing without gameplay keys after load.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "theme_mixed_hostile_camp_siege_v0_2026-05-18",

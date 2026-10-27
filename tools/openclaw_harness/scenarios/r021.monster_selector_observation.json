@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r021.monster_selector_observation",
-  "description": "Zero-credit R-021 observation route. It opens the native Monster category, dispatches into Edit monster, filters the exact fixture, observes the Set hit points submenu, and closes without sending an HP command.",
+  "description": "R021 monster-selector observation from a fixture with one tagged inert zombie and no inherited active monsters. Open Monster, enter Edit monster, locate the exact fixture and inspect Set hit points; close without sending an HP command.",
   "profile": "r009-m091",
   "world": "McWilliams",
   "fixture": "r021_direct_hp_setter_bootstrap_v1",

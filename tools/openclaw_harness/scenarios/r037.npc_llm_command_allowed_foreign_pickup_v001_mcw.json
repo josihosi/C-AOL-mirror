@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_allowed_foreign_pickup_v001_mcw",
-  "description": "R-037 source-bound ownership-only pickup control: one foreign-owned bandage on an allowed tile.",
+  "description": "R037 ownership-only pickup control: one Hells Raiders-owned bandage lies on the player tile with no NO_NPC_PICKUP zone; the allied recipient has a machete. Use this separately from the forbidden-zone control.",
   "profile": "harness-npc-llm-coverage",
   "config_profile": "dev-harness",
   "world": "McWilliams",

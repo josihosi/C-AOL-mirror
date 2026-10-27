@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r019.keep_watch_off_interruption_control_mcw",
-  "description": "Zero-credit R-019 counterexample. With the master Keep watch switch disabled, the worker must use only the advertised primitive one-minute wait. The staged hostile must interrupt that primitive wait; the session stops without guarded recovery or unsafe continuation.",
+  "description": "R019 off-switch control from a clean wait fixture with one hostile zombie dog six map squares east. With master Keep watch disabled, use an advertised one-minute primitive wait and observe the interruption; stop without guarded recovery.",
   "profile": "r009-m095",
   "config_profile": "dev-harness",
   "world": "McWilliams",

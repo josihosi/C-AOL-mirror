@@ -1,4 +1,5 @@
 {
+  "description": "Sandy Creek save captured from the dev profile on 2026-04-02. Locker and Smart Zone UI probes use this historical basecamp footing; the manifest does not describe its current actors, items or zones.",
   "profile": "dev",
   "world": "Sandy Creek",
   "captured_at": "2026-04-02T16:55:08+0200",

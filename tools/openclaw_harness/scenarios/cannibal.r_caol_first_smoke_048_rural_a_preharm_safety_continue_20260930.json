@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_048_rural_a_preharm_safety_continue_20260930",
-  "description": "R048 changed safety continuation from the exact 55-file full-health turn5256302 pre-harm checkpoint; same post-report hostile:2 IDs 5/7 and candidate-level route trace only.",
+  "description": "R048 rural-A safety continuation from the recorded turn 5256302 full-health, post-report hostile:2 checkpoint for members 5 and 7; inspect route and first harm. Its declared fixture manifest is not present at the linked path on this host, so availability of that exact start remains unverified.",
   "profile": "first-smoke-048-route-safety-turn5256302-20260930",
   "world": "TestSetup00",
   "observer_character": true,

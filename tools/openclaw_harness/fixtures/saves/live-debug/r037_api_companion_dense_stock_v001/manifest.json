@@ -2,7 +2,7 @@
   "name": "r037_api_companion_dense_stock_v001",
   "source_profile": "live-debug",
   "source_fixture": "r037_npc_llm_command_sandbox_v001",
-  "description": "Disposable API rerun derivative of the unchanged canonical R037 fixture. Adds reachable ordinary item stock only; it does not add commands, outcomes, NPC phases, or responses.",
+  "description": "R037 companion setup derived from the command sandbox: the recipe adds two bandages, two T-shirts, five rocks, one log, 60 rounds of .38, a lighter and three apples as nearby stock. It supplies no model command or outcome.",
   "save_transforms": [
     {
       "kind": "map_items_near_player",

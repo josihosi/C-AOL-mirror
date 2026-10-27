@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_011_ordinary_closed_smoke_assault",
-  "description": "R011 ordinary-view closed-window smoke-to-cannibal-assault run from the verified disposable owner-archive copy using immutable R015 executable.",
+  "description": "Historical recipe: R011 ordinary-view closed-window smoke-to-cannibal-assault run from the verified disposable owner-archive copy using immutable R015 executable. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-011-ordinary-closed-window-smoke-20260927",
   "world": "TestSetup00",
   "observer_character": true,

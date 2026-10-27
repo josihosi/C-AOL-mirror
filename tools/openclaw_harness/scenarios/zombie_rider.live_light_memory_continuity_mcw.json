@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_light_memory_continuity_mcw",
-  "description": "Native rider light-memory continuity: one current exposed furniture lamp is sampled by one loaded rider, creates finite source-keyed memory and an investigation intent, then stops refreshing and expires after native source removal.",
+  "description": "Rider light-memory test: one hostile rider and an exposed powered utility lamp start on the same open level, with no staged fire fields or human NPC targets. Observe source-keyed memory, investigation and expiry after native source removal.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "harness.ergonomics_native_mcw",
-  "description": "Disposable zero-credit diagnostic of whether an LLM can understand and operate native game surfaces through the player CLI without implementation archaeology.",
+  "description": "Native-surface usability diagnostic in an isolated McWilliams save. The fixture starts at an idle World footing with one wet flashlight wielded so Inventory, Activate and its confirmation can be exercised. Judge ordinary player CLI operation; the manufactured item is setup only.",
   "profile": "harness-ergonomics",
   "config_profile": "dev-harness",
   "world": "McWilliams",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "writhing_stalker.live_high_threat_allied_light_retreat_stalk_mcw",
-  "description": "Current-build staged/live high-threat row: local noon McWilliams fixture with save-transformed three-follower allied footing and one hostile writhing stalker on a naturally bright/focused tile. The bounded live window must choose overmatched stalking withdrawal with the live_high_threat_allied_light_retreat_stalk reason instead of close loiter.",
+  "description": "High-threat daylight stalker control: the McWilliams fixture brings the existing two followers to three allies and stages one hostile stalker seven tiles east. Observe whether the bright/focused scene produces overmatched withdrawal instead of close loiter.",
   "capabilities": {
     "runtime.entry_mode": "cockpit_live_session",
     "capabilities.r_zl_stalker.daylight_pressure": "matched_daylight_heavy_allied_native_non_attack"

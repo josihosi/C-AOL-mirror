@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "cannibal.r_caol_first_smoke_open_reference_first_light_v1",
-  "description": "Signal-only first-light observation from an independent disposable copy of the prepared Josef OPEN-window TestSetup00 reference. The owner reference is unchanged; no cannibal camp exists in this save, so this route proves physical light/smoke only.",
+  "description": "Historical recipe: Signal-only first-light observation from an independent disposable copy of the prepared Josef OPEN-window TestSetup00 reference. The owner reference is unchanged; no cannibal camp exists in this save, so this route proves physical light/smoke only. The named local world was not found here; current input and build compatibility are unverified.",
   "profile": "first-smoke-r-caol-001-open-reference-light",
   "world": "TestSetup00",
   "observer_character": true,

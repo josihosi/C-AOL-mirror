@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r013.cockpit_long_wait_activity_interrupt_bootstrap_mcw",
-  "description": "Zero-credit R-013 setup route.  It binds a deterministic hostile fixture, reaches ordinary gameplay, and stops when the six-hour native wait exposes the current activity interruption.  It does not dispatch recovery.",
+  "description": "R013 long-wait interruption setup: the clean fixture clears inherited monsters and places one hostile zombie dog six map squares east. Reach World, then stop when a six-hour native wait exposes an activity interruption; do not dispatch recovery.",
   "profile": "r009-m095",
   "world": "McWilliams",
   "fixture": "r013_long_wait_hostile_interrupt_bootstrap_v1",

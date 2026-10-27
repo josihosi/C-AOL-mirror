@@ -1,6 +1,6 @@
 {
   "name": "writhing_stalker.live_shadow_strike_mcw",
-  "description": "Live writhing-stalker shadow/strike scene proof: install a harness-only vulnerable-midnight McWilliams fixture, guard saved midnight before spawn, spawn one hostile writhing stalker at seven east, turn safe mode off, require live monster-plan shadow-before-strike, strike, and immediate cooldown lines, then save/audit same-run active-monster state.",
+  "description": "Midnight stalker strike test in McWilliams: the fixture sets the player to 60% HP, low stamina and torso bleed. Spawn one hostile stalker seven tiles east, then observe shadowing, strike and cooldown; the vulnerable player is setup.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",
