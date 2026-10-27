@@ -329,15 +329,18 @@ def session_context(workspace: Path, evidence: dict) -> dict:
             pending_request_id=(str(pending_request_id) if pending_request_id else None),
             unresolved_question='What does the exact recorded session state permit next?',
             next_decision=str(next_operation['reason']), next_operation=next_operation)
-        result.append({'session':str(session),'files':files,'recorded_status':status,
+        projected = {'session':str(session),'files':files,'recorded_status':status,
             'current_continuation': current_note,
             'next_operation': next_operation,
-            'refresh_argv': [*command_prefix, 'look'],
             'controls_argv': [*command_prefix, 'controls'],
             'log_query_argv':[sys.executable,'tools/openclaw_harness/cockpit_file_bridge.py','log-query',
                               '--session-dir',str(session)],
             'evidence_limit':'Recorded bridge state and pending request only. Process liveness and '
-                             'current input ownership require a fresh look; missing state is unknown, not finished.'})
+                             'current input ownership require fresh evidence; follow next_operation before '
+                             'new input. Missing state is unknown, not finished.'}
+        if next_operation['kind'] == 'refresh_current_owner':
+            projected['refresh_argv'] = next_operation['argv']
+        result.append(projected)
     return {'observed_at':time.time(),'sessions':result,
             'registry_history_argv':[sys.executable,'tools/openclaw_harness/scenario_registry_cli.py','registry-status'],
             'evidence_limit':'Only exact referenced sessions are inspected. No session selection, launch, or input occurred.'}

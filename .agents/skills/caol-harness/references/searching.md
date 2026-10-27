@@ -1,5 +1,29 @@
 # Search by question
 
+## Search the playtest catalogue
+
+The default `startup_harness.py list-scenarios` view shows maintained purpose families. Expand
+one with `--family FAMILY_ID`; `--diagnostic` shows focused controls, `--search TEXT` searches
+more broadly, `--scenario-id ID` inspects an exact ID or unambiguous name, and `--all` lists the
+complete flat catalogue. Use `list-fixtures --profile PROFILE` for fixture details; it also accepts
+`--diagnostic`, `--all` and `--registry`. These are read-only discovery routes. Follow
+[selection and launch](selection-and-launch.md) for the registry query and its returned action.
+
+A family can have no starting save, as with the C8 recipe. A task-local continuation belongs to
+its current task; it is not a fresh starting fixture. Maintained membership, source-matched registry
+eligibility, physical fixture availability and source/build/save/native qualification are distinct.
+Quarantine is unavailable for selection; absent or stale registry status is unknown. Exact lookup
+does not bypass validation.
+
+Search output can be large. For example, project invalid historical continuations to their names
+and validation status, then inspect the actual error with `--scenario-id`:
+
+```sh
+python3 tools/openclaw_harness/startup_harness.py list-scenarios --search continuation | python3 -c 'import json,sys; d=json.load(sys.stdin); rows=d.get("other_scenarios",[])+[v for f in d.get("families",[]) for v in f["variants"]]; [print(r["name"],r["scenario_manifest"]["validation"]["status"]) for r in rows if r["scenario_manifest"]["validation"]["status"] == "invalid"]'
+```
+
+## Search a live observation
+
 Start from the response you are investigating, not a guessed universal JSON root:
 
 - A collected `look` response has `.response.current_input` and `.response.result` in the CLI
@@ -25,6 +49,8 @@ Field names under World facts are starting points; another input owner exposes i
 | What is nearby: characters, terrain, objects, effects or zones? | Inspect World fact selectors `visible_entities`, `visible_local`, `minimap`, `overmap`, or `visible_zones`. Filter a list by name/type, then check identity, coordinates and relevant fields. Use larger map detail when immediate neighbours do not cover the question. |
 | What did the game say? | `messages --contains TEXT` searches the displayed observation. For an earlier response, inspect its messages selector with `--request-id REQUEST --contains TEXT`. Correlate message time and actor; retained fixture history may be present. |
 | What happened in an earlier action or causal event? | Use its request ID with `inspect`; for logs, use the exact query arguments from `controls`, then filter run/event/actor and project relevant fields with repeated `--select`. Follow returned evidence handles for deeper detail. |
+| Did a signal cause a response? | Check the actual emitting source, its sample, the named observer/site's reception and subsequent dispatch separately. Use [source and reception guidance](smoke-light-visibility.md#keep-the-source-alive-through-the-useful-scan). |
+| Did the same party move? | Compare the bound actors' actual positions across meaningful saved or observed endpoints. An ownership/reservation timestamp is not a body movement clock; endpoint displacement does not reconstruct the route between them. |
 
 For example, after substituting the session, retained request and returned selector:
 

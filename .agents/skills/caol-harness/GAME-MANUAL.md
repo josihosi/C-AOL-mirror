@@ -97,9 +97,9 @@ For scenario authoring, reuse the existing registry and a relevant source manife
 its exact scenario query. [CONTROL_LOOKUP](../../../tools/openclaw_harness/CONTROL_LOOKUP.md)
 is the current detailed control catalogue. The old interaction matrix was consumed; use the
 relevant existing recipe and current native controls rather than that missing dependency.
-Validate a candidate through `scenario_registry.py::validate_manifest` before selection; record setup
-changes separately from native behavior. The scenario-consolidation ledger item owns broader
-catalogue reduction; this manual does not create a parallel registry or erase variants.
+Validate a changed candidate before selection; record setup changes separately from native
+behavior. Use [family discovery](SKILL.md#find-a-playtest) for maintained variants and historical
+search; the registry remains the source for exact selection and qualification.
 
 The [skill entry point](SKILL.md) routes launch, live controls, evidence, setup and closeout.
 Only Luna operates live sessions. Sol can analyze source, logs and saved data or repair code.

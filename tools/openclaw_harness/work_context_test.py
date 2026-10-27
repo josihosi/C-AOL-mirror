@@ -4,6 +4,8 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
+import sys
 from work_context_provider import (session_context, select_current_results,
                                     export_current_results, prepare_current_results,
                                     continuation_note, CurrentResultsError)
@@ -17,6 +19,7 @@ class SessionContextTests(unittest.TestCase):
             evidence={'entrypoints':[str(status)], 'receipts':[{'bindings':{'session':str(session.parent/'historical-b')}}]}
             missing=session_context(root,evidence)['sessions'][0]
             self.assertFalse(missing['files']['status.json']['available'])
+            self.assertNotIn('refresh_argv', missing)
             status.write_text(json.dumps({'state':'ready','session_generation':0}))
             first=session_context(root,evidence)['sessions'][0]
             status.write_text(json.dumps({'state':'ready','session_generation':1,'session_descriptor':{'run_id':'new'}}))
@@ -43,32 +46,61 @@ class SessionContextTests(unittest.TestCase):
             status.write_text(json.dumps({'state': 'awaiting_response', 'binding_id': 'bound',
                                           'session_generation': 3, 'inflight_request_id': 'request-pending'}))
             active.write_text(json.dumps({'request_id': 'request-pending'}))
-            pending = session_context(root, evidence)['sessions'][0]['next_operation']
+            pending_context = session_context(root, evidence)['sessions'][0]
+            self.assertNotIn('refresh_argv', pending_context)
+            pending = pending_context['next_operation']
             self.assertEqual(pending['kind'], 'collect_pending')
             self.assertEqual(pending['request_id'], 'request-pending')
             self.assertEqual(pending['argv'][-3:], ['collect', '--request-id', 'request-pending'])
             self.assertNotIn('look', pending['argv'])
 
             active.unlink()
+            status.write_text(json.dumps({'state': 'awaiting_response', 'binding_id': 'bound'}))
+            unknown_pending = session_context(root, evidence)['sessions'][0]
+            self.assertEqual(unknown_pending['next_operation']['kind'], 'unknown_pending_identity')
+            self.assertNotIn('argv', unknown_pending['next_operation'])
+            self.assertNotIn('refresh_argv', unknown_pending)
             status.write_text(json.dumps({'state': 'ready', 'binding_id': 'bound', 'session_generation': 3}))
             (session / 'play-client.json').write_text(json.dumps({
                 'binding_id': 'bound', 'last_request_id': 'request-completed',
                 'last_collected_result': {'request_id': 'request-completed', 'ok': True},
             }))
-            completed = session_context(root, evidence)['sessions'][0]['next_operation']
+            completed_context = session_context(root, evidence)['sessions'][0]
+            self.assertNotIn('refresh_argv', completed_context)
+            completed = completed_context['next_operation']
             self.assertEqual(completed['kind'], 'replay_completed_result')
             self.assertEqual(completed['argv'][-3:], ['collect', '--request-id', 'request-completed'])
 
             status.write_text(json.dumps({'state': 'safe_to_cleanup', 'binding_id': 'bound'}))
-            ended = session_context(root, evidence)['sessions'][0]['next_operation']
+            ended_context = session_context(root, evidence)['sessions'][0]
+            self.assertNotIn('refresh_argv', ended_context)
+            ended = ended_context['next_operation']
             self.assertEqual(ended['kind'], 'ended_or_failed')
             self.assertNotIn('argv', ended)
 
             (session / 'play-client.json').unlink()
             status.write_text(json.dumps({'state': 'ready', 'binding_id': 'bound', 'session_generation': 4}))
-            stale = session_context(root, evidence)['sessions'][0]['next_operation']
+            ready_context = session_context(root, evidence)['sessions'][0]
+            stale = ready_context['next_operation']
             self.assertEqual(stale['kind'], 'refresh_current_owner')
             self.assertEqual(stale['argv'][-1], 'look')
+            self.assertEqual(ready_context['refresh_argv'], stale['argv'])
+
+    def test_provider_cli_does_not_offer_look_during_pending_input(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            session = root / '.userdata/openclaw_harness/bridge-sessions/current'
+            session.mkdir(parents=True)
+            status = session / 'status.json'
+            status.write_text(json.dumps({'state': 'awaiting_response', 'inflight_request_id': 'request-pending'}))
+            script = Path(__file__).with_name('work_context_provider.py').resolve()
+            result = subprocess.run([sys.executable, '-B', str(script)], cwd=root,
+                                    input=json.dumps({'entrypoints': [str(status)]}),
+                                    text=True, capture_output=True, check=True)
+            observed = json.loads(result.stdout)['sessions'][0]
+            self.assertEqual(observed['next_operation']['kind'], 'collect_pending')
+            self.assertEqual(observed['next_operation']['request_id'], 'request-pending')
+            self.assertNotIn('refresh_argv', observed)
 
     def test_current_results_requires_exact_ids_and_preserves_independent_results(self):
         with tempfile.TemporaryDirectory() as d:
@@ -222,7 +254,7 @@ class SessionContextTests(unittest.TestCase):
             import play_cli
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                exit_status = play_cli.main(operation['argv'][2:])
+                exit_status = play_cli.main(['--diagnostics', *operation['argv'][2:]])
             replay = json.loads(output.getvalue())
             self.assertEqual(exit_status, 0)
             self.assertEqual(replay['request_id'], 'completed-1')
