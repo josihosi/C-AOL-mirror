@@ -337,7 +337,8 @@ item &inventory::add_item( item newit, bool keep_invlet, bool assign_invlet, boo
     }
     update_cache_with_item( newit );
 
-    items.emplace_back( std::list<item> { std::move( newit ) } );
+    items.emplace_back();
+    items.back().emplace_back( std::move( newit ) );
     return items.back().back();
 }
 
@@ -361,7 +362,8 @@ void inventory::add_items_bulk( std::vector<item> items_in, bool keep_invlet,
                 update_invlet( it, assign_invlet );
             }
             update_cache_with_item( it );
-            items.emplace_back( std::list<item> { std::move( it ) } );
+            items.emplace_back();
+            items.back().emplace_back( std::move( it ) );
         }
         return;
     }
@@ -409,7 +411,8 @@ void inventory::add_items_bulk( std::vector<item> items_in, bool keep_invlet,
             update_invlet( newit, assign_invlet );
         }
         update_cache_with_item( newit );
-        items.emplace_back( std::list<item> { std::move( newit ) } );
+        items.emplace_back();
+        items.back().emplace_back( std::move( newit ) );
         by_type[items.back().front().typeId()].push_back( std::prev( items.end() ) );
     }
 }

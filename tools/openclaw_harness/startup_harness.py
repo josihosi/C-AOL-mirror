@@ -29586,7 +29586,8 @@ def apply_remove_overmap_npcs_transform(world_dir: Path, transform: Dict[str, An
     }
 
 
-def apply_overmap_npcs_near_player_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
+def apply_overmap_npcs_near_player_transform(world_dir: Path, transform: Dict[str, Any],
+                                           *, _next_npc_id: Optional[int] = None) -> Dict[str, Any]:
     selected_player_save = str(transform.get("player_save", "") or "").strip()
     if not selected_player_save:
         saves = sorted(path.name for path in world_dir.glob("*.sav.zzip"))
@@ -29656,6 +29657,10 @@ def apply_overmap_npcs_near_player_transform(world_dir: Path, transform: Dict[st
                 raise SystemExit(f"Fixture overmap-npcs transform needs an existing NPC template in {target_overmap_path}")
 
         next_id = max(existing_ids + [0]) + 1
+        if _next_npc_id is not None:
+            if type(_next_npc_id) is not int or _next_npc_id <= 0:
+                raise SystemExit("Fixture NPC allocator boundary must be a positive integer")
+            next_id = max(next_id, _next_npc_id)
         name_prefix = str(transform.get("name_prefix", "OpenClaw Ally") or "OpenClaw Ally").strip()
         placed: List[Dict[str, Any]] = []
         for index, offset in enumerate(transform.get("offsets_ms", []), start=1):
@@ -32395,7 +32400,8 @@ def _mixed_load_response_lead(site: Dict[str, Any], target: List[int], minute: i
     return matching[0] if matching else lead
 
 
-def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict[str, Any]) -> Dict[str, Any]:
+def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict[str, Any],
+                                              *, _sample_cohorts: bool = False) -> Dict[str, Any]:
     """Prepare fresh metrics ownership, not a naturally earned dispatch or story.
 
     Preserve the parent's native time and every body.  Legacy roster-shaping is
@@ -32415,9 +32421,10 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
     sites = {site["site_id"]: site for site in world["sites"]}
     source = sites.get(transform["source_site_id"])
     cohorts = transform["cohorts"]
-    if (source is None or len(cohorts) not in {2, 4} or len(sites) != len(cohorts) or
+    valid_count = len(cohorts) >= 2 if _sample_cohorts else len(cohorts) in {2, 4}
+    if (source is None or not valid_count or len(sites) != len(cohorts) or
             set(sites) != {c["site_id"] for c in cohorts}):
-        raise SystemExit("Mixed-load bootstrap needs exactly the declared two or four camps")
+        raise SystemExit("Mixed-load bootstrap needs exactly the declared camps (ordinary transforms permit two or four)")
     # Direct callers must meet the downstream operation's member bounds before
     # any body, roster, report or claim is written, just like manifest callers.
     for cohort in cohorts:
@@ -32439,7 +32446,8 @@ def apply_bandit_mixed_load_bootstrap_transform(world_dir: Path, transform: Dict
     for index, cohort in enumerate(cohorts):
         site = sites[cohort["site_id"]]
         expected_kind = "bandit_camp" if index == 0 else "cannibal_camp"
-        if site.get("site_kind") != expected_kind:
+        if (site.get("site_kind") not in {"bandit_camp", "cannibal_camp"} or
+                (not _sample_cohorts and site.get("site_kind") != expected_kind)):
             raise SystemExit("Mixed-load bootstrap camp profiles do not match the declared cohorts")
         ids = ([npc_id for npc_id in members if npc_id not in transferred_ids]
                if index == 0 else cohort["member_ids"])
@@ -39543,6 +39551,286 @@ def install_fixture(profile: str, fixture_name: str, replace: bool, fixture_prof
     }
 
 
+def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count: int,
+                              member_pattern: Sequence[int] = (4, 2, 3)) -> Dict[str, Any]:
+    """Compile a fresh, zero-credit metrics sample, never a saved continuation.
+
+    One maintained recipe and one ordinary saved-start declaration serve every
+    sample size. No token, native process or measurement is created here.
+    """
+    if (type(party_count) is not int or party_count < 2 or not member_pattern or
+            any(type(n) is not int or not 2 <= n <= 4 for n in member_pattern)):
+        raise SystemExit("Mixed-load sample needs at least two parties and a 2-4 member pattern")
+    profile = resolve_profile_name(profile)
+    destination = userdir_for_profile(profile).absolute()
+    declaration_path = declaration_path.absolute()
+    if (destination.exists() or destination.is_symlink() or declaration_path.exists() or
+            declaration_path.is_symlink() or not declaration_path.parent.is_dir() or
+            declaration_path.parent.resolve() != declaration_path.parent):
+        raise SystemExit("Mixed-load sample requires unused profile/declaration paths and an existing real parent")
+    fixture = "performance_mixed_hostile_stalker_horde_v0_2026-04-30"
+    resolved = resolve_fixture_payload(fixture, "live-debug")
+    source_binding = fixture_source_binding(fixture, "live-debug")
+    source_hash, error = sha256_tree(resolved["save_src"])
+    if error:
+        raise SystemExit(error)
+    transforms = resolved["save_transforms"]
+    split = next(i for i, t in enumerate(transforms) if t["kind"] == "bandit_mixed_load_bootstrap")
+    sizes = [member_pattern[i % len(member_pattern)] for i in range(party_count)]
+    template_scenario = load_scenario("performance.mixed_hostile_stalker_horde_mcw")
+    ensure_dir(destination.parent)
+    with tempfile.TemporaryDirectory(prefix=".mixed-sample-", dir=destination.parent) as temporary:
+        stage = Path(temporary)
+        world = stage / "save" / "McWilliams"
+        shutil.copytree(resolved["save_src"] / "McWilliams", world)
+        apply_fixture_save_transforms(world, transforms[:split])
+        dimension = world / "dimension_data.gsav"
+        header, _, text = dimension.read_text().partition("\n")
+        payload = json.loads(text)
+        live = payload["overmapbuffer"]["bandit_live_world"]
+        source = live["sites"][0]
+        source_id = source["site_id"]
+        player_save = transforms[split]["player_save"]
+        player_omt, player_ms = load_player_abs_omt(world, player_save)
+
+        # Inspect native archive entries once in the disposable staging world.
+        # New homes must not replace already generated physical geometry.
+        occupied = set()
+        for directory in (world / "maps").iterdir():
+            if directory.is_dir():
+                occupied.update(p.name for p in directory.glob("*.map"))
+        for archive in sorted((world / "maps").glob("*.0.zzip")):
+            extracted = archive.with_suffix("")
+            if extracted.exists():
+                raise SystemExit("Mixed-load sample refuses ambiguous plain/archive map inputs")
+            run_zzip(archive)
+            try:
+                occupied.update(p.name for p in extracted.glob("*.map"))
+            finally:
+                shutil.rmtree(extracted)
+        placements = load_bandit_special_placements(
+            repo_root(), world, BANDIT_HOME_SPECIAL_IDS | {"cannibal_camp", "Mi-Go Encampment"})
+        used = {point for placed in placements for point in placed.points}
+        sites = copy.deepcopy(live["sites"])
+        candidates = sorted(((x, y) for x in range(-33, 34, 3) for y in range(-33, 34, 3)
+                             if max(abs(x), abs(y)) >= 6),
+                            key=lambda xy: (max(abs(xy[0]), abs(xy[1])), xy))
+        for dx, dy in candidates:
+            if len(sites) >= party_count:
+                break
+            anchor = [player_omt[0] + dx, player_omt[1] + dy, 0]
+            footprint = [(anchor[0] + x, anchor[1] + y, 0) for x in (0, 1) for y in (0, 1)]
+            # Native make_special_footprint looks one OMT around each tile.
+            # Keep a separating tile so distinct same-kind placements cannot
+            # be registered under an alias anchor when ordinary mapgen runs.
+            if (any(any((point[0] + x, point[1] + y, point[2]) in used
+                        for x in (-1, 0, 1) for y in (-1, 0, 1)) or
+                    f"{point[0]}.{point[1]}.0.map" in occupied for point in footprint) or
+                    any(point[0] // OMAPX != player_omt[0] // OMAPX or
+                        point[1] // OMAPY != player_omt[1] // OMAPY for point in footprint)):
+                continue
+            # Native overmap routing remains responsible for the actual route.
+            # Avoid water/building starts; do not replace a corridor with air.
+            if any(saved_overmap_terrain_id(world, p) != "field" for p in footprint):
+                continue
+            kind = "bandit_camp" if len(sites) % 2 == 0 else "cannibal_camp"
+            apply_seed_overmap_special_near_player_transform(world, {
+                "player_save": player_save, "special_id": kind,
+                "source_special_id": "bandit_camp", "site_index": 2,
+                "offset_omt": [dx, dy, 0]})
+            site_id = f"overmap_special:{kind}@{anchor[0]},{anchor[1]},0"
+            apply_bandit_clone_site_transform(world, {
+                "source_site_id": source_id, "new_site_id": site_id,
+                "new_site_kind": kind, "new_source_id": kind,
+                "new_anchor": anchor, "new_footprint": [list(p) for p in footprint]})
+            sites.append({"site_id": site_id, "site_kind": kind, "anchor": anchor})
+            used.update(footprint)
+        if len(sites) != party_count:
+            raise SystemExit(f"Mixed-load sample needs {party_count} homes; only {len(sites)} unused field footprints fit this parent/40-OMT neighborhood")
+        placed_homes = load_bandit_special_placements(
+            repo_root(), world, {"bandit_camp", "cannibal_camp"})
+        for site in sites:
+            expected = {tuple(p) for p in site.get("footprint", [])}
+            if not expected:
+                anchor = site["anchor"]
+                expected = {(anchor[0] + x, anchor[1] + y, 0) for x in (0, 1) for y in (0, 1)}
+            if not any(p.special_id == site["site_kind"] and
+                       {point for point in p.points if point[2] == 0} == expected
+                       for p in placed_homes):
+                raise SystemExit("Mixed-load sample home ownership does not match its actual native special footprint")
+
+        # Reuse the existing saved NPC-template producer. New item instances
+        # omit UIDs so the unchanged native item loader assigns them exactly
+        # once from master.gsav. Existing bodies/items are not renumbered.
+        members = copy.deepcopy(source["members"])
+        inherited_ids = [member["npc_id"] for member in members]
+        needed = max(0, sum(sizes) - len(members))
+        new_ids = []
+        if needed:
+            master = world / "master.gsav"
+            master_version, separator, raw = master.read_text().partition("\n")
+            if not separator:
+                raise SystemExit("Mixed-load sample requires native master allocator state")
+            state = json.loads(raw)
+            if type(state.get("next_npc_id")) is not int or state["next_npc_id"] <= 0:
+                raise SystemExit("Mixed-load sample requires a native next_npc_id")
+            cloned = apply_overmap_npcs_near_player_transform(world, {
+                "player_save": player_save, "source_npc_id": inherited_ids[0],
+                "scan_all_overmaps_for_ids": True, "clear_camp_assignment": True,
+                "name_prefix": "Mixed metrics member", "npc_faction": "hells_raiders",
+                "npc_mission": 11, "offsets_ms": [[0, 0, 0]] * needed},
+                _next_npc_id=state["next_npc_id"])
+            new_ids = [row["id"] for row in cloned["placed_npcs"]]
+            for npc_id in new_ids:
+                member = copy.deepcopy(members[0])
+                member.update(npc_id=npc_id)
+                members.append(member)
+            def fresh_items(value: Any) -> None:
+                if isinstance(value, dict):
+                    if "typeid" in value:
+                        value.pop("uid", None)
+                    for child in value.values():
+                        fresh_items(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        fresh_items(child)
+            for archive in sorted((world / "overmaps").glob("o.*.*.zzip")):
+                plain, version, data = extract_overmap_payload(archive)
+                changed = False
+                try:
+                    for body in data.get("npcs", []):
+                        if body.get("id") in new_ids:
+                            fresh_items(body)
+                            changed = True
+                    if changed:
+                        write_overmap_payload(plain, version, data)
+                finally:
+                    cleanup_extracted_overmap(plain, keep=False)
+            state["next_npc_id"] = max(state["next_npc_id"], max(new_ids) + 1)
+            master.write_text(master_version + "\n" + json.dumps(state))
+        header, _, raw = dimension.read_text().partition("\n")
+        payload = json.loads(raw)
+        payload["overmapbuffer"]["bandit_live_world"]["sites"][0]["members"] = members
+        dimension.write_text(header + "\n" + json.dumps(payload))
+        cohorts = []
+        cursor = 0
+        for site, count in zip(sites, sizes):
+            selected = members[cursor:cursor + count]
+            for slot, member in enumerate(selected):
+                member["home_spawn_tile"] = [source["anchor"][0] * 24 + 12 + slot % 2,
+                                             source["anchor"][1] * 24 + 12 + slot // 2, 0]
+            cohorts.append({"site_id": site["site_id"], "member_ids": [m["npc_id"] for m in selected],
+                            "rally_omt": [player_omt[0], player_omt[1] + 3, 0]})
+            cursor += count
+        # Publish the selected fresh home tiles before the existing bootstrap
+        # reads them; all of this is still an unpublished disposable stage.
+        payload["overmapbuffer"]["bandit_live_world"]["sites"][0]["members"] = members
+        dimension.write_text(header + "\n" + json.dumps(payload))
+        bootstrap = {"kind": "bandit_mixed_load_bootstrap", "player_save": player_save,
+                     "source_site_id": source_id, "cohorts": cohorts}
+        prepared = apply_bandit_mixed_load_bootstrap_transform(world, bootstrap, _sample_cohorts=True)
+        apply_fixture_save_transforms(world, transforms[split + 1:])
+        tree, error = sha256_tree(world)
+        if error:
+            raise SystemExit(error)
+        scenario = copy.deepcopy(template_scenario)
+        scenario.update(name=f"performance.mixed_load_sample.{profile}", profile="mixed-load-sample",
+                        config_profile=profile, fixture="", fixture_profile="",
+                        saved_world_snapshot=str(destination / "save" / "McWilliams"),
+                        description=f"Fresh manufactured mixed metrics sample: {party_count} human parties/{sum(sizes)} selected members. Native work, Mi-go population/admission and capacity are unqualified.")
+        scenario["catalogue"]["variant"] = f"Fresh {party_count}-party mixed-load sample"
+        scenario["artifact_patterns"] = [p for p in scenario["artifact_patterns"]
+                                         if p not in {"sites=2", "travelling_npcs=6"}]
+        contract = scenario["runtime_contract"]
+        contract.update(profile=scenario["profile"], fixture="")
+        contract["requirements"].update(profile=scenario["profile"], fixture="none")
+        scenario.pop("recommended_test_command", None)
+        audits = []
+        final = json.loads(dimension.read_text().partition("\n")[2])["overmapbuffer"]["bandit_live_world"]
+        for index, cohort in enumerate(cohorts):
+            site = next(s for s in final["sites"] if s["site_id"] == cohort["site_id"])
+            audit = copy.deepcopy(template_scenario["steps"][1 if site["site_kind"] == "bandit_camp" else 2])
+            audit.update(label=f"preflight_mixed_sample_party_{index + 1}", required_site_id_contains=site["site_id"],
+                         required_member_count=len(site["members"]), required_active_outside_count=len(cohort["member_ids"]),
+                         required_min_active_member_ids=len(cohort["member_ids"]),
+                         required_active_hostile_reservation_min_member_ids=len(cohort["member_ids"]),
+                         required_active_hostile_reservation_target_id_exact=f"performance_mixed:{site['site_id']}")
+            audit["expected_immediate_state"] = "Complete manufactured current owner and physical bodies at authenticated homes; native activity is unproved."
+            requirements = {k: v for k, v in audit.items() if k.startswith("required_") or k == "player_save"}
+            if audit_saved_bandit_live_world_state(world, **requirements)["status"] != "required_state_present":
+                raise SystemExit(f"Mixed-load sample party {index + 1} failed the ordinary physical preflight")
+            audits.append(audit)
+        live_step = copy.deepcopy(template_scenario["steps"][-1])
+        live_step["label"] = "mixed_sample_work_controls_and_reload"
+        live_step["proof_targets"] = [
+            f"all {party_count} prepared parties pass physical body/owner/report/claim guards",
+            "actual native human party and generated Mi-go work counted separately from setup",
+            "existing source-bound budget/resource comparison with active/inactive identity controls",
+            "normal save/close and supported same-result owner/body/clock reload"]
+        live_step["objective"] = (
+            f"Manufactured close metrics setup requests {party_count} independent human parties with member counts {sizes}. "
+            "Every body/owner/report/claim preflight must pass before gameplay. Count actual progressing parties, their members, "
+            "native-generated Mi-go, stalkers and horde entities separately. Homes begin within the normal40-OMT neighborhood; "
+            "this is a geometry premise, not proof of activation or work. Shift the player map normally near the seeded encampment "
+            "and authenticate native committed population before counting it. Preserve real survival, refusal and casualties. "
+            "Record effective AUTOSAVE=false and RAID_PERFORMANCE_DIAGNOSTIC=normal, plus other settings. Use the existing "
+            "budget/interval resource comparison and retain decisive original boundaries. Sampler counts10/20/50/100 are inputs, "
+            "not production caps or earned capacity. Do useful active and idle/unload controls with same-ID/state comparisons, "
+            "then normal save/close and supported SAME-result reload, without reinstall or fresh activity. No runtime NPC/history/clock "
+            "edits, forced admission or synthetic performance credit. Original Luna alone input under Terra. "
+            "No whole-scaling or gain claim without actual matched measurements; preserve the first genuine setup/route guard.")
+        scenario["steps"] = [copy.deepcopy(template_scenario["steps"][0]), *audits, live_step]
+        # Saved-start selection uses this explicit existing continuation route
+        # and clears automatic reentry after resolving it. Keep every audit in
+        # that route instead of silently reducing it to bootstrap/live alone.
+        scenario["post_relaunch"] = {
+            "terminal_save_step_label": live_step["label"], "terminal_exit_timeout_seconds": 45,
+            "steps": copy.deepcopy([*audits, live_step])}
+        for step in scenario["post_relaunch"]["steps"]:
+            step["label"] += "_saved_start"
+        scenario["proof_route"] = {"precondition": [s["label"] for s in scenario["steps"][:-1]],
+                                   **{k: [live_step["label"]] for k in ("production_behavior", "artifact_verdict", "terminal_persistence", "disallowed_shortcuts")}}
+        scenario["evidence_contract"]["failure_rule"] = "Every party physical-body/report/claim preflight aborts on failure. Setup count is not native active work; qualify actual Mi-go and preserve real refusals, casualties and missing measurements."
+        config = stage / "config" / "options.json"
+        config.parent.mkdir()
+        shutil.copyfile(profile_snapshots_root() / "live-debug" / "mcwilliams_live_debug_2026-04-07" / "config" / "options.json", config)
+        apply_option_overrides_to_file(config, {"AUTOSAVE": "false", "RAID_PERFORMANCE_DIAGNOSTIC": "normal"})
+        declared = stage / "declaration.json"
+        declared.write_text(json.dumps(scenario, indent=2) + "\n")
+        validate_manifest(scenario, path=declared)
+        if (sha256_tree(resolved["save_src"]) != (source_hash, "") or
+                fixture_source_binding(fixture, "live-debug") != source_binding):
+            raise SystemExit("Mixed-load sample source changed during preparation")
+        # Final destinations were prevalidated; no overwrite or active-world
+        # ownership reconciliation is performed by this preparation command.
+        destination.mkdir()
+        declaration_created = False
+        try:
+            shutil.move(str(stage / "save"), destination / "save")
+            shutil.move(str(stage / "config"), destination / "config")
+            with declaration_path.open("x") as output:
+                declaration_created = True
+                output.write(declared.read_text())
+        except BaseException:
+            shutil.rmtree(destination)
+            if declaration_created:
+                declaration_path.unlink()
+            raise
+    return {"classification": "fresh manufactured close metrics input; no native work credit",
+            "profile": profile, "world": str(destination / "save" / "McWilliams"),
+            "world_sha256": tree, "source_fixture_binding": source_binding,
+            "party_count": party_count, "member_counts": sizes, "selected_members": sum(sizes),
+            "inherited_member_ids": inherited_ids, "new_npc_ids": new_ids,
+            "bootstrap": prepared, "declaration": str(declaration_path),
+            "geometry": {"player_omt": player_omt, "rally_omt": cohorts[0]["rally_omt"],
+                         "home_anchors": [site["anchor"] for site in sites],
+                         "migo_seed_omt": [144, 39, 0],
+                         "native_routes": "Not solved by setup; native owner must qualify physical travel"},
+            "declaration_sha256": path_sha256(declaration_path),
+            "config_sha256": path_sha256(destination / "config" / "options.json"),
+            "native_qualification": "Not run; requires original Luna through supported selection"}
+
+
 def resolve_profile_snapshot_payload(
     snapshot_name: str,
     snapshot_profile: str,
@@ -45116,6 +45404,13 @@ def build_parser() -> argparse.ArgumentParser:
     install_p.add_argument("--fixture-profile", default="", help="Fixture source profile; defaults to the target profile.")
     install_p.add_argument("--replace", action="store_true", help="Replace existing worlds when installing.")
 
+    mixed_p = subparsers.add_parser(
+        "prepare-mixed-load", help="Prepare one fresh adjustable mixed metrics sample and source-bound saved-start declaration; no game.")
+    mixed_p.add_argument("--profile", required=True, help="Unused preparation profile; never an existing game or continuation.")
+    mixed_p.add_argument("--declaration-output", required=True, type=Path, help="New task-local ordinary declaration path.")
+    mixed_p.add_argument("--parties", type=int, default=10, help="Requested independent human parties, not measured capacity.")
+    mixed_p.add_argument("--member-pattern", default="4,2,3", help="Repeating per-party member counts, each 2-4.")
+
     scenarios_p = subparsers.add_parser("list-scenarios", help="List packaged live-probe scenario contracts.")
     scenarios_p.add_argument("--profile", default="", help="Ignored today; reserved for future per-profile scenario filtering.")
     scenarios_p.add_argument("--all", action="store_true", help="Include historical, diagnostic and unclassified declarations.")
@@ -45302,6 +45597,14 @@ def main() -> int:
     if args.command == "install-fixture":
         profile = resolve_profile_name(args.profile)
         result = install_fixture(profile, args.fixture, replace=args.replace, fixture_profile=args.fixture_profile)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    if args.command == "prepare-mixed-load":
+        try:
+            pattern = [int(value) for value in args.member_pattern.split(",")]
+        except ValueError:
+            parser.error("--member-pattern must contain comma-separated integers")
+        result = prepare_mixed_load_sample(args.profile, args.declaration_output, args.parties, pattern)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     if args.command == "list-scenarios":

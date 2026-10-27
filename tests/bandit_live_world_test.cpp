@@ -91,6 +91,7 @@
 #include "pocket_type.h"
 #include "npctrade.h"
 #include "item.h"
+#include "inventory.h"
 #include "omdata.h"
 #include "overmap.h"
 #include "overmapbuffer.h"
@@ -75314,6 +75315,135 @@ TEST_CASE( "maintained mixed metrics bootstrap has current reloadable owners and
     }
 }
 
+TEST_CASE( "inventory ingestion and JSON reload transfer nested identities without cloning",
+           "[inventory_move_persistence]" )
+{
+    const int route = GENERATE( 0, 1, 2, 3 );
+    CAPTURE( route );
+    const auto identities = []( const auto & source ) {
+        std::vector<int64_t> result;
+        source.visit_items( [&]( const item * value, const item * ) {
+            result.push_back( value->uid().get_value() );
+            return VisitResponse::NEXT;
+        } );
+        return result;
+    };
+    const auto nested = []( const char letter ) {
+        item inner( itype_id( "bag_plastic_small" ), calendar::turn );
+        REQUIRE( inner.put_in( item( itype_id( "jerky" ), calendar::turn ),
+                               pocket_type::CONTAINER ).success() );
+        item outer( itype_id( "backpack" ), calendar::turn );
+        REQUIRE( outer.put_in( inner, pocket_type::CONTAINER ).success() );
+        outer.invlet = letter;
+        return outer;
+    };
+    std::vector<item> batch;
+    batch.emplace_back( nested( 'q' ) );
+    batch.emplace_back( nested( 'r' ) );
+    auto expected = identities( batch.front() );
+    const auto second = identities( batch.back() );
+    expected.insert( expected.end(), second.begin(), second.end() );
+    REQUIRE( expected.size() == 6 );
+    REQUIRE( std::set<int64_t>( expected.begin(), expected.end() ).size() == expected.size() );
+    inventory target;
+    const bool stack = route != 1;
+    if( route == 0 ) {
+        for( item &value : batch ) {
+            target.add_item( std::move( value ), true, false, stack );
+        }
+    } else {
+        target.add_items_bulk( std::move( batch ), true, route == 3, stack );
+    }
+    CHECK( identities( target ) == expected );
+    REQUIRE( target.size() == ( stack ? 1u : 2u ) );
+    CHECK( target.const_stack( 0 ).front().invlet == 'q' );
+    if( stack ) {
+        REQUIRE( target.const_stack( 0 ).size() == 2 );
+        CHECK( target.const_stack( 0 ).back().invlet == 'q' );
+    } else {
+        CHECK( target.const_stack( 1 ).front().invlet == 'r' );
+    }
+    std::ostringstream output;
+    JsonOut json( output );
+    target.json_save_items( json );
+    inventory restored;
+    restored.json_load_items( json_loader::from_string( output.str() ).get_array() );
+    CHECK( identities( restored ) == expected );
+    CHECK( identities( target ) == expected );
+    std::ostringstream reserialized;
+    JsonOut restored_json( reserialized );
+    restored.json_save_items( restored_json );
+    if( route == 1 ) {
+        // JSON load intentionally uses ordinary stacking even when its source
+        // was built without it. The second matching item inherits the first
+        // letter; its physical identity and every contained UID still survive.
+        REQUIRE( restored.size() == 1 );
+        REQUIRE( restored.const_stack( 0 ).size() == 2 );
+        CHECK( restored.const_stack( 0 ).back().invlet == 'q' );
+        CHECK( target.const_stack( 1 ).front().invlet == 'r' );
+        inventory stable;
+        stable.json_load_items( json_loader::from_string( reserialized.str() ).get_array() );
+        CHECK( identities( stable ) == expected );
+        std::ostringstream stable_output;
+        JsonOut stable_json( stable_output );
+        stable.json_save_items( stable_json );
+        CHECK( stable_output.str() == reserialized.str() );
+    } else {
+        CHECK( reserialized.str() == output.str() );
+    }
+
+    // An lvalue is a deliberate new instance, including contained items.
+    // Neither single insertion nor bulk by-value input may steal its identity.
+    item original = nested( 's' );
+    const auto original_ids = identities( original );
+    inventory copied;
+    copied.add_item( original, true, false, false );
+    CHECK( identities( original ) == original_ids );
+    for( const int64_t uid : identities( copied ) ) {
+        CHECK( std::find( original_ids.begin(), original_ids.end(), uid ) == original_ids.end() );
+    }
+    std::vector<item> originals;
+    originals.emplace_back( nested( 't' ) );
+    const auto bulk_original_ids = identities( originals.front() );
+    inventory bulk_copy;
+    bulk_copy.add_items_bulk( originals, true, false, false );
+    CHECK( identities( originals.front() ) == bulk_original_ids );
+    for( const int64_t uid : identities( bulk_copy ) ) {
+        CHECK( std::find( bulk_original_ids.begin(), bulk_original_ids.end(), uid ) ==
+               bulk_original_ids.end() );
+    }
+}
+
+TEST_CASE( "inventory move fix preserves charge merging and the surviving identity",
+           "[inventory_move_persistence]" )
+{
+    const bool bulk = GENERATE( false, true );
+    const bool keep_letter = GENERATE( false, true );
+    CAPTURE( bulk, keep_letter );
+    std::vector<item> batch;
+    batch.emplace_back( itype_id( "9mm" ), calendar::turn, 10 );
+    batch.emplace_back( itype_id( "9mm" ), calendar::turn, 20 );
+    batch.front().invlet = 'q';
+    batch.back().invlet = 'r';
+    const auto survivor = batch.front().uid().get_value();
+    inventory target;
+    if( bulk ) {
+        target.add_items_bulk( std::move( batch ), keep_letter, false );
+    } else {
+        for( item &value : batch ) {
+            target.add_item( std::move( value ), keep_letter, false );
+        }
+    }
+    REQUIRE( target.size() == 1 );
+    REQUIRE( target.const_stack( 0 ).size() == 1 );
+    const item &merged = target.const_stack( 0 ).front();
+    CHECK( merged.uid().get_value() == survivor );
+    CHECK( merged.charges == 30 );
+    if( keep_letter ) {
+        CHECK( merged.invlet == 'q' );
+    }
+}
+
 TEST_CASE( "maintained mixed metrics world earns native travel and survives actual reload",
            "[.][bandit][mixed_load_native_caller]" )
 {
@@ -75415,6 +75545,17 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
                     json.member( "travelling", actor->is_travelling() );
                     json.member( "loaded", actor->is_active() );
                     json.member( "last_updated", to_turn<int>( actor->get_last_updated() ) );
+                    json.member( "items" );
+                    json.start_array();
+                    actor->visit_items( [&]( const item * value, const item * ) {
+                        json.start_object();
+                        json.member( "uid", value->uid().get_value() );
+                        json.member( "type", value->typeId().str() );
+                        json.member( "charges", value->charges );
+                        json.end_object();
+                        return VisitResponse::NEXT;
+                    } );
+                    json.end_array();
                 }
                 json.end_object();
             }
@@ -75481,6 +75622,18 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         output << '\n';
     };
     const bool four_sites = std::getenv( "CAOL_FOUR_SITE_LOAD" ) != nullptr;
+    const char *sample_count = std::getenv( "CAOL_MIXED_LOAD_PARTIES" );
+    const int sampled_parties = sample_count ? std::stoi( sample_count ) : 0;
+    int expected_selected = four_sites ? 10 : 6;
+    if( sample_count ) {
+        REQUIRE( sampled_parties >= 2 );
+        expected_selected = 0;
+        const int pattern[] = { 4, 2, 3 };
+        for( int i = 0; i < sampled_parties; ++i ) {
+            expected_selected += pattern[i % 3];
+        }
+    }
+    const int last_body_id = 17 + std::max( 0, expected_selected - 14 );
     auto site_ids = std::vector<std::string> {
         "overmap_special:bandit_camp@140,51,0", "overmap_special:cannibal_camp@150,39,0"
     };
@@ -75488,11 +75641,18 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         site_ids.emplace_back( "overmap_special:cannibal_camp@130,39,0" );
         site_ids.emplace_back( "overmap_special:cannibal_camp@140,29,0" );
     }
+    if( sample_count ) {
+        site_ids.clear();
+        for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+            site_ids.push_back( site.site_id );
+        }
+        REQUIRE( site_ids.size() == static_cast<size_t>( sampled_parties ) );
+    }
     const auto check_owners = [&]() {
         auto &world = overmap_buffer.global_state.bandit_live_world;
         CHECK( world.sites.size() == site_ids.size() );
         int count = 0;
-        for( int id = 2; id <= 17; ++id ) {
+        for( int id = 2; id <= last_body_id; ++id ) {
             auto actor = overmap_buffer.find_npc( character_id( id ) );
             REQUIRE( actor );
             CHECK_FALSE( actor->is_dead() );
@@ -75514,9 +75674,28 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
                 ++count;
             }
         }
-        CHECK( count == ( four_sites ? 10 : 6 ) );
+        CHECK( count == expected_selected );
     };
     check_owners();
+    std::map<character_id, std::vector<int64_t>> sampled_item_ids;
+    if( sample_count ) {
+        std::set<int64_t> existing_items;
+        for( int id = 2; id <= last_body_id; ++id ) {
+            const auto actor = overmap_buffer.find_npc( character_id( id ) );
+            REQUIRE( actor );
+            actor->visit_items( [&]( const item * value, const item * ) {
+                const int64_t uid = value->uid().get_value();
+                REQUIRE( uid > 0 );
+                const bool inserted = existing_items.insert( uid ).second;
+                if( id > 17 ) {
+                    CHECK( inserted );
+                }
+                sampled_item_ids[actor->getID()].push_back( uid );
+                return VisitResponse::NEXT;
+            } );
+        }
+        REQUIRE_FALSE( sampled_item_ids.empty() );
+    }
     if( std::getenv( "CAOL_MIXED_LOAD_TERMINAL_RETURN" ) ) {
         // Import the actual generated fixture through g->load above. Only the
         // paid/home endpoint is component setup; no payment or journey credit.
@@ -75677,10 +75856,14 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         CHECK( serialize_world( world ) == original );
     }
     std::map<character_id, tripoint_abs_ms> initial_positions;
-    for( int id = 4; id <= ( four_sites ? 13 : 9 ); ++id ) {
-        auto actor = overmap_buffer.find_npc( character_id( id ) );
-        REQUIRE( actor );
-        initial_positions.emplace( actor->getID(), actor->pos_abs() );
+    for( const auto &site_id : site_ids ) {
+        const auto *site = overmap_buffer.global_state.bandit_live_world.find_site( site_id );
+        REQUIRE( site );
+        for( const auto id : site->active_hostile_operation.reservation.member_ids ) {
+            auto actor = overmap_buffer.find_npc( id );
+            REQUIRE( actor );
+            REQUIRE( initial_positions.emplace( actor->getID(), actor->pos_abs() ).second );
+        }
     }
     refresh_live_bandit_activation();
     for( const auto &site_id : site_ids ) {
@@ -75772,10 +75955,19 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
     }
     const auto progressed = serialize_world( overmap_buffer.global_state.bandit_live_world );
     std::map<character_id, decltype( r067_handover_actor_key( std::declval<npc>() ) )> actors;
-    for( int id = 2; id <= 17; ++id ) {
+    for( int id = 2; id <= last_body_id; ++id ) {
         const auto actor = overmap_buffer.find_npc( character_id( id ) );
         actors.emplace( actor->getID(), r067_handover_actor_key( *actor ) );
     }
+    std::map<character_id, std::vector<int64_t>> before_save_items;
+    for( const auto &[id, initial_items] : sampled_item_ids ) {
+        const character_id actor_id = id;
+        overmap_buffer.find_npc( id )->visit_items( [&]( const item * value, const item * ) {
+            before_save_items[actor_id].push_back( value->uid().get_value() );
+            return VisitResponse::NEXT;
+        } );
+    }
+    trace_owners( "before_save" );
     REQUIRE( g->save() );
     const auto saved_turn = calendar::turn;
     r067_handover_reload( name );
@@ -75783,6 +75975,20 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
     check_owners();
     CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == progressed );
     CHECK( serialize_population() == progressed_population );
+    if( sample_count ) {
+        for( const auto &[id, initial_items] : sampled_item_ids ) {
+            CAPTURE( id );
+            const auto actor = overmap_buffer.find_npc( id );
+            REQUIRE( actor );
+            std::vector<int64_t> restored_items;
+            actor->visit_items( [&]( const item * value, const item * ) {
+                restored_items.push_back( value->uid().get_value() );
+                return VisitResponse::NEXT;
+            } );
+            CHECK( restored_items == initial_items );
+            CHECK( restored_items == before_save_items.at( id ) );
+        }
+    }
     for( const auto &[id, key] : actors ) {
         const auto actor = overmap_buffer.find_npc( id );
         REQUIRE( actor );

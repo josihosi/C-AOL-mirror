@@ -13227,5 +13227,201 @@ class CanonicalTowerTerminalRouteTest(unittest.TestCase):
         self.assertIn("without SDL sound", result["reason"])
 
 
+class AdjustableMixedLoadSampleTest(unittest.TestCase):
+    """Real native archive preparation/installation, without launching a game."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import startup_harness as startup
+        cls.startup = startup
+        cls.temporary = tempfile.TemporaryDirectory(prefix="mixed-samples-")
+        cls.root = Path(cls.temporary.name).resolve()
+        cls.source = startup.resolve_fixture_payload(
+            MixedLoadBootstrapContractTest.fixture, "live-debug")["save_src"]
+        cls.before = startup.sha256_tree(cls.source)
+        cls.declaration = cls.root / "sample-10.json"
+        with mock.patch.object(startup, "userdir_for_profile", return_value=cls.root / "sample-10"):
+            cls.prepared = startup.prepare_mixed_load_sample("sample-10", cls.declaration, 10)
+        cls.world = Path(cls.prepared["world"])
+        cls.scenario = json.loads(cls.declaration.read_text())
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        try:
+            assert cls.startup.sha256_tree(cls.source) == cls.before
+        finally:
+            cls.temporary.cleanup()
+
+    read_bodies = MixedLoadBootstrapContractTest.read_bodies
+
+    def test_ten_real_parties_have_unique_bodies_and_complete_current_authority(self) -> None:
+        prepared = self.prepared
+        self.assertEqual(prepared["member_counts"], [4, 2, 3, 4, 2, 3, 4, 2, 3, 4])
+        world = json.loads((self.world / "dimension_data.gsav").read_text().partition("\n")[2])["overmapbuffer"]["bandit_live_world"]
+        bodies = self.read_bodies(self.world)
+        inherited = self.read_bodies(self.source / "McWilliams")
+        self.assertEqual(set(bodies), set(inherited) | set(prepared["new_npc_ids"]))
+        self.assertEqual(len(bodies), 33)
+        selected = []
+        owners = []
+        for site, count in zip(world["sites"], prepared["member_counts"]):
+            operation = site["active_hostile_operation"]
+            outing = operation["reservation"]
+            self.assertEqual(len(outing["member_ids"]), count)
+            selected.extend(outing["member_ids"])
+            owners.extend(m["npc_id"] for m in site["members"])
+            for member in site["members"]:
+                self.assertEqual(bodies[member["npc_id"]]["location"], member["home_spawn_tile"])
+                self.assertIn([v // 24 if i < 2 else v for i, v in enumerate(member["home_spawn_tile"])], site["footprint"])
+            self.assertEqual(outing["simulation_owner"], "abstract")
+            self.assertEqual(site["current_scout_report"]["application_key"], operation["source_report_application_key"])
+            self.assertTrue(self.startup._prepared_hostile_operation_binding(
+                self.startup.summarize_bandit_live_world_site(site), world["hostile_target_opportunities"])["prepared_hostile_operation_complete"])
+        self.assertEqual(len(set(selected)), 31)
+        self.assertEqual(len(set(owners)), len(owners))
+        for index, site in enumerate(world["sites"]):
+            for other in world["sites"][index + 1:]:
+                if site["site_kind"] == other["site_kind"]:
+                    self.assertTrue(all(max(abs(a[i] - b[i]) for i in (0, 1)) > 1
+                                        for a in site["footprint"] for b in other["footprint"]))
+        for npc_id in (2, 3):
+            self.assertEqual(bodies[npc_id], inherited[npc_id])
+        _, _, player, _ = self.startup.load_saved_player_payload(self.world)
+        self.assertEqual(player["turn"], 5241593)
+        self.assertTrue(all(body["last_updated"] <= player["turn"] for body in bodies.values()))
+        master = json.loads((self.world / "master.gsav").read_text().partition("\n")[2])
+        self.assertGreater(master["next_npc_id"], max(bodies))
+
+    def test_saved_start_installer_and_every_guard_survive_the_actual_route(self) -> None:
+        from scenario_registry import saved_world_continuation_steps, validate_manifest
+        validate_manifest(self.scenario, path=self.declaration)
+        route = saved_world_continuation_steps(self.scenario["steps"], self.scenario["post_relaunch"])
+        self.assertEqual(route[0]["kind"], "native_semantic_bootstrap")
+        self.assertEqual(route[-1]["kind"], "cockpit_live_session")
+        self.assertEqual(len(route[1:-1]), 10)
+        self.assertEqual([{k: v for k, v in s.items() if k != "label"} for s in route[1:-1]],
+                         [{k: v for k, v in s.items() if k != "label"} for s in self.scenario["steps"][1:-1]])
+        destination = self.root / "snapshot-install"
+        with mock.patch.object(self.startup, "save_dir_for_profile", return_value=destination):
+            installed = self.startup.install_saved_world_snapshot("sample-native", "McWilliams", self.world)
+        self.addCleanup(shutil.rmtree, destination)
+        self.assertEqual(installed["status"], "green_saved_world_snapshot_installed")
+        self.assertEqual(installed["installed_sha256"], self.prepared["world_sha256"])
+        for step in route[1:-1]:
+            requirements = {k: v for k, v in step.items() if k.startswith("required_") or k == "player_save"}
+            self.assertTrue(step["abort_on_metadata_failure"])
+            self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
+                destination / "McWilliams", **requirements)["status"], "required_state_present")
+        options = json.loads((self.world.parent.parent / "config/options.json").read_text())
+        effective = {o["name"]: o["value"] for o in options}
+        self.assertEqual(str(effective["AUTOSAVE"]).lower(), "false")
+        self.assertEqual(effective["RAID_PERFORMANCE_DIAGNOSTIC"], "normal")
+
+    def test_twenty_fifty_and_hundred_are_preparation_inputs_not_catalogue_copies(self) -> None:
+        for count in (20, 50, 100):
+            with self.subTest(parties=count), mock.patch.object(
+                    self.startup, "userdir_for_profile", return_value=self.root / f"sample-{count}"):
+                result = self.startup.prepare_mixed_load_sample(
+                    f"sample-{count}", self.root / f"sample-{count}.json", count)
+                self.assertEqual(result["party_count"], count)
+                self.assertEqual(result["selected_members"], sum([4, 2, 3][i % 3] for i in range(count)))
+                self.assertEqual(len(json.loads((self.root / f"sample-{count}.json").read_text())["steps"]), count + 2)
+                self.assertIn("Not run", result["native_qualification"])
+                shutil.rmtree(self.root / f"sample-{count}")
+                (self.root / f"sample-{count}.json").unlink()
+
+    def test_invalid_conflicting_or_failed_preparation_does_not_publish_or_mutate(self) -> None:
+        for count, pattern in ((1, [4, 2]), (True, [2]), (10, [1]), (10, [5]), (10, [])):
+            with self.subTest(count=count, pattern=pattern), self.assertRaises(SystemExit):
+                self.startup.prepare_mixed_load_sample("invalid", self.root / "invalid.json", count, pattern)
+        before = self.startup.sha256_tree(self.world)
+        with mock.patch.object(self.startup, "userdir_for_profile", return_value=self.world.parent.parent):
+            with self.assertRaises(SystemExit):
+                self.startup.prepare_mixed_load_sample("sample-10", self.root / "unused.json", 10)
+        self.assertEqual(self.startup.sha256_tree(self.world), before)
+        target = self.root / "failed"
+        with mock.patch.object(self.startup, "userdir_for_profile", return_value=target), mock.patch.object(
+                self.startup, "apply_bandit_mixed_load_bootstrap_transform", side_effect=SystemExit("forced stage refusal")):
+            with self.assertRaisesRegex(SystemExit, "forced stage refusal"):
+                self.startup.prepare_mixed_load_sample("failed", self.root / "failed.json", 10)
+        self.assertFalse(target.exists())
+        self.assertFalse((self.root / "failed.json").exists())
+        self.assertFalse(list(self.root.glob(".mixed-sample-*")))
+
+    def test_missing_real_bodies_and_foreign_claims_fail_each_current_guard(self) -> None:
+        # Remove the actual body, keeping the roster/reservation/claim intact.
+        # Exercise both kinds from this larger producer, not an unrelated count.
+        for step in self.scenario["steps"][1:3]:
+            with self.subTest(site=step["required_site_id_contains"]):
+                with tempfile.TemporaryDirectory(dir=self.root) as folder:
+                    world = Path(folder) / "McWilliams"
+                    shutil.copytree(self.world, world)
+                    dimension = world / "dimension_data.gsav"
+                    header, _, raw = dimension.read_text().partition("\n")
+                    data = json.loads(raw)
+                    live = data["overmapbuffer"]["bandit_live_world"]
+                    site = next(s for s in live["sites"] if s["site_id"] == step["required_site_id_contains"])
+                    requirements = {k: v for k, v in step.items() if k.startswith("required_") or k == "player_save"}
+                    claim = next(c for c in live["hostile_target_opportunities"]
+                                 if c["consumed_operation_id"] == site["active_hostile_operation"]["reservation"]["activity_id"])
+                    claim["consumed_operation_id"] += "foreign"
+                    dimension.write_text(header + "\n" + json.dumps(data))
+                    before = self.startup.sha256_tree(world)
+                    self.assertNotEqual(self.startup.audit_saved_bandit_live_world_state(
+                        world, **requirements)["status"], "required_state_present")
+                    self.assertEqual(self.startup.sha256_tree(world), before)
+
+                    shutil.copyfile(self.world / "dimension_data.gsav", dimension)
+                    removed_id = site["active_hostile_operation"]["reservation"]["member_ids"][0]
+                    removed = 0
+                    for archive in (world / "overmaps").glob("o.*.*.zzip"):
+                        plain, version, body_data = self.startup.extract_overmap_payload(archive)
+                        try:
+                            old = body_data.get("npcs", [])
+                            body_data["npcs"] = [b for b in old if b["id"] != removed_id]
+                            removed += len(old) - len(body_data["npcs"])
+                            if len(old) != len(body_data["npcs"]):
+                                self.startup.write_overmap_payload(plain, version, body_data)
+                        finally:
+                            self.startup.cleanup_extracted_overmap(plain, keep=False)
+                    self.assertEqual(removed, 1)
+                    before = self.startup.sha256_tree(world)
+                    self.assertNotEqual(self.startup.audit_saved_bandit_live_world_state(
+                        world, **requirements)["status"], "required_state_present")
+                    self.assertEqual(self.startup.sha256_tree(world), before)
+
+    def test_real_terminal_readiness_preserves_all_aborting_guards(self) -> None:
+        from scenario_registry import saved_world_continuation_steps
+        consumer = CanonicalTowerTerminalRouteTest()
+        try:
+            consumer.setUp()
+            routes = [self.scenario, {**self.scenario, "steps": saved_world_continuation_steps(
+                self.scenario["steps"], self.scenario["post_relaunch"])}]
+            for route in routes:
+                self.assertEqual(consumer.readiness(route)["status"], "ready")
+                self.assertEqual(sum(s.get("required_active_member_bodies_found") is True
+                                     for s in route["steps"]), 10)
+            bad = copy.deepcopy(routes[1])
+            bad["steps"][1]["abort_on_metadata_failure"] = False
+            self.assertEqual(consumer.readiness(bad)["status"], "unsupported_terminal_mode")
+        finally:
+            consumer.doCleanups()
+
+    def test_actual_cli_supports_a_different_member_pattern_without_new_catalogue_files(self) -> None:
+        declaration = self.root / "cli.json"
+        output = io.StringIO()
+        with mock.patch.object(self.startup, "userdir_for_profile", return_value=self.root / "cli"), \
+                mock.patch.object(sys, "argv", ["startup_harness.py", "prepare-mixed-load", "--profile", "cli",
+                                  "--declaration-output", str(declaration), "--parties", "2", "--member-pattern", "2,4"]), \
+                redirect_stdout(output):
+            self.assertEqual(self.startup.main(), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["member_counts"], [2, 4])
+        self.assertEqual(result["selected_members"], 6)
+        self.assertEqual(result["new_npc_ids"], [])
+        self.assertEqual(json.loads(declaration.read_text())["catalogue"]["family_id"], "mixed-load-controls")
+
+
+
 if __name__ == "__main__":
     unittest.main()
