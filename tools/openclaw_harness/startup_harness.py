@@ -2775,17 +2775,22 @@ def apply_option_overrides_to_file(path: Path, overrides: Dict[str, str]) -> Dic
             entry["value"] = normalized[name]
             applied[name] = normalized[name]
     missing = sorted(set(normalized) - set(applied))
-    # Old disposable profile snapshots predate this hidden option.  Seed only
-    # the known current-source default so an API scenario can apply its
-    # declared provider to a fresh copy; unknown option names stay rejected.
-    if missing == ["LLM_INTENT_API_PROVIDER"]:
-        data.append({
-            "info": "API provider used by the any-llm runner.",
-            "default": "Default: openai",
-            "name": "LLM_INTENT_API_PROVIDER",
-            "value": normalized["LLM_INTENT_API_PROVIDER"],
-        })
-        applied["LLM_INTENT_API_PROVIDER"] = normalized["LLM_INTENT_API_PROVIDER"]
+    # Maintained disposable snapshots predate these hidden native options.
+    # Seed only explicitly selected, known current options in the fresh copy;
+    # neither the shared source nor unrelated/unknown options change.
+    known_missing = {
+        "LLM_INTENT_API_PROVIDER": ("API provider used by the any-llm runner.", "openai"),
+        "RAID_PERFORMANCE_DIAGNOSTIC": ("Task-local matched signal logging experiment.", "off"),
+    }
+    if missing and set(missing) <= known_missing.keys():
+        if ("RAID_PERFORMANCE_DIAGNOSTIC" in missing and
+                normalized["RAID_PERFORMANCE_DIAGNOSTIC"] not in {"off", "normal", "quiet_signal"}):
+            raise ValueError("Invalid native RAID_PERFORMANCE_DIAGNOSTIC selection")
+        for name in missing:
+            info, default = known_missing[name]
+            data.append({"info": info, "default": f"Default: {default}",
+                         "name": name, "value": normalized[name]})
+            applied[name] = normalized[name]
         missing = []
     if missing:
         raise ValueError(f"Profile option(s) not found in {path}: {', '.join(missing)}")
@@ -16104,7 +16109,11 @@ def summarize_bandit_active_outing(site: Dict[str, Any]) -> Dict[str, Any]:
         "waypoint_index": waypoint_index,
         "waypoint_in_route": waypoint_in_route,
         "waypoint_omt": waypoint_omt,
+        # This is a persisted structural-sortie shape check, not the native
+        # body-to-rally path solver used by hostile operations.
+        "structural_route_applicable": kind == "structural_sortie",
         "structural_route_valid": structural_route_valid,
+        "native_path_evaluated": False,
         "target_id": str(outing.get("target_id", "") or ""),
         "target_omt": outing.get("target_omt", []),
         "target_lead_revision": integer_field(outing, "target_lead_revision", 0),
@@ -16216,9 +16225,8 @@ def summarize_bandit_live_world_site(site: Dict[str, Any]) -> Dict[str, Any]:
     )
     active_member_ids = active_outing.get("member_ids", []) if active_outing.get("is_active") else site.get("active_member_ids", [])
     if not active_member_ids and hostile_operation_active:
-        # Hostile abstract operations own their members in the persisted
-        # reservation; they intentionally have no concrete overmap NPCs to
-        # scan.  Expose those IDs through the same read-only observation shape.
+        # Abstract ownership is summarized from the reservation without loading
+        # bodies. Concrete presence is a separate optional saved-body audit.
         active_member_ids = hostile_reservation.get("member_ids", [])
     if not isinstance(active_member_ids, list):
         active_member_ids = []

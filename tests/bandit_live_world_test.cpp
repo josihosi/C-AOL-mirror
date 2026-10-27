@@ -16,6 +16,7 @@
 #include "raid_decision_trace.h"
 #include "zzip.h"
 #include "physical_light.h"
+#include "migo_population_native.h"
 
 #include <algorithm>
 #include <array>
@@ -75375,6 +75376,110 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
     REQUIRE( g->load( name ) );
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     REQUIRE( to_turn<int>( calendar::turn ) == 5241593 );
+    const bool ordinary_turns = std::getenv( "CAOL_MIXED_LOAD_ORDINARY_TURNS" ) != nullptr;
+    const auto trace_owners = [&]( const std::string &boundary ) {
+        const char *trace_path = std::getenv( "CAOL_MIXED_LOAD_OWNER_TRACE" );
+        if( !trace_path ) {
+            return;
+        }
+        std::ofstream output( trace_path, std::ios::app );
+        JsonOut json( output );
+        json.start_object();
+        json.member( "boundary", boundary );
+        json.member( "turn", to_turn<int>( calendar::turn ) );
+        json.member( "player", get_avatar().pos_abs() );
+        json.member( "map_origin", get_map().get_abs_sub() );
+        json.member( "zlevels", get_map().supports_zlevels() );
+        json.member( "sites" );
+        json.start_array();
+        for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+            const auto &operation = site.active_hostile_operation;
+            const auto &outing = operation.reservation;
+            json.start_object();
+            json.member( "site", site.site_id );
+            json.member( "phase", static_cast<int>( operation.phase ) );
+            json.member( "last_advanced", outing.last_advanced_minutes );
+            json.member( "reconciliation_rejected", outing.local_projection_reconciliation_rejected );
+            json.member( "activation_active", outing.activation.active );
+            json.member( "active_turns", outing.activation.active_turns );
+            json.member( "members" );
+            json.start_array();
+            for( const auto id : outing.member_ids ) {
+                const auto actor = overmap_buffer.find_npc( id );
+                json.start_object();
+                json.member( "id", id.get_value() );
+                if( actor ) {
+                    json.member( "position", actor->pos_abs() );
+                    json.member( "goal", actor->goal );
+                    json.member( "path_size", actor->omt_path.size() );
+                    json.member( "travelling", actor->is_travelling() );
+                    json.member( "loaded", actor->is_active() );
+                    json.member( "last_updated", to_turn<int>( actor->get_last_updated() ) );
+                }
+                json.end_object();
+            }
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+        json.member( "migo_population" );
+        json.start_array();
+        for( const auto &site : overmap_buffer.global_state.migo_populations.sites ) {
+            json.start_object();
+            json.member( "site", site.id );
+            json.member( "new_content", site.new_content );
+            json.member( "seed_committed", site.seed_committed );
+            json.member( "living", site.living_count() );
+            json.member( "cached_physical_levels" );
+            json.start_array();
+            if( const auto geometry = migo_population::geometry_at( site.anchor ) ) {
+                for( const auto &part : geometry->parts ) {
+                    for( int z = 0; z <= 3; ++z ) {
+                        const tripoint_abs_omt omt( part.xy(), z );
+                        int present = 0;
+                        for( int x = 0; x < 2; ++x ) {
+                            for( int y = 0; y < 2; ++y ) {
+                                present += MAPBUFFER.lookup_submap_cached(
+                                               project_to<coords::sm>( omt ) + point( x, y ) ) != nullptr;
+                            }
+                        }
+                        json.start_object();
+                        json.member( "position", omt );
+                        json.member( "resident_submaps", present );
+                        json.end_object();
+                    }
+                }
+            }
+            json.end_array();
+            json.member( "members" );
+            json.start_array();
+            for( const auto &member : site.members ) {
+                json.start_object();
+                json.member( "id", member.token.member_id );
+                json.member( "owner", static_cast<int>( member.owner ) );
+                json.member( "duty", static_cast<int>( member.assignment ) );
+                json.member( "position", member.current_position );
+                json.end_object();
+            }
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+        json.member( "migo_operations" );
+        json.start_array();
+        for( const auto &site : overmap_buffer.global_state.migo_towers.sites ) {
+            json.start_object();
+            json.member( "site", site.site_id );
+            json.member( "recognized_enemies", site.recognized_enemies );
+            json.member( "has_signal", site.signal.has_value() );
+            json.member( "has_operation", site.operation.has_value() );
+            json.member( "operation_members", site.operation ? site.operation->members.size() : 0 );
+            json.end_object();
+        }
+        json.end_array();
+        json.end_object();
+        output << '\n';
+    };
     const auto site_ids = std::vector<std::string> {
         "overmap_special:bandit_camp@140,51,0", "overmap_special:cannibal_camp@150,39,0"
     };
@@ -75417,12 +75522,83 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         const auto *site = overmap_buffer.global_state.bandit_live_world.find_site( site_id );
         CHECK( site->active_hostile_operation.reservation.activation.active_turns == 0 );
     }
-    // A genuine subsequent native minute, then a five-minute motor cadence.
-    // No body/owner timestamp, route, lease or admission is injected here.
-    calendar::turn = time_point::from_turn( ( to_turn<int>( calendar::turn ) / 60 + 1 ) * 60 );
-    process_overmap_npc_move_for_test();
-    calendar::turn += 5_minutes;
-    process_overmap_npc_move_for_test();
+    trace_owners( "initial" );
+    std::map<std::string, std::optional<tripoint_abs_ms>> native_migo_positions;
+    if( std::getenv( "CAOL_MIXED_LOAD_NATIVE_POPULATION" ) ) {
+        const auto geometry = migo_population::geometry_at( tripoint_abs_omt( 144, 39, 0 ) );
+        REQUIRE( geometry );
+        const auto *population = overmap_buffer.global_state.migo_populations.find( geometry->id );
+        REQUIRE( population );
+        REQUIRE( population->new_content );
+        // Actual physical setup, never a supplied signal or resident token.
+        const auto fire = get_avatar().pos_bub() + point( 1, 0 );
+        get_map().furn_set( fire, furn_str_id( "f_brazier" ) );
+        for( int i = 0; i < 1000; ++i ) {
+            get_map().add_item_or_charges( fire, item( itype_id( "splinter" ), calendar::turn ) );
+        }
+        REQUIRE( get_map().add_field( fire, field_type_id( "fd_fire" ), 3 ) );
+    }
+    if( ordinary_turns ) {
+        // Component setup only: keep the observer alive without changing NPC
+        // ownership, perception, bodies, routes or clocks. Each zero-move turn
+        // consumes the player's pause and runs the actual game scheduler.
+        get_avatar().toggle_trait( trait_id( "DEBUG_NODMG" ) );
+        const auto first_cadence = time_point::from_turn(
+                                       ( to_turn<int>( calendar::turn ) / 60 + 1 ) * 60 );
+        const auto end = first_cadence + 5_minutes;
+        while( calendar::turn < end ) {
+            get_avatar().set_moves( 0 );
+            REQUIRE_FALSE( g->do_turn() );
+            if( calendar::turn == first_cadence ) {
+                trace_owners( "first_native_minute" );
+                if( std::getenv( "CAOL_MIXED_LOAD_NATIVE_POPULATION" ) ) {
+                    const auto geometry = migo_population::geometry_at( tripoint_abs_omt( 144, 39, 0 ) );
+                    REQUIRE( geometry );
+                    // Exercise the ordinary avatar map-update/spawn consumer
+                    // after initial map generation. No population record,
+                    // resident payload, intent or clock is supplied by setup.
+                    get_avatar().setpos( get_map(), get_avatar().pos_bub() + point( 12, 0 ) );
+                    g->update_map( get_avatar() );
+                    trace_owners( "native_avatar_map_update" );
+                    const auto *population = overmap_buffer.global_state.migo_populations.find( geometry->id );
+                    REQUIRE( population );
+                    REQUIRE( population->seed_committed );
+                    REQUIRE( population->living_count() >= 3 );
+                    for( const auto &member : population->members ) {
+                        native_migo_positions.emplace( member.token.member_id, member.current_position );
+                    }
+                }
+            }
+        }
+    } else {
+        // Existing cadence-only seam retained as the causal comparison.
+        calendar::turn = time_point::from_turn( ( to_turn<int>( calendar::turn ) / 60 + 1 ) * 60 );
+        process_overmap_npc_move_for_test();
+        trace_owners( "first_native_minute" );
+        calendar::turn += 5_minutes;
+        process_overmap_npc_move_for_test();
+    }
+    trace_owners( "after_native_window" );
+    const auto serialize_population = [&]() {
+        std::ostringstream output;
+        JsonOut json( output );
+        overmap_buffer.global_state.migo_populations.serialize( json );
+        return output.str();
+    };
+    if( !native_migo_positions.empty() ) {
+        const auto geometry = migo_population::geometry_at( tripoint_abs_omt( 144, 39, 0 ) );
+        REQUIRE( geometry );
+        const auto *population = overmap_buffer.global_state.migo_populations.find( geometry->id );
+        REQUIRE( population );
+        CHECK( population->members.size() == native_migo_positions.size() );
+        int moved = 0;
+        for( const auto &member : population->members ) {
+            REQUIRE( native_migo_positions.count( member.token.member_id ) == 1 );
+            moved += member.current_position != native_migo_positions.at( member.token.member_id );
+        }
+        CHECK( moved >= 3 );
+    }
+    const std::string progressed_population = serialize_population();
     check_owners();
     for( const auto &[id, initial] : initial_positions ) {
         const auto actor = overmap_buffer.find_npc( id );
@@ -75441,6 +75617,7 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
     CHECK( calendar::turn == saved_turn );
     check_owners();
     CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == progressed );
+    CHECK( serialize_population() == progressed_population );
     for( const auto &[id, key] : actors ) {
         const auto actor = overmap_buffer.find_npc( id );
         REQUIRE( actor );

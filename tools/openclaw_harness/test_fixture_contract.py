@@ -4703,6 +4703,8 @@ class BanditLiveWorldAuditContractTest(unittest.TestCase):
         })
         self.assertTrue(outing["exact_pair_with_leader"])
         self.assertTrue(outing["structural_route_valid"])
+        self.assertTrue(outing["structural_route_applicable"])
+        self.assertFalse(outing["native_path_evaluated"])
         self.assertEqual(outing["waypoint_omt"], [2, 1, 0])
         self.assertTrue(outing["owner_cursor_valid"])
         self.assertEqual(handoff["state"], "local")
@@ -5132,6 +5134,37 @@ class BanditLiveWorldAuditContractTest(unittest.TestCase):
 
 
 class ProfileOptionOverrideContractTest(unittest.TestCase):
+    def test_actual_fallback_supports_explicit_native_metrics_options_without_source_changes(self) -> None:
+        source = (HARNESS_DIR / "fixtures/profiles/live-debug" /
+                  "mcwilliams_live_debug_2026-04-07/config/options.json")
+        before = source.read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            options = Path(temporary) / "options.json"
+            options.write_bytes(before)
+            original = json.loads(before)
+            self.assertNotIn("RAID_PERFORMANCE_DIAGNOSTIC", [x["name"] for x in original])
+            result = apply_option_overrides_to_file(
+                options, {"AUTOSAVE": "false", "RAID_PERFORMANCE_DIAGNOSTIC": "normal"})
+            updated = json.loads(options.read_text())
+            self.assertEqual(result["applied"], {"AUTOSAVE": "false", "RAID_PERFORMANCE_DIAGNOSTIC": "normal"})
+            for old in original:
+                expected = {**old, "value": "false"} if old["name"] == "AUTOSAVE" else old
+                self.assertEqual(next(x for x in updated if x["name"] == old["name"]), expected)
+            self.assertEqual(updated[-1]["name"], "RAID_PERFORMANCE_DIAGNOSTIC")
+            self.assertEqual(updated[-1]["value"], "normal")
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_missing_metrics_option_rejects_unknown_names_and_invalid_values_without_writes(self) -> None:
+        for overrides in ({"RAID_PERFORMANCE_DIAGNOSTIC": "invented"},
+                          {"RAID_PERFORMANCE_DIAGNOSTIC": "normal", "UNKNOWN_OPTION": "true"}):
+            with self.subTest(overrides=overrides), tempfile.TemporaryDirectory() as temporary:
+                options = Path(temporary) / "options.json"
+                options.write_text('[{"name":"AUTOSAVE","value":"true"}]')
+                before = options.read_bytes()
+                with self.assertRaises(ValueError):
+                    apply_option_overrides_to_file(options, overrides)
+                self.assertEqual(options.read_bytes(), before)
+
     def test_updates_existing_profile_option_without_changing_other_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             options_path = Path(temp_dir) / "options.json"
@@ -6738,6 +6771,11 @@ class MixedLoadBootstrapContractTest(unittest.TestCase):
         for site in world["sites"]:
             operation = site["active_hostile_operation"]
             outing = operation["reservation"]
+            summary = self.startup.summarize_bandit_live_world_site(site)
+            route_summary = summary["active_hostile_operation"]["reservation"]
+            self.assertFalse(route_summary["structural_route_applicable"])
+            self.assertFalse(route_summary["structural_route_valid"])
+            self.assertFalse(route_summary["native_path_evaluated"])
             self.assertEqual(site["schema_version"], 12)
             self.assertEqual(operation["phase"], "outbound")
             self.assertFalse(operation["legacy_unpinned"])
@@ -6768,6 +6806,44 @@ class MixedLoadBootstrapContractTest(unittest.TestCase):
         self.assertEqual(sorted(owned), list(range(4, 18)))
         self.assertEqual(bodies[2], self.before_bodies[2])
         self.assertEqual(bodies[3], self.before_bodies[3])
+
+    def test_native_migo_setup_is_complete_terrain_not_fabricated_population(self) -> None:
+        # setUp has applied the real inherited terrain/player transforms.
+        before = self.startup.path_sha256(self.world)
+        player, _, payload, _ = self.startup.load_saved_player_payload(self.world)
+        self.assertEqual(payload["turn"], 5241593)
+        self.assertEqual(self.startup.load_player_abs_omt(self.world, player)[0], (142, 39, 0))
+        placements = self.startup.load_bandit_special_placements(
+            self.startup.repo_root(), self.world, {"Mi-Go Encampment"})
+        placed = [p for p in placements if (144, 39, 0) in p.points]
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(set(placed[0].points), {
+            (144, 39, 0), (144, 40, 0), (144, 39, 1),
+            (144, 40, 1), (144, 40, 2), (144, 40, 3)})
+        for point in placed[0].points:
+            self.assertTrue(self.startup.saved_overmap_terrain_id(self.world, point).startswith("mi-go_camp"))
+        dimension = json.loads((self.world / "dimension_data.gsav").read_text().partition("\n")[2])
+        self.assertFalse(dimension["overmapbuffer"].get("migo_populations", {}).get("sites"))
+        self.assertFalse(dimension["overmapbuffer"].get("migo_towers", {}).get("sites"))
+        self.assertEqual(set(self.read_bodies(self.world)), set(range(2, 18)))
+        # Native mapbuffer groups this actual footprint in segment4,1.
+        # Existing physical quads would override new overmap terrain and are
+        # not permission to reconstruct residents. Inspect checked native
+        # footers without extracting/creating any physical input.
+        for z in range(4):
+            archive = self.world / "maps" / f"4.1.{z}.zzip"
+            data = archive.read_bytes()
+            header, offset = _read_skippable_frame(
+                data, 0, len(data), ZZIP_HEADER_MAGIC, "native map archive header")
+            size, checksum = struct.unpack("<QQ", header)
+            self.assertTrue(0 < size <= len(data) - offset)
+            footer = data[-size:]
+            self.assertEqual(xxh64(footer, ZZIP_CHECKSUM_SEED), checksum)
+            entries, _, _ = _parse_zzip_footer(footer)
+            for y in (39, 40):
+                self.assertNotIn(f"144.{y}.{z}.map", entries)
+                self.assertFalse((self.world / "maps" / f"4.1.{z}" / f"144.{y}.{z}.map").exists())
+        self.assertEqual(self.startup.path_sha256(self.world), before)
 
     def test_missing_body_refuses_before_any_owner_or_archive_write(self) -> None:
         self.transform["cohorts"][1]["member_ids"] = [8, 99999]
@@ -12706,6 +12782,26 @@ class CanonicalTowerTerminalRouteTest(unittest.TestCase):
         result = self.readiness(route)
         self.assertEqual(result["status"], "ready", result)
         self.assertEqual(result["executable_sha256"], self.selected["executable_sha256"])
+
+    def test_maintained_mixed_entrypoint_itself_is_terminal_ready(self) -> None:
+        from scenario_registry import validate_manifest
+        mixed = self.startup.load_scenario("performance.mixed_hostile_stalker_horde_mcw")
+        path = HARNESS_DIR / "scenarios/performance.mixed_hostile_stalker_horde_mcw.json"
+        validate_manifest(json.loads(path.read_text()), path=path)
+        self.assertEqual([step["kind"] for step in mixed["steps"]], [
+            "native_semantic_bootstrap", "audit_saved_bandit_live_world_state",
+            "audit_saved_bandit_live_world_state", "cockpit_live_session"])
+        self.assertEqual(self.readiness(mixed)["status"], "ready")
+        self.assertNotIn("config_profile", mixed)
+        self.assertNotIn("profile_snapshot", mixed)
+        self.assertNotIn("post_relaunch", mixed)
+        self.assertEqual(mixed["runtime_contract"]["fixture"], mixed["fixture"])
+        self.assertEqual(mixed["profile_option_overrides"], {
+            "AUTOSAVE": "false", "RAID_PERFORMANCE_DIAGNOSTIC": "normal"})
+        # This invokes the same real consumer as registry selection; lint
+        # alone cannot catch unsupported prelaunch scripted controls.
+        unsupported = {**mixed, "steps": [{"kind": "wait", "label": "legacy_wait", "seconds": 1}, *mixed["steps"]]}
+        self.assertEqual(self.readiness(unsupported)["status"], "unsupported_terminal_mode")
 
     def test_terminal_saved_preflights_cannot_supply_input_or_skip_failure(self) -> None:
         mixed = self.startup.load_scenario("performance.mixed_hostile_stalker_horde_mcw")
