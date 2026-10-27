@@ -176,6 +176,8 @@ class existing_view : public map
             return true;
         }
 
+        // Authenticate only physical inputs here. Cache preparation is grouped
+        // until a native consumer actually reads the requested cache planes.
         bool require_light_cell( const tripoint_bub_ms &p ) {
             if( lighting_validated.count( p ) ) {
                 return true;
@@ -221,30 +223,41 @@ class existing_view : public map
                 !load_light_submap( project_to<coords::sm>( get_abs( p - tripoint::above ) ) ) ) {
                 return false; // Native floor may be supplied by furniture below.
             }
-            if( !lighting_dirty.empty() ) {
-                raid_perf_scope diagnostic( raid_perf_stage::scout_view_cache );
-                rebuild_vehicle_level_caches();
-                for( int z : lighting_dirty ) {
-                    build_outside_cache( z );
-                    build_transparency_cache( z );
-                    build_floor_cache( z );
-                }
-                // A newly loaded upper submap rebuilds that whole floor plane.
-                // Reapply roofs from its already admitted lower vehicles too,
-                // after all terrain rebuilds, in the native bottom-up order.
-                std::set<int> vehicle_levels = lighting_dirty;
-                for( int z : lighting_dirty ) {
-                    if( z > -OVERMAP_DEPTH ) {
-                        vehicle_levels.insert( z - 1 );
-                    }
-                }
-                for( int z : vehicle_levels ) {
-                    do_vehicle_caching( z );
-                }
-                lighting_dirty.clear();
-            }
             lighting_validated.insert( p );
             return true;
+        }
+
+        void prepare_light_cache( const int low_z, const int high_z ) {
+            std::set<int> levels;
+            for( auto it = lighting_dirty.lower_bound( low_z );
+                 it != lighting_dirty.end() && *it <= high_z; ++it ) {
+                levels.insert( *it );
+            }
+            if( levels.empty() ) {
+                return;
+            }
+            raid_perf_scope diagnostic( raid_perf_stage::scout_view_cache );
+            rebuild_vehicle_level_caches();
+            for( int z : levels ) {
+                build_outside_cache( z );
+                build_transparency_cache( z );
+                build_floor_cache( z );
+            }
+            // All requested terrain planes first, then their contributing
+            // vehicle owners. In particular a rebuilt upper floor must regain
+            // an already admitted lower vehicle's roof before it is consumed.
+            std::set<int> vehicle_levels = levels;
+            for( int z : levels ) {
+                if( z > -OVERMAP_DEPTH ) {
+                    vehicle_levels.insert( z - 1 );
+                }
+            }
+            for( int z : vehicle_levels ) {
+                do_vehicle_caching( z );
+            }
+            for( int z : levels ) {
+                lighting_dirty.erase( z );
+            }
         }
 
         const std::optional<submap_sunlight_input> &sunlight_metadata( const tripoint_abs_sm &pos ) {
@@ -279,6 +292,9 @@ class existing_view : public map
             }
             if( ( floors | physical->nonclear ).any() ) {
                 result.clear = false; // Additional vehicle facts cannot undo this blocker.
+            }
+            if( available.count( pos ) && available.count( pos - tripoint::above ) ) {
+                prepare_light_cache( pos.z() - 1, pos.z() );
             }
             // A floor already proved by the native terrain/vehicle cache is
             // also a decisive blocker. This admits no extra geometry: it only
@@ -508,9 +524,12 @@ class existing_view : public map
             const sunlight_prefix_input prefix = [&]( const tripoint_rel_sm &sm ) {
                 return sunlight_summary( sm );
             };
+            const std::function<void( int, int )> prepare = [&]( const int first, const int last ) {
+                prepare_light_cache( first, last );
+            };
             const auto light = generate_observed_lightmap( get_bub( point ),
             [&]( const tripoint_bub_ms &p ) { return require_light_cell( p ); }, &prefix, sufficient,
-            source_light );
+            source_light, &prepare );
             if( source_light && *source_light ) {
                 source_results.insert_or_assign( point, **source_light );
             }

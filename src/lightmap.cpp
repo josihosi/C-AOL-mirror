@@ -881,7 +881,8 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         const std::function<bool( const tripoint_bub_ms & )> &require_cell,
         const sunlight_prefix_input *prefix_input,
         const std::function<bool( float )> *sufficient,
-        std::optional<float> *source_light )
+        std::optional<float> *source_light,
+        const std::function<void( int, int )> *prepare_cache )
 {
     if( source_light ) {
         source_light->reset();
@@ -901,7 +902,13 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
     const sunlight_projection no_sun = []( const tripoint_bub_ms & ) {
         return std::optional<four_quadrants>( four_quadrants{} );
     };
+    const auto prepare = [&]( const int low, const int high ) {
+        if( prepare_cache ) {
+            ( *prepare_cache )( low, std::min( high, OVERMAP_HEIGHT ) );
+        }
+    };
     const auto native_pass = [&]( const sunlight_projection & projection ) {
+        prepare( target.z(), target.z() + 1 );
         raid_perf_scope diagnostic( raid_perf_stage::scout_light_native );
         generate_lightmap( target.z(), true, &projection, &target );
     };
@@ -973,6 +980,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         if( prefix_input ) {
             value = ( *prefix_input )( sm );
         } else if( const submap *physical = get_submap_at_grid( sm ) ) {
+            prepare( sm.z(), sm.z() );
             bool clear = true;
             bool all_blocking = true;
             std::bitset<SEEX * SEEY> air_path;
@@ -1084,6 +1092,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         // disproves fully_inside in both of its original update branches.
         for( const auto &[point, light] : sunlight ) {
             if( point.z() == z + 1 && light.max() > above_baseline && require_cell( point ) ) {
+                prepare( point.z(), point.z() );
                 const auto &cache = get_cache_ref( point.z() );
                 if( !cache.floor_cache[point.x()][point.y()] &&
                     cache.transparency_cache[point.x()][point.y()] > LIGHT_TRANSPARENCY_SOLID ) {
@@ -1171,6 +1180,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         if( !inbounds( p ) || !require_cell( p ) ) {
             return std::nullopt;
         }
+        prepare( p.z(), p.z() );
         const float outside_light = g->natural_light_level( 0 );
         const float inside = p.z() >= 0 && outside_light > LIGHT_SOURCE_BRIGHT ?
                              LIGHT_AMBIENT_DIM * 0.8f : LIGHT_AMBIENT_LOW;
@@ -1182,6 +1192,7 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
             if( !require_cell( above ) ) {
                 return std::nullopt;
             }
+            prepare( above.z(), above.z() );
             const auto &cache = get_cache_ref( above.z() );
             const float transparency = cache.transparency_cache[xy.x()][xy.y()];
             const bool floor = cache.floor_cache[xy.x()][xy.y()];

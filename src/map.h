@@ -2100,11 +2100,15 @@ class map
         // Synchronous native point projection. Exact ambient is returned only
         // with complete inputs. An optional caller can separately settle its
         // predicate from a proved lower bound; that bound is never exact ambient.
+        // A decision-local input owner may defer cache preparation until the
+        // requested inclusive z range is actually consumed. This never admits
+        // geometry; ordinary callbacks retain their existing eager semantics.
         std::optional<float> generate_observed_lightmap( const tripoint_bub_ms &target,
                 const std::function<bool( const tripoint_bub_ms & )> &require_cell,
                 const sunlight_prefix_input *prefix_input = nullptr,
                 const std::function<bool( float )> *sufficient = nullptr,
-                std::optional<float> *source_light = nullptr );
+                std::optional<float> *source_light = nullptr,
+                const std::function<void( int, int )> *prepare_cache = nullptr );
         void build_seen_cache( const tripoint_bub_ms &origin, int target_z,
                                int extension_range = MAX_VIEW_DISTANCE,
                                bool cumulative = false,

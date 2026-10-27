@@ -8,6 +8,8 @@
 #include <chrono>
 #include <ctime>
 #include <memory>
+#include <set>
+#include <functional>
 #include "lightmap.h"
 #include "level_cache.h"
 #include <filesystem>
@@ -873,6 +875,8 @@ class observation_light_fixture : public map
         std::vector<std::unique_ptr<submap>> uniform_inputs;
     public:
         using map::get_submap_at_grid;
+        using map::build_transparency_cache;
+        using map::do_vehicle_caching;
         void install_input( const tripoint_rel_sm &p, submap *input ) {
             setsubmap( get_nonant( p ), input );
             invalidate_map_cache( p.z() );
@@ -902,8 +906,9 @@ class observation_light_fixture : public map
         }
         std::optional<float> observe_point( const tripoint_bub_ms &target,
                 const std::function<bool( const tripoint_bub_ms & )> &require_cell,
-                std::optional<float> *source = nullptr ) {
-            return generate_observed_lightmap( target, require_cell, nullptr, nullptr, source );
+                std::optional<float> *source = nullptr,
+                const std::function<void( int, int )> *prepare = nullptr ) {
+            return generate_observed_lightmap( target, require_cell, nullptr, nullptr, source, prepare );
         }
         std::optional<float> observe_decision( const tripoint_bub_ms &target,
                 const std::function<bool( const tripoint_bub_ms & )> &require_cell,
@@ -946,6 +951,122 @@ void install_uniform_observation_inputs( const tripoint_abs_sm &origin, bool ser
         }
     }
 }
+}
+
+TEST_CASE( "deferred optical preparation preserves the native physical request and result",
+           "[binocular_056][observation_cache_preparation]" )
+{
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    const auto previous_turn = calendar::turn;
+    const auto previous_rng = rng_get_engine();
+    on_out_of_scope restore( [&]() { set_time( previous_turn ); rng_get_engine() = previous_rng; } );
+    set_time_to_day();
+    const auto now = calendar::turn;
+    const auto residents = std::distance( MAPBUFFER.begin(), MAPBUFFER.end() );
+    for( const std::string mode : { "solar_roof", "field_override", "missing_target", "partial_plane" } ) {
+        DYNAMIC_SECTION( mode ) {
+            observation_light_fixture eager;
+            observation_light_fixture deferred;
+            const tripoint_abs_sm origin( 2300, 2300, 0 );
+            const tripoint_bub_ms target( 66, 66, 0 );
+            eager.uniform_input_window( origin, true );
+            deferred.uniform_input_window( origin, true );
+            for( auto *view : { &eager, &deferred } ) {
+                REQUIRE( view->add_field( target, field_type_id( "fd_spotlight" ), 1 ) );
+                if( mode == "field_override" ) {
+                    REQUIRE( view->add_field( target, field_type_id( "fd_darkness" ), 1 ) );
+                }
+            }
+            std::vector<tripoint_bub_ms> eager_inputs;
+            std::vector<tripoint_bub_ms> deferred_inputs;
+            std::vector<std::pair<int, int>> preparations;
+            const auto available = [&]( const tripoint_bub_ms &cell ) {
+                return eager.inbounds( cell ) &&
+                       !( mode == "missing_target" && cell == target ) &&
+                       !( mode == "partial_plane" && cell == target + point( -MAX_VIEW_DISTANCE - 1,
+                               -MAX_VIEW_DISTANCE - 1 ) );
+            };
+            // Both use native cache builders over the same fully installed
+            // physical inputs. The old callback prepares eagerly; the new
+            // owner prepares only the levels requested by the native consumer.
+            std::set<int> eager_ready_levels;
+            std::set<int> deferred_ready_levels;
+            const auto prepare = []( observation_light_fixture &view, int low, int high,
+            std::set<int> &ready ) {
+                std::set<int> fresh;
+                for( int z = low; z <= high; ++z ) {
+                    if( ready.insert( z ).second ) {
+                        fresh.insert( z );
+                    }
+                }
+                for( int z : fresh ) {
+                    view.build_outside_cache( z );
+                    view.build_transparency_cache( z );
+                    view.build_floor_cache( z );
+                }
+                std::set<int> vehicles = fresh;
+                for( int z : fresh ) {
+                    if( z > -OVERMAP_DEPTH ) {
+                        vehicles.insert( z - 1 );
+                    }
+                }
+                for( int z : vehicles ) {
+                    view.do_vehicle_caching( z );
+                }
+            };
+            bool eager_ready = false;
+            const auto require_eager = [&]( const tripoint_bub_ms &point ) {
+                eager_inputs.push_back( point );
+                if( !available( point ) ) {
+                    return false;
+                }
+                if( !eager_ready ) {
+                    prepare( eager, -OVERMAP_DEPTH, OVERMAP_HEIGHT, eager_ready_levels );
+                    eager_ready = true;
+                }
+                return true;
+            };
+            const auto require_deferred = [&]( const tripoint_bub_ms &point ) {
+                deferred_inputs.push_back( point );
+                return available( point );
+            };
+            const std::function<void( int, int )> consume = [&]( int low, int high ) {
+                preparations.emplace_back( low, high );
+                prepare( deferred, low, high, deferred_ready_levels );
+            };
+            std::optional<float> eager_source;
+            std::optional<float> deferred_source;
+            // Catch's sectionStarting callback reseeds before this section.
+            // Snapshot the actual native read boundary, after that framework
+            // setup and physical fixture construction; never rewrite its RNG.
+            const auto engine = rng_get_engine();
+            const auto expected = eager.observe_point( target, require_eager, &eager_source );
+            CHECK( rng_get_engine() == engine );
+            const auto actual = deferred.observe_point( target, require_deferred, &deferred_source, &consume );
+            CHECK( rng_get_engine() == engine );
+            CHECK( eager_inputs == deferred_inputs );
+            CHECK( actual == expected );
+            CHECK( deferred_source == eager_source );
+            if( mode == "solar_roof" || mode == "field_override" ) {
+                REQUIRE( expected );
+                REQUIRE( eager_source );
+                CHECK( *eager_source > 0 );
+                CHECK_FALSE( preparations.empty() );
+                if( mode == "field_override" ) {
+                    CHECK( *actual == 0 );
+                }
+            } else {
+                CHECK_FALSE( actual );
+                CHECK_FALSE( deferred_source );
+            }
+            if( mode == "missing_target" ) {
+                CHECK( preparations.empty() );
+            }
+            CHECK( calendar::turn == now );
+            CHECK( rng_get_engine() == engine );
+            CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == residents );
+        }
+    }
 }
 
 TEST_CASE( "uniform native rain transparency includes its northwest outside halo",
