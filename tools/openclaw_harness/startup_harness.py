@@ -33135,6 +33135,7 @@ def list_scenarios() -> List[Dict[str, Any]]:
             "artifact_source": str(loaded.get("artifact_source", "debug.log")).strip() or "debug.log",
             "step_count": len(loaded.get("steps", [])) if isinstance(loaded.get("steps"), list) else 0,
             "status": blocker_info["status"],
+            "status_basis": "declaration blocker only; registry lifecycle is separate",
             "blocked_reason": blocker_info["blocked_reason"],
             "required_helpers": blocker_info["required_helpers"],
             "scenario_manifest": manifest_binding,
@@ -44984,6 +44985,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_p = subparsers.add_parser("list-fixtures", help="List harness-owned save fixtures for a profile.")
     list_p.add_argument("--profile", default="", help="Profile name (defaults to sanitized current branch).")
     list_p.add_argument("--all", action="store_true", help="Include every fixture, including unlinked historical inputs.")
+    list_p.add_argument("--registry", default=None, help="Read status from this registry without modifying it.")
     list_p.add_argument("--diagnostic", action="store_true", help="Show fixtures declared by diagnostic controls.")
 
     capture_p = subparsers.add_parser("capture-fixture", help="Capture a world save into harness-owned fixture storage.")
@@ -45010,6 +45012,7 @@ def build_parser() -> argparse.ArgumentParser:
     scenarios_p = subparsers.add_parser("list-scenarios", help="List packaged live-probe scenario contracts.")
     scenarios_p.add_argument("--profile", default="", help="Ignored today; reserved for future per-profile scenario filtering.")
     scenarios_p.add_argument("--all", action="store_true", help="Include historical, diagnostic and unclassified declarations.")
+    scenarios_p.add_argument("--registry", default=None, help="Read status from this registry without modifying it.")
     scenarios_p.add_argument("--diagnostic", action="store_true", help="Show maintained diagnostic controls.")
     scenarios_p.add_argument("--family", default="", help="Expand one exact family ID.")
     scenarios_p.add_argument("--search", default="", help="Search all declarations by name, description or family.")
@@ -45146,16 +45149,20 @@ def main() -> int:
     if args.command == "start":
         return run_startup(args)
     if args.command == "list-fixtures":
+        from catalogue_view import attach_registry_status
         profile = resolve_profile_name(args.profile)
         fixtures = list_fixtures(profile)
-        links: Dict[str, List[Dict[str, str]]] = {}
-        for scenario in list_scenarios():
+        links: Dict[str, List[Dict[str, Any]]] = {}
+        scenarios = [row for row in list_scenarios() if row['membership'] in {'maintained', 'diagnostic'}]
+        attach_registry_status(scenarios, args.registry)
+        for scenario in scenarios:
             metadata = scenario.get("catalogue")
             footing = scenario["fixture"]
             if isinstance(metadata, dict) and scenario["membership"] in {"maintained", "diagnostic"} and footing["profile"] == profile:
                 links.setdefault(footing["name"], []).append({
                     "scenario_id": scenario["scenario_id"], "name": scenario["name"],
                     "family_id": metadata["family_id"], "kind": metadata["kind"],
+                    "registry_status": scenario["registry_status"],
                 })
         for fixture in fixtures:
             fixture["declared_variants"] = links.get(fixture["fixture"], [])
@@ -45191,12 +45198,18 @@ def main() -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     if args.command == "list-scenarios":
-        from catalogue_view import family_view, recipe_families
+        from catalogue_view import family_view, recipe_families, attach_registry_status
         scenarios = list_scenarios()
+        requested = [item for item in scenarios if args.all or item['membership'] in {'maintained', 'diagnostic'} or
+                     (args.scenario_id and args.scenario_id in (item['name'], item['scenario_id'])) or
+                     (args.search and args.search.casefold() in (item['name'] + ' ' + item['description']).casefold())]
+        attach_registry_status(requested, args.registry)
         if args.scenario_id:
             matches = [item for item in scenarios if args.scenario_id in (item["name"], item["scenario_id"])]
             if len(matches) != 1:
                 raise SystemExit("Scenario identity is missing or ambiguous")
+            for match in matches:
+                match['declared_status'] = match.pop('status')
             result = {"scenarios": matches}
         elif args.all and not args.search and not args.family:
             result = {"scenarios": scenarios}

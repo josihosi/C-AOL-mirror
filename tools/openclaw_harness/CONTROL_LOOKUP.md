@@ -16,7 +16,9 @@ Use `list-fixtures --profile PROFILE` for fixture declarations linked to maintai
 or add `--diagnostic` or `--all` for broader inspection. A present manifest is not a validated
 save; membership is not a build, fixture or gameplay qualification. A recipe-only family has
 no selectable variant until an actual start is declared. For launch, pass the exact variant ID
-and the actual requirements through the existing registry query and follow its decision.
+and the actual requirements through the existing registry query and follow its decision. The
+read-only registry status reports quarantine and token eligibility only when the recorded source
+hash matches; an absent or stale index is shown as unknown and does not create a registry.
 
 ## Principles
 - These are **pragmatic automation notes**, not authoritative game documentation.

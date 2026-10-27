@@ -165,5 +165,80 @@ class CatalogueViewTest(unittest.TestCase):
             self.assertTrue(any(row['scenario_manifest']['validation']['status'] == 'invalid'
                                 for row in search['result']['other_scenarios']))
 
+    def test_real_discovery_shows_quarantine_stale_and_missing_index(self):
+        class Annotated(cli_fixtures.ScenarioRegistryCliTest):
+            def strict_manifest(self):
+                d = super().strict_manifest()
+                d.update({'fixture': 'fixture-a', 'fixture_profile': 'dev-harness',
+                          'catalogue': dict(kind='maintained', family_id='family', family_title='Family',
+                                            family_purpose='Exercise selection', variant='Active')})
+                return d
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry, scenarios, _ = Annotated().issue_selection_token(root)
+            quarantine_path = scenarios / 'quarantined.json'
+            declaration = Annotated().strict_manifest()
+            declaration['name'] = 'quarantined'
+            declaration['catalogue']['variant'] = 'Quarantined'
+            quarantine_path.write_text(json.dumps(declaration))
+            fixture_root = root / 'fixture-root'
+            (fixture_root / 'fixture-a').mkdir(parents=True)
+            (fixture_root / 'fixture-a' / 'manifest.json').write_text('{}')
+            connection = store.open_registry(str(registry))
+            try:
+                store.rebuild_manifest_projection(connection, source_paths=[quarantine_path])
+                bad_id = store.manifest_identity(quarantine_path)
+                connection.execute('INSERT INTO quarantine_history(manifest_id,route_key,quarantine_kind,details_json) VALUES(?,?,?,?)',
+                                   (bad_id, 'test-route', 'contradicted', '{}'))
+                with self.assertRaises(store.ScenarioRegistryStoreError):
+                    store.execute_registry_query(connection, store.parse_registry_query_request({'requirements': [], 'preferences': []}), scenario_id=bad_id)
+            finally:
+                connection.close()
+            def invoke(*argv):
+                output = io.StringIO()
+                with mock.patch.object(sys, 'argv', ['startup_harness.py', *argv]), \
+                     mock.patch.object(startup_harness, 'scenarios_root', return_value=scenarios), \
+                     mock.patch.object(startup_harness, 'profile_fixture_root', return_value=fixture_root), \
+                     contextlib.redirect_stdout(output):
+                    self.assertEqual(startup_harness.main(), 0)
+                return json.loads(output.getvalue())
+            default = invoke('list-scenarios', '--registry', str(registry))
+            variants = {x['name']: x for x in default['families'][0]['variants']}
+            self.assertEqual(variants['quarantined']['registry_status']['availability'], 'Unavailable: quarantined')
+            self.assertFalse(variants['quarantined']['registry_status']['token_eligible'])
+            self.assertEqual(variants['cli.registry.fixture']['registry_status']['lifecycle'], 'active')
+            self.assertTrue(variants['cli.registry.fixture']['registry_status']['token_eligible'])
+            expanded = invoke('list-scenarios', '--family', 'family', '--registry', str(registry))
+            row = next(x for x in expanded['families'][0]['variants'] if x['name'] == 'quarantined')
+            self.assertEqual(row['registry_status']['lifecycle'], 'quarantined')
+            self.assertEqual(row['fixture']['qualification'], 'unknown')
+            with mock.patch.object(startup_harness, 'scenarios_root', return_value=scenarios), \
+                 mock.patch.object(startup_harness, 'profile_fixture_root', return_value=fixture_root):
+                service = cockpit.CockpitService(str(registry))
+                cockpit_default = service.call({'action': 'scenario'})['result']['families'][0]
+                cockpit_row = next(x for x in cockpit_default['variants'] if x['name'] == 'quarantined')
+                self.assertEqual(cockpit_row['registry_status']['availability'], 'Unavailable: quarantined')
+                cockpit_expanded = service.call({'action': 'scenario.browse', 'family': 'family'})
+                self.assertEqual(next(x for x in cockpit_expanded['result']['families'][0]['variants']
+                                      if x['name'] == 'quarantined')['registry_status']['lifecycle'], 'quarantined')
+            fixtures = invoke('list-fixtures', '--profile', 'dev-harness', '--registry', str(registry))
+            self.assertTrue(any(x['registry_status']['availability'] == 'Unavailable: quarantined'
+                                for x in fixtures['fixtures'][0]['declared_variants']))
+            no_index = root / 'missing' / 'registry.sqlite3'
+            unknown = invoke('list-scenarios', '--registry', str(no_index))
+            self.assertEqual(unknown['families'][0]['variants'][0]['registry_status']['lifecycle'], 'unknown')
+            self.assertEqual(unknown['families'][0]['variants'][0]['registry_status']['availability'],
+                             'Registry status unknown: index unavailable')
+            self.assertFalse(no_index.exists())
+            with mock.patch.object(startup_harness, 'scenarios_root', return_value=scenarios):
+                self.assertTrue(cockpit.CockpitService(str(no_index)).call({'action': 'scenario'})['ok'])
+            self.assertFalse(no_index.exists())
+            declaration['description'] = 'source changed without projection'
+            quarantine_path.write_text(json.dumps(declaration))
+            stale = invoke('list-scenarios', '--family', 'family', '--registry', str(registry))
+            row = next(x for x in stale['families'][0]['variants'] if x['name'] == 'quarantined')
+            self.assertEqual(row['registry_status']['lifecycle'], 'unknown')
+            self.assertEqual(row['registry_status']['availability'], 'Registry status unknown: source not current in registry')
+
 if __name__ == '__main__':
     unittest.main()

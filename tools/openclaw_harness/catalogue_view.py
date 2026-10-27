@@ -3,7 +3,47 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 import json
+import sqlite3
 from pathlib import Path
+
+
+def attach_registry_status(rows: Sequence[dict[str, Any]], registry: str | None = None) -> None:
+    """Attach current source-bound registry facts without creating or changing an index."""
+    from scenario_registry_store import open_registry, build_registry_query_candidate_snapshot, ScenarioRegistryStoreError
+
+    unknown = {'lifecycle': 'unknown', 'token_eligible': None,
+               'availability': 'Registry status unknown: index unavailable'}
+    for row in rows:
+        row['registry_status'] = dict(unknown)
+    ids = tuple(row['scenario_id'] for row in rows if row.get('scenario_id'))
+    if not ids:
+        return
+    try:
+        connection = open_registry(registry, writable=False)
+        try:
+            snapshots = build_registry_query_candidate_snapshot(
+                connection, include_lifecycle_states=('absent', 'quarantined', 'retired'), manifest_ids=ids)
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError, ScenarioRegistryStoreError):
+        return
+    by_id = {snapshot.scenario_id: snapshot for snapshot in snapshots}
+    for row in rows:
+        snapshot = by_id.get(row.get('scenario_id'))
+        if snapshot is None:
+            row['registry_status']['availability'] = 'Registry status unknown: scenario not in registry'
+            continue
+        manifest = snapshot.explanation.get('manifest', {})
+        source = row.get('scenario_manifest', {}).get('source', {})
+        if not source.get('sha256') or not manifest.get('present') or \
+                manifest.get('source_path') != source.get('path') or manifest.get('sha256') != source.get('sha256'):
+            row['registry_status']['availability'] = 'Registry status unknown: source not current in registry'
+            continue
+        lifecycle = snapshot.lifecycle_state
+        eligible = bool(snapshot.token_eligible)
+        availability = ('Unavailable: ' + lifecycle if lifecycle != 'active' else
+                        'Registry eligible; qualification unknown' if eligible else 'Unavailable: not eligible')
+        row['registry_status'] = {'lifecycle': lifecycle, 'token_eligible': eligible, 'availability': availability}
 
 
 def recipe_families(root: Path) -> list[dict[str, Any]]:
@@ -72,6 +112,8 @@ def family_view(rows: Sequence[Mapping[str, Any]], *, kind: str = 'maintained',
         binding = row.get('scenario_manifest')
         if isinstance(binding, dict):
             row['scenario_manifest'] = {key: binding[key] for key in ('source', 'validation') if key in binding}
+        if 'status' in row:
+            row['declared_status'] = row.pop('status')
         entry['variants'].append(row)
     for recipe in recipes:
         fid = recipe['id']
@@ -88,6 +130,7 @@ def family_view(rows: Sequence[Mapping[str, Any]], *, kind: str = 'maintained',
         entry['variant_count'] = len(entry['variants'])
         if not family and not query:
             entry['variants'] = [{**{k: row[k] for k in ('scenario_id', 'name', 'variant')},
-                                  'qualification': 'unknown'} for row in entry['variants']]
+                                  'qualification': 'unknown', 'registry_status': row.get('registry_status',
+                                  {'lifecycle': 'unknown', 'token_eligible': None, 'availability': 'Registry status unknown'})} for row in entry['variants']]
         result.append(entry)
     return {'families': result, 'other_scenarios': others}

@@ -4347,6 +4347,18 @@ class CockpitService:
                 witness=witness if isinstance(witness, Mapping) else None,
                 outcome=request.get("outcome"),
             )
+        if action == "scenario.browse" or (action == "scenario" and not any(
+                request.get(key) for key in ("requirements", "preferences", "scenario_id", "id"))):
+            from catalogue_view import family_view, recipe_families, attach_registry_status
+            view = str(request.get("view", "maintained"))
+            rows = startup_harness.list_scenarios()
+            search = str(request.get("search", ""))
+            selected = [row for row in rows if row['membership'] in {'maintained', 'diagnostic'} or
+                        (search and search.casefold() in (row['name'] + ' ' + row['description']).casefold())]
+            attach_registry_status(selected, self.registry)
+            result = family_view(rows, kind=view, family=str(request.get("family", "")), search=search,
+                                 recipes=recipe_families(startup_harness.repo_root() / ".agents" / "skills" / "caol-harness" / "references"))
+            return {"ok": True, "result": _public({"kind": "scenario_families", **result})}
         try:
             # Finish the SQLite transaction before closing, including early returns.
             with closing(open_registry(self.registry, writable=True)) as connection, connection:
@@ -4482,15 +4494,6 @@ class CockpitService:
                         fixture_install=fixture_install,
                     )
                     return {"ok": True, "result": _public(result)}
-                if action == "scenario.browse" or (action == "scenario" and not any(
-                        request.get(key) for key in ("requirements", "preferences", "scenario_id", "id"))):
-                    from catalogue_view import family_view, recipe_families
-                    view = str(request.get("view", "maintained"))
-                    result = family_view(startup_harness.list_scenarios(), kind=view,
-                                         family=str(request.get("family", "")),
-                                         search=str(request.get("search", "")),
-                                         recipes=recipe_families(startup_harness.repo_root() / ".agents" / "skills" / "caol-harness" / "references"))
-                    return {"ok": True, "result": _public({"kind": "scenario_families", **result})}
                 kind = request.get("capability") or request.get("scenario")
                 if action in {"capability", "capability_search", "capability_summary"}:
                     kind = "capability"

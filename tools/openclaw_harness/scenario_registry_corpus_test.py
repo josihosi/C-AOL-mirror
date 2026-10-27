@@ -13,7 +13,7 @@ from pathlib import Path
 HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HARNESS_DIR))
 
-from startup_harness import list_scenarios, scenarios_root  # noqa: E402
+from startup_harness import list_scenarios, load_scenario, scenarios_root  # noqa: E402
 
 
 class ScenarioRegistryCorpusContractTest(unittest.TestCase):
@@ -76,6 +76,13 @@ class ScenarioRegistryCorpusContractTest(unittest.TestCase):
                 raw = json.loads(source_bytes.decode("utf-8"))
 
                 self.assertEqual(binding["source"]["path"], str(path))
+                if path.name == "cannibal.r_caol_r051_r067_post_report_8341_service_continuation_20261004.json":
+                    self.assertEqual(binding["source"]["sha256"], "")
+                    self.assertEqual(binding["validation"]["status"], "invalid")
+                    self.assertIn("saved-world continuation", binding["validation"]["error"])
+                    with self.assertRaises(SystemExit):
+                        load_scenario(raw["name"], source_path=path)
+                    continue
                 self.assertEqual(binding["source"]["sha256"], hashlib.sha256(source_bytes).hexdigest())
 
                 normalized = binding["normalized"]
