@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "bandit.scout_to_decision_observer_live_mcw",
   "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
-  "description": "Observer-backed vertical probe from an idle zero-lead bandit camp at (164,39,0), with the player at (162,36,0), two OMTs west and one OMT south of the sector-0 inner waypoint at (164,35,0), a fixture-installed clear road sightline at (163,32,0), its concealed forest watch at (163,33,0), and the sector-0 outer target at (164,30,0) on the existing continuous x=164 north-south road. Production discovers local leads and reaches its stable-ID-derived 13-hour frontier deadline, then dispatches and hands off the sector-0 pair through the real route. A selected-entity capture-and-continue watch follows an initial six-hour natural window before authoritative survivor-return, final-report, and camp-decision audit.",
+  "description": "Focused scout observation from an idle zero-lead bandit camp at 164,39,0 and player at 162,36,0. Setup makes a clear road sightline at 163,32, retains the concealed watch at 163,33 and uses the sector-0 road target at 164,30. Follow the native dispatch, selected pair, return, report and decision. This close geometry is a focused control, not a representative remote-source journey.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_scout_to_decision_observer_southwest_v0_2026-08-07",

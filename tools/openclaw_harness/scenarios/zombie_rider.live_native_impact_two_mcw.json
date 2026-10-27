@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_impact_two_mcw",
-  "description": "Dedicated native two-rider impact fixture for physical closing, named impact outcomes, cooldown/re-approach and independent single-attack arbitration.",
+  "description": "Two-rider impact test from McWilliams: a full-health armored player faces two hostile riders on separate three-tile approaches, with finite bow ammunition and no setup-time movement. Observe closing, impact, cooldown, re-approach and independent attack arbitration.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

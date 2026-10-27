@@ -1,6 +1,6 @@
 {
   "name": "performance.three_site_prestaged_active_wait_30m",
-  "description": "Attempt-3 performance-load row for three active hostile overmap AI sites. One bandit-style site and two separated cannibal_camp sites are pre-staged as already-active persisted stalk jobs with non-player performance targets, then a 30-minute wait measures live cadence cost with all three active jobs. This is load/cost measurement, not natural three-way player-pressure dispatch proof.",
+  "description": "Manufactured three-site load control from the two-site save: one bandit and two cannibal sites are intended to have staged jobs against non-player targets. Verify party ownership and actual work before interpreting the 30-minute timing; this setup does not prove natural dispatch.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "performance_three_site_prestaged_active_v0_2026-04-29",

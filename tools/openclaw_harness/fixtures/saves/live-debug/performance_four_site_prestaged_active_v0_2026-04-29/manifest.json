@@ -2,7 +2,7 @@
   "name": "performance_four_site_prestaged_active_v0_2026-04-29",
   "source_fixture": "bandit_extortion_reopen_local_contact_mcw_v0_2026-04-24",
   "source_profile": "live-debug",
-  "description": "Manufactured close metrics preparation from the McWilliams extortion save at turn5241593. Seeds three complete cannibal camp footprints and partitions the sixteen inherited bodies without creating NPCs: eight bandits (four selected), and three cannibal pairs. Installs current abstract shakedown/raid reservations with native initial clocks, real home positions and report/claim tuples. These are prepared operations, not runtime-qualified active work or natural dispatch; legacy stalk labels are no longer produced.",
+  "description": "Manufactured four-site setup from the McWilliams extortion save at turn 5241593. Player 140,39; bandit camp 140,51; cannibal camps 150,39, 130,39 and 140,29. The recipe preserves 16 human bodies and prepares four bandits and three cannibal pairs at their homes, without adding fire or signal. Component tests moved all ten selected bodies and preserved ownership across save/reload; live workload and timing remain unqualified. See four-site-checkpoint.prepared.json.",
   "save_transforms": [
     {
       "kind": "player_near_overmap_special",

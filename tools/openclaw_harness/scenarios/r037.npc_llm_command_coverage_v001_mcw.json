@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_coverage_v001_mcw",
-  "description": "R-037 source-bound safe command-coverage route. The fixture provides a known allied recipient, controlled equipment and pickup ownership variants, but each local-model command still requires its own actual E4B response, native application and consequence.",
+  "description": "Companion command coverage from a prepared living camp: allied actor 2 is near the player with wearable, melee, firearm and bow equipment, ammunition and activation/drop candidates. One unowned pickup and one foreign-owned pickup are staged. Each command needs its own model response, native application and consequence.",
   "profile": "harness-npc-llm-coverage",
   "config_profile": "dev-harness",
   "world": "McWilliams",

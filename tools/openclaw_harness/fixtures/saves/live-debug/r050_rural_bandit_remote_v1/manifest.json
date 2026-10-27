@@ -2,7 +2,7 @@
   "name": "r050_rural_bandit_remote_v1",
   "source_fixture": "r050_rural_roof_bandit_only_v1",
   "source_profile": "live-debug",
-  "description": "Representative remote derivative of the maintained pre-signal R050 payload. Preserve both homes, terrain, rosters, clocks and knowledge. Relocate only initial player/source footing to existing field OMT145,149,0, then measure all inherited/additional human footprints. This is setup, not an emitting or range-qualified source. Luna must establish usable footing and a genuine source while remaining near it, verify native range, save/reload and measure the actual remote leg. The old roof131,143 is not this source. A smoke packet may not reach15 OMT; do not claim admission or move a home closer.",
+  "description": "R050 pre-signal remote derivative: moves the initial player to existing field 145,149,0 while preserving both homes, terrain, rosters, clocks and knowledge. No emitting or range-qualified source is supplied. Establish and measure a real source and reload; the older roof at 131,143 is a separate footing.",
   "gameplay_credit": false,
   "save_transforms": [
     {

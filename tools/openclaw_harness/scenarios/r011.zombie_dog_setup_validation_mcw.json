@@ -1,4 +1,5 @@
 {
+  "description": "R011 disposable setup validation in McWilliams: the fixture places one hostile zombie dog 12 map squares from the player after clearing existing monsters; an ordinary dog is required absent. This checks setup, not a gameplay outcome.",
   "manifest_version": 1,
   "name": "r011.zombie_dog_setup_validation_mcw",
   "profile": "dev-harness",

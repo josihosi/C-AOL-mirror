@@ -1,4 +1,5 @@
 {
+  "description": "R027 saved source-absent control: native setup removed the fire at 138,49,0, one map square west of the player. The saved audit and setup run are linked in this manifest; removal alone is not signal-response proof.",
   "fixture_id": "r027_absent_source_v003_20260902",
   "claim": "R-027",
   "evidence_ceiling": "zero-credit",

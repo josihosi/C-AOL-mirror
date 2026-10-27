@@ -20,7 +20,7 @@
     "minimum_home_footprint_edge_omt": 15,
     "native_observer_distance_and_emission_cap": "must be measured from actual future packet; layout15 is not a cap or native distance claim"
   },
-  "description": "Reusable native-prepared Mi-go tower pre-signal start: source-OFF charged physical cone/finite roof at145,149,1, full tower/human home footprint edges15/15/42. Native setup and metadata are not emission, dispatch or journey credit.",
+  "description": "Pre-signal Mi-go tower start in TestSetup00 at turn 5216251. Player is near an unlit charged motorcycle headlight on a 25-cell roof at 145,149,1; the tower and two human homes are 15, 15 and 42 OMT away. The tower has four floors, a brood pod and eight committed residents, with two reserved. Setup and reload are recorded; emission, response and journey remain to be observed. See the fixture manifest for preparation and custody references.",
   "profile": "r050-migo-tower-remote-initial",
   "world": "TestSetup00",
   "observer_character": true,

@@ -1,6 +1,6 @@
 {
   "name": "bandit.live_world_nearby_camp_smoke_mcw",
-  "description": "Saved-field smoke/fire reader proof on a camp seeded just beyond direct-player range: inject visible/safe same-OMT fd_fire/fd_smoke near but not on the player, require a matched owned-site refresh before waiting, then open the in-game wait command (`|`), choose `w`ait a while from the alarm prompt, wait three in-game hours with `7`, and capture whether the live signal persists, decays, refreshes, or stops. This is not product proof for the real wood-plus-ignition fire action chain.",
+  "description": "Saved-field smoke/fire reader control from the McWilliams Basecamp kit. A bandit camp is seeded just beyond direct range and fire/smoke fields are placed near the player. After a matched site refresh, wait three game hours and observe signal persistence, decay or refresh. This does not prove ordinary wood-and-ignition fire creation.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_live_world_nearby_camp_smoke_v0_2026-04-26",

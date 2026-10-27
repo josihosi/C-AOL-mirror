@@ -1,4 +1,5 @@
 {
+  "description": "R048 saved TestSetup00 continuation at turn 5241819, after the smoke report and hostile:2 response were committed. This checkpoint does not replay ignition, scouting, report generation or dispatch. Source run 502b4ad2 and copy binding are recorded in this manifest.",
   "schema": "r048-checkpoint-fixture-v1",
   "fixture": "r048_hostile2_reserved_turn5241819_20260930",
   "profile": "live-debug",

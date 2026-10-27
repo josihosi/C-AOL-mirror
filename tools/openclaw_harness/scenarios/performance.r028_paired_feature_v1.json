@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.r028_paired_feature_v1",
-  "description": "R-028 paired feature observation.  It uses the same established-base source and the same semantic local-transition plus five-minute wait sequence as the baseline, with two staged independent bandit jobs, horde, and environmental ecology as zero-credit setup.  Renderer and native cadence counters remain the measured evidence.",
+  "description": "R-028 renderer and native cadence comparison from the same prepared McWilliams base as the baseline. Two bandit jobs, a nearby horde and distant fire and smoke are staged; use the same east-west transitions and five one-minute waits. Setup alone is not measured activity.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r028_paired_feature_ecology_v1",

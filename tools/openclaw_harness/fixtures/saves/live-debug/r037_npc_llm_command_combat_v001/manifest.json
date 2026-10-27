@@ -2,7 +2,7 @@
   "name": "r037_npc_llm_command_combat_v001",
   "source_fixture": "r037_npc_llm_command_sandbox_v001",
   "source_profile": "live-debug",
-  "description": "Disposable R-037 combat variation. It inherits the setup-only companion equipment footing and stages one visible named hostile target at controlled distance. Target staging is zero-credit; only an E4B response tied to the current target handle and subsequent native combat evidence can establish attack coverage.",
+  "description": "Disposable R037 combat variation of the companion equipment setup: allied actor 2 has ranged and melee options, and one visible named hostile target is staged at controlled distance. Staging alone supplies no model response or attack result.",
   "save_transforms": [
     {
       "kind": "npc_llm_panic_state",

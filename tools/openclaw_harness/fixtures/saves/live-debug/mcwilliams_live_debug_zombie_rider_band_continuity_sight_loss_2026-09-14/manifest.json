@@ -2,7 +2,7 @@
   "name": "mcwilliams_live_debug_zombie_rider_band_continuity_sight_loss_2026-09-14",
   "source_fixture": "mcwilliams_live_debug_zombie_rider_impact_multi_recovery_controls_2026-09-12",
   "source_profile": "live-debug",
-  "description": "Two tagged hostile riders begin on clear reciprocal east lanes.  The east rider directly sees the avatar; a two-by-two southeast wall screen blocks the other rider's line while retaining rider-to-rider sight and a route.  A native southward avatar path crosses behind the screen, creating a real loss-of-sight premise without injecting knowledge or attacks.",
+  "description": "Two tagged hostile riders on reciprocal east lanes; only the east rider sees the avatar. A two-by-two southeast wall screen blocks the other rider’s sight while retaining rider-to-rider sight and a route. A southward avatar path can establish native sight loss without injecting knowledge or attacks.",
   "save_transforms": [
     {
       "kind": "map_terrain_near_player",

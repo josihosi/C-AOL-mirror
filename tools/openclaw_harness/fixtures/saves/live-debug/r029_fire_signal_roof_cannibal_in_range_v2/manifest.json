@@ -3,7 +3,7 @@
   "source_fixture": "r008_fire_signal_roof_bandit_v1",
   "source_profile": "live-debug",
   "setup_classification": {"kind": "focused_control", "reason": "Focused channel/range/occlusion/registration control. Preserve exact inherited short camp offsets and native mechanism; not a representative remote story.", "representative_remote_credit": false},
-  "description": "R-029 in-range cannibal natural-route footing. Setup supplies only the existing exposed roof, ordinary fire tools/logs, stabilizer traits, and a non-colliding cannibal_camp footprint at the native player-created-fire signal distance. It does not write hostile roster, actor, signal, target knowledge, scout, report, rally, response, or contact state. Fixture preparation remains zero-credit; all ecology facts require a fresh production observation.",
+  "description": "In-range cannibal fire setup with an exposed roof, ordinary fire tools and logs, stabilizer traits and a non-colliding camp footprint. It supplies no hostile roster, actor, signal, knowledge or encounter; ecology requires native observation.",
   "save_transforms": [
     {
       "kind": "player_mutations",

@@ -1,6 +1,6 @@
 {
   "name": "bandit.multi_camp_structural_stress_mcw",
-  "description": "Challenge A for CAOL-MULTI-CAMP-SIGNAL-GAUNTLET-v0: two clean bandit camps with non-overlapping five-member rosters each receive a distinct structural_bounty lead. The run waits through bounded live structural maintenance, requires both camps to dispatch, perform stalking checks, harvest, and persist honest after-state: the west camp returns idle with its fixture lead harvested, while the east camp proves no-repeat by harvesting its fixture lead and immediately continuing on a newly generated structural target instead of repeating the same one. Two camps are used instead of four to avoid duplicate fixture member ids; that is a deliberate challenge-quality boundary, not setup shrinkage folklore.",
+  "description": "Two-camp structural stress from the McWilliams extortion save: the recipe creates two bandit camps with separate five-member rosters and distinct structural leads. Observe dispatch and harvest; the west camp should return idle and the east should move to a new target rather than repeat its first. Two camps avoid duplicate member IDs; this does not establish a four-camp result.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_multi_camp_structural_stress_v0_2026-04-30",

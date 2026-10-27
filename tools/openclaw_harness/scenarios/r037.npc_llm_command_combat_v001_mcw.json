@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "r037.npc_llm_command_combat_v001_mcw",
-  "description": "R-037 source-bound combat command route. The fixture stages one visible target and a known allied recipient with ranged/melee options. Staging is setup only; exact-target E4B output and native engagement/damage or ammunition consequence remain required.",
+  "description": "Companion combat command setup from the R037 equipment fixture: allied actor 2 has ranged and melee options, and one visible named hostile target is staged at controlled distance. An actual model response tied to the target and native engagement, damage or ammunition consequence are still required.",
   "profile": "harness-npc-llm-coverage-combat",
   "config_profile": "dev-harness",
   "world": "McWilliams",

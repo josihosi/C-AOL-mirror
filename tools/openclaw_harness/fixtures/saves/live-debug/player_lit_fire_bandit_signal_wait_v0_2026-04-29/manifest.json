@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams continuation captured after the recorded player-lit brazier/fire action in run 20260429_153253. The recipe adds 12 mineral waters one tile south and an AUTO_DRINK zone around the player for a signal wait; subsequent signal behavior requires observation.",
   "name": "player_lit_fire_bandit_signal_wait_v0_2026-04-29",
   "profile": "dev-harness",
   "world": "McWilliams",

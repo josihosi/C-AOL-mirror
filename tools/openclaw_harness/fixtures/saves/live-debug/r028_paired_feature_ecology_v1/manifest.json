@@ -2,7 +2,7 @@
   "name": "r028_paired_feature_ecology_v1",
   "source_fixture": "tmp_bandit_live_world_local_contact_raw_2026-04-23",
   "source_profile": "live-debug",
-  "description": "R-028 zero-credit paired feature footing.  It starts from the same captured established-base save as the baseline, then stages two independent bandit hostile jobs, a nearby overmap horde, and distant fire/smoke.  Native semantic movement and time passage—not these transforms—supply the measured route.",
+  "description": "R-028 and R-036 feature setup from the same captured McWilliams base as the baseline. The recipe stages two bandit jobs, a nearby horde and distant fire and smoke; verify actual activity during the comparison.",
   "save_transforms": [
     {
       "kind": "repair_basecamp_npc_assignments",

@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams save captured from profile r027-closure-015 on 2026-09-02. The linked R027 setup requires a preserved fire one tile west of the player; this manifest does not independently describe its saved contents.",
   "profile": "r027-closure-015",
   "world": "McWilliams",
   "captured_at": "2026-09-02T10:29:05+0200",

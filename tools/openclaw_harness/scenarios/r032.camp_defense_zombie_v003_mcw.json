@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.camp_defense_zombie_v003_mcw",
-  "description": "Zero-credit R032 defense branch based on the accepted native Locker save/reload. The isolated profile receives an exact frozen copy of that saved world; camp patrol routes/orders, threats and all combat/contact outcomes must be established and observed live.",
+  "description": "Camp defense against zombies from the saved R032 Locker world: the Assignment Camp and character 25 are retained. No patrol order, zombie, bandit or inventory change is supplied; set up patrol and observe defense through native play.",
   "profile": "r032-camp-defense-zombie-exp003-20260924",
   "config_profile": "dev-harness",
   "world": "McWilliams",

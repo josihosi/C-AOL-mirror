@@ -6,7 +6,7 @@
     "native_source_qualified": false,
     "native_prepared_save_adopted": false
   },
-  "description": "Explicit hard10-compatible R050 source setup140,138,0, nearest full-home edge11; default15 recipe remains separate. Fresh native elevation/emission qualification required, no copied completed journey.",
+  "description": "R050 pre-signal reach control: player starts at field 140,138,0, with full bandit camp edge 11 OMT and cabin 37 OMT away. This meets the hard 10-OMT minimum but is not the default 15-OMT start. No elevation or charged light is supplied; native source setup, emission and reload remain to be qualified.",
   "profile": "r050-representative-remote-reach",
   "world": "TestSetup00",
   "observer_character": true,

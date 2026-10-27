@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.r036_integrated_baseline_v1",
-  "description": "Fresh R-036 matched baseline: established living base with no hostile-ecology load, using native semantic local transitions and five one-minute waits.",
+  "description": "R-036 matched baseline from a prepared McWilliams base without hostile-ecology setup: native local transitions and five one-minute waits, compared with the feature case. Fixture preparation is not a performance result.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r028_paired_baseline_base_v1",

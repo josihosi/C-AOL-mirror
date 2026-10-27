@@ -2,7 +2,7 @@
   "name": "r028_paired_baseline_base_v1",
   "source_fixture": "tmp_bandit_live_world_local_contact_raw_2026-04-23",
   "source_profile": "live-debug",
-  "description": "R-028 zero-credit paired baseline.  It retains the captured McWilliams established-base save and only clears local threats plus makes an east-west local transition lane walkable.  The fixture is comparison setup, not ecology or performance credit.",
+  "description": "R-028 and R-036 baseline setup from a captured McWilliams base. The recipe clears local threats and prepares an east-west walking lane. It is comparison setup, not an ecology or performance result.",
   "save_transforms": [
     {
       "kind": "repair_basecamp_npc_assignments",

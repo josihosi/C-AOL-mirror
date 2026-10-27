@@ -2,7 +2,7 @@
   "name": "r037_npc_llm_command_sandbox_v001",
   "source_fixture": "harness_basecamp_no_giuseppe_2026-09-05",
   "source_profile": "live-debug",
-  "description": "Disposable R-037 setup-only footing. It keeps the qualified living camp and places the known companion actor 2 near the player with an auditable inventory spanning wearable, melee, firearm/ammo, bow/ammo, activation and drop candidates. It also stages one unowned pickup candidate and one foreign-owned pickup control. The fixture supplies no LLM response, selected command, movement, attack, pickup, inventory outcome or gameplay credit.",
+  "description": "Disposable living-camp command setup: allied actor 2 is near the player with wearable, melee, firearm/ammo, bow/ammo, activation and drop candidates. One unowned pickup and one foreign-owned pickup control are staged. No model response or action outcome is supplied.",
   "save_transforms": [
     {
       "kind": "basecamp_assigned_npc_items",

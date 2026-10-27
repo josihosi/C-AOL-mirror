@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "zombie_rider.live_native_band_continuity_mcw",
-  "description": "A focused continuation of the accepted replacement proof: two tagged hostile riders begin on reciprocal east lanes, with only the east rider directly seeing the avatar.  A native southward path crosses behind a wall screen so the still-open bounded-relay and later-pressure boundary can be tested without replaying persistence.",
+  "description": "Rider sight-loss continuation from McWilliams: two tagged hostile riders occupy reciprocal east lanes, but only the east rider sees the avatar. A two-by-two southeast wall screen preserves rider-to-rider sight and a route; a native southward path tests loss of sight and later pressure without replaying persistence.",
   "profile": "rider-band-continuity-001",
   "world": "McWilliams",
   "profile_snapshot": "mcwilliams_live_debug_2026-04-07",

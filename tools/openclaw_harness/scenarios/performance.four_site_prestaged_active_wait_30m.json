@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.four_site_prestaged_active_wait_30m",
-  "description": "Four-site manufactured close metrics preparation from McWilliams turn5241593: player140,39; bandit140,51; cannibal camps150,39 /130,39 /140,29. Ten concrete selected humans have current prepared reservations; actual movement, simultaneous work, cost and reload still require native qualification. No natural dispatch, representative remote-story or gain credit.",
+  "description": "Manufactured four-site performance test from the McWilliams extortion save at turn 5241593. Player 140,39; bandit camp 140,51; cannibal camps 150,39, 130,39 and 140,29. Four bandits and three cannibal pairs are prepared at their homes; all 16 inherited human bodies are preserved. In component tests all ten selected bodies moved and retained ownership across save/reload; live workload and timing remain unqualified. The earlier 05c67 ownership rejection was from the old fixture; see four-site-checkpoint.prepared.json.",
   "profile": "four-site-metrics",
   "world": "McWilliams",
   "fixture": "performance_four_site_prestaged_active_v0_2026-04-29",

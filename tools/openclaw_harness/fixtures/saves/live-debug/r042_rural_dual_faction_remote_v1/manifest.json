@@ -2,7 +2,7 @@
   "name": "r042_rural_dual_faction_remote_v1",
   "source_fixture": "r042_rural_roof_dual_faction_b_v1",
   "source_profile": "live-debug",
-  "description": "Default15 remote derivative of the unchanged pre-signal dual-faction R042 payload. Move only initial player to existing field145,153,0. Audit bandit129,149, cannibal135,137, inherited cabin103,167 and every additional home footprint. Preserve original rosters, clocks, ownership and old cabin knowledge. This is no guaranteed common signal envelope: each real recipient, native distance/cap and source identity must qualify separately. Keep emitter loaded/active with player near SOURCE and HOME remote; native terrain/emission/save/reload adoption remains open. No new source/camp/actor/history injected.",
+  "description": "R042 pre-signal dual-faction derivative: moves the initial player to field 145,153,0, preserving rosters, clocks, ownership and prior cabin knowledge. Bandit camp 129,149, cannibal camp 135,137 and cabin 103,167 remain distinct. No source, camp or actor is added; qualify each recipient and real emission independently.",
   "setup_classification": {
     "kind": "representative_candidate",
     "minimum_footprint_edge_omt": 15,

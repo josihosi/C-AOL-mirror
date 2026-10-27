@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "name": "bandit.r_caol_first_smoke_042_rural_roof_b",
   "setup_classification": {"kind": "representative_candidate", "native_source_qualified": false, "native_prepared_save_adopted": false},
-  "description": "Representative default15 R042 dual-faction source setup145,153; preserve original homes/rosters/history and separately qualify each real recipient.",
+  "description": "R042 dual-faction pre-signal start: the recipe moves the player to the existing field at 145,153,0 while preserving homes and rosters. Bandit camp 129,149, cannibal camp 135,137 and cabin 103,167 remain distinct. Each recipient and the physical source must qualify separately; native emission and save/reload are still required.",
   "profile": "first-smoke-042-rural-b-20260929",
   "world": "TestSetup00",
   "observer_character": true,

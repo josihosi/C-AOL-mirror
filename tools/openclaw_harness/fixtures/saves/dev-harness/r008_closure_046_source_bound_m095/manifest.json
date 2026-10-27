@@ -1,4 +1,5 @@
 {
+  "description": "R008 source-bound M095 footing for seed 830205385: bandit camp 177,13,0, hostile origin 177,9,0 and watch 174,13,0. The recipe supplies needs, temperature, stamina, cardio, clairvoyance and night-vision debug traits; use the original source binding for the saved route.",
   "profile": "dev-harness",
   "world": "R008Closure045Seed830205385",
   "captured_at": "2026-08-25T04:56:15+0200",

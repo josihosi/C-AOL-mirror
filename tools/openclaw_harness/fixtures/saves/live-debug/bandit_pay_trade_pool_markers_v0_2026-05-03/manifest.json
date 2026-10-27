@@ -1,4 +1,5 @@
 {
+  "description": "Payment-stock setup derived from the local-contact bandit fixture. The recipe adds binoculars to the player, a saxophone wielded by camp NPC 2, and 200 follower-owned gold watches in CAMP_STORAGE at offset 31,6. Actual trade and payment are not supplied.",
   "name": "bandit_pay_trade_pool_markers_v0_2026-05-03",
   "source_fixture": "tmp_bandit_live_world_local_contact_raw_2026-04-23",
   "save_transforms": [

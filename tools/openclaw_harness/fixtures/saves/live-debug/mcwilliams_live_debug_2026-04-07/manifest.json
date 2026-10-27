@@ -1,4 +1,5 @@
 {
+  "description": "McWilliams save captured from the live-debug profile on 2026-04-07. Its actor, inventory, zone and fire contents are not described in this manifest; inspect the selected save before relying on them.",
   "profile": "live-debug",
   "world": "McWilliams",
   "captured_at": "2026-04-07T21:41:16+0200",

@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.r028_paired_baseline_v1",
-  "description": "R-028 paired baseline observation.  From the audited established-base source fixture, execute the same native east-west local transitions and five one-minute waits as the feature case while opt-in renderer telemetry records presented-frame cost and pacing.  Fixture installation is setup only.",
+  "description": "R-028 renderer baseline from a prepared McWilliams base: native east-west local transitions and five one-minute waits, with opt-in presented-frame cost and pacing telemetry. Compare the paired feature setup; fixture preparation is not a performance result.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r028_paired_baseline_base_v1",

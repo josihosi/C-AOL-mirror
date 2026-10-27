@@ -2,7 +2,7 @@
   "name": "mcwilliams_live_debug_zombie_rider_impact_two_2026-09-12",
   "source_fixture": "mcwilliams_live_debug_zombie_rider_native_hunt_open_2026-09-12",
   "source_profile": "live-debug",
-  "description": "Dedicated native impact footing: full-health armored player and two hostile zombie riders held at separate three-tile closing approaches with finite bow ammunition and no setup-time movement.",
+  "description": "Two-rider impact setup: full-health armored player and two hostile zombie riders on separate three-tile approaches, with finite bow ammunition. No movement is supplied at setup.",
   "save_transforms": [
     {
       "kind": "map_terrain_near_player",

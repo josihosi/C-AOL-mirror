@@ -1,4 +1,5 @@
 {
+  "description": "Fire setup from the McWilliams Basecamp kit: turn 5266800, bandit camp 11 OMT away, a wielded brazier, a lighter with 100 butane charges, and 100 logs in a SOURCE_FIREWOOD zone east of the player. These are recipe additions; deployment and ignition require native action.",
   "name": "fuel_visible_brazier_deploy_source_zone_nested_lighter_v0_2026-04-29",
   "source_fixture": "bandit_basecamp_playtest_kit_v0_2026-04-22",
   "save_transforms": [

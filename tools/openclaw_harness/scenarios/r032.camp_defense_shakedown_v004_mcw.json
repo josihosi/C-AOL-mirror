@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "r032.camp_defense_shakedown_v004_mcw",
-  "description": "Native R032 defense continuation from the accepted Locker and payment-stock source. Uses the source-bound v002 handoff-receipt fix. On a fresh profile, set character:25 patrol-only job priority through native UI before creating CAMP_PATROL, so the first plan cache sees the final priority and zone. All guard orders, bandit dispatch/contact, branch choice and outcomes remain native.",
+  "description": "Camp defense against a bandit shakedown, continuing the saved R032 Locker camp at 162,36. Character 25 and nearby storage remain; the fixture adds ten RobofacCoin in follower storage 31 map squares east. Set character 25’s patrol-only priority before creating CAMP_PATROL; orders, dispatch, contact and outcome remain native.",
   "profile": "r032-camp-defense-shakedown-exp008-20260924",
   "config_profile": "dev-harness",
   "world": "McWilliams",

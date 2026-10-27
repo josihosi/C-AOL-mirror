@@ -1,4 +1,5 @@
 {
+  "description": "R027 saved opaque-barrier control: audit records intensity-3 fire at 138,49,0, camp at 140,51,0 and an opaque, impassable rock border at 139,50,0. The barrier was native setup; this save alone is not a signal or gameplay result. See the manifest audit and setup run.",
   "schema": "r027-opaque-barrier-fixture-v1",
   "fixture": "r027_opaque_barrier_v009_20260902",
   "world": "McWilliams",

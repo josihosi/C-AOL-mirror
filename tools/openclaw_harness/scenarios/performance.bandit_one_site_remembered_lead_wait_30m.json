@@ -2,7 +2,7 @@
   "name": "performance.bandit_one_site_remembered_lead_wait_30m",
   "status": "blocked",
   "blocked_reason": "Retired active-player remembered-lead dispatch performance fixture.",
-  "description": "Performance-audit row: one active hostile overmap AI site. A bandit camp starts from a persisted remembered camp-map lead, waits through the real 30-minute overmap AI cadence, and captures compact live-path timing/counter lines from bandit_live_world perf instrumentation.",
+  "description": "Measure one bandit site from a McWilliams save prepared with a remembered camp lead. The recipe moves the player outside direct range and waits 30 minutes; actual dispatch and timing require native observation.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "bandit_camp_map_remembered_stalk_v0_2026-04-28",

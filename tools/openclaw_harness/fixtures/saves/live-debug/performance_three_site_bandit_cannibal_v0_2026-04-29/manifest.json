@@ -2,7 +2,7 @@
   "name": "performance_three_site_bandit_cannibal_v0_2026-04-29",
   "source_fixture": "performance_two_site_bandit_cannibal_v0_2026-04-29",
   "source_profile": "live-debug",
-  "description": "Blocked direct-range three-site performance-audit footing: starts from the green two-site remembered-lead bandit plus direct-range cannibal fixture, then seeds a second camp-shaped cannibal_camp 10 OMT west of the player. Run 20260429_035001 showed this footing proves both added cannibal sites bootstrapped and dispatched, but only reaches sites=3 active_sites=2 because the two direct-range cannibal sites consume the live player-pressure cap before the remembered-lead bandit camp dispatches. Retain as cap/interference evidence, not as a green three-active-site row.",
+  "description": "Direct-range three-site control based on the two-site fixture, adding a cannibal camp 10 OMT west. The existing description reports that run 20260429_035001 reached two active sites: the cannibal sites dispatched and consumed the pressure cap before the bandit dispatched; the original run evidence was not located in this review. This retains cap/interference evidence, not a three-active-site result.",
   "status": "blocked_direct_range_cap_guardrail",
   "save_transforms": [
     {

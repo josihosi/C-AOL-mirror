@@ -1,4 +1,5 @@
 {
+  "description": "R027 saved out-of-range control: the original fire at 138,49,0 was removed and an intensity-3 fire was placed at 152,49,0 through native setup. The saved audit and source run are linked in this manifest; setup is not signal-response proof.",
   "fixture_id": "r027_out_of_range_v004_20260902",
   "claim": "R-027",
   "evidence_ceiling": "zero-credit",

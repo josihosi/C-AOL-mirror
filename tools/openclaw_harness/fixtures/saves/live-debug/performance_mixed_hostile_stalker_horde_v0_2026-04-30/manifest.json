@@ -2,7 +2,7 @@
   "name": "performance_mixed_hostile_stalker_horde_v0_2026-04-30",
   "source_fixture": "performance_two_site_bandit_cannibal_v0_2026-04-29",
   "source_profile": "live-debug",
-  "description": "Manufactured close mixed-load metrics footing. Preserves native time and all sixteen inherited NPC bodies; current zero-credit operations own four bandits and two cannibals. Initial observer relocation and a complete native Mi-go encampment terrain placement use existing setup transforms. No Mi-go actors, tokens or operation are serialized by this recipe: actual native generation, committed roster, useful human travel and Mi-go activity must be qualified after load. Eight other home members, two unrelated NPCs, one stalker and one horde remain distinct. Not representative travel, natural dispatch or performance-gain proof.",
+  "description": "Manufactured close mixed setup from the two-site fixture: preserves time and 16 inherited human bodies, preparing four bandits and two cannibals while retaining eight other home members and two unrelated NPCs. Places Mi-go encampment terrain, a stalker and a horde; no Mi-go actors or operation are supplied. Native generation and activity are required. A prior mixed interval and reload are recorded separately in root-four-site-return-checkpoint.prepared.json.",
   "save_transforms": [
     {
       "kind": "player_near_overmap_special",

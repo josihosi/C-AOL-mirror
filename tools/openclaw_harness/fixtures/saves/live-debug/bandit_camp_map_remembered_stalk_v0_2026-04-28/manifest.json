@@ -2,7 +2,7 @@
   "name": "bandit_camp_map_remembered_stalk_v0_2026-04-28",
   "source_fixture": "bandit_extortion_reopen_local_contact_mcw_v0_2026-04-24",
   "source_profile": "live-debug",
-  "description": "Fixture-backed vanished-signal camp-map dispatch footing: reuse the current-build McWilliams bandit live-world save, move the player just outside direct-player range, clear the legacy active local-contact pressure, and seed a scout-confirmed remembered basecamp lead so the normal 30-minute dispatch cadence must choose from persisted camp-map knowledge rather than a live signal.",
+  "description": "McWilliams extortion save prepared for a remembered-lead bandit test: the recipe moves the player outside direct range and seeds a camp lead. The actual saved state and subsequent dispatch require verification.",
   "save_transforms": [
     {
       "kind": "player_near_overmap_special",

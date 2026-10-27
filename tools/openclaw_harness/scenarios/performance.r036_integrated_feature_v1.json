@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "name": "performance.r036_integrated_feature_v1",
-  "description": "Fresh R-036 matched feature: established living base with hostile-ecology load, using the same native semantic local transitions and five one-minute waits.",
+  "description": "R-036 matched feature from the prepared McWilliams base: staged hostile ecology, using the baseline’s native local transitions and five one-minute waits. Fixture preparation is not measured activity.",
   "profile": "dev-harness",
   "world": "McWilliams",
   "fixture": "r028_paired_feature_ecology_v1",

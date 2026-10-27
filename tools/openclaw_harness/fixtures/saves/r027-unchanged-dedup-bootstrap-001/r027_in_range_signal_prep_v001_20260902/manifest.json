@@ -1,4 +1,5 @@
 {
+  "description": "R027 zero-credit signal setup from the saved safe-footing fixture. The recipe places the avatar at 140,50,0 and an intensity-3 fire 11 map squares away in the same OMT; camp 140,51,0 is one OMT away. Expected baseline is one lead and idle drive. No scheduler outcome is supplied.",
   "fixture_id": "r027_in_range_signal_prep_v001_20260902",
   "claim": "R-027",
   "evidence_ceiling": "zero-credit",

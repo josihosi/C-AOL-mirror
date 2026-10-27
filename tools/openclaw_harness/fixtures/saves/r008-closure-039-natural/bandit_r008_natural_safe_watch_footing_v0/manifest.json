@@ -1,4 +1,5 @@
 {
+  "description": "R008 production-generated seed 830205385 footing: bandit camp 177,13,0, hostile origin 177,9,0 and watch 174,13,0. The recipe places the player three OMT west of camp and adds needs, temperature, stamina, cardio, clairvoyance, night-vision and cloak debug traits. This is setup, not a natural survival result.",
   "name": "bandit_r008_natural_safe_watch_footing_v0",
   "profile": "r008-closure-039-natural",
   "world": "r008-natural-bandit-039",

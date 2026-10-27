@@ -2,7 +2,7 @@
   "name": "r050_rural_bandit_remote_reach_v1",
   "source_fixture": "r050_rural_roof_bandit_only_v1",
   "source_profile": "live-debug",
-  "description": "Reach-compatible hard-minimum alternative to unchanged default15 r050_rural_bandit_remote_v1. Reuse the exact maintained pre-signal payload; move only initial player to saved field140,138,0. Full camp edge11/cabin37 differs from native observer distance. Original Mixed later physically qualified an elevated source140,138,1 at native15/cap16 on its own continuation; that history is NOT copied here. Fresh Luna setup must create usable physical elevation/support and a genuinely charged enabled cone source, remain near SOURCE, end any close-HOME visits, and qualify current weather/night/exposure/intensity/range before source-associated travel. No platform, vehicle, battery, light, lead, report or party is authored. Native geometry/emission/save/reload adoption remains required; hard10 exception is not default15 credit.",
+  "description": "R050 hard-minimum reach alternative from the pre-signal save: moves the player to field 140,138,0; full camp edge is 11 OMT and cabin 37 OMT away. No platform, vehicle, battery, light or party is supplied. Establish a real elevated source and qualify emission and reload; an earlier separate continuation does not qualify this start.",
   "setup_classification": {
     "kind": "representative_candidate",
     "minimum_footprint_edge_omt": 10,

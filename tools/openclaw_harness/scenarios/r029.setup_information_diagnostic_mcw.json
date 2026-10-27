@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "r029.setup_information_diagnostic_mcw",
   "setup_classification": {"kind": "focused_control", "reason": "Preserve this exact channel, route, combat, roof/building or control boundary and close geometry; no representative remote full-story credit.", "representative_remote_credit": false},
-  "description": "Isolated zero-credit setup information and continuation diagnostic: selected smartphone, named brazier, placement and ignition.",
+  "description": "Zero-credit setup diagnostic for smartphone, brazier placement and ignition. The in-range roof fixture supplies ordinary fire tools and logs, stabilizer traits and a cannibal camp footprint; it does not supply hostile actors, signal or encounter.",
   "profile": "mutation-setup-ffc9168450f6",
   "config_profile": "dev-harness",
   "world": "McWilliams",

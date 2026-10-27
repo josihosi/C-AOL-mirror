@@ -2,7 +2,7 @@
   "name": "r050_migo_tower_remote_initial_v1",
   "profile": "live-debug",
   "world": "TestSetup00",
-  "description": "Reusable native-prepared pre-signal tower start. Native placed/generated/committed tower and all human homes remain unchanged. Player is near the source-OFF charged cone on the real finite roof platform. Setup only: source activation, measured native reach, observation, response and journey remain native work after installation.",
+  "description": "Native-prepared pre-signal TestSetup00 save at turn 5216251. Player is near an unlit charged motorcycle headlight on a 25-cell roof at 145,149,1; the tower and two human homes are 15, 15 and 42 OMT away. The tower has four floors, a brood pod and eight committed residents, with two reserved. Setup and reload are recorded in this manifest; emission, body authentication and journey remain unproved.",
   "source_parent_fixture": "r050_rural_bandit_remote_v1",
   "pre_signal": true,
   "gameplay_credit": false,

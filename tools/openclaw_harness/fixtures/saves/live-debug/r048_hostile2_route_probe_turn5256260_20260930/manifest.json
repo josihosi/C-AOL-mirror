@@ -1,4 +1,5 @@
 {
+  "description": "R048 saved TestSetup00 continuation at turn 5256260: cannibal camp 135,137 has hostile members 5 and 7 outbound on operation hostile:2. The retained copy is post-report; ignition, scouting, report and dispatch are not replayed. Source run d5c6f891 and copy binding are recorded in this manifest.",
   "fixture": "r048_hostile2_route_probe_turn5256260_20260930",
   "native_saved_turn": 5256260,
   "note": "Byte-exact continuation of the retained rural-A post-report/pre-divergence state. The run begins with hostile IDs 7 and 5 outbound. No ignition, scout, report, or dispatch is replayed; B fixture and A/B published declarations are untouched.",

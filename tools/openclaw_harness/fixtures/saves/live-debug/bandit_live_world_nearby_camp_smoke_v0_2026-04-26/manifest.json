@@ -2,7 +2,7 @@
   "name": "bandit_live_world_nearby_camp_smoke_v0_2026-04-26",
   "source_fixture": "bandit_basecamp_playtest_kit_v0_2026-04-22",
   "source_profile": "live-debug",
-  "description": "Live smoke/fire signal proof footing: reuse the McWilliams/Basecamp playtest-kit save, seed a real bandit_camp just beyond direct-player range, and inject visible/safe same-OMT fd_fire/fd_smoke near but not on the player so current-build overmap_npc_move can prove a matched live signal rather than an authored playback packet or direct-range dispatch.",
+  "description": "Saved-field signal control based on the McWilliams Basecamp kit: a bandit camp is seeded beyond direct range and visible fire/smoke fields are placed near, but not on, the player. This tests the signal reader rather than the ordinary ignition chain.",
   "save_transforms": [
     {
       "kind": "seed_overmap_special_near_player",
