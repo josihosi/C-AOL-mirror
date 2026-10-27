@@ -2400,8 +2400,10 @@ void monster::plan()
     // Include native targeting/action work before the species hook. The
     // authenticated prepare_step route remains its separately timed child.
     std::optional<raid_perf_scope> diagnostic;
+    std::optional<raid_perf_scope> native_targeting;
     if( migo_intent() ) {
         diagnostic.emplace( raid_perf_stage::migo_local_plan );
+        native_targeting.emplace( raid_perf_stage::migo_plan_native_targeting );
     }
     monster_plan mon_plan( *this );
 
@@ -2582,7 +2584,9 @@ void monster::plan()
         turns_since_target = 0;
     }
 
+    native_targeting.reset();
     if( migo_intent() ) {
+        raid_perf_scope species_hook( raid_perf_stage::migo_plan_species_hook );
         Character *opponent = mon_plan.target ? mon_plan.target->as_character() : nullptr;
         const bool native_flight = mon_plan.fleeing || attitude() == MATT_FLEE ||
                                    ( opponent && is_fleeing( *opponent ) );

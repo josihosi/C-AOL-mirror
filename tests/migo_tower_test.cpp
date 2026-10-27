@@ -2,8 +2,12 @@
 #include <array>
 #include <chrono>
 #include <ctime>
+#include <clocale>
+#include <cstdlib>
+#include <map>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -50,6 +54,14 @@
 #include "player_helpers.h"
 #include "physical_navigation.h"
 #include "physical_light.h"
+#include "rng.h"
+#include "imgui/imgui.h"
+#include "ui_manager.h"
+#include "output.h"
+#include "options_helpers.h"
+#include "input.h"
+#include "cached_options.h"
+#include "cursesdef.h"
 #include "submap.h"
 
 TEST_CASE( "shared active arithmetic preserves separate source and operation clocks",
@@ -6586,4 +6598,400 @@ TEST_CASE( "individual_home_rally_interval_is_finite_and_reload_cannot_replenish
     member.member_id = "overflow";
     CHECK_FALSE( loaded.add( member ) );
     CHECK( loaded.members.size() == 16 );
+}
+
+// Separate the native pre-hook work from the species hook without changing a
+// plan's physical inputs, PRNG stream or canonical body. Cache prewarming is
+// outside the measured call and is not a gameplay scheduling proposal.
+TEST_CASE( "native_migo_plan_reachability_cold_and_warm_conserve_the_same_decision",
+           "[.][migo_tower][migo_plan_attribution]" )
+{
+    const std::string type = GENERATE( std::string( "mon_mi_go" ),
+                                       std::string( "mon_mi_go_scout" ) );
+    clear_map( -2, 2 );
+    map &here = get_map();
+    const auto old_rng = rng_get_engine();
+    const auto old_position = get_avatar().pos_abs();
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        get_avatar().setpos( old_position, false );
+        rng_get_engine() = old_rng;
+    } );
+    get_avatar().setpos( here.get_abs( tripoint_bub_ms( 110, 110, -2 ) ), false );
+    monster &body = spawn_test_monster( type, tripoint_bub_ms( 60, 60, 0 ) );
+    monster &peer = spawn_test_monster( "mon_zombie_hulk", tripoint_bub_ms( 66, 66, 0 ) );
+    const auto anchor = body.pos_abs_omt();
+    migo_population::site_record home;
+    home.id = "native-plan-caller";
+    home.anchor = anchor;
+    migo_population::member_record member;
+    member.token = {home.id, "native-plan-member", 1, anchor};
+    member.type = body.type->id;
+    member.home = body.pos_abs();
+    member.owner = migo_population::representation::local;
+    member.assignment = migo_population::duty::available;
+    member.hp = body.get_hp();
+    REQUIRE( home.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    body.population_identity() = member.token;
+    body.set_migo_intent( migo_tower::member_intent() );
+    overmap_buffer.global_state.migo_populations.sites.push_back( home );
+    REQUIRE( overmap_buffer.global_state.migo_populations.find( home.id )->owns(
+                 member.token, migo_population::representation::local ) );
+    REQUIRE( get_creature_tracker().find( body.pos_abs() ).get() == &body );
+    REQUIRE_FALSE( migo_tower::owns_intent( body, migo_population::representation::local ) );
+    // The original packet contains both active generation1 and ordinary
+    // generation0 intents. This first control covers the latter, not a raid.
+    for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) {
+        here.build_map_cache( z );
+    }
+    const auto bytes = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut js( out ); value.serialize( js ); }
+        return out.str();
+    };
+    const auto initial_peer = bytes( peer );
+    const auto initial_world = bytes( overmap_buffer.global_state.migo_populations );
+    const auto initial_time = calendar::turn;
+    const monster initial_body( body );
+    const auto seed = rng_get_engine();
+    double cold = 0.0;
+    double warm = 0.0;
+    double prewarm = 0.0;
+    double direct_hook = 0.0;
+    int visited = 0;
+    const auto timed = []( const auto &call ) {
+        const auto started = std::chrono::steady_clock::now();
+        call();
+        return std::chrono::duration<double>( std::chrono::steady_clock::now() - started ).count();
+    };
+    for( int repeat = 0; repeat < 3; ++repeat ) {
+        body = initial_body;
+        rng_get_engine() = seed;
+        get_creature_tracker().invalidate_reachability_cache();
+        cold += timed( [&]() { body.plan(); } );
+        const auto expected_body = bytes( body );
+        const auto expected_rng = rng_get_engine();
+        body = initial_body;
+        rng_get_engine() = seed;
+        get_creature_tracker().invalidate_reachability_cache();
+        prewarm += timed( [&]() {
+            get_creature_tracker().for_each_reachable( body, [&]( Creature * ) { ++visited; } );
+        } );
+        CHECK( rng_get_engine() == seed );
+        warm += timed( [&]() { body.plan(); } );
+        CHECK( bytes( body ) == expected_body );
+        CHECK( rng_get_engine() == expected_rng );
+        CHECK( bytes( peer ) == initial_peer );
+        CHECK( bytes( overmap_buffer.global_state.migo_populations ) == initial_world );
+        CHECK( calendar::turn == initial_time );
+        body = initial_body;
+        rng_get_engine() = seed;
+        bool applied = true;
+        direct_hook += timed( [&]() { applied = migo_tower::plan_local( body, false, nullptr ); } );
+        CHECK_FALSE( applied );
+        CHECK( bytes( body ) == bytes( initial_body ) );
+        CHECK( rng_get_engine() == seed );
+    }
+    std::ostringstream out;
+    {
+        JsonOut js( out );
+        js.start_object();
+        js.member( "type", type );
+        js.member( "repetitions", 3 );
+        js.member( "cold_full_plan_seconds", cold );
+        js.member( "warm_full_plan_seconds", warm );
+        js.member( "native_reachability_prewarm_seconds", prewarm );
+        js.member( "generation0_direct_hook_seconds", direct_hook );
+        js.member( "reachable_visits", visited );
+        js.end_object();
+    }
+    std::cout << "MIGO_PLAN_COMPARISON " << out.str() << '\n';
+}
+
+#if !defined(TILES)
+extern "C" int ungetch( int );
+#endif
+
+TEST_CASE( "active_native_migo_plan_separates_hostile_recognition_from_targeting",
+           "[.][migo_tower][migo_plan_species_attribution]" )
+{
+#if !defined(TILES)
+    // The test world starts with loaded data, not a running game mode. Use the
+    // established save/load owner before exercising actual advancing turns.
+    REQUIRE( world_generator->active_world );
+    const std::string world_name = world_generator->active_world->world_name;
+    REQUIRE( g->save() );
+    REQUIRE( turn_handler::cleanup_at_end() );
+    world_generator->set_active_world( nullptr );
+    REQUIRE( g->load( world_name ) );
+#endif
+    clear_map( -2, 2 );
+    map &here = get_map();
+    const auto old_rng = rng_get_engine();
+    const auto old_position = get_avatar().pos_abs();
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    const auto old_turn = calendar::turn;
+    on_out_of_scope restore( [&]() {
+        clear_creatures();
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+        get_avatar().setpos( old_position, false );
+        set_time( old_turn );
+        rng_get_engine() = old_rng;
+    } );
+    // A full game turn expects the avatar near the native map center, inside
+    // the fixed scent-array footprint. A real opaque room keeps it from
+    // replacing the deliberately visible hostile target in either comparison.
+    get_avatar().setpos( here.get_abs( tripoint_bub_ms( 66, 60, 0 ) ), false );
+    for( int x = 65; x <= 67; ++x ) {
+        for( int y = 59; y <= 61; ++y ) {
+            if( x != 66 || y != 60 ) {
+                here.ter_set( tripoint_bub_ms( x, y, 0 ), ter_str_id( "t_wall" ) );
+            }
+        }
+    }
+    set_time( calendar::turn_zero + 12_hours );
+    monster &body = spawn_test_monster( "mon_mi_go", tripoint_bub_ms( 60, 60, 0 ) );
+    monster &enemy = spawn_test_monster( "mon_zombie_hulk", tripoint_bub_ms( 66, 66, 0 ) );
+    const auto anchor = body.pos_abs_omt();
+    migo_population::site_record home;
+    home.id = "active-plan-caller";
+    home.anchor = anchor;
+    migo_population::member_record member;
+    member.token = {home.id, "active-plan-member", 1, anchor};
+    member.type = body.type->id;
+    member.home = body.pos_abs();
+    member.owner = migo_population::representation::local;
+    member.assignment = migo_population::duty::dispatched;
+    member.hp = body.get_hp();
+    REQUIRE( home.commit_seed( {member}, std::nullopt, "", 0, true, false ) );
+    body.population_identity() = member.token;
+    migo_tower::member_intent intent;
+    intent.generation = 1;
+    intent.home = member.home;
+    body.set_migo_intent( intent );
+    overmap_buffer.global_state.migo_populations.sites.push_back( home );
+    migo_tower::site_state site;
+    site.site_id = home.id;
+    site.anchor = anchor;
+    migo_tower::operation_record operation;
+    operation.generation = 1;
+    operation.source.source_omt = anchor + point( 1, 0 );
+    operation.sweep.candidates = {{body.pos_abs() + point( 18, 0 )}};
+    operation.members = {{member.token.member_id, false, false, member.home}};
+    operation.overdue_after_active = 100000;
+    site.operation = operation;
+    overmap_buffer.global_state.migo_towers.sites.push_back( site );
+    migo_tower::refresh_activation( to_turn<int>( calendar::turn ) );
+    REQUIRE( migo_tower::owns_intent( body, migo_population::representation::local ) );
+    REQUIRE( migo_tower::activity_for( body, migo_population::representation::local,
+                                     to_turn<int>( calendar::turn ) ) );
+    REQUIRE( body.attitude_to( enemy ) == Creature::Attitude::HOSTILE );
+    for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) {
+        here.build_map_cache( z );
+    }
+    REQUIRE( body.sees( here, enemy ) );
+    REQUIRE_FALSE( body.sees( here, get_avatar() ) );
+    REQUIRE( here.inbounds( get_avatar().pos_bub() + point( 41, 41 ) ) );
+    REQUIRE( here.inbounds( get_avatar().pos_bub() - point( 41, 41 ) ) );
+    const auto bytes = []( const auto &value ) {
+        std::ostringstream out;
+        { JsonOut js( out ); value.serialize( js ); }
+        return out.str();
+    };
+    const auto world = bytes( overmap_buffer.global_state.migo_populations );
+    const auto towers = bytes( overmap_buffer.global_state.migo_towers );
+    const auto peer = bytes( enemy );
+    const auto now = calendar::turn;
+    const monster initial( body );
+    const auto seed = rng_get_engine();
+    const auto reset = [&]() { body = initial; rng_get_engine() = seed; };
+    const auto timed = []( const auto &call ) {
+        const auto started = std::chrono::steady_clock::now();
+        call();
+        return std::chrono::duration<double>( std::chrono::steady_clock::now() - started ).count();
+    };
+    double full = 0.0;
+    double hook = 0.0;
+    double optical = 0.0;
+    double native_visibility = 0.0;
+    std::string full_endpoint;
+    std::string hook_endpoint;
+    cata_default_random_engine full_rng;
+    cata_default_random_engine hook_rng;
+    for( int repeat = 0; repeat < 3; ++repeat ) {
+        reset();
+        get_creature_tracker().invalidate_reachability_cache();
+        get_creature_tracker().for_each_reachable( body, []( Creature * ) {} );
+        full += timed( [&]() { body.plan(); } );
+        if( repeat == 0 ) {
+            full_endpoint = bytes( body );
+            full_rng = rng_get_engine();
+        } else {
+            CHECK( bytes( body ) == full_endpoint );
+            CHECK( rng_get_engine() == full_rng );
+        }
+        reset();
+        bool applied = true;
+        hook += timed( [&]() { applied = migo_tower::plan_local( body, false, &enemy ); } );
+        CHECK_FALSE( applied ); // Native combat retains its normal priority.
+        CHECK( body.migo_intent()->last_observed_enemy_world == to_turn<int>( calendar::turn ) );
+        REQUIRE_FALSE( body.migo_intent()->observed_threats.empty() );
+        if( repeat == 0 ) {
+            hook_endpoint = bytes( body );
+            hook_rng = rng_get_engine();
+        } else {
+            CHECK( bytes( body ) == hook_endpoint );
+            CHECK( rng_get_engine() == hook_rng );
+        }
+        reset();
+        scout_observation::site_reader reader;
+        bool recognized = false;
+        optical += timed( [&]() {
+            recognized = migo_tower::observe_enemy( body, enemy, reader ).has_value();
+        } );
+        CHECK( recognized );
+        CHECK( bytes( body ) == bytes( initial ) );
+        CHECK( rng_get_engine() == seed );
+        bool visible = false;
+        native_visibility += timed( [&]() { visible = body.sees( here, enemy ); } );
+        CHECK( visible );
+        CHECK( bytes( body ) == bytes( initial ) );
+        CHECK( rng_get_engine() == seed );
+        CHECK( bytes( enemy ) == peer );
+        CHECK( bytes( overmap_buffer.global_state.migo_populations ) == world );
+        CHECK( bytes( overmap_buffer.global_state.migo_towers ) == towers );
+        CHECK( calendar::turn == now );
+    }
+    std::ostringstream out;
+    {
+        JsonOut js( out );
+        js.start_object();
+        js.member( "repetitions", 3 );
+        js.member( "warm_full_plan_seconds", full );
+        js.member( "active_hostile_hook_seconds", hook );
+        js.member( "isolated_observe_enemy_seconds", optical );
+        js.member( "native_sees_seconds", native_visibility );
+        js.end_object();
+    }
+    std::cout << "MIGO_PLAN_COMPARISON " << out.str() << '\n';
+
+#if !defined(TILES)
+    // Exercise the real advancing turn producer and its normal input flush;
+    // no diagnostic test-row API or additional event stream is introduced.
+    override_option diagnostic( "RAID_PERFORMANCE_DIAGNOSTIC", "quiet_signal" );
+    override_option autosave( "AUTOSAVE", "false" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    const auto trace = std::filesystem::path( PATH_INFO::user_dir() ) / "migo-plan-turn.jsonl";
+    REQUIRE_FALSE( std::filesystem::exists( trace ) );
+    const auto environment = []( const char *key, const char *value ) {
+#if defined(_WIN32)
+        return _putenv_s( key, value ? value : "" );
+#else
+        return value ? setenv( key, value, 1 ) : unsetenv( key );
+#endif
+    };
+    const std::map<std::string, std::string> settings = {
+        { "OPENCLAW_HARNESS_RUN_ID", "migo-plan-component" },
+        { "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", "migo-plan-component" },
+        { "OPENCLAW_HARNESS_SEMANTIC_TRACE_PATH", trace.string() }
+    };
+    std::map<std::string, std::optional<std::string>> previous;
+    for( const auto &entry : settings ) {
+        const char *value = std::getenv( entry.first.c_str() );
+        previous[entry.first] = value ? std::optional<std::string>( value ) : std::nullopt;
+        REQUIRE( environment( entry.first.c_str(), entry.second.c_str() ) == 0 );
+    }
+    on_out_of_scope restore_environment( [&]() {
+        for( const auto &entry : previous ) {
+            environment( entry.first.c_str(), entry.second ? entry.second->c_str() : nullptr );
+        }
+        std::filesystem::remove( trace );
+    } );
+    const std::string old_ctype = std::setlocale( LC_CTYPE, nullptr );
+    on_out_of_scope restore_locale( [&]() { std::setlocale( LC_CTYPE, old_ctype.c_str() ); } );
+    // The standalone test runner deliberately starts in the C locale; native
+    // curses needs the host's Unicode locale just as the ordinary main does.
+    REQUIRE( std::setlocale( LC_CTYPE, "" ) != nullptr );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() { if( owns_terminal ) { catacurses::endwin(); } } );
+    const bool owns_imgui = ImGui::GetCurrentContext() == nullptr;
+    if( owns_imgui ) {
+        ImGui::CreateContext();
+        auto &io = ImGui::GetIO();
+        io.DisplaySize = ImVec2( 800.0f, 600.0f );
+        io.DeltaTime = 1.0f / 60.0f;
+        io.Fonts->AddFontDefault();
+        io.Fonts->Build();
+        ImGui::NewFrame();
+    }
+    on_out_of_scope close_imgui( [&]() {
+        if( owns_imgui ) { ImGui::EndFrame(); ImGui::DestroyContext(); }
+    } );
+    restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+    restore_on_out_of_scope<bool> restore_new_game( g->new_game );
+    restore_on_out_of_scope<safe_mode_type> restore_safe_mode( g->safe_mode );
+    g->new_game = false;
+    g->set_safe_mode( SAFE_MODE_OFF );
+    test_mode = false;
+    ui_adaptor root;
+    root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    reset();
+    // Give the isolated player actual usable footing; no plan/target input changes.
+    here.ter_set( get_avatar().pos_bub(), ter_str_id( "t_rock_floor" ) );
+    const int measured_turn = to_turn<int>( calendar::turn ) + 1;
+    get_avatar().set_moves( 0 );
+    REQUIRE_FALSE( g->do_turn() );
+    const auto pause = get_default_mode_input_context().first_keyboard_character_for_action( "pause" );
+    REQUIRE( pause );
+    REQUIRE( pause->size() == 1 );
+    REQUIRE( ungetch( pause->front() ) != -1 );
+    get_avatar().set_moves( 100 );
+    REQUIRE_FALSE( g->do_turn() );
+    bool row_seen = false;
+    std::ifstream input( trace );
+    std::string line;
+    while( std::getline( input, line ) ) {
+        const auto start = line.find( '{' );
+        if( start == std::string::npos ) { continue; }
+        const auto event = json_loader::from_string( line.substr( start ) ).get_object();
+        event.allow_omitted_members();
+        if( event.get_string( "event", "" ) != "raid_performance_interval" ) { continue; }
+        const auto names = event.get_array( "stage_names" );
+        std::map<std::string, int> indexes;
+        int index = 0;
+        for( const auto name : names ) { indexes[name.get_string()] = index++; }
+        for( const auto value : event.get_array( "rows" ) ) {
+            const auto row = value.get_object();
+            row.allow_omitted_members();
+            if( row.get_int( "turn" ) != measured_turn ) { continue; }
+            row_seen = true;
+            const auto durations = row.get_array( "stages_seconds" );
+            const auto calls = row.get_array( "stage_calls" );
+            const auto seconds = [&]( const std::string &name ) {
+                REQUIRE( indexes.count( name ) == 1 );
+                return durations.get_float( indexes.at( name ) );
+            };
+            for( const std::string &name : { "migo_local_plan", "migo_plan_native_targeting",
+                                            "migo_plan_species_hook", "migo_plan_hostile_recognition" } ) {
+                REQUIRE( indexes.count( name ) == 1 );
+                CHECK( calls.get_int( indexes.at( name ) ) > 0 );
+            }
+            CHECK( seconds( "migo_local_plan" ) + 0.00002 >=
+                   seconds( "migo_plan_native_targeting" ) + seconds( "migo_plan_species_hook" ) );
+            CHECK( seconds( "migo_plan_species_hook" ) + 0.00002 >=
+                   seconds( "migo_plan_hostile_recognition" ) );
+            std::cout << "MIGO_PLAN_ROW " << row.str() << '\n';
+        }
+    }
+    CHECK( row_seen );
+#endif
 }

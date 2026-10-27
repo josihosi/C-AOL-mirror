@@ -1613,6 +1613,7 @@ bool plan_local( monster &body, bool fleeing, Creature *target )
     }
     const bool hostile = target && body.attitude_to( *target ) == Creature::Attitude::HOSTILE;
     if( hostile ) {
+        raid_perf_scope recognition( raid_perf_stage::migo_plan_hostile_recognition );
         intent.last_observed_enemy_world = to_turn<int>( calendar::turn );
         scout_observation::site_reader reader;
         if( const auto observed = observe_enemy( body, *target, reader ) ) {
