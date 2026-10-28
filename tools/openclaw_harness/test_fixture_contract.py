@@ -13317,6 +13317,236 @@ class AdjustableMixedLoadSampleTest(unittest.TestCase):
         self.assertEqual(str(effective["AUTOSAVE"]).lower(), "false")
         self.assertEqual(effective["RAID_PERFORMANCE_DIAGNOSTIC"], "normal")
 
+    def run_public_startup_journey(self, *, steps=None, source_change=None, native_events=None):
+        """Real audits -> session publication -> bridge adoption -> public control.
+
+        Only the absent native process/wake boundary is doubled. The fixture,
+        saved readers, scenario executor, bounded channel, cockpit, archive and
+        bridge descriptor validator are the production consumers.
+        """
+        from contextlib import ExitStack
+        from cockpit_archive import resolve_wire
+        from cockpit_file_bridge import FileBackedCockpitBridge
+        run = self.root / "connected-startup"
+        shutil.rmtree(run, ignore_errors=True)
+        run.mkdir()
+        config = run / "config"
+        config.mkdir()
+        session = run / "bridge-session"
+        session.mkdir()
+        run_id, binding = "mixed-connected", "mixed-bridge"
+        marker = self.startup.SEMANTIC_STEP_PREFIX
+        encode = lambda event: (marker + json.dumps(event) + "\n").encode()
+        hud = {"event": "frame", "run_id": run_id, "frame_id": "initial-hud",
+               "state": "world", "observed_turn": 5241593, "game_minutes": 8159,
+               "producer": "hud_world_ready", "initial_world_ready": True,
+               "valid_actions": ["world.look", "world.wait", "world.quicksave"]}
+        owner = {"event": "surface_descriptor", "schema_version": 1,
+                 "run_id": run_id, "process_instance": "component-native", "sequence": 2,
+                 "surface_id": "world-owner", "frame_id": "world-frame", "kind": "world",
+                 "game_turn": 5241593, "game_minutes": 8159, "breadcrumbs": ["World"],
+                 "payload": {"title": "World", "turn": "5241593",
+                             "diagnostic_active_monsters": json.dumps([
+                                 {"identity": {"id": f"component:{i}"}, "typeid": "mon_zombie",
+                                  "position": [2508 + i, 1428, 0], "hp": 80}
+                                 for i in range(4000)])},
+                 "valid_actions": [{"id": name, "stable_id": "", "label": name, "enabled": True}
+                                   for name in hud["valid_actions"]]}
+        if native_events is not None:
+            hud, owner = copy.deepcopy(native_events)
+            run_id = owner["run_id"]
+        trace = run / "semantic.native.events.jsonl"
+        trace.write_bytes(encode(hud) + encode(owner))
+        self.assertGreater(trace.stat().st_size, self.startup.SEMANTIC_STEP_MAX_BYTES)
+        (config / "debug.log").write_bytes(trace.read_bytes())
+        (run / self.startup.TRANSITION_EVENT_BINDING_FILENAME).write_text(json.dumps({"run_id": run_id}))
+        (run / "terminal.owner.json").write_text("{}")
+        output = io.StringIO()
+        public_responses = []
+        adopted = []
+        original_serve = self.startup.serve_cockpit_live
+        def native_wake(*args, **kwargs):
+            request = json.loads((run / "semantic.requests.jsonl").read_text().splitlines()[-1])
+            successor = {**owner, "sequence": 4, "frame_id": "successor-frame"}
+            receipt = {"event": "surface_receipt", "run_id": run_id, "sequence": 3,
+                       "request_id": request["request_id"], "action_id": request["action_id"],
+                       "requested_run_id": run_id, "requested_surface_id": request["surface_id"],
+                       "requested_frame_id": request["frame_id"], "consuming_surface_id": request["surface_id"],
+                       "consuming_frame_id": request["frame_id"], "accepted": True,
+                       "rejection_reason": "", "resulting_frame_id": successor["frame_id"]}
+            with trace.open("ab") as stream:
+                stream.write(encode(receipt) + encode(successor))
+            return 1
+        def live(service, _stdin, _stdout):
+            envelope = json.loads(output.getvalue().splitlines()[-1])
+            bridge = FileBackedCockpitBridge(session, ["not-executed"], binding_id=binding,
+                                             require_session_ready=True)
+            adopted.append(bridge._session_descriptor(envelope))
+            for bad in ({**envelope["cockpit_live_session"], "bridge_binding_id": "foreign"},
+                        {**envelope["cockpit_live_session"], "schema": "legacy"}):
+                with self.assertRaises(ValueError):
+                    bridge._session_descriptor({"cockpit_live_session": bad})
+            requests = [{"action": "game.observe"},
+                        {"action": "game.act", "observation_id": "stale", "action_id": "world.look"},
+                        {"action": "game.act", "observation_id": owner["frame_id"], "action_id": "world.look"},
+                        {"action": "game.act", "observation_id": owner["frame_id"], "action_id": "world.look"},
+                        {"action": "game.observe"}]
+            replies = io.StringIO()
+            status = original_serve(service, io.StringIO("".join(json.dumps(x) + "\n" for x in requests)), replies)
+            public_responses.extend(resolve_wire(json.loads(line), directory=session, binding_id=binding)
+                                    for line in replies.getvalue().splitlines())
+            # EOF is an intentionally unfinished component session, not native
+            # finish/SaveQuit proof or authority to kill a process.
+            self.assertEqual(status, 1)
+            return status
+        read_player = self.startup.load_saved_player_payload
+        route = copy.deepcopy(steps if steps is not None else self.scenario["steps"])
+        route[-1].update(cleanup_on_finish=False, live_operations=["game.act"], observe_interval_seconds=.001)
+        generation = {"pid": os.getpid(), "status": "alive", "expected": {"pid": os.getpid(), "birth_identity": "component"}}
+        with ExitStack() as stack:
+            for context in (
+                    mock.patch.object(self.startup, "save_dir_for_profile", return_value=self.world.parent),
+                    mock.patch.object(self.startup, "config_dir_for_profile", return_value=config),
+                    mock.patch.object(self.startup, "resolve_profile_name", return_value="component"),
+                    mock.patch.object(self.startup, "semantic_step_trace_start_for_source", return_value=0),
+                    mock.patch.object(self.startup, "current_owned_process_generation", return_value=generation),
+                    mock.patch.object(self.startup, "active_playtest_witness_charter", return_value=None),
+                    mock.patch("process_performance.ProcessPerformance", side_effect=OSError("component process double")),
+                    mock.patch.object(self.startup, "semantic_wake_pipe_contract", return_value={
+                        "status": "bound", "path": "component", "contract": {"transport": "component"}}),
+                    mock.patch.object(self.startup, "write_semantic_wake_pipe", side_effect=native_wake),
+                    mock.patch.object(self.startup, "serve_cockpit_live", side_effect=live),
+                    mock.patch.dict(os.environ, {"OPENCLAW_COCKPIT_BRIDGE_BINDING_ID": binding,
+                                                "OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(session)}),
+                    redirect_stdout(output)):
+                stack.enter_context(context)
+            player_reads = stack.enter_context(mock.patch.object(
+                self.startup, "load_saved_player_payload", wraps=read_player))
+            if source_change:
+                original_audit = self.startup.audit_saved_bandit_live_world_state
+                def audit(*args, **kwargs):
+                    result = original_audit(*args, **kwargs)
+                    source_change(result)
+                    return result
+                stack.enter_context(mock.patch.object(self.startup, "audit_saved_bandit_live_world_state", side_effect=audit))
+            reports = self.startup.execute_probe_steps(os.getpid(), run, route, profile="component",
+                                                       world="McWilliams", grants_gameplay_proof=False)
+        return reports, player_reads.call_count, adopted, public_responses, run
+
+    def test_public_startup_audits_share_source_facts_and_reach_fresh_controls(self) -> None:
+        before = self.startup.sha256_tree(self.world)
+        reports, reads, adopted, responses, run = self.run_public_startup_journey()
+        self.assertEqual(len(reports), 12, repr(reports)[:6000])
+        self.assertEqual(reads, 1)  # Native player/overmaps are read once, not once per party.
+        first = reports[1]["metadata"]
+        shared_path = Path(first["artifact_path"])
+        self.assertEqual(len(first["observed_sites"]), 10)
+        for report in reports[2:-1]:
+            metadata = report["metadata"]
+            self.assertEqual(metadata["status"], "required_state_present")
+            self.assertEqual(metadata["observed_site_count"], 10)
+            self.assertEqual(len(metadata["matching_sites"]), 1)
+            self.assertNotIn("observed_sites", metadata)
+            self.assertNotIn("scheduler_snapshot", metadata)
+            self.assertEqual(metadata["shared_saved_state"]["sha256"], self.startup.path_sha256(shared_path))
+            self.assertEqual(metadata["shared_saved_state"]["path"], str(shared_path))
+        self.assertEqual(adopted[0]["run_id"], "mixed-connected")
+        self.assertTrue(responses[0]["ok"], responses[0])
+        self.assertFalse(responses[1]["ok"])
+        self.assertTrue(responses[2]["ok"], responses[2])
+        self.assertFalse(responses[3]["ok"])
+        self.assertTrue(responses[4]["ok"], responses[4])
+        self.assertEqual(len((run / "semantic.requests.jsonl").read_text().splitlines()), 1)
+        self.assertEqual(self.startup.sha256_tree(self.world), before)
+
+    def test_public_startup_refuses_changed_saved_inputs_before_cockpit(self) -> None:
+        dimension = self.world / "dimension_data.gsav"
+        original = dimension.read_bytes()
+        changed = []
+        def change_once(metadata):
+            if not changed:
+                changed.append(True)
+                dimension.write_bytes(original + b"\n")
+        try:
+            reports, reads, adopted, responses, _ = self.run_public_startup_journey(source_change=change_once)
+            self.assertEqual(len(reports), 3)
+            self.assertEqual(reads, 1)
+            self.assertEqual(reports[-1]["metadata"]["status"], "failed")
+            self.assertIn("inputs changed", reports[-1]["metadata"]["error"])
+            self.assertIn("abort", reports[-1])
+            self.assertFalse(adopted)
+            self.assertFalse(responses)
+        finally:
+            dimension.write_bytes(original)
+
+    def test_public_startup_discards_shared_reads_before_intervening_step(self) -> None:
+        route = copy.deepcopy(self.scenario["steps"])
+        route.insert(2, {"kind": "wait", "label": "separate_decision", "seconds": .001})
+        dimension = self.world / "dimension_data.gsav"
+        original = dimension.read_bytes()
+        changed = []
+        def change_once(metadata):
+            if not changed:
+                changed.append(True)
+                dimension.write_bytes(original + b"\n")
+        try:
+            reports, reads, adopted, _, _ = self.run_public_startup_journey(
+                steps=route, source_change=change_once)
+            self.assertEqual(len(reports), 13)
+            self.assertEqual(reads, 2)
+            self.assertEqual(len(adopted), 1)
+            self.assertNotIn("shared_saved_state", reports[3]["metadata"])
+            self.assertEqual(reports[4]["metadata"]["shared_saved_state"]["path"],
+                             reports[3]["metadata"]["artifact_path"])
+        finally:
+            dimension.write_bytes(original)
+
+    def test_public_startup_last_party_missing_body_or_foreign_claim_cannot_admit_cockpit(self) -> None:
+        original_world = self.world
+        for failure in ("missing_body", "foreign_claim"):
+            with self.subTest(failure=failure):
+                destination = self.root / ("bad-startup-" + failure)
+                with mock.patch.object(self.startup, "save_dir_for_profile", return_value=destination):
+                    self.startup.install_saved_world_snapshot("component", "McWilliams", original_world)
+                self.addCleanup(shutil.rmtree, destination)
+                self.world = destination / "McWilliams"
+                try:
+                    dimension = self.world / "dimension_data.gsav"
+                    header, _, raw = dimension.read_text().partition("\n")
+                    whole = json.loads(raw)
+                    live = whole["overmapbuffer"]["bandit_live_world"]
+                    operation = live["sites"][-1]["active_hostile_operation"]
+                    if failure == "foreign_claim":
+                        claim = next(c for c in live["hostile_target_opportunities"]
+                                     if c["consumed_operation_id"] == operation["reservation"]["activity_id"])
+                        claim["consumed_operation_id"] += "-foreign"
+                        dimension.write_text(header + "\n" + json.dumps(whole))
+                    else:
+                        removed_id = operation["reservation"]["member_ids"][0]
+                        removed = 0
+                        for archive in (self.world / "overmaps").glob("o.*.*.zzip"):
+                            plain, version, payload = self.startup.extract_overmap_payload(archive)
+                            try:
+                                old = payload.get("npcs", [])
+                                payload["npcs"] = [n for n in old if n["id"] != removed_id]
+                                removed += len(old) - len(payload["npcs"])
+                                if len(old) != len(payload["npcs"]):
+                                    self.startup.write_overmap_payload(plain, version, payload)
+                            finally:
+                                self.startup.cleanup_extracted_overmap(plain, keep=False)
+                        self.assertEqual(removed, 1)
+                    before = self.startup.sha256_tree(self.world)
+                    reports, reads, adopted, responses, _ = self.run_public_startup_journey()
+                    self.assertEqual(len(reports), 11)
+                    self.assertEqual(reads, 1)
+                    self.assertIn("abort", reports[-1])
+                    self.assertEqual(reports[-1]["metadata"]["status"], "required_state_missing")
+                    self.assertFalse(adopted)
+                    self.assertFalse(responses)
+                    self.assertEqual(self.startup.sha256_tree(self.world), before)
+                finally:
+                    self.world = original_world
+
     def test_explicit_initial_origin_cli_keeps_native_geometry_and_current_authority(self) -> None:
         destination = self.root / "initial-origin"
         declaration = self.root / "initial-origin.json"

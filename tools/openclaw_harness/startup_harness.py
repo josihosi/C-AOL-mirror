@@ -16440,6 +16440,33 @@ def _prepared_hostile_operation_binding(site: Dict[str, Any],
     }
 
 
+def _saved_bandit_audit_input_identity(world_dir: Path) -> tuple:
+    """Identity of the native inputs used by consecutive read-only preflights.
+
+    Include existing plain overmaps because the native helper prefers them,
+    and dictionaries/player archives because they supply concrete body facts.
+    Temporary extraction outputs are removed before this is sampled again.
+    """
+    paths = {world_dir / "dimension_data.gsav", world_dir / "worldoptions.json"}
+    paths.update(world_dir.glob("*.dict"))
+    paths.update(world_dir.glob("*.sav.zzip"))
+    paths.update(p for p in world_dir.iterdir()
+                 if re.fullmatch(r"o\.-?\d+\.-?\d+", p.name))
+    overmaps = world_dir / "overmaps"
+    if overmaps.is_dir():
+        paths.update(p for p in overmaps.iterdir()
+                     if re.fullmatch(r"o\.-?\d+\.-?\d+(?:\.zzip)?", p.name))
+    identity = []
+    for path in sorted(paths):
+        if not path.exists():
+            identity.append((str(path), None))
+            continue
+        stat = path.stat()
+        identity.append((str(path), stat.st_dev, stat.st_ino, stat.st_size,
+                         stat.st_mtime_ns, stat.st_ctime_ns))
+    return tuple(identity)
+
+
 def audit_saved_bandit_live_world_state(
     world_dir: Path,
     *,
@@ -16521,6 +16548,7 @@ def audit_saved_bandit_live_world_state(
     required_camp_decision_state: str = "",
     required_report_decision_identity_match: Optional[bool] = None,
     required_report_hostile_operation_claim_match: Optional[bool] = None,
+    _read_context: Optional[MutableMapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Read-only saved dimension-data audit for persisted bandit_live_world state."""
     if not world_dir.exists():
@@ -16529,100 +16557,135 @@ def audit_saved_bandit_live_world_state(
     if not dimension_path.exists():
         raise FileNotFoundError(f"World dimension data not found: {dimension_path}")
 
-    dimension_text = dimension_path.read_text(encoding="utf-8")
-    version_line, sep, payload_text = dimension_text.partition("\n")
-    if not sep:
-        raise RuntimeError(f"Dimension data missing version header newline: {dimension_path}")
-    payload = json.loads(payload_text)
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"Dimension data is not a JSON object: {dimension_path}")
-    overmapbuffer = payload.get("overmapbuffer")
-    if not isinstance(overmapbuffer, dict):
-        raise RuntimeError(f"Dimension data lacks overmapbuffer object: {dimension_path}")
-    bandit_world = overmapbuffer.get("bandit_live_world")
-    if not isinstance(bandit_world, dict):
-        raise RuntimeError(f"Dimension data lacks overmapbuffer.bandit_live_world object: {dimension_path}")
-    raw_sites = bandit_world.get("sites", [])
-    if not isinstance(raw_sites, list):
-        raise RuntimeError(f"bandit_live_world.sites is not a list: {dimension_path}")
-
-    observed_sites = [summarize_bandit_live_world_site(site) for site in raw_sites if isinstance(site, dict)]
-    raw_hostile_opportunities = bandit_world.get("hostile_target_opportunities", [])
-    if not isinstance(raw_hostile_opportunities, list):
-        raw_hostile_opportunities = []
-    for observed_site in observed_sites:
-        observed_site.update(_prepared_hostile_operation_binding(observed_site, raw_hostile_opportunities))
-
-    selected_player_save = str(player_save or "").strip()
-    player_location_ms: List[int] = []
-    player_abs_omt: List[int] = []
-    active_member_scan_error = ""
-    active_member_npcs_by_id: Dict[str, Dict[str, Any]] = {}
     should_scan_active_members = bool(required_active_members_found or required_active_member_bodies_found or
                                       required_active_member_max_abs_offset_ms is not None or
                                       required_active_member_abs_omt is not None)
-    if should_scan_active_members:
-        try:
-            selected_player_save, _player_save_path, player_payload, _player_stat = load_saved_player_payload(world_dir, selected_player_save)
-            player = player_payload.get("player")
-            if not isinstance(player, dict):
-                raise RuntimeError("Extracted player save is missing player object")
-            location_raw = player.get("location", [])
-            if not isinstance(location_raw, list) or len(location_raw) < 3:
-                raise RuntimeError("Extracted player save is missing player location")
-            player_location_ms = [int(location_raw[0]), int(location_raw[1]), int(location_raw[2])]
-            player_abs_omt = [player_location_ms[0] // 24, player_location_ms[1] // 24, player_location_ms[2]]
-            overmaps_dir = world_dir / "overmaps"
-            if not overmaps_dir.exists():
-                raise RuntimeError(f"Overmaps dir not found: {overmaps_dir}")
-            for overmap_path in sorted(overmaps_dir.glob("o.*.*.zzip")):
-                plain_path: Optional[Path] = None
-                created_plain = False
-                try:
-                    plain_path, _version_line, overmap_payload = extract_overmap_payload(overmap_path)
-                    created_plain = bool(overmap_payload.get("_created_plain"))
-                    raw_npcs = overmap_payload.get("npcs", [])
-                    if not isinstance(raw_npcs, list):
-                        continue
-                    for index, npc_payload in enumerate(raw_npcs):
-                        if not isinstance(npc_payload, dict):
+    context_key = (str(world_dir.resolve()), str(player_save), should_scan_active_members)
+    input_identity = _saved_bandit_audit_input_identity(world_dir) if _read_context is not None else None
+    if (_read_context and _read_context["key"][0] == context_key[0] and
+            _read_context["input_identity"] != input_identity):
+        raise RuntimeError("saved bandit inputs changed during consecutive preflights")
+    if _read_context is not None and _read_context.get("key") == context_key:
+        snapshot = _read_context["snapshot"]
+        version_line = snapshot["version_line"]
+        bandit_world = snapshot["bandit_world"]
+        raw_sites = snapshot["raw_sites"]
+        observed_sites = copy.deepcopy(snapshot["observed_sites"])
+        raw_hostile_opportunities = snapshot["raw_hostile_opportunities"]
+        selected_player_save = snapshot["selected_player_save"]
+        player_location_ms = snapshot["player_location_ms"]
+        player_abs_omt = snapshot["player_abs_omt"]
+        active_member_scan_error = snapshot["active_member_scan_error"]
+        active_member_npcs_by_id = snapshot["active_member_npcs_by_id"]
+    else:
+        dimension_text = dimension_path.read_text(encoding="utf-8")
+        version_line, sep, payload_text = dimension_text.partition("\n")
+        if not sep:
+            raise RuntimeError(f"Dimension data missing version header newline: {dimension_path}")
+        payload = json.loads(payload_text)
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Dimension data is not a JSON object: {dimension_path}")
+        overmapbuffer = payload.get("overmapbuffer")
+        if not isinstance(overmapbuffer, dict):
+            raise RuntimeError(f"Dimension data lacks overmapbuffer object: {dimension_path}")
+        bandit_world = overmapbuffer.get("bandit_live_world")
+        if not isinstance(bandit_world, dict):
+            raise RuntimeError(f"Dimension data lacks overmapbuffer.bandit_live_world object: {dimension_path}")
+        raw_sites = bandit_world.get("sites", [])
+        if not isinstance(raw_sites, list):
+            raise RuntimeError(f"bandit_live_world.sites is not a list: {dimension_path}")
+
+        observed_sites = [summarize_bandit_live_world_site(site) for site in raw_sites if isinstance(site, dict)]
+        raw_hostile_opportunities = bandit_world.get("hostile_target_opportunities", [])
+        if not isinstance(raw_hostile_opportunities, list):
+            raw_hostile_opportunities = []
+        for observed_site in observed_sites:
+            observed_site.update(_prepared_hostile_operation_binding(observed_site, raw_hostile_opportunities))
+
+        selected_player_save = str(player_save or "").strip()
+        player_location_ms: List[int] = []
+        player_abs_omt: List[int] = []
+        active_member_scan_error = ""
+        active_member_npcs_by_id: Dict[str, Dict[str, Any]] = {}
+        if should_scan_active_members:
+            try:
+                selected_player_save, _player_save_path, player_payload, _player_stat = load_saved_player_payload(world_dir, selected_player_save)
+                player = player_payload.get("player")
+                if not isinstance(player, dict):
+                    raise RuntimeError("Extracted player save is missing player object")
+                location_raw = player.get("location", [])
+                if not isinstance(location_raw, list) or len(location_raw) < 3:
+                    raise RuntimeError("Extracted player save is missing player location")
+                player_location_ms = [int(location_raw[0]), int(location_raw[1]), int(location_raw[2])]
+                player_abs_omt = [player_location_ms[0] // 24, player_location_ms[1] // 24, player_location_ms[2]]
+                overmaps_dir = world_dir / "overmaps"
+                if not overmaps_dir.exists():
+                    raise RuntimeError(f"Overmaps dir not found: {overmaps_dir}")
+                for overmap_path in sorted(overmaps_dir.glob("o.*.*.zzip")):
+                    plain_path: Optional[Path] = None
+                    created_plain = False
+                    try:
+                        plain_path, _version_line, overmap_payload = extract_overmap_payload(overmap_path)
+                        created_plain = bool(overmap_payload.get("_created_plain"))
+                        raw_npcs = overmap_payload.get("npcs", [])
+                        if not isinstance(raw_npcs, list):
                             continue
-                        npc_id = npc_payload.get("id")
-                        if npc_id is None:
-                            continue
-                        location_raw = npc_payload.get("location", [])
-                        location_ms: List[int] = []
-                        offset_ms: List[int] = []
-                        if isinstance(location_raw, list) and len(location_raw) >= 3:
-                            location_ms = [int(location_raw[0]), int(location_raw[1]), int(location_raw[2])]
-                            offset_ms = [
-                                location_ms[0] - player_location_ms[0],
-                                location_ms[1] - player_location_ms[1],
-                                location_ms[2] - player_location_ms[2],
-                            ]
-                        active_member_npcs_by_id[str(npc_id)] = {
-                            "id": npc_id,
-                            "overmap": str(overmap_path.relative_to(world_dir)),
-                            "index": index,
-                            "name": str(npc_payload.get("name", "") or ""),
-                            "location_ms": location_ms,
-                            "abs_omt": ([location_ms[0] // 24, location_ms[1] // 24, location_ms[2]]
-                                        if len(location_ms) >= 3 else []),
-                            "offset_ms": offset_ms,
-                            "attitude": npc_payload.get("attitude"),
-                            "mission": npc_payload.get("mission"),
-                            "my_fac": npc_payload.get("my_fac"),
-                            "dead": npc_payload.get("dead"),
-                        }
-                finally:
-                    if plain_path is not None and created_plain:
-                        cleanup_extracted_overmap(plain_path, keep=False)
-        except Exception as exc:
-            active_member_scan_error = str(exc)
-            if (required_active_members_found or required_active_member_bodies_found or
-                    required_active_member_max_abs_offset_ms is not None or
-                    required_active_member_abs_omt is not None):
-                raise
+                        for index, npc_payload in enumerate(raw_npcs):
+                            if not isinstance(npc_payload, dict):
+                                continue
+                            npc_id = npc_payload.get("id")
+                            if npc_id is None:
+                                continue
+                            location_raw = npc_payload.get("location", [])
+                            location_ms: List[int] = []
+                            offset_ms: List[int] = []
+                            if isinstance(location_raw, list) and len(location_raw) >= 3:
+                                location_ms = [int(location_raw[0]), int(location_raw[1]), int(location_raw[2])]
+                                offset_ms = [
+                                    location_ms[0] - player_location_ms[0],
+                                    location_ms[1] - player_location_ms[1],
+                                    location_ms[2] - player_location_ms[2],
+                                ]
+                            active_member_npcs_by_id[str(npc_id)] = {
+                                "id": npc_id,
+                                "overmap": str(overmap_path.relative_to(world_dir)),
+                                "index": index,
+                                "name": str(npc_payload.get("name", "") or ""),
+                                "location_ms": location_ms,
+                                "abs_omt": ([location_ms[0] // 24, location_ms[1] // 24, location_ms[2]]
+                                            if len(location_ms) >= 3 else []),
+                                "offset_ms": offset_ms,
+                                "attitude": npc_payload.get("attitude"),
+                                "mission": npc_payload.get("mission"),
+                                "my_fac": npc_payload.get("my_fac"),
+                                "dead": npc_payload.get("dead"),
+                            }
+                    finally:
+                        if plain_path is not None and created_plain:
+                            cleanup_extracted_overmap(plain_path, keep=False)
+            except Exception as exc:
+                active_member_scan_error = str(exc)
+                if (required_active_members_found or required_active_member_bodies_found or
+                        required_active_member_max_abs_offset_ms is not None or
+                        required_active_member_abs_omt is not None):
+                    raise
+
+        if _read_context is not None:
+            if _saved_bandit_audit_input_identity(world_dir) != input_identity:
+                raise RuntimeError("saved bandit inputs changed while reading preflight snapshot")
+            _read_context.clear()
+            _read_context.update(key=context_key, input_identity=input_identity, snapshot={
+                "version_line": version_line,
+                "bandit_world": bandit_world,
+                "raw_sites": raw_sites,
+                "observed_sites": copy.deepcopy(observed_sites),
+                "raw_hostile_opportunities": raw_hostile_opportunities,
+                "selected_player_save": selected_player_save,
+                "player_location_ms": player_location_ms,
+                "player_abs_omt": player_abs_omt,
+                "active_member_scan_error": active_member_scan_error,
+                "active_member_npcs_by_id": active_member_npcs_by_id,
+            })
 
     normalized_max_abs_offset: Optional[List[int]] = None
     if required_active_member_max_abs_offset_ms is not None:
@@ -17120,6 +17183,8 @@ def audit_saved_bandit_live_world_state(
                   for site in raw_sites if isinstance(site, dict)],
     }
     stat = dimension_path.stat()
+    if _read_context is not None and _saved_bandit_audit_input_identity(world_dir) != input_identity:
+        raise RuntimeError("saved bandit inputs changed while evaluating preflight")
     return {
         "world": world_dir.name,
         "world_dir": str(world_dir),
@@ -34438,8 +34503,11 @@ def execute_probe_steps(
         semantic_binding = {}
     semantic_run_id = str(semantic_binding.get("run_id", "")).strip()
     pending_selection_bootstrap: Optional[Dict[str, Any]] = None
+    saved_bandit_audit_context: Dict[str, Any] = {}
     for index, step in enumerate(steps, start=1 + step_index_offset):
         kind = str(step.get("kind", "")).strip().lower()
+        if kind != "audit_saved_bandit_live_world_state":
+            saved_bandit_audit_context.clear()
         label = str(step.get("label", f"step_{index:02d}")).strip() or f"step_{index:02d}"
         if causal_boundary_gate_id:
             boundary = evaluate_causal_boundary(
@@ -37547,6 +37615,7 @@ def execute_probe_steps(
             try:
                 metadata = audit_saved_bandit_live_world_state(
                     world_dir,
+                    _read_context=saved_bandit_audit_context,
                     required_profile=str(step.get("required_profile", "") or "").strip(),
                     required_site_id_contains=str(step.get("required_site_id_contains", "") or "").strip(),
                     required_active_group_id_exact=step.get("required_active_group_id_exact"),
@@ -37733,11 +37802,26 @@ def execute_probe_steps(
                         step.get("required_known_recent_mark_contains", "") or ""
                     ).strip(),
                 }
+            shared_metadata = saved_bandit_audit_context.get("metadata_reference")
+            if shared_metadata is not None and metadata.get("status") != "failed":
+                metadata.pop("observed_sites", None)
+                metadata.pop("scheduler_snapshot", None)
+                metadata["shared_saved_state"] = dict(shared_metadata)
             metadata["artifact_path"] = str(metadata_artifact)
             metadata = normalize_saved_artifact_receipt(
                 metadata, kind, producer_step_label=label, producer_step_index=index
             )
             metadata_artifact.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+            if shared_metadata is None and metadata.get("status") != "failed":
+                # The first existing audit artifact retains all source facts.
+                # Later steps retain their own requirements, matching bodies,
+                # identities and verdict, with a digest-bound reference instead
+                # of N copies of the same whole-world scheduler/roster.
+                saved_bandit_audit_context["metadata_reference"] = {
+                    "path": str(metadata_artifact), "sha256": path_sha256(metadata_artifact),
+                    "fields": ["observed_sites", "scheduler_snapshot"],
+                }
+
             report.update({
                 "world_dir": str(world_dir),
                 "metadata": metadata,
