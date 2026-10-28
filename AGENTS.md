@@ -1,4 +1,12 @@
-Current model direction, 2026-10-26: GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Luna and GPT-6 Astra for new work. Coordinator GPT-6.1 Sol low; Terra for straightforward coding/tool-heavy work and chaperoning direct Luna players; Luna remains mandatory for live harness input. Sol owns coupled engineering; Astra owns mutation review. Choose worker thinking intensity separately by task difficulty and available efforts. GPT-5.6 models remain retired. This supersedes historical model guidance below. Existing records remain evidence, not dispatch choices.
+## Model choice
+
+Current owner direction, 2026-10-28: choose GPT-6.1 Terra by default for coding with a clear outcome and testable constraints, including localized fixes, features, tests, fixtures, tooling and refactoring. Use GPT-6.1 Sol when the current work has concrete ambiguity, substantial cross-system coupling, an architectural decision or demonstrated difficulty that warrants it. A coding label, large file or historically complex assignment alone is not a reason to keep Sol. Reassess the next meaningful piece at a safe boundary; preserve useful context and avoid handoffs whose overhead outweighs the benefit. This is a default, not a quota or mandatory Terra trial before obviously difficult work. Do not add a mandatory Sol review layer to every Terra result; retain ordinary risk-based review.
+
+Coordinator remains GPT-6.1 Sol; Astra owns mutation review. Terra also remains the default chaperone for direct GPT-6 Luna players; only Luna operates live harness input. Use supported same-assignment model handoffs with settled requests and source/build/input custody, preserving tasks, conversations, clocks and saves. A blocked model preference must not strand otherwise authorized delivery; retain the current capable owner and report the concrete obstruction. GPT-5.6 models remain retired. This direction supersedes historical dispatch guidance, not historical evidence.
+
+## Thinking intensity
+
+Choose worker effort separately from model, based on uncertainty, coupling and consequences within the model's available efforts. Clear bounded work can use low; raise effort when the task needs it. Do not automatically pair Terra with medium or Sol with high. Coordinator Sol low and mutation-reviewer Astra medium remain the role defaults. No specific quality, speed or cost saving is presumed without observed results.
 
 # Workspace command and evidence habits
 
