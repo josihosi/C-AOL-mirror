@@ -13,6 +13,16 @@ not incoming damage. Preserve the variable actually under test: a needs-survival
 natural needs, and a natural-combat check retains the relevant damage and survival conditions.
 Leave tested NPC mechanics intact except for the explicitly selected controlled intervention, such as the panic or casualty variant. Record meaningful setup changes and their evidence scope.
 
+### Incidental danger
+
+When an unrelated creature interrupts the assigned playtest, the original Luna removes that
+exact creature using the supported `world.debug_kill_creature` control and continues the same
+run. Resolve the current target from the live scene; incidental danger does not warrant closing
+and restarting the game. Record the removal as setup with no combat or victory credit.
+Preserve tested actors, required encounters and actual prior injuries, deaths and other history.
+An encounter that is itself under test remains part of that test, subject to its selected
+controlled interventions; this setup rule does not manufacture its outcome.
+
 ### Get and verify Debug Life Support
 
 1. Inspect the current avatar mutation state once. If `DEBUG_LS` is already active, keep it active.
@@ -70,7 +80,8 @@ survival friction. This is not a global mutation allowlist. Preserve each measur
 - Do not bypass the tested NPC behavior by editing its mission or moving it to the expected endpoint. Preserve explicitly selected controlled variants: the [panic branch](rural-roof-replay.md#panic-and-withdrawal-regression) induces flight, the night-alarm arm permits its stated threat setup, and the [X4 procedure](playtest-suite.md#x4-party-survivor-and-casualty-handover)
   separately permits one identified bandit debug kill; [X4b](playtest-suite.md#x4b-rider-ambush-during-bandit-return)
   permits one hostile zombie rider spawn. These controlled interventions do not authorize other
-  actor creation, casualties, mission edits or forced outcomes.
+  actor creation, casualties among tested actors or in required encounters, mission edits or
+  forced outcomes. Unrelated interruptions follow [incidental danger](#incidental-danger).
 
 For comparisons, keep setup fixed or label the mutation difference as the tested variable. Keep
 existing viewer evidence; do not silently remove traits from its saved continuation and call it

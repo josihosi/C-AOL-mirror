@@ -267,8 +267,9 @@ must stay unlit and unmoved; travel would change its question.
 
 For a movement or loot-trip arm, verify Safe mode **Off** after loading. Use recorded
 `DEBUG_LS` and, when that arm permits altered visibility, `DEBUG_CLOAK`; keep an ordinary
-visibility arm separate. Clear incidental blocking zombies with the authorized recorded
-debug HP-to-zero or melee setup so a routine route is not abandoned as a false blocker.
+visibility arm separate. Clear incidental blocking zombies under the shared
+[incidental-danger setup rule](references/setup-and-interactions.md#incidental-danger),
+then continue the same run rather than abandoning the route or restarting.
 Locate the actual doors in the north-center part of this house from current native
 terrain and coordinates; do not aim a walk into a wall or closed curtain. Pass through
 the doors by checked local steps, use overmap travel for distance, and return to local
