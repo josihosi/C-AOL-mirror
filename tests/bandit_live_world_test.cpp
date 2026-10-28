@@ -73820,6 +73820,223 @@ TEST_CASE( "authorized_response_fallback_survives_assembly_and_reload",
     CHECK( bytes.str().find( "response_home_reserve" ) == std::string::npos );
 }
 
+TEST_CASE( "fresh_physical_scout_return_reaches_home_rally_before_same_call_response",
+           "[bandit][live_world][home_rally_return_order]" )
+{
+    using namespace bandit_live_world;
+    const bool scheduler_already_serviced = GENERATE( false, true );
+    const bool report_ready = GENERATE( true, false );
+    CAPTURE( scheduler_already_serviced, report_ready );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    clear_npcs();
+    clear_avatar();
+    clear_map_with_vision( -1, 1, false );
+    const auto old_turn = calendar::turn;
+    const auto old_avatar = get_avatar().pos_abs();
+    const auto old_world = overmap_buffer.global_state.bandit_live_world;
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> old_terrain;
+    on_out_of_scope restore( [&]() {
+        get_avatar().setpos( old_avatar, false );
+        clear_npcs();
+        overmap_buffer.global_state.bandit_live_world = old_world;
+        for( const auto &entry : old_terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+        clear_avatar();
+        set_time( old_turn );
+    } );
+    set_time( calendar::start_of_cataclysm + 100_minutes );
+    map &here = get_map();
+    get_avatar().setpos( here, tripoint_bub_ms( 1, 1, 0 ), false );
+    get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+    std::vector<npc *> bodies;
+    for( const point_bub_ms &pos : { point_bub_ms( 60, 60 ), point_bub_ms( 61, 60 ),
+                                   point_bub_ms( 62, 60 ), point_bub_ms( 85, 60 ) } ) {
+        npc &body = spawn_npc( pos, "bandit" );
+        clear_character( body, true );
+        body.generate_personality_traits();
+        body.setpos( here, tripoint_bub_ms( pos, 0 ), false );
+        body.set_attitude( NPCATT_NULL );
+        body.set_mission( NPC_MISSION_NULL );
+        body.goal = npc::no_goal_point;
+        body.guard_pos.reset();
+        body.clear_ai_guard_pos();
+        bodies.push_back( &body );
+    }
+    const auto home = bodies.front()->pos_abs_omt();
+    const auto contains_home = []( const site_record &site, const tripoint_abs_omt &pos ) {
+        return std::find( site.footprint.begin(), site.footprint.end(), pos ) != site.footprint.end();
+    };
+    const auto home_lookup = [&]( const tripoint_abs_omt &pos ) -> std::optional<std::string> {
+        return pos == home ? std::optional<std::string>( "bandit_camp" ) : std::nullopt;
+    };
+    world_state world;
+    for( std::size_t i = 0; i < bodies.size(); ++i ) {
+        REQUIRE( claim_tracked_spawn( world, "bandit", bodies[i]->getID(),
+                 here.get_abs( tripoint_bub_ms( 60 + static_cast<int>( i ), 60, 0 ) ),
+                 std::string( "bandit_camp" ), std::nullopt, home_lookup ) );
+    }
+    auto &prepared = world.sites.front();
+    prepared.living_total = bodies.size();
+    const auto target = home + point( 6, 0 );
+    for( int x = 0; x <= 6; ++x ) {
+        const auto pos = home + point( x, 0 );
+        old_terrain.emplace_back( pos, overmap_buffer.ter( pos ) );
+        overmap_buffer.ter_set( pos, oter_id( "field" ) );
+    }
+    const oter_str_id shelter_terrain( "shelter_north" );
+    REQUIRE( shelter_terrain.is_valid() );
+    overmap_buffer.ter_set( target, shelter_terrain.id() );
+    const auto bounty = classify_structural_bounty_terrain( shelter_terrain.str() );
+    REQUIRE( upsert_structural_bounty_lead( prepared, target, bounty, 0 ) );
+    const auto lead_id = make_structural_bounty_lead_id( prepared.site_id, target,
+                         bounty.terrain_class );
+    const auto *lead = prepared.intelligence_map.find_lead( lead_id );
+    REQUIRE( lead );
+    auto plan = plan_structural_bounty_outing( prepared, *lead, 100 );
+    REQUIRE( plan.valid );
+    REQUIRE( plan.job == bandit_dry_run::job_template::scout );
+    const auto watch = home + point( 3, 0 );
+    const auto approach = home + point( 2, 0 );
+    structural_route_read route;
+    route.reachable = true;
+    route.complete_route_cost = 6;
+    route.watch_geography_supplied = true;
+    route.target_footprint = { target };
+    route.watch_candidates = { { watch, true, true, true, 6 } };
+    route.watch_shared_route = { home, approach, watch, approach, home };
+    REQUIRE( refine_structural_outing_route( prepared, 100, route, plan ) );
+    REQUIRE( apply_structural_bounty_outing_plan( prepared, plan, 100 ) );
+    REQUIRE( prepared.active_outing.member_ids.size() == 2 );
+    REQUIRE( prepared.active_outing.schema_version == 10 );
+    const auto carriers = prepared.active_outing.member_ids;
+    npc &away = *bodies.back();
+    REQUIRE( std::find( carriers.begin(), carriers.end(), away.getID() ) == carriers.end() );
+    REQUIRE_FALSE( contains_home( prepared, away.pos_abs_omt() ) );
+    // This fixture begins at an actual physical return boundary, not with an
+    // injected report-awaiting decision. The public return reducer below owns
+    // report construction/acceptance, release and response dispatch in one call.
+    auto &outing = prepared.active_outing;
+    outing.phase = scout_phase::returning_home;
+    outing.waypoint_index = static_cast<int>( outing.shared_route.size() ) - 2;
+    // The completed watch ended at220; this three-OMT homeward leg is due250.
+    // Authenticate this actual current-schema clock through the native reader.
+    const int return_grace = outing.missing_deadline_minutes - outing.expected_return_minutes;
+    outing.last_progress_minutes = 220;
+    outing.last_advanced_minutes = 220;
+    outing.expected_return_minutes = 250;
+    outing.missing_deadline_minutes = outing.expected_return_minutes + return_grace;
+    outing.actor_departure_observed = true;
+    outing.actor_route_waypoint = static_cast<int>( outing.shared_route.size() ) - 1;
+    outing.assessment.certainty = 95;
+    outing.assessment.habitation_certainty = 20; // Native bounded optical contribution.
+    outing.assessment.observation_started_minutes = 100;
+    outing.assessment.last_progress_minutes = 220;
+    outing.assessment.strong_visual_windows = report_ready ? 3 : 0;
+    outing.assessment.habitation_certainty_known = true;
+    outing.assessment.readiness_latched = report_ready;
+    outing.assessment.threshold_class = report_ready ? scout_assessment_threshold_class::normal :
+                                         scout_assessment_threshold_class::none;
+    outing.assessment.danger_high = 1;
+    outing.assessment.bounty_estimate = 1;
+    outing.assessment.exit_reason = "completed native watch returned by physical carriers";
+    const int returned = ( ( outing.expected_return_minutes + 59 ) / 60 ) * 60;
+    for( const auto id : carriers ) {
+        const auto body = overmap_buffer.find_npc( id );
+        REQUIRE( body );
+        REQUIRE( contains_home( prepared, body->pos_abs_omt() ) );
+        REQUIRE( record_structural_member_physical_return( prepared,
+                 *current_external_simulation_cursor( prepared ), id, home, returned - 1 ) );
+    }
+    REQUIRE_FALSE( prepared.current_scout_report.is_present() );
+    REQUIRE( prepared.camp_decision.state == camp_decision_state::idle );
+    REQUIRE( prepared.active_outing.is_active() );
+    world.routine_scheduler_last_hour = scheduler_already_serviced ? returned / 60 : returned / 60 - 1;
+    world = round_trip_world( world ); // Authenticate the native saved return premise first.
+    REQUIRE_FALSE( world.sites.front().current_scout_report.is_present() );
+    REQUIRE( world.sites.front().camp_decision.state == camp_decision_state::idle );
+    REQUIRE( world.sites.front().active_outing.is_active() );
+    overmap_buffer.global_state.bandit_live_world = world;
+    // Adopt the existing owner at the preceding real boundary, then earn the
+    // final minute. First activation must not grant an unobserved interval.
+    set_time( calendar::start_of_cataclysm + time_duration::from_minutes( returned - 1 ) );
+    refresh_live_bandit_activation();
+    set_time( calendar::start_of_cataclysm + time_duration::from_minutes( returned ) );
+    bandit_live_world_probe::session transitions(
+        bandit_live_world_probe::collection_mode::transition_events );
+    process_overmap_npc_move_for_test();
+    std::ostringstream observed_transitions;
+    for( const auto &event : transitions.result().transition_events ) {
+        observed_transitions << event.transition << ":" << event.reason << "; ";
+    }
+    INFO( observed_transitions.str() );
+    auto site = [&]() -> site_record & {
+        return overmap_buffer.global_state.bandit_live_world.sites.front();
+    };
+    INFO( "actual return cursor=" << site().active_outing.last_advanced_minutes <<
+          " expected=" << site().active_outing.expected_return_minutes <<
+          " progress=" << site().active_outing.last_progress_minutes <<
+          " phase=" << to_string( site().active_outing.phase ) );
+    REQUIRE( site().current_scout_report.is_present() );
+    CHECK( site().current_scout_report.carrier_ids == carriers );
+    CHECK_FALSE( site().active_outing.is_active() );
+    CHECK( evaluate_scout_report_at( site().current_scout_report, returned ).assessment_ready ==
+           report_ready );
+    if( !report_ready ) {
+        CHECK_FALSE( site().active_hostile_operation.is_active() );
+        CHECK_FALSE( site().response_home_rally );
+        CHECK( site().camp_decision.state == camp_decision_state::report_awaiting_assessment );
+        calendar::turn += 1_turns;
+        process_overmap_npc_move_for_test();
+        CHECK_FALSE( site().response_home_rally );
+        return;
+    }
+    if( scheduler_already_serviced ) {
+        // A deferred scheduler leaves an existing genuine pending window; this
+        // control distinguishes the fresh-return same-call ordering defect.
+        REQUIRE_FALSE( site().active_hostile_operation.is_active() );
+        REQUIRE( site().camp_decision.state == camp_decision_state::report_awaiting_assessment );
+        calendar::turn += 1_turns;
+        process_overmap_npc_move_for_test();
+    } else {
+        REQUIRE( site().active_hostile_operation.is_active() );
+        CHECK( site().active_hostile_operation.phase == hostile_operation_phase::assembling );
+        CHECK( site().camp_decision.state == camp_decision_state::preparing_follow_on );
+    }
+    REQUIRE( site().response_home_rally );
+    const auto *recalled = site().response_home_rally->find( std::to_string( away.getID().get_value() ) );
+    REQUIRE( recalled );
+    CHECK( recalled->working() );
+    CHECK( recalled->active_turns == 0 );
+    CHECK( away.goal == home );
+    CHECK( away.has_omt_destination() );
+    CHECK_FALSE( contains_home( site(), away.pos_abs_omt() ) );
+    if( site().active_hostile_operation.is_active() ) {
+        CHECK( std::find( site().active_hostile_operation.reservation.member_ids.begin(),
+                         site().active_hostile_operation.reservation.member_ids.end(), away.getID() ) ==
+               site().active_hostile_operation.reservation.member_ids.end() );
+    }
+    const auto episode = site().response_home_rally->episode;
+    const int allowance = recalled->allowance_turns;
+    const auto report_revision = site().current_scout_report.revision;
+    const auto operation_generation = site().active_hostile_operation.reservation.generation;
+    auto restored = round_trip_world( overmap_buffer.global_state.bandit_live_world );
+    const auto *saved_recall = restored.sites.front().response_home_rally->find(
+                                   std::to_string( away.getID().get_value() ) );
+    REQUIRE( saved_recall );
+    CHECK( saved_recall->allowance_turns == allowance );
+    CHECK( saved_recall->active_turns == 0 );
+    process_overmap_npc_move_for_test(); // Same world time cannot renew this trip.
+    const auto *repeated = site().response_home_rally->find(
+                              std::to_string( away.getID().get_value() ) );
+    REQUIRE( repeated );
+    CHECK( site().response_home_rally->episode == episode );
+    CHECK( repeated->allowance_turns == allowance );
+    CHECK( repeated->active_turns == 0 );
+    CHECK( site().current_scout_report.revision == report_revision );
+    CHECK( site().active_hostile_operation.reservation.generation == operation_generation );
+}
+
 TEST_CASE( "native_home_rally_uses_an_individual_body_interval_and_real_arrival",
            "[bandit][live_world][home_rally_native]" )
 {

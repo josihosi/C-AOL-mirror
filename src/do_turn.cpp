@@ -14417,6 +14417,8 @@ void sample_and_deliver_live_light_for_advancing_turn()
     live_light::run_advancing_turn( calendar::turn, callbacks );
 }
 
+void service_live_bandit_home_rallies( std::optional<std::size_t> only_site = std::nullopt );
+
 bandit_live_world::structural_bounty_maintenance_result maintain_live_bandit_structural_bounty(
     const std::vector<live_bandit_signal_observation> &live_signals,
     const std::vector<live_bandit_sound_observation> &live_sounds,
@@ -14539,8 +14541,14 @@ bandit_live_world::structural_bounty_maintenance_result maintain_live_bandit_str
         if( site_index >= world.sites.size() ) {
             return 0;
         }
-        return live_bandit_materialize_abstract_members_for_response(
-                   world, world.sites[site_index] );
+        const int materialized = live_bandit_materialize_abstract_members_for_response(
+                                     world, world.sites[site_index] );
+        // Structural returns can publish and accept a fresh report inside this
+        // maintenance call, after the ordinary rally pass. Offer that report to
+        // the same rally owner before response selection consumes the decision.
+        // A sufficient present party still dispatches without awaiting recall.
+        service_live_bandit_home_rallies( site_index );
+        return materialized;
     }, []( const bandit_live_world::site_record & site ) {
         return live_bandit_hostile_operation_route_read( site );
     }, {}, []( const bandit_live_world::site_record & before,
@@ -16171,13 +16179,19 @@ void record_live_bandit_rally_outcomes( bandit_live_world::site_record &site )
     }
 }
 
-void service_live_bandit_home_rallies()
+void service_live_bandit_home_rallies( const std::optional<std::size_t> only_site )
 {
     using namespace bandit_live_world;
     using raid_sweep::home_rally_outcome;
     const int now = to_turns<int>( calendar::turn - calendar::start_of_cataclysm );
     auto &world = overmap_buffer.global_state.bandit_live_world;
-    for( auto &site : world.sites ) {
+    const std::size_t first = only_site.value_or( 0 );
+    if( first >= world.sites.size() ) {
+        return;
+    }
+    const std::size_t end = only_site ? first + 1 : world.sites.size();
+    for( std::size_t index = first; index < end; ++index ) {
+        auto &site = world.sites[index];
         record_live_bandit_rally_outcomes( site );
         if( site.retired_empty_site ) {
             continue;
