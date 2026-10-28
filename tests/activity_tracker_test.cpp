@@ -1,12 +1,104 @@
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "activity_tracker.h"
 #include "calendar.h"
 #include "cata_catch.h"
+#include "cata_scope_helpers.h"
 #include "game_constants.h"
+#include "json.h"
+#include "json_loader.h"
 #include "rng.h"
+
+TEST_CASE( "activity accounting does not recount idle turns since the last action",
+           "[activity_tracker][activity_elapsed]" )
+{
+    const time_point old_turn = calendar::turn;
+    on_out_of_scope restore_time( [old_turn]() {
+        calendar::turn = old_turn;
+    } );
+    calendar::turn = calendar::turn_zero + 50000_turns;
+    activity_tracker tracker;
+    tracker.new_turn();
+    tracker.log_activity( 4.0f );
+    for( int elapsed = 1; elapsed <= 6; ++elapsed ) {
+        calendar::turn += 1_turns;
+        tracker.new_turn();
+        CHECK( tracker.activity() == NO_EXERCISE );
+        CHECK( tracker.average_activity() == Approx( ( 4.0f + elapsed ) / ( elapsed + 1 ) ) );
+    }
+    std::ostringstream saved;
+    { JsonOut out( saved ); tracker.serialize( out ); }
+    const JsonValue value = json_loader::from_string( saved.str() );
+    const JsonObject history = value.get_object();
+    history.allow_omitted_members();
+    CHECK( history.get_int( "num_events" ) == 7 );
+    // Advancing accounting must not invent a logged action at the new time.
+    CHECK( history.get_int( "current_turn" ) == 50000 );
+}
+
+TEST_CASE( "activity intervals preserve idle sleep reset and zero elapsed accounting",
+           "[activity_tracker][activity_elapsed]" )
+{
+    const time_point old_turn = calendar::turn;
+    on_out_of_scope restore_time( [old_turn]() {
+        calendar::turn = old_turn;
+    } );
+    const bool sleeping = GENERATE( false, true );
+    const float base = sleeping ? SLEEP_EXERCISE : NO_EXERCISE;
+    calendar::turn = calendar::turn_zero + 50000_turns;
+    activity_tracker sequential;
+    sequential.new_turn( sleeping );
+    activity_tracker batched = sequential;
+    for( int i = 0; i < 10; ++i ) {
+        calendar::turn += 1_turns;
+        sequential.new_turn( sleeping );
+    }
+    // Same interval, evaluated at its endpoint rather than by moving global time.
+    batched.new_turn( sleeping, 10_turns );
+    CHECK( sequential.average_activity() == Approx( base ) );
+    CHECK( batched.average_activity() == Approx( sequential.average_activity() ) );
+    const auto saved = []( const activity_tracker & tracker ) {
+        std::ostringstream bytes;
+        JsonOut out( bytes );
+        tracker.serialize( out );
+        return bytes.str();
+    };
+    for( const activity_tracker *tracker : { &batched, &sequential } ) {
+        JsonValue value = json_loader::from_string( saved( *tracker ) );
+        const JsonObject history = value.get_object();
+        history.allow_omitted_members();
+        CHECK( history.get_int( "num_events" ) == 11 );
+        CHECK( history.get_float( "accumulated_activity" ) == Approx( 10 * base ) );
+        CHECK( history.get_int( "current_turn" ) == 0 );
+    }
+    const std::string before_no_time = saved( batched );
+    batched.new_turn( !sleeping, 0_turns );
+    CHECK( saved( batched ) == before_no_time );
+    batched.new_turn( !sleeping, -1_turns );
+    CHECK( saved( batched ) == before_no_time );
+
+    batched.log_activity( 4.0f );
+    calendar::turn += 1_turns;
+    batched.new_turn( sleeping );
+    const float prior_average = batched.average_activity();
+    batched.reset_activity_level();
+    CHECK( batched.average_activity() == Approx( prior_average - base / 12.0f ) );
+    // A reset starts a new period; neither prior idle time nor the last action's
+    // timestamp is a new contribution to it.
+    calendar::turn += 1_turns;
+    batched.new_turn( sleeping );
+    CHECK( batched.average_activity() == Approx( base ) );
+    calendar::turn += 5_turns;
+    batched.new_turn( sleeping, 5_turns );
+    CHECK( batched.average_activity() == Approx( base ) );
+    activity_tracker restored;
+    JsonValue value = json_loader::from_string( saved( batched ) );
+    restored.deserialize( value.get_object() );
+    CHECK( saved( restored ) == saved( batched ) );
+}
 
 static void test_activity_tracker( const std::vector<float> &values )
 {

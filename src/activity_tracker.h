@@ -28,8 +28,9 @@ class activity_tracker
         int intake = 0;
         // Logs activity level. If called multiple times in one turn, will preserve the highest.
         void log_activity( float new_level );
-        // Informs the tracker that a new turn has started.
-        void new_turn( bool sleeping = false );
+        // Account a completed body interval. The caller owns elapsed time, including
+        // catch-up intervals evaluated without advancing the global calendar.
+        void new_turn( bool sleeping = false, time_duration elapsed = 1_turns );
         // Resets accumulated activity level.
         void reset_activity_level();
         // Outputs player activity level to a printable string.

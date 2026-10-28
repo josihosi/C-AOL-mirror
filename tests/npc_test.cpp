@@ -88,6 +88,7 @@ std::map<character_id, std::pair<tripoint_abs_ms, tripoint_abs_ms>>
 #include "raid_decision_trace.h"
 #include "rng.h"
 #include "stomach.h"
+#include "string_formatter.h"
 #include "test_data.h"
 #include "text_snippets.h"
 #include "translation.h"
@@ -415,6 +416,125 @@ TEST_CASE( "native needs remain continuous through unloading and persisted body 
     CHECK( reloaded.get_sleepiness() == sleepiness );
     CHECK( reloaded.getID() == initial_id );
     CHECK( reloaded.get_hp() == inactive.get_hp() );
+}
+
+TEST_CASE( "NPC reload accounts six pending body seconds once without recounting its calendar age",
+           "[npc][npc_activity_elapsed]" )
+{
+    const time_point old_turn = calendar::turn;
+    on_out_of_scope restore_time( [old_turn]() {
+        calendar::turn = old_turn;
+    } );
+    override_option needs_enabled( "NO_NPC_FOOD", "false" );
+    const bool sleeping = GENERATE( false, true );
+    const int prior_events = GENERATE( 13, 21027701 );
+    const bool through_reload = GENERATE( false, true );
+    CAPTURE( sleeping, prior_events, through_reload );
+    calendar::turn = calendar::turn_zero + 5256940_turns;
+    npc initial_body = create_model();
+    initial_body.setpos( get_map(), get_player_character().pos_bub() + point( 5, 5 ) );
+    if( sleeping ) {
+        initial_body.add_effect( effect_sleep, 10_minutes );
+        initial_body.set_sleepiness( 1000 );
+    }
+    initial_body.add_effect( efftype_id( "stunned" ), 10_minutes );
+    // The large history is the actual saved pre-reload accounting premise.
+    // Load it through the native tracker format; do not repair or reset it.
+    const std::string history = string_format(
+                                    R"({"current_activity":1.0,"accumulated_activity":%d,
+"previous_activity":152445728.0,"previous_turn_activity":1.0,"current_turn":0,
+"activity_reset":false,"num_events":%d,"tracker":0,"intake":0,"low_activity_ticks":0.0})",
+                                    prior_events - 1, prior_events );
+    JsonValue history_value = json_loader::from_string( history );
+    initial_body.activity_history.deserialize( history_value.get_object() );
+    initial_body.on_unload();
+    std::ostringstream pending;
+    { JsonOut out( pending ); initial_body.serialize( out ); }
+    npc pending_reload;
+    JsonValue pending_value = json_loader::from_string( pending.str() );
+    pending_reload.deserialize( pending_value.get_object() );
+    npc &body = through_reload ? pending_reload : initial_body;
+    const character_id id = body.getID();
+    const int hp = body.get_hp();
+    const auto position = body.pos_abs();
+    calendar::turn += 6_turns;
+    if( through_reload ) {
+        body.on_load( &get_map() );
+    } else {
+        REQUIRE( body.catch_up_body() == 6_turns );
+    }
+    CHECK( body.get_effect_dur( efftype_id( "stunned" ) ) == 594_turns );
+    CHECK( body.getID() == id );
+    CHECK( body.get_hp() == hp );
+    CHECK( body.pos_abs() == position );
+    const auto history_bytes = []( const npc & who ) {
+        std::ostringstream bytes;
+        JsonOut out( bytes );
+        who.activity_history.serialize( out );
+        return bytes.str();
+    };
+    const std::string after = history_bytes( body );
+    JsonValue after_value = json_loader::from_string( after );
+    const JsonObject after_history = after_value.get_object();
+    after_history.allow_omitted_members();
+    CHECK( after_history.get_int( "num_events" ) == prior_events + 6 );
+    CHECK( after_history.get_int( "current_turn" ) == 0 );
+    if( prior_events == 13 ) {
+        const float base = sleeping ? SLEEP_EXERCISE : NO_EXERCISE;
+        // Sleeping uses a non-binary-exact float; event counts stay exact.
+        CHECK( after_history.get_float( "accumulated_activity" ) == Approx( 13.0f + 5 * base ) );
+    }
+    CHECK( body.catch_up_body() == 0_turns );
+    CHECK( history_bytes( body ) == after );
+    std::ostringstream saved;
+    { JsonOut out( saved ); body.serialize( out ); }
+    npc reloaded;
+    JsonValue value = json_loader::from_string( saved.str() );
+    reloaded.deserialize( value.get_object() );
+    reloaded.on_load( &get_map() );
+    CHECK( history_bytes( reloaded ) == after );
+    CHECK( reloaded.get_effect_dur( efftype_id( "stunned" ) ) == 594_turns );
+    CHECK( reloaded.getID() == id );
+    CHECK( reloaded.get_hp() == hp );
+    CHECK( reloaded.pos_abs() == position );
+    CHECK( reloaded.catch_up_body() == 0_turns );
+    CHECK( history_bytes( reloaded ) == after );
+}
+
+TEST_CASE( "NPC activity accounting follows the throttled body's elapsed interval",
+           "[npc][npc_activity_elapsed]" )
+{
+    const time_point old_turn = calendar::turn;
+    on_out_of_scope restore_time( [old_turn]() {
+        calendar::turn = old_turn;
+    } );
+    calendar::turn = calendar::turn_zero + 50000_turns;
+    npc body = create_model();
+    JsonValue initial = json_loader::from_string(
+                            R"({"current_activity":1.0,"activity_reset":false,"num_events":1})" );
+    body.activity_history.deserialize( initial.get_object() );
+    body.on_unload();
+    const auto events = [&]() {
+        std::ostringstream bytes;
+        { JsonOut out( bytes ); body.activity_history.serialize( out ); }
+        JsonValue value = json_loader::from_string( bytes.str() );
+        const JsonObject history = value.get_object();
+        history.allow_omitted_members();
+        return history.get_int( "num_events" );
+    };
+    calendar::turn += 10_turns;
+    body.npc_update_body();
+    CHECK( events() == 11 );
+    body.npc_update_body();
+    CHECK( events() == 11 );
+    calendar::turn += 1_turns;
+    body.npc_update_body();
+    CHECK( events() == 11 );
+    calendar::turn += 1_turns;
+    CHECK( body.catch_up_body() == 2_turns );
+    CHECK( events() == 13 );
+    CHECK( body.catch_up_body() == 0_turns );
+    CHECK( events() == 13 );
 }
 
 TEST_CASE( "snippet-tag-test" )

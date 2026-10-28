@@ -297,7 +297,7 @@ void Character::update_body( const time_point &from, const time_point &to )
     }
     set_value( "was_sleeping", in_sleep_state() ? "true" : "false" );
 
-    activity_history.new_turn( in_sleep_state() );
+    activity_history.new_turn( in_sleep_state(), to - from );
 
     // Cardio related health stuff
     if( calendar::once_every( 1_days ) ) {

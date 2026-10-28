@@ -136,8 +136,12 @@ void activity_tracker::log_activity( float new_level )
     current_turn = calendar::turn;
 }
 
-void activity_tracker::new_turn( bool sleeping )
+void activity_tracker::new_turn( bool sleeping, time_duration elapsed )
 {
+    const int num_turns = to_turns<int>( elapsed );
+    if( num_turns <= 0 ) {
+        return;
+    }
     float base_activity_level = sleeping ? SLEEP_EXERCISE : NO_EXERCISE;
 
     if( activity_reset ) {
@@ -149,8 +153,9 @@ void activity_tracker::new_turn( bool sleeping )
     } else {
         // This is for the last turn that had activity logged.
         accumulated_activity += current_activity;
-        // Then handle the interventing turns that had no activity logged.
-        int num_turns = to_turns<int>( calendar::turn - current_turn );
+        // Then handle the intervening turns without logged activity. current_turn
+        // records the last action, not the last accounted body interval: using
+        // its age here recounts idle time on every update, especially on load.
         if( num_turns > 1 ) {
             accumulated_activity += ( num_turns - 1 ) * std::min( NO_EXERCISE, current_activity );
             num_events += num_turns - 1;
