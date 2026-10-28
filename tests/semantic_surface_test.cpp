@@ -180,6 +180,7 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
            "[semantic_surface][debug_error_prompt_067]" )
 {
     const bool enclosing_session = GENERATE( false, true );
+    const bool ignore_warning = GENERATE( false, true );
     const std::vector<std::string> keys = { "OPENCLAW_HARNESS_RUN_ID", "OPENCLAW_HARNESS_SEMANTIC_RUN_ID",
                                             "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH"
                                           };
@@ -200,6 +201,8 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
     const std::string run = std::string( enclosing_session ? "redraw-enclosed-" :
                                          "redraw-between-owners-" ) +
                             std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() );
+    const std::string warning_file = run + ".cpp";
+    const std::string chosen_action = ignore_warning ? "prompt.ignore" : "prompt.acknowledge";
     set_test_environment( keys[0].c_str(), run.c_str(), 1 );
     set_test_environment( keys[1].c_str(), run.c_str(), 1 );
     unset_test_environment( keys[2].c_str() );
@@ -262,17 +265,19 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
             return receipt.request_id == "north";
         } ) );
         CHECK( owner.payload.at( "text" ).find( "controlled redraw error" ) != std::string::npos );
-        CHECK( owner.valid_actions.size() == 1 );
+        REQUIRE( owner.valid_actions.size() == 2 );
+        CHECK( owner.valid_actions[0].id == "prompt.acknowledge" );
+        CHECK( owner.valid_actions[1].id == "prompt.ignore" );
         const auto suffix = std::to_string( prompts.size() );
         REQUIRE( manager.submit_request( { "foreign-run", owner.surface_id, owner.frame_id,
-                                           "foreign-continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
+                                           "foreign-continue" + suffix, chosen_action, std::nullopt, {} } ) );
         REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
-                                           "parameter-continue" + suffix, "prompt.acknowledge", std::nullopt,
+                                           "parameter-continue" + suffix, chosen_action, std::nullopt,
         { { "ignore_future_errors", "true" } } } ) );
         REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, "stale-frame",
-                                           "stale-continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
+                                           "stale-continue" + suffix, chosen_action, std::nullopt, {} } ) );
         REQUIRE( manager.submit_request( { manager.run_id(), owner.surface_id, owner.frame_id,
-                                           "continue" + suffix, "prompt.acknowledge", std::nullopt, {} } ) );
+                                           "continue" + suffix, chosen_action, std::nullopt, {} } ) );
         // Once a real semantic owner exists, exercise its native redraw too.
         test_mode = false;
     } );
@@ -286,9 +291,12 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
         test_mode = false;
         for( int repeat = 0; repeat < 2; ++repeat ) {
             CHECK( capture_debugmsg_during( [&]() {
-                realDebugmsg( "redraw-control.cpp", "1", "redraw_control", "controlled redraw error" );
+                realDebugmsg( warning_file.c_str(), "1", "redraw_control", "controlled redraw error" );
             } ) == "controlled redraw error" );
         }
+        CHECK( capture_debugmsg_during( [&]() {
+            realDebugmsg( warning_file.c_str(), "2", "redraw_control", "controlled redraw error" );
+        } ) == "controlled redraw error" );
     }
     bool invoked = false;
     ui_adaptor drawing;
@@ -305,13 +313,14 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
     test_mode = false;
     REQUIRE_NOTHROW( ui_manager::redraw() );
     REQUIRE( invoked );
-    // Continue never grants future Ignore: the second identical error still
-    // needs its own current prompt and acknowledgement.
-    REQUIRE( prompts.size() == 2 );
-    REQUIRE( receipts.size() == 8 );
-    for( std::size_t offset : {
-             0, 4
-         } ) {
+    // Continue never grants future Ignore. Explicit Ignore suppresses only
+    // the repeated source line; the other source line still needs input.
+    const std::size_t expected_prompts = ignore_warning ? 2 : 3;
+    REQUIRE( prompts.size() == expected_prompts );
+    CHECK( prompts.front().payload.at( "source_line" ) == "1" );
+    CHECK( prompts.back().payload.at( "source_line" ) == "2" );
+    REQUIRE( receipts.size() == expected_prompts * 4 );
+    for( std::size_t offset = 0; offset < receipts.size(); offset += 4 ) {
         CHECK_FALSE( receipts[offset].accepted );
         CHECK( receipts[offset].rejection_reason == "wrong_run" );
         CHECK_FALSE( receipts[offset + 1].accepted );
@@ -319,14 +328,15 @@ TEST_CASE( "redraw debug errors interrupt input without completing its pending a
         CHECK_FALSE( receipts[offset + 2].accepted );
         CHECK( receipts[offset + 2].rejection_reason == "stale_frame" );
         CHECK( receipts[offset + 3].accepted );
-        CHECK( receipts[offset + 3].outcome == "debug_error_continued" );
+        CHECK( receipts[offset + 3].outcome == ( ignore_warning ? "debug_error_ignored" :
+                "debug_error_continued" ) );
         CHECK( receipts[offset + 3].resulting_frame_id.empty() );
     }
     REQUIRE_FALSE( manager.top() );
     CHECK( active_semantic_surface_manager() == ( enclosing_session ? &manager : nullptr ) );
     {
         semantic_surface_scope successor( manager, "world", "World after redraw" );
-        REQUIRE( receipts.size() == 9 );
+        REQUIRE( receipts.size() == expected_prompts * 4 + 1 );
         CHECK( receipts.back().request_id == "north" );
         CHECK( receipts.back().resulting_frame_id == manager.top()->frame_id );
         CHECK( receipts.back().resulting_frame_id != prompts[0].frame_id );

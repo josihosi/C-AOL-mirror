@@ -390,6 +390,7 @@ static void debug_error_prompt(
         semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
     }
     bool continue_requested = false;
+    bool ignore_requested = false;
     std::optional<semantic_surface_scope> semantic_scope;
     if( semantic_surface_manager *manager = active_semantic_surface_manager() ) {
         semantic_scope.emplace( *manager, "prompt", "Debug error",
@@ -397,15 +398,18 @@ static void debug_error_prompt(
             { "native_owner", "DEBUG_MSG" }, { "title", "DEBUG_MSG" },
             { "text", error_message }, { "source_file", filename }, { "source_line", line }
         }, std::vector<semantic_action_descriptor> {
-            { "prompt.acknowledge", "", _( "Continue" ), true }
-        }, [&continue_requested]( const semantic_action_request & request ) {
-            if( request.action_id != "prompt.acknowledge" || request.stable_id ||
+            { "prompt.acknowledge", "", _( "Continue" ), true },
+            { "prompt.ignore", "", _( "Ignore future warnings from this source line" ), true }
+        }, [&continue_requested, &ignore_requested]( const semantic_action_request & request ) {
+            if( ( request.action_id != "prompt.acknowledge" && request.action_id != "prompt.ignore" ) ||
+                request.stable_id ||
                 !request.parameters.empty() ) {
                 return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
             }
             continue_requested = true;
+            ignore_requested = request.action_id == "prompt.ignore";
             return semantic_action_dispatch_result{ true, "", "", false, false,
-                                                    "debug_error_continued" };
+                                                    ignore_requested ? "debug_error_ignored" : "debug_error_continued" };
         }, true );
     }
 
@@ -445,7 +449,8 @@ static void debug_error_prompt(
                     }
                 }
             }
-            switch( continue_requested ? ' ' : inp_mngr.get_input_event().get_first_input() ) {
+            switch( continue_requested ? ( ignore_requested ? 'i' : ' ' ) :
+                    inp_mngr.get_input_event().get_first_input() ) {
 #if defined(TILES)
                 case 'c':
                 case 'C':
