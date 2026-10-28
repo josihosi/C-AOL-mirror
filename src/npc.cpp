@@ -1153,6 +1153,9 @@ void npc::randomize( const npc_class_id &type, const npc_template_id &tem_id )
         }
     }
 
+    // Initialize the previously unset rate without reordering the existing
+    // body/equipment generation draws. Creation EOCs see the completed body.
+    randomize_heartrate();
     // Add eocs
     effect_on_conditions::load_new_character( *this );
 }

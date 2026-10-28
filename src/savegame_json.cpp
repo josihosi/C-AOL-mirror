@@ -711,7 +711,9 @@ void Character::load( const JsonObject &data )
         !data.read( "blood_rh_factor", blood_rh_factor ) ) {
         randomize_blood();
     }
-    data.read( "avg_nat_bpm", avg_nat_bpm );
+    // Older saves omitted this field. Do not retain a previous body's value or
+    // consume creation RNG during load; present saved values remain authoritative.
+    avg_nat_bpm = data.get_int( "avg_nat_bpm", 80 );
 
     data.read( "custom_profession", custom_profession );
 

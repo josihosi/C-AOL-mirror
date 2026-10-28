@@ -54176,6 +54176,28 @@ TEST_CASE( "delayed demand and Pay trade inputs retain the owning turn phase",
                 row.allow_omitted_members();
                 if( row.get_int( "turn" ) == measured_turn ) {
                     row_seen = true;
+                    const auto names = object.get_string_array( "stage_names" );
+                    const auto times = row.get_array( "stages_seconds" );
+                    const auto calls = row.get_array( "stage_calls" );
+                    REQUIRE( times.size() == names.size() );
+                    REQUIRE( calls.size() == names.size() );
+                    const auto index = [&]( const std::string &name ) {
+                        const auto found = std::find( names.begin(), names.end(), name );
+                        REQUIRE( found != names.end() );
+                        CHECK( std::count( names.begin(), names.end(), name ) == 1 );
+                        return std::distance( names.begin(), found );
+                    };
+                    const auto parent = index( "creatures" );
+                    double children = 0.0;
+                    for( const char *name : { "creature_monsters", "creature_npc_preparation",
+                                             "creature_npc_actions" } ) {
+                        const auto child = index( name );
+                        CHECK( calls.get_int( child ) == calls.get_int( parent ) );
+                        children += times.get_float( child );
+                    }
+                    // Rounded WALL children are disjoint, not additive with
+                    // their parent or the shared optical scopes inside them.
+                    CHECK( children <= times.get_float( parent ) + 0.00001 );
                     CHECK( row.get_float( "input_seconds" ) > 0.0 );
                     CHECK( row.get_float( "input_seconds" ) ==
                            Approx( acquired_wall ).margin( 0.001 + begins * 0.000002 ) );
@@ -75444,6 +75466,81 @@ TEST_CASE( "inventory move fix preserves charge merging and the surviving identi
     }
 }
 
+TEST_CASE( "typed NPC creation initializes heart rate and legacy loads do not reroll bodies",
+           "[npc][npc_heartrate_initialization]" )
+{
+    const auto saved_rng = rng_get_engine();
+    on_out_of_scope restore_rng( [&]() { rng_get_engine() = saved_rng; } );
+    const npc_class_id type( "NC_DOCTOR" );
+    REQUIRE( type.is_valid() );
+    npc actor;
+    CHECK( actor.avg_nat_bpm == 80 );
+    actor.avg_nat_bpm = -777;
+    actor.randomize( type );
+    CHECK( actor.avg_nat_bpm >= 70 );
+    CHECK( actor.avg_nat_bpm <= 90 );
+    // A newly created typed body uses the existing native randomizer. Saved
+    // values, including ones outside that starting interval, are never rerolled.
+    actor.avg_nat_bpm = 53;
+    std::vector<int64_t> item_ids;
+    actor.visit_items( [&]( const item *value, const item * ) {
+        item_ids.push_back( value->uid().get_value() );
+        return VisitResponse::NEXT;
+    } );
+    REQUIRE_FALSE( item_ids.empty() );
+    std::ostringstream out;
+    { JsonOut json( out ); actor.serialize( json ); }
+    const std::string full = out.str();
+    std::string missing = full;
+    const std::string key = "\"avg_nat_bpm\"";
+    const auto start = missing.find( key );
+    REQUIRE( start != std::string::npos );
+    REQUIRE( missing.find( key, start + key.size() ) == std::string::npos );
+    const auto end = missing.find( ',', start );
+    REQUIRE( end != std::string::npos );
+    missing.erase( start, end - start + 1 );
+    const auto missing_record = json_loader::from_string( missing ).get_object();
+    missing_record.allow_omitted_members();
+    CHECK_FALSE( missing_record.has_member( "avg_nat_bpm" ) );
+    const auto id = actor.getID();
+    const auto turn = calendar::turn;
+    const auto load_seed = rng_get_engine();
+    auto present_field_rng = load_seed;
+    bool first_load = true;
+    for( const bool legacy : { false, true, false } ) {
+        CAPTURE( legacy );
+        // Ordinary native deserialization starts with an unowned body. Give
+        // its rate a prior value without fabricating/reassigning an owner ID.
+        npc restored;
+        restored.avg_nat_bpm = 111;
+        // Full NPC loading includes native item-variant/personality work.
+        // Removing only heart rate must not add RNG draws to that same load.
+        rng_get_engine() = load_seed;
+        restored.deserialize( json_loader::from_string( legacy ? missing : full ).get_object() );
+        if( first_load ) {
+            present_field_rng = rng_get_engine();
+            first_load = false;
+        } else {
+            CHECK( rng_get_engine() == present_field_rng );
+        }
+        CHECK( calendar::turn == turn );
+        CHECK( restored.avg_nat_bpm == ( legacy ? 80 : 53 ) );
+        CHECK( restored.getID() == id );
+        std::vector<int64_t> loaded_ids;
+        restored.visit_items( [&]( const item *value, const item * ) {
+            loaded_ids.push_back( value->uid().get_value() );
+            return VisitResponse::NEXT;
+        } );
+        CHECK( loaded_ids == item_ids );
+    }
+    std::string malformed = full;
+    const auto value_start = malformed.find( ':', start ) + 1;
+    const auto value_end = malformed.find( ',', value_start );
+    malformed.replace( value_start, value_end - value_start, "\"invalid\"" );
+    npc rejected;
+    CHECK_THROWS( rejected.deserialize( json_loader::from_string( malformed ).get_object() ) );
+}
+
 TEST_CASE( "maintained mixed metrics world earns native travel and survives actual reload",
            "[.][bandit][mixed_load_native_caller]" )
 {
@@ -75727,11 +75824,73 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         REQUIRE_FALSE( initial_monsters.empty() );
         get_avatar().set_mutation( trait_id( "DEBUG_NODMG" ) );
         get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        const char *cost_path = std::getenv( "CAOL_MIXED_LOAD_CREATURE_COST" );
+        std::unique_ptr<override_option> creature_diagnostic;
+        if( cost_path && std::getenv( "CAOL_MIXED_LOAD_CREATURE_STAGES" ) ) {
+            creature_diagnostic = std::make_unique<override_option>(
+                                      "RAID_PERFORMANCE_DIAGNOSTIC", "quiet_signal" );
+        }
+        std::unique_ptr<bandit_live_world_probe::session> creature_probe;
+        if( cost_path && std::getenv( "CAOL_MIXED_LOAD_CREATURE_PROBE" ) ) {
+            creature_probe = std::make_unique<bandit_live_world_probe::session>(
+                                 bandit_live_world_probe::collection_mode::timings );
+        }
+        const auto cost_started = std::chrono::steady_clock::now();
+        const auto cost_cpu = std::clock();
         const auto initial_turn = calendar::turn;
         while( calendar::turn < initial_turn + 8_turns ) {
             get_avatar().set_moves( 0 );
             REQUIRE_FALSE( g->do_turn() );
         }
+        const double cost_wall = std::chrono::duration<double>(
+                                     std::chrono::steady_clock::now() - cost_started ).count();
+        const double cost_process_cpu = double( std::clock() - cost_cpu ) / CLOCKS_PER_SEC;
+        if( cost_path ) {
+            // Finite diagnostic comparison of the existing native scheduler.
+            // No actor is removed/frozen and no predicate/action is skipped.
+            // The matching process uses the same source/seed with the existing
+            // probe off. Its full resulting state must agree, not its timing.
+            const auto bytes = []( const auto &value ) {
+                std::ostringstream out;
+                { JsonOut json( out ); value.serialize( json ); }
+                return out.str();
+            };
+            std::map<std::string, std::string> local_npc_state;
+            for( const npc &actor : g->all_npcs() ) {
+                local_npc_state.emplace( std::to_string( actor.getID().get_value() ), bytes( actor ) );
+            }
+            std::vector<std::string> local_monster_state;
+            for( const monster &actor : g->all_monsters() ) {
+                local_monster_state.push_back( bytes( actor ) );
+            }
+            std::sort( local_monster_state.begin(), local_monster_state.end() );
+            std::ostringstream rng;
+            rng << rng_get_engine();
+            std::ofstream output( cost_path );
+            REQUIRE( output.good() );
+            JsonOut json( output );
+            json.start_object();
+            json.member( "scope", "8 ordinary native component turns; existing covert prepass probe on/off, no native playtest credit" );
+            json.member( "probe_enabled", creature_probe != nullptr );
+            json.member( "wall_seconds", cost_wall );
+            json.member( "process_cpu_seconds", cost_process_cpu );
+            json.member( "turn", to_turn<int>( calendar::turn ) );
+            json.member( "player", bytes( get_avatar() ) );
+            json.member( "world", bytes( overmap_buffer.global_state ) );
+            json.member( "local_npcs", local_npc_state );
+            json.member( "local_monsters", local_monster_state );
+            json.member( "rng", rng.str() );
+            if( creature_probe ) {
+                const auto &sample = creature_probe->result();
+                const auto &prepass = sample.sections[static_cast<size_t>(
+                                         bandit_live_world_probe::section::loaded_covert_prepass )];
+                json.member( "prepass_inclusive_ns", prepass.inclusive.total_ns );
+                json.member( "prepass_self_ns", prepass.self.total_ns );
+                json.member( "prepass_calls", prepass.inclusive.count );
+            }
+            json.end_object();
+        }
+        creature_probe.reset();
         int local_moved = 0;
         for( const auto &[id, position] : local_initial ) {
             const auto actor = overmap_buffer.find_npc( id );

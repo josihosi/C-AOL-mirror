@@ -490,6 +490,9 @@ Character::Character() :
     last_climate_control_ret( false )
 {
     randomize_blood();
+    // Safe construction/legacy-save baseline; creation paths randomize this
+    // explicitly. Construction and loading must not add a heart-rate RNG draw.
+    avg_nat_bpm = 80;
     cached_organic_size = 1.0f;
     str_max = 8;
     dex_max = 8;
