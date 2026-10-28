@@ -20577,25 +20577,27 @@ def initial_hud_world_frame_counts(
     matching = 0
     foreign = 0
     event_count = 0
-    for raw_line in body.splitlines():
-        marker = raw_line.find(SEMANTIC_STEP_PREFIX.encode("utf-8"))
-        if marker < 0:
-            continue
-        event_count += 1
-        if len(raw_line) > SEMANTIC_STEP_MAX_BYTES or event_count > SEMANTIC_STEP_MAX_EVENTS:
-            return 0, 0
-        try:
-            event = decode_semantic_step_event(raw_line[marker + len(SEMANTIC_STEP_PREFIX):])
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return 0, 1
-        if not isinstance(event, Mapping) or event.get("event") != "frame" or \
-                event.get("producer") != "hud_world_ready" or \
-                event.get("initial_world_ready") is not True:
-            continue
-        if str(event.get("run_id", "")) == str(run_id):
-            matching += 1
-        else:
-            foreign += 1
+    try:
+        for event, record_start, record_end in iter_complete_semantic_trace_records(
+                io.BytesIO(body), len(body)):
+            event_count += 1
+            # The native source is not the compact wire channel. Complete
+            # surface descriptors use the existing lossless record reader;
+            # the HUD frames themselves retain their compact event bound.
+            if event_count > SEMANTIC_STEP_MAX_EVENTS or (
+                    record_end - record_start > SEMANTIC_STEP_MAX_BYTES and
+                    event.get("event") != "surface_descriptor"):
+                return 0, 0
+            if event.get("event") != "frame" or \
+                    event.get("producer") != "hud_world_ready" or \
+                    event.get("initial_world_ready") is not True:
+                continue
+            if str(event.get("run_id", "")) == str(run_id):
+                matching += 1
+            else:
+                foreign += 1
+    except ValueError:
+        return 0, 1
     return matching, foreign
 
 
@@ -20625,36 +20627,32 @@ def first_initial_hud_world_frame_after_boundary(
     foreign = 0
     mismatched_producer = 0
     event_count = 0
-    cursor = 0
     semantic_events: List[Mapping[str, Any]] = []
     candidate_event_index: Optional[int] = None
-    for raw_line in body.splitlines(keepends=True):
-        marker = raw_line.find(SEMANTIC_STEP_PREFIX.encode("utf-8"))
-        if marker >= 0:
-            if len(raw_line) > SEMANTIC_STEP_MAX_BYTES:
-                raise ValueError("initial HUD frame event exceeds the semantic event limit")
-            event_count += 1
-            if event_count > SEMANTIC_STEP_MAX_EVENTS:
-                raise ValueError("initial HUD frame trace exceeds the semantic event count")
-            try:
-                event = decode_semantic_step_event(raw_line[marker + len(SEMANTIC_STEP_PREFIX):])
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ValueError("initial HUD frame trace is malformed") from exc
-            if isinstance(event, Mapping):
-                semantic_events.append(event)
-            if isinstance(event, Mapping) and event.get("event") == "frame" and \
-                    event.get("initial_world_ready") is True:
-                if str(event.get("run_id", "")) != str(run_id):
-                    foreign += 1
-                elif event.get("producer") != "hud_world_ready":
-                    mismatched_producer += 1
-                else:
-                    matching += 1
-                    if candidate is None:
-                        candidate = dict(event)
-                        candidate["_event_offset"] = effective_offset + cursor + marker
-                        candidate_event_index = len(semantic_events) - 1
-        cursor += len(raw_line)
+    for event, record_start, record_end in iter_complete_semantic_trace_records(
+            io.BytesIO(body), len(body)):
+        # Native descriptors can contain a full population's current facts.
+        # Parse them through the same complete-record owner as cockpit refresh,
+        # keeping the existing total trace/event-count limits. Do not apply
+        # the compact wire cap to an authoritative source descriptor.
+        if record_end - record_start > SEMANTIC_STEP_MAX_BYTES and \
+                event.get("event") != "surface_descriptor":
+            raise ValueError("initial HUD frame event exceeds the semantic event limit")
+        event_count += 1
+        if event_count > SEMANTIC_STEP_MAX_EVENTS:
+            raise ValueError("initial HUD frame trace exceeds the semantic event count")
+        semantic_events.append(event)
+        if event.get("event") == "frame" and event.get("initial_world_ready") is True:
+            if str(event.get("run_id", "")) != str(run_id):
+                foreign += 1
+            elif event.get("producer") != "hud_world_ready":
+                mismatched_producer += 1
+            else:
+                matching += 1
+                if candidate is None:
+                    candidate = dict(event)
+                    candidate["_event_offset"] = effective_offset + record_start
+                    candidate_event_index = len(semantic_events) - 1
 
     if foreign:
         raise ValueError("initial HUD frame belongs to a different run")

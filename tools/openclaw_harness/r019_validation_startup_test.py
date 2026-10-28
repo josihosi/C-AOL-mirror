@@ -347,6 +347,127 @@ class R019ValidationStartupTest(unittest.TestCase):
         self.assertEqual(selected["frame_id"], "run-1:initial")
         self.assertEqual(selected["_event_offset"], 0)
 
+    @staticmethod
+    def _population_startup_events():
+        run = "large-native-startup"
+        hud = {
+            "event": "frame", "run_id": run, "frame_id": run + ":initial",
+            "state": "world", "observed_turn": 5241593,
+            "valid_actions": ["world.wait", "world.look", "world.quicksave"],
+            "producer": "hud_world_ready", "initial_world_ready": True,
+        }
+        # Lossless current population facts belong to the source descriptor,
+        # not the compact HUD frame or an arbitrary padding-only log record.
+        facts = json.dumps([
+            {"site_id": f"site-{i}", "members": [i * 3 + j for j in range(3)],
+             "route": [[j, j + 1, 0] for j in range(180)]}
+            for i in range(120)
+        ])
+        surface = {
+            "event": "surface_descriptor", "schema_version": 1, "run_id": run,
+            "surface_id": run + ":surface", "frame_id": run + ":world",
+            "kind": "world", "game_turn": 5241593, "sequence": 1,
+            "breadcrumbs": ["World"], "payload": {"structural_signal_dispatch": facts},
+            "valid_actions": [
+                {"id": action, "stable_id": "", "label": action, "enabled": True}
+                for action in ["world.wait", "world.look", "world.quicksave", "world.inspect_npc"]
+            ],
+        }
+        later = {**hud, "frame_id": run + ":later", "producer": "",
+                 "initial_world_ready": False}
+        return hud, surface, later
+
+    @staticmethod
+    def _write_startup_events(run_dir, events):
+        path = run_dir / "semantic.native.events.jsonl"
+        path.write_bytes(b"".join(
+            startup_harness.SEMANTIC_STEP_PREFIX.encode() +
+            json.dumps(event, separators=(",", ":")).encode() + b"\n"
+            for event in events
+        ))
+        return path
+
+    def test_large_native_descriptor_reaches_strict_bootstrap_and_live_cockpit_reader(self):
+        hud, surface, later = self._population_startup_events()
+        self.assertGreater(len(json.dumps(surface).encode()), startup_harness.SEMANTIC_STEP_MAX_BYTES)
+        required = ["world.wait", "world.look", "world.quicksave", "world.inspect_npc"]
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            source = self._write_startup_events(run_dir, [hud, surface, later])
+            original = source.read_bytes()
+            result = startup_harness.deferred_native_world_bootstrap_result(
+                {"checkpoint": {"required_state": "world", "required_actions": required}},
+                profile="test", run_dir=run_dir, run_id=hud["run_id"], trace_start_offset=0,
+            )
+            self.assertTrue(result["qualified"], result)
+            self.assertEqual(result["matching_initial_hud_world_frame_count"], 1)
+            self.assertEqual(result["foreign_frame_count_after_dismissal"], 0)
+            self.assertEqual(result["metadata"]["frame_id"], hud["frame_id"])
+            self.assertIn("world.inspect_npc", result["metadata"]["same_turn_surface_actions"])
+            current = startup_harness.current_semantic_step_frame(
+                profile="test", run_dir=run_dir, run_id=hud["run_id"], start_offset=0,
+            )
+            self.assertEqual(current["frame_id"], surface["frame_id"])
+            self.assertEqual(current["payload"], surface["payload"])
+            self.assertEqual(current["valid_actions"], surface["valid_actions"])
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_large_descriptor_does_not_relax_initial_owner_or_adjacency(self):
+        hud, surface, later = self._population_startup_events()
+        cases = {
+            "duplicate": [hud, surface, hud],
+            "foreign_initial": [hud, surface, {**hud, "run_id": "foreign"}],
+            "wrong_producer": [{**hud, "producer": "post_step"}, surface, later],
+            "not_initial": [{**hud, "initial_world_ready": False}, surface, later],
+            "wrong_state": [{**hud, "state": "menu"}, surface, later],
+            "foreign_surface": [hud, {**surface, "run_id": "foreign"}, later],
+            "later_surface": [hud, {**surface, "game_turn": 5241594}, later],
+            "not_adjacent": [hud, later, surface],
+            "disabled_dynamic_action": [hud, {**surface, "valid_actions": [
+                {**a, "enabled": False} for a in surface["valid_actions"]]}, later],
+        }
+        for name, events in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                run_dir = Path(directory)
+                self._write_startup_events(run_dir, events)
+                result = startup_harness.deferred_native_world_bootstrap_result(
+                    {"checkpoint": {"required_state": "world", "required_actions": [
+                        "world.wait", "world.inspect_npc"]}},
+                    profile="test", run_dir=run_dir, run_id=hud["run_id"], trace_start_offset=0,
+                )
+                self.assertFalse(result["qualified"], result)
+
+    def test_large_descriptor_still_requires_complete_valid_records_and_trace_bounds(self):
+        hud, surface, later = self._population_startup_events()
+        for suffix in (b"invalid-json\n", b'{"event":"surface_descriptor","payload":"unfinished'):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                run_dir = Path(directory)
+                source = self._write_startup_events(run_dir, [hud, surface])
+                with source.open("ab") as handle:
+                    handle.write(startup_harness.SEMANTIC_STEP_PREFIX.encode() + suffix)
+                result = startup_harness.deferred_native_world_bootstrap_result(
+                    {"checkpoint": {"required_state": "world", "required_actions": ["world.wait"]}},
+                    profile="test", run_dir=run_dir, run_id=hud["run_id"], trace_start_offset=0,
+                )
+                self.assertFalse(result["qualified"], result)
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self._write_startup_events(run_dir, [hud, surface, later])
+            # Existing event-count and total-slice guards are independent of
+            # the descriptor's representation; neither may be bypassed.
+            with mock.patch.object(startup_harness, "SEMANTIC_STEP_MAX_EVENTS", 2):
+                with self.assertRaisesRegex(ValueError, "event count"):
+                    first_initial_hud_world_frame_after_boundary(
+                        profile="test", trace_offset=0, run_id=hud["run_id"], run_dir=run_dir,
+                        required_state="world", required_actions=["world.wait"],
+                    )
+            with mock.patch.object(startup_harness, "SEMANTIC_STEP_MAX_BYTES", 1024):
+                with self.assertRaisesRegex(ValueError, "bounded trace slice"):
+                    first_initial_hud_world_frame_after_boundary(
+                        profile="test", trace_offset=0, run_id=hud["run_id"], run_dir=run_dir,
+                        required_state="world", required_actions=["world.wait"],
+                    )
+
     def test_initial_frame_selector_rejects_a_single_oversized_event(self) -> None:
         eligible = {
             "event": "frame", "run_id": "run-1", "frame_id": "run-1:initial", "state": "world",
