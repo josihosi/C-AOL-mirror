@@ -75696,6 +75696,102 @@ TEST_CASE( "maintained mixed metrics world earns native travel and survives actu
         }
         REQUIRE_FALSE( sampled_item_ids.empty() );
     }
+    if( std::getenv( "CAOL_MIXED_LOAD_INITIAL_LOCAL_RELOAD" ) ) {
+        // A fresh metrics layout must admit real local selected bodies, not
+        // merely geometrically include abstract roster entries. This component
+        // mode exercises the native loader/scheduler/serializer; it grants no
+        // live playtest or natural-dispatch credit.
+        std::map<character_id, tripoint_abs_ms> local_initial;
+        for( const auto &site_id : site_ids ) {
+            const auto *site = overmap_buffer.global_state.bandit_live_world.find_site( site_id );
+            REQUIRE( site );
+            for( const auto id : site->active_hostile_operation.reservation.member_ids ) {
+                const auto actor = overmap_buffer.find_npc( id );
+                REQUIRE( actor );
+                if( actor->is_active() ) {
+                    CHECK( get_map().inbounds( actor->pos_abs() ) );
+                    local_initial.emplace( id, actor->pos_abs() );
+                }
+            }
+        }
+        REQUIRE( local_initial.size() >= 2 );
+        const auto monster_facts = [&]() {
+            std::vector<std::tuple<std::string, tripoint_abs_ms, int>> facts;
+            for( const monster &critter : g->all_monsters() ) {
+                facts.emplace_back( critter.type->id.str(), critter.pos_abs(), critter.get_hp() );
+            }
+            std::sort( facts.begin(), facts.end() );
+            return facts;
+        };
+        const auto initial_monsters = monster_facts();
+        REQUIRE_FALSE( initial_monsters.empty() );
+        get_avatar().set_mutation( trait_id( "DEBUG_NODMG" ) );
+        get_avatar().set_mutation( trait_id( "DEBUG_CLOAK" ) );
+        const auto initial_turn = calendar::turn;
+        while( calendar::turn < initial_turn + 8_turns ) {
+            get_avatar().set_moves( 0 );
+            REQUIRE_FALSE( g->do_turn() );
+        }
+        int local_moved = 0;
+        for( const auto &[id, position] : local_initial ) {
+            const auto actor = overmap_buffer.find_npc( id );
+            REQUIRE( actor );
+            local_moved += actor->pos_abs() != position;
+        }
+        CHECK( local_moved > 0 );
+        CHECK( monster_facts() != initial_monsters );
+        check_owners();
+        // Loaded physiology is deliberately throttled. A native unload closes
+        // that pending body interval before the persisted handoff boundary;
+        // on_load may otherwise settle the same anchor at the current turn.
+        const auto handoff_turn = calendar::turn;
+        std::map<std::string, std::pair<int64_t, int64_t>> active_before;
+        for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+            active_before.emplace( site.site_id, std::make_pair( site.home_activation.active_turns,
+                                   site.active_hostile_operation.reservation.activation.active_turns ) );
+        }
+        const auto player_before_handoff = get_avatar().pos_abs();
+        const tripoint_abs_sm expected_handoff_map =
+            project_to<coords::sm>( get_avatar().pos_abs_omt() ) - point( HALF_MAPSIZE, HALF_MAPSIZE );
+        g->place_player_overmap( get_avatar().pos_abs_omt(), false );
+        refresh_live_bandit_activation();
+        CHECK( get_avatar().pos_abs() == player_before_handoff );
+        CHECK( get_map().get_abs_sub() == expected_handoff_map );
+        CHECK( calendar::turn == handoff_turn );
+        for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+            CHECK( active_before.at( site.site_id ) == std::make_pair( site.home_activation.active_turns,
+                    site.active_hostile_operation.reservation.activation.active_turns ) );
+        }
+        const std::string before = serialize_world( overmap_buffer.global_state.bandit_live_world );
+        std::map<character_id, std::vector<int64_t>> item_ids;
+        for( const auto &[id, initial] : sampled_item_ids ) {
+            const character_id actor_id = id;
+            overmap_buffer.find_npc( actor_id )->visit_items( [&]( const item * value, const item * ) {
+                item_ids[actor_id].push_back( value->uid().get_value() );
+                return VisitResponse::NEXT;
+            } );
+        }
+        REQUIRE( g->save() );
+        const auto saved_turn = calendar::turn;
+        r067_handover_reload( name );
+        CHECK( calendar::turn == saved_turn );
+        check_owners();
+        const bool owner_state_identical =
+            serialize_world( overmap_buffer.global_state.bandit_live_world ) == before;
+        CHECK( owner_state_identical );
+        for( const auto &[id, expected] : item_ids ) {
+            const auto actor = overmap_buffer.find_npc( id );
+            REQUIRE( actor );
+            std::vector<int64_t> actual;
+            actor->visit_items( [&]( const item * value, const item * ) {
+                actual.push_back( value->uid().get_value() );
+                return VisitResponse::NEXT;
+            } );
+            CHECK( actual == expected );
+            CHECK( actor->get_last_updated() <= calendar::turn );
+        }
+        return;
+    }
     if( std::getenv( "CAOL_MIXED_LOAD_TERMINAL_RETURN" ) ) {
         // Import the actual generated fixture through g->load above. Only the
         // paid/home endpoint is component setup; no payment or journey credit.

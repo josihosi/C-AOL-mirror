@@ -13317,6 +13317,124 @@ class AdjustableMixedLoadSampleTest(unittest.TestCase):
         self.assertEqual(str(effective["AUTOSAVE"]).lower(), "false")
         self.assertEqual(effective["RAID_PERFORMANCE_DIAGNOSTIC"], "normal")
 
+    def test_explicit_initial_origin_cli_keeps_native_geometry_and_current_authority(self) -> None:
+        destination = self.root / "initial-origin"
+        declaration = self.root / "initial-origin.json"
+        argv = ["startup_harness.py", "prepare-mixed-load", "--profile", "initial-origin",
+                "--declaration-output", str(declaration), "--parties", "10",
+                "--origin-omt", "104", "59", "0"]
+        output = io.StringIO()
+        with mock.patch.object(self.startup, "userdir_for_profile", return_value=destination), \
+                mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+            self.assertEqual(self.startup.main(), 0)
+        prepared = json.loads(output.getvalue())
+        self.addCleanup(shutil.rmtree, destination)
+        self.assertEqual(prepared["geometry"]["player_omt"], [104, 59, 0])
+        self.assertEqual(prepared["geometry"]["migo_seed_omt"], [106, 59, 0])
+        self.assertGreaterEqual(len(prepared["geometry"]["home_members_within48ms"]), 2)
+        world = Path(prepared["world"])
+        data = json.loads((world / "dimension_data.gsav").read_text().partition("\n")[2])["overmapbuffer"]["bandit_live_world"]
+        bodies = self.read_bodies(world)
+        ids = []
+        for site in data["sites"]:
+            reservation = site["active_hostile_operation"]["reservation"]
+            ids.extend(reservation["member_ids"])
+            self.assertTrue(self.startup._prepared_hostile_operation_binding(
+                self.startup.summarize_bandit_live_world_site(site),
+                data["hostile_target_opportunities"])["prepared_hostile_operation_complete"])
+            self.assertEqual(site["current_scout_report"]["target_omt"], [104, 59, 0])
+            for point in site["footprint"]:
+                self.assertLessEqual(max(abs(point[i] - [104, 59][i]) for i in (0, 1)), 40)
+            for member in site["members"]:
+                self.assertEqual(bodies[member["npc_id"]]["location"], member["home_spawn_tile"])
+        self.assertEqual(len(set(ids)), 31)
+        inherited = self.read_bodies(self.source / "McWilliams")
+        for npc_id in (2, 3):
+            self.assertEqual(bodies[npc_id], inherited[npc_id])
+        scenario = json.loads(declaration.read_text())
+        self.assertIn("Start at the prepared OMT[104, 59, 0]", scenario["steps"][-1]["objective"])
+        self.assertNotIn("Shift the player map normally", scenario["steps"][-1]["objective"])
+        self.assertIn("not a general census", scenario["steps"][-1]["objective"])
+        for step in scenario["steps"][1:-1]:
+            required = {k: v for k, v in step.items() if k.startswith("required_") or k == "player_save"}
+            self.assertEqual(self.startup.audit_saved_bandit_live_world_state(
+                world, **required)["status"], "required_state_present")
+        # The native loader generates legitimate home residents. Exercise a
+        # real saved body through the existing producer, with the selected
+        # operation and its report/reservation/claim unchanged.
+        site = data["sites"][2]
+        first = site["active_hostile_operation"]["reservation"]["member_ids"][0]
+        target = [site["anchor"][0] * 24 + 13, site["anchor"][1] * 24 + 13, 0]
+        _, _, player, _ = self.startup.load_saved_player_payload(world)
+        location = player["player"]["location"]
+        added = self.startup.apply_overmap_npcs_near_player_transform(world, {
+            "player_save": scenario["steps"][1]["player_save"], "source_npc_id": first,
+            "scan_all_overmaps_for_ids": True, "clear_camp_assignment": True,
+            "offsets_ms": [[target[i] - location[i] for i in range(3)]], "npc_mission": 11})
+        resident = copy.deepcopy(site["members"][0])
+        resident.update(npc_id=added["placed_npcs"][0]["id"], home_spawn_tile=target, state="at_home")
+        site["members"].append(resident)
+        site["living_total"] += 1
+        site["spawn_tiles"].append({"tile": target, "assigned_living_total": 1})
+        dimension = world / "dimension_data.gsav"
+        header, _, raw = dimension.read_text().partition("\n")
+        whole = json.loads(raw)
+        whole["overmapbuffer"]["bandit_live_world"] = data
+        dimension.write_text(header + "\n" + json.dumps(whole))
+        fresh = scenario["steps"][3]
+        continued = scenario["post_relaunch"]["steps"][2]
+        self.assertNotIn("required_member_count", continued)
+        self.assertNotIn("required_active_hostile_operation_phase", continued)
+        self.assertEqual({k: v for k, v in continued.items() if k.startswith("required_")},
+                         {k: v for k, v in fresh.items() if k.startswith("required_") and k not in {
+                             "required_member_count", "required_active_hostile_operation_phase"}})
+        def audit(step):
+            requirements = {k: v for k, v in step.items() if k.startswith("required_") or k == "player_save"}
+            return self.startup.audit_saved_bandit_live_world_state(world, **requirements)["status"]
+        self.assertNotEqual(audit(fresh), "required_state_present")
+        self.assertEqual(audit(continued), "required_state_present")
+        site["active_hostile_operation"]["phase"] = "rallying"
+        dimension.write_text(header + "\n" + json.dumps(whole))
+        self.assertEqual(audit(continued), "required_state_present")
+        # A foreign consumed claim remains a refusal despite real home growth.
+        claim = next(c for c in data["hostile_target_opportunities"]
+                     if c["consumed_operation_id"] == site["active_hostile_operation"]["reservation"]["activity_id"])
+        operation_id = claim["consumed_operation_id"]
+        claim["consumed_operation_id"] += "-foreign"
+        dimension.write_text(header + "\n" + json.dumps(whole))
+        self.assertNotEqual(audit(continued), "required_state_present")
+        claim["consumed_operation_id"] = operation_id
+        dimension.write_text(header + "\n" + json.dumps(whole))
+        # Remove a real selected body, leaving the expanded roster/claim intact.
+        removed = 0
+        for archive in (world / "overmaps").glob("o.*.*.zzip"):
+            plain, version, payload = self.startup.extract_overmap_payload(archive)
+            try:
+                old = payload.get("npcs", [])
+                payload["npcs"] = [body for body in old if body["id"] != first]
+                removed += len(old) - len(payload["npcs"])
+                if len(old) != len(payload["npcs"]):
+                    self.startup.write_overmap_payload(plain, version, payload)
+            finally:
+                self.startup.cleanup_extracted_overmap(plain, keep=False)
+        self.assertEqual(removed, 1)
+        before_refusal = self.startup.sha256_tree(world)
+        self.assertNotEqual(audit(continued), "required_state_present")
+        self.assertEqual(self.startup.sha256_tree(world), before_refusal)
+        self.assertFalse(list(self.root.glob(".mixed-sample-*")))
+
+    def test_initial_origin_refuses_invalid_missing_or_occupied_native_geometry(self) -> None:
+        for origin in ([True, 59, 0], [104, 59], [104, 59, 1], [9999, 9999, 0], [140, 51, 0]):
+            with self.subTest(origin=origin), mock.patch.object(
+                    self.startup, "userdir_for_profile", return_value=self.root / "bad-origin"):
+                with self.assertRaises(SystemExit):
+                    self.startup.prepare_mixed_load_sample(
+                        "bad-origin", self.root / "bad-origin.json", 10, origin_omt=origin)
+                self.assertFalse((self.root / "bad-origin").exists())
+                self.assertFalse((self.root / "bad-origin.json").exists())
+                self.assertFalse(list(self.root.glob(".mixed-sample-*")))
+        self.assertEqual(self.startup.sha256_tree(self.source), self.before)
+
     def test_twenty_fifty_and_hundred_are_preparation_inputs_not_catalogue_copies(self) -> None:
         for count in (20, 50, 100):
             with self.subTest(parties=count), mock.patch.object(

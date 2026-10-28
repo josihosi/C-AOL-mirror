@@ -39550,7 +39550,8 @@ def install_fixture(profile: str, fixture_name: str, replace: bool, fixture_prof
 
 
 def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count: int,
-                              member_pattern: Sequence[int] = (4, 2, 3)) -> Dict[str, Any]:
+                              member_pattern: Sequence[int] = (4, 2, 3), *,
+                              origin_omt: Optional[Sequence[int]] = None) -> Dict[str, Any]:
     """Compile a fresh, zero-credit metrics sample, never a saved continuation.
 
     One maintained recipe and one ordinary saved-start declaration serve every
@@ -39559,6 +39560,10 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
     if (type(party_count) is not int or party_count < 2 or not member_pattern or
             any(type(n) is not int or not 2 <= n <= 4 for n in member_pattern)):
         raise SystemExit("Mixed-load sample needs at least two parties and a 2-4 member pattern")
+    if origin_omt is not None and (
+            not isinstance(origin_omt, (list, tuple)) or len(origin_omt) != 3 or
+            any(type(n) is not int for n in origin_omt) or origin_omt[2] != 0):
+        raise SystemExit("Mixed-load initial origin must be an integer ground-level OMT triple")
     profile = resolve_profile_name(profile)
     destination = userdir_for_profile(profile).absolute()
     declaration_path = declaration_path.absolute()
@@ -39581,18 +39586,6 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
         stage = Path(temporary)
         world = stage / "save" / "McWilliams"
         shutil.copytree(resolved["save_src"] / "McWilliams", world)
-        apply_fixture_save_transforms(world, transforms[:split])
-        dimension = world / "dimension_data.gsav"
-        header, _, text = dimension.read_text().partition("\n")
-        payload = json.loads(text)
-        live = payload["overmapbuffer"]["bandit_live_world"]
-        source = live["sites"][0]
-        source_id = source["site_id"]
-        player_save = transforms[split]["player_save"]
-        player_omt, player_ms = load_player_abs_omt(world, player_save)
-
-        # Inspect native archive entries once in the disposable staging world.
-        # New homes must not replace already generated physical geometry.
         occupied = set()
         for directory in (world / "maps").iterdir():
             if directory.is_dir():
@@ -39606,13 +39599,96 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
                 occupied.update(p.name for p in extracted.glob("*.map"))
             finally:
                 shutil.rmtree(extracted)
-        placements = load_bandit_special_placements(
-            repo_root(), world, BANDIT_HOME_SPECIAL_IDS | {"cannibal_camp", "Mi-Go Encampment"})
-        used = {point for placed in placements for point in placed.points}
+
+        def physical_geometry():
+            # Decision-local native layers and placement metadata only. The
+            # disposable stage is the existing save-transform owner; no mapgen
+            # or persistent index is introduced by this read.
+            terrain = {}
+            used_points = set()
+            for archive in sorted((world / "overmaps").glob("o.*.*.zzip")):
+                coordinates = re.fullmatch(r"o\.(-?\d+)\.(-?\d+)\.zzip", archive.name)
+                if coordinates is None:
+                    raise SystemExit("Mixed-load overmap coordinate is malformed")
+                ox, oy = map(int, coordinates.groups())
+                plain, _version, data = extract_overmap_payload(archive)
+                try:
+                    terrain[ox, oy] = decode_overmap_layer(
+                        data["layers"][overmap_layer_index(0)], context=str(archive))
+                    for entry in data["overmap_special_placements"]:
+                        for placement in entry["placements"]:
+                            for point in placement["points"]:
+                                x, y, z = point["p"]
+                                # Preserve each native special's entire column,
+                                # including a footprint recorded above ground.
+                                used_points.add((x + ox * OMAPX, y + oy * OMAPY, 0))
+                finally:
+                    cleanup_extracted_overmap(plain, keep=False)
+            return terrain, used_points
+
+        def field_at(point, terrain):
+            ox, oy, local = overmap_file_coords_from_abs_omt(point)
+            if (ox, oy) not in terrain:
+                raise SystemExit("Mixed-load initial origin requires an existing saved overmap")
+            return terrain[ox, oy][overmap_flat_index(local)] == "field"
+
+        prefix = copy.deepcopy(transforms[:split])
+        if origin_omt is not None:
+            # Reuse the maintained initial setup, translated before any body or
+            # operation is prepared. This never transforms a living continuation.
+            terrain, protected = physical_geometry()
+            homes = load_bandit_special_placements(repo_root(), world, {"bandit_camp"})
+            home = next((p for p in homes if p.special_id == "bandit_camp" and p.site_index == 2), None)
+            if home is None:
+                raise SystemExit("Mixed-load initial origin has no maintained native home")
+            native_anchor = anchor_from_special_points([p for p in home.points if p[2] <= 0])
+            offset = [origin_omt[i] - native_anchor[i] for i in range(3)]
+            initial_moves = [t for t in prefix if t["kind"] == "player_near_overmap_special"]
+            if len(initial_moves) != 2:
+                raise SystemExit("Mixed-load initial setup recipe changed")
+            initial_moves[0]["offset_omt"] = [offset[0] - 2, offset[1], 0]
+            initial_moves[1]["offset_omt"] = offset
+            for dx in (0, 2, 8):
+                points = [(origin_omt[0] + dx + x, origin_omt[1] + y, 0)
+                          for x in (0, 1) for y in (0, 1)] if dx else [tuple(origin_omt)]
+                if any(not field_at(p, terrain) or f"{p[0]}.{p[1]}.0.map" in occupied or
+                       any((p[0] + x, p[1] + y, 0) in protected
+                           for x in (-1, 0, 1) for y in (-1, 0, 1)) for p in points):
+                    raise SystemExit("Mixed-load initial origin/seeds need unused native field geometry")
+            clone = next(t for t in prefix if t["kind"] == "bandit_clone_site")
+            anchor = [origin_omt[0] + 8, origin_omt[1], 0]
+            clone.update(new_site_id=f"overmap_special:cannibal_camp@{anchor[0]},{anchor[1]},0",
+                         new_anchor=anchor,
+                         new_footprint=[[anchor[0] + x, anchor[1] + y, 0]
+                                        for x in (0, 1) for y in (0, 1)])
+        apply_fixture_save_transforms(world, prefix)
+        dimension = world / "dimension_data.gsav"
+        header, _, text = dimension.read_text().partition("\n")
+        payload = json.loads(text)
+        live = payload["overmapbuffer"]["bandit_live_world"]
+        source = live["sites"][0]
+        source_id = source["site_id"]
+        player_save = transforms[split]["player_save"]
+        player_omt, player_ms = load_player_abs_omt(world, player_save)
+        terrain, used = physical_geometry()
+        if origin_omt is None:
+            placements = load_bandit_special_placements(
+                repo_root(), world, BANDIT_HOME_SPECIAL_IDS | {"cannibal_camp", "Mi-Go Encampment"})
+            used = {point for placed in placements for point in placed.points}
         sites = copy.deepcopy(live["sites"])
-        candidates = sorted(((x, y) for x in range(-33, 34, 3) for y in range(-33, 34, 3)
-                             if max(abs(x), abs(y)) >= 6),
-                            key=lambda xy: (max(abs(xy[0]), abs(xy[1])), xy))
+        if any(max(abs(p[i] - player_omt[i]) for i in (0, 1)) > 40
+               for site in sites for p in site["footprint"]):
+            raise SystemExit("Mixed-load inherited homes exceed the native40-OMT neighborhood")
+        if origin_omt is None:
+            # Preserve the qualified smaller samples' original layout.
+            offsets = ((x, y) for x in range(-33, 34, 3) for y in range(-33, 34, 3)
+                       if max(abs(x), abs(y)) >= 6)
+        else:
+            # Initial nearby homes allow genuine local loading. Remaining
+            # parties use real separated fields throughout the active square.
+            offsets = ((x, y) for x in range(-40, 40) for y in range(-40, 40)
+                       if max(abs(x), abs(y)) >= 2)
+        candidates = sorted(offsets, key=lambda xy: (max(abs(xy[0]), abs(xy[1])), xy))
         for dx, dy in candidates:
             if len(sites) >= party_count:
                 break
@@ -39629,7 +39705,8 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
                 continue
             # Native overmap routing remains responsible for the actual route.
             # Avoid water/building starts; do not replace a corridor with air.
-            if any(saved_overmap_terrain_id(world, p) != "field" for p in footprint):
+            if any(max(abs(p[i] - player_omt[i]) for i in (0, 1)) > 40 or
+                   not field_at(p, terrain) for p in footprint):
                 continue
             kind = "bandit_camp" if len(sites) % 2 == 0 else "cannibal_camp"
             apply_seed_overmap_special_near_player_transform(world, {
@@ -39777,6 +39854,16 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
             "then normal save/close and supported SAME-result reload, without reinstall or fresh activity. No runtime NPC/history/clock "
             "edits, forced admission or synthetic performance credit. Original Luna alone input under Terra. "
             "No whole-scaling or gain claim without actual matched measurements; preserve the first genuine setup/route guard.")
+        if origin_omt is not None:
+            live_step["objective"] = live_step["objective"].replace(
+                "Shift the player map normally near the seeded encampment and authenticate native committed population before counting it.",
+                f"Start at the prepared OMT{list(player_omt)}, with Mi-go seed at"
+                f"{[player_omt[0] + 2, player_omt[1], 0]} and nearby real home cohorts. "
+                "Inspect actual native local admission and actions before changing this footing; "
+                "do not repeat setup or shift solely because a compact list is empty. "
+                "Compact visible_entities covers12MS, and tagged diagnostic_active_monsters is not a general census. "
+                "Use native Look beyond that radius and actual saved/body/owner evidence. "
+                "Native-generated Mi-go and ordinary horde work remain separate facts, not prerequisites invented for unrelated human work.")
         scenario["steps"] = [copy.deepcopy(template_scenario["steps"][0]), *audits, live_step]
         # Saved-start selection uses this explicit existing continuation route
         # and clears automatic reentry after resolving it. Keep every audit in
@@ -39786,6 +39873,14 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
             "steps": copy.deepcopy([*audits, live_step])}
         for step in scenario["post_relaunch"]["steps"]:
             step["label"] += "_saved_start"
+            if origin_omt is not None and step["kind"] == "audit_saved_bandit_live_world_state":
+                # Local native mapgen may add home residents, and the same
+                # active cohort may advance from outbound to rally/approach.
+                # Keep its physical-body, active count, operation/target and
+                # complete report/claim guards; fresh roster/phase are not
+                # valid assertions about this later native continuation.
+                step.pop("required_member_count", None)
+                step.pop("required_active_hostile_operation_phase", None)
         scenario["proof_route"] = {"precondition": [s["label"] for s in scenario["steps"][:-1]],
                                    **{k: [live_step["label"]] for k in ("production_behavior", "artifact_verdict", "terminal_persistence", "disallowed_shortcuts")}}
         scenario["evidence_contract"]["failure_rule"] = "Every party physical-body/report/claim preflight aborts on failure. Setup count is not native active work; qualify actual Mi-go and preserve real refusals, casualties and missing measurements."
@@ -39822,7 +39917,12 @@ def prepare_mixed_load_sample(profile: str, declaration_path: Path, party_count:
             "bootstrap": prepared, "declaration": str(declaration_path),
             "geometry": {"player_omt": player_omt, "rally_omt": cohorts[0]["rally_omt"],
                          "home_anchors": [site["anchor"] for site in sites],
-                         "migo_seed_omt": [144, 39, 0],
+                         "migo_seed_omt": [player_omt[0] + 2, player_omt[1], 0],
+                         "origin_omt_requested": list(origin_omt) if origin_omt is not None else None,
+                         "home_members_within48ms": [member["npc_id"] for site in final["sites"]
+                             for member in site["members"]
+                             if abs(member["home_spawn_tile"][0] - player_ms[0]) <= 48 and
+                                abs(member["home_spawn_tile"][1] - player_ms[1]) <= 48],
                          "native_routes": "Not solved by setup; native owner must qualify physical travel"},
             "declaration_sha256": path_sha256(declaration_path),
             "config_sha256": path_sha256(destination / "config" / "options.json"),
@@ -45408,6 +45508,8 @@ def build_parser() -> argparse.ArgumentParser:
     mixed_p.add_argument("--declaration-output", required=True, type=Path, help="New task-local ordinary declaration path.")
     mixed_p.add_argument("--parties", type=int, default=10, help="Requested independent human parties, not measured capacity.")
     mixed_p.add_argument("--member-pattern", default="4,2,3", help="Repeating per-party member counts, each 2-4.")
+    mixed_p.add_argument("--origin-omt", nargs=3, type=int, default=None, metavar=("X", "Y", "Z"),
+                         help="Optional fresh initial ground origin in this maintained parent; real separated homes remain within40OMT. Never a continuation relocation.")
 
     scenarios_p = subparsers.add_parser("list-scenarios", help="List packaged live-probe scenario contracts.")
     scenarios_p.add_argument("--profile", default="", help="Ignored today; reserved for future per-profile scenario filtering.")
@@ -45602,7 +45704,8 @@ def main() -> int:
             pattern = [int(value) for value in args.member_pattern.split(",")]
         except ValueError:
             parser.error("--member-pattern must contain comma-separated integers")
-        result = prepare_mixed_load_sample(args.profile, args.declaration_output, args.parties, pattern)
+        result = prepare_mixed_load_sample(args.profile, args.declaration_output, args.parties, pattern,
+                                           origin_omt=args.origin_omt)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     if args.command == "list-scenarios":
