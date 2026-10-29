@@ -33157,6 +33157,51 @@ def list_fixtures(profile: str) -> List[Dict[str, Any]]:
     return fixtures
 
 
+def catalogue_fixture_opportunity(fixture: str, profile: str, cache: Dict[Tuple[str, str], Dict[str, Any]]) -> Dict[str, Any]:
+    """Read the exact reusable fixture payload, without installing it or applying transforms."""
+    from catalogue_view import saved_camp_opportunity
+    key = (profile, fixture)
+    if key in cache:
+        return copy.deepcopy(cache[key])
+    unknown = {"status": "unknown", "reason": "fixture or saved payload unavailable", "sites": []}
+    if not fixture or not profile or Path(fixture).name != fixture or Path(profile).name != profile:
+        return unknown
+    try:
+        resolved = resolve_fixture_payload(fixture, profile)
+        root = fixtures_root().resolve()
+        source = resolved["save_src"].resolve()
+        if not source.is_relative_to(root):
+            result = {**unknown, "reason": "fixture payload outside fixture root"}
+        elif any(transform.get("kind") != "representative_human_source_geometry"
+                 for transform in resolved.get("save_transforms", [])):
+            result = {**unknown, "reason": "fixture transforms may change saved camp state"}
+        else:
+            worlds = [p for p in source.iterdir() if p.is_dir()]
+            if len(worlds) != 1:
+                result = {**unknown, "reason": "fixture world missing or ambiguous"}
+            elif not worlds[0].resolve().is_relative_to(source):
+                result = {**unknown, "reason": "fixture world outside payload"}
+            else:
+                chain = resolved.get("source_chain", [])
+                manifests = [profile_fixture_root(p) / name / "manifest.json" for p, name in chain]
+                def signatures() -> List[str]:
+                    return [hashlib.sha256(path.read_bytes()).hexdigest() for path in manifests]
+                before = signatures()
+                result = saved_camp_opportunity(worlds[0] / "dimension_data.gsav")
+                again = resolve_fixture_payload(fixture, profile)
+                after = signatures()
+                if before != after or again.get("source_chain") != chain or again.get("save_transforms") != resolved.get("save_transforms"):
+                    result = {**unknown, "reason": "fixture source chain changed during inspection"}
+                elif result.get("status") == "known":
+                    result["fixture_source_chain"] = [
+                        {"profile": p, "fixture": name, "manifest_path": str(path.resolve()), "sha256": digest}
+                        for (p, name), path, digest in zip(chain, manifests, before)]
+    except (OSError, ValueError, TypeError, KeyError, SystemExit):
+        result = unknown
+    cache[key] = result
+    return copy.deepcopy(result)
+
+
 def scenario_path(name: str) -> Path:
     return scenarios_root() / f"{name}.json"
 
@@ -45758,6 +45803,9 @@ def main() -> int:
             fixtures = [fixture for fixture in fixtures if any(
                 item["kind"] == ("diagnostic" if args.diagnostic else "maintained")
                 for item in fixture["declared_variants"])]
+        opportunity_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for fixture in fixtures:
+            fixture["opportunity"] = catalogue_fixture_opportunity(fixture["fixture"], profile, opportunity_cache)
         print(json.dumps({"profile": profile, "fixtures": fixtures}, indent=2, ensure_ascii=False))
         return 0
     if args.command == "capture-fixture":
@@ -45799,6 +45847,10 @@ def main() -> int:
                      (args.scenario_id and args.scenario_id in (item['name'], item['scenario_id'])) or
                      (args.search and args.search.casefold() in (item['name'] + ' ' + item['description']).casefold())]
         attach_registry_status(requested, args.registry)
+        opportunity_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for row in requested:
+            footing = row["fixture"]
+            row["opportunity"] = catalogue_fixture_opportunity(footing["name"], footing["profile"], opportunity_cache)
         if args.scenario_id:
             matches = [item for item in scenarios if args.scenario_id in (item["name"], item["scenario_id"])]
             if len(matches) != 1:

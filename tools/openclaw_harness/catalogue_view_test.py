@@ -14,7 +14,7 @@ import cockpit
 import scenario_registry_store as store
 import scenario_registry_cli as cli
 import startup_harness
-from catalogue_view import family_view
+from catalogue_view import family_view, saved_camp_opportunity
 import scenario_registry_cli_test as cli_fixtures
 
 HERE = Path(__file__).resolve().parent
@@ -72,6 +72,91 @@ class CatalogueViewTest(unittest.TestCase):
             path.write_text(json.dumps({'name': 'bad', 'catalogue': {'kind': 'maintained'}}))
             with self.assertRaises(SystemExit):
                 startup_harness.load_scenario('bad', source_path=path)
+
+    def test_saved_camp_opportunity_reports_source_and_earliest_expiry(self):
+        site = {'schema_version': 12, 'site_id': 'camp:one',
+                'camp_decision': {'schema_version': 2, 'state': 'report_awaiting_assessment'},
+                'next_routine_dispatch_eligible_minutes': 9100,
+                'current_scout_report': {'schema_version': 5, 'revision': 1, 'source_generation': 2,
+                    'source_activity_id': 'a', 'application_key': 'k', 'delivered_minutes': 8000,
+                    'assessment': {'schema_version': 3, 'threshold_class': 'site_signal',
+                                   'site_signal_observed_minutes': 7900, 'site_signal_source_id': 'fire'}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'dimension_data.gsav'
+            def write():
+                path.write_text('# version 39\n' + json.dumps({'overmapbuffer': {'bandit_live_world': {'schema_version': 7, 'sites': [site]}}}))
+            write()
+            result = saved_camp_opportunity(path)
+            self.assertEqual(result['status'], 'known')
+            self.assertEqual(result['sites'][0]['decision'], 'report_awaiting_assessment')
+            self.assertEqual(result['sites'][0]['routine_next_eligible_minutes']['value'], 9100)
+            self.assertEqual(result['sites'][0]['report']['authorization_expiry_minutes'], 10780)
+            first = result['source']['sha256']
+            site['current_scout_report']['assessment']['site_signal_source_id'] = ''
+            write()
+            second = saved_camp_opportunity(path)
+            self.assertIsNone(second['sites'][0]['report']['authorization_expiry_minutes'])
+            self.assertNotEqual(first, second['source']['sha256'])
+            site['camp_decision']['schema_version'] = 99
+            write()
+            self.assertIsNone(saved_camp_opportunity(path)['sites'][0]['decision'])
+            path.write_text('# version 999\n{}')
+            self.assertEqual(saved_camp_opportunity(path)['status'], 'unknown')
+            path.unlink()
+            self.assertEqual(saved_camp_opportunity(path)['status'], 'unknown')
+
+    def test_saved_camp_changed_during_read_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'dimension_data.gsav'
+            path.write_text('# version 39\n' + json.dumps({'overmapbuffer': {'bandit_live_world': {'schema_version': 7, 'sites': []}}}))
+            import os
+            original = os.fstat
+            count = 0
+            def changed(fd):
+                nonlocal count
+                count += 1
+                result = original(fd)
+                if count == 2:
+                    return SimpleNamespace(st_dev=result.st_dev, st_ino=result.st_ino, st_size=result.st_size,
+                                           st_mtime_ns=result.st_mtime_ns + 1, st_ctime_ns=result.st_ctime_ns)
+                return result
+            with mock.patch('catalogue_view.os.fstat', side_effect=changed):
+                self.assertEqual(saved_camp_opportunity(path)['reason'], 'saved dimension changed during inspection')
+
+    def test_real_saved_fixture_projection_and_exact_scenario(self):
+        name = 'bandit.r009_m092_persisted_opportunity_dispatch_mcw'
+        scenario = self.cli('list-scenarios', '--scenario-id', name)['scenarios'][0]
+        self.assertEqual(scenario['opportunity']['status'], 'known')
+        self.assertTrue(scenario['opportunity']['source']['sha256'])
+        fixtures = self.cli('list-fixtures', '--profile', 'r009-m091', '--all')['fixtures']
+        fixture = next(row for row in fixtures if row['fixture'] == 'r009_m092_m091_fullsave_current_schema')
+        self.assertEqual(fixture['opportunity'], scenario['opportunity'])
+        self.assertEqual(fixture['opportunity']['sites'][0]['decision'], 'idle')
+        self.assertEqual(fixture['qualification'], 'unknown')
+
+    def test_changed_fixture_chain_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = root / 'p' / 'f'
+            world = fixture / 'save' / 'world'
+            world.mkdir(parents=True)
+            (fixture / 'manifest.json').write_text('{}')
+            (world / 'dimension_data.gsav').write_text('# version 39\n' + json.dumps(
+                {'overmapbuffer': {'bandit_live_world': {'schema_version': 7, 'sites': []}}}))
+            resolved = {'save_src': fixture / 'save', 'source_chain': [('p', 'f')], 'save_transforms': []}
+            changed = dict(resolved, save_transforms=[{'kind': 'player_items'}])
+            with mock.patch.object(startup_harness, 'fixtures_root', return_value=root), \
+                 mock.patch.object(startup_harness, 'resolve_fixture_payload', side_effect=[resolved, changed]):
+                result = startup_harness.catalogue_fixture_opportunity('f', 'p', {})
+            self.assertEqual(result['status'], 'unknown')
+            self.assertEqual(result['reason'], 'fixture source chain changed during inspection')
+
+    def test_transform_and_missing_fixture_are_unknown(self):
+        human = self.cli('list-scenarios', '--family', 'human-signal-journeys')['families'][0]['variants'][0]
+        self.assertEqual(human['opportunity']['status'], 'unknown')
+        self.assertIn('transforms', human['opportunity']['reason'])
+        missing = self.cli('list-scenarios', '--scenario-id', 'cannibal.r_caol_first_smoke_048_rural_a_preharm_safety_continue_20260930')['scenarios'][0]
+        self.assertEqual(missing['opportunity']['status'], 'unknown')
 
     def test_metadata_change_does_not_authorize_old_token(self):
         with tempfile.TemporaryDirectory() as tmp:

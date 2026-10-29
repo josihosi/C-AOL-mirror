@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 import json
 import sqlite3
+import os
 from pathlib import Path
 
 
@@ -129,8 +130,84 @@ def family_view(rows: Sequence[Mapping[str, Any]], *, kind: str = 'maintained',
         entry = families[key]
         entry['variant_count'] = len(entry['variants'])
         if not family and not query:
-            entry['variants'] = [{**{k: row[k] for k in ('scenario_id', 'name', 'variant')},
+            entry['variants'] = [{**{k: row[k] for k in ('scenario_id', 'name', 'variant', 'opportunity') if k in row},
                                   'qualification': 'unknown', 'registry_status': row.get('registry_status',
                                   {'lifecycle': 'unknown', 'token_eligible': None, 'availability': 'Registry status unknown'})} for row in entry['variants']]
         result.append(entry)
     return {'families': result, 'other_scenarios': others}
+
+
+def saved_camp_opportunity(dimension: Path) -> dict[str, Any]:
+    """Inspect one fixture's saved facts; never interpret them as dispatch authority."""
+    import hashlib
+    unknown = {'status': 'unknown', 'reason': 'saved camp facts unavailable', 'sites': []}
+    try:
+        with dimension.open('rb') as stream:
+            before = stream.fileno()
+            stat_before = os.fstat(before)
+            if stat_before.st_size > 64 * 1024 * 1024:
+                return {**unknown, 'reason': 'saved dimension exceeds inspection limit'}
+            raw = stream.read()
+            stat_after = os.fstat(before)
+        current = dimension.stat()
+        identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        if identity(stat_before) != identity(stat_after) or identity(stat_after) != identity(current):
+            return {**unknown, 'reason': 'saved dimension changed during inspection'}
+        header, sep, body = raw.partition(b'\n')
+        if not sep or header != b'# version 39':
+            return {**unknown, 'reason': 'unsupported dimension header'}
+        payload = json.loads(body)
+        world = payload['overmapbuffer']['bandit_live_world']
+        sites = world['sites']
+        if world.get('schema_version') != 7:
+            return {**unknown, 'reason': 'unsupported saved camp world schema'}
+        if not isinstance(sites, list):
+            raise ValueError('sites is not a list')
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return unknown
+
+    def minute(value: Any) -> bool:
+        return type(value) is int and -1 <= value <= 2147483647
+
+    output = []
+    for site in sites:
+        if not isinstance(site, dict):
+            return {**unknown, 'reason': 'malformed site'}
+        decision = site.get('camp_decision')
+        report = site.get('current_scout_report')
+        state = decision.get('state') if isinstance(decision, dict) else None
+        routine = site.get('next_routine_dispatch_eligible_minutes')
+        result = {'site_id': site.get('site_id'), 'decision': None,
+                  'routine_next_eligible_minutes': None, 'report': {'status': 'unknown'}}
+        if not isinstance(result['site_id'], str) or not result['site_id']:
+            return {**unknown, 'reason': 'site identity unavailable'}
+        if site.get('schema_version') == 12 and isinstance(decision, dict) and decision.get('schema_version') == 2 and state in {
+                'idle', 'report_awaiting_assessment', 'preparing_follow_on', 'cooldown', 'abandoned'}:
+            result['decision'] = state
+        if site.get('schema_version') == 12 and minute(routine):
+            result['routine_next_eligible_minutes'] = {'status': 'unset' if routine == -1 else 'known',
+                                                        'value': None if routine == -1 else routine}
+        if site.get('schema_version') == 12 and isinstance(report, dict) and report.get('schema_version') == 5:
+            rev, gen = report.get('revision'), report.get('source_generation')
+            activity, key = report.get('source_activity_id'), report.get('application_key')
+            if type(rev) is int and type(gen) is int and isinstance(activity, str) and isinstance(key, str):
+                if rev == 0 and gen == 0 and not activity and not key:
+                    result['report'] = {'status': 'absent'}
+                elif rev > 0 and gen > 0 and activity and key:
+                    delivered = report.get('delivered_minutes')
+                    assessment = report.get('assessment')
+                    report_out = {'status': 'present', 'delivered_minutes': delivered if minute(delivered) and delivered >= 0 else None,
+                                  'authorization_expiry_minutes': None}
+                    if minute(delivered) and delivered >= 0 and isinstance(assessment, dict) and assessment.get('schema_version') in (1, 2, 3):
+                        threshold = assessment.get('threshold_class')
+                        if threshold in ('none', 'normal', 'burned'):
+                            report_out['authorization_expiry_minutes'] = min(2147483647, delivered + 48 * 60)
+                        elif threshold == 'site_signal':
+                            observed, source = assessment.get('site_signal_observed_minutes'), assessment.get('site_signal_source_id')
+                            if minute(observed) and 0 <= observed <= delivered and isinstance(source, str) and source:
+                                report_out['authorization_expiry_minutes'] = min(2147483647, observed + 48 * 60, delivered + 48 * 60)
+                    result['report'] = report_out
+        output.append(result)
+    return {'status': 'known', 'source': {'path': str(dimension.resolve()), 'sha256': hashlib.sha256(raw).hexdigest()},
+            'basis': 'Saved source facts only; not current live state, qualification, motivation or guaranteed dispatch.',
+            'time_unit': 'minutes since cataclysm start; expiry is exclusive', 'sites': output}
