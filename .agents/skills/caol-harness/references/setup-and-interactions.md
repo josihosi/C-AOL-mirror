@@ -91,6 +91,24 @@ survival friction. This is not a global mutation allowlist. Preserve each measur
   actor creation, casualties among tested actors or in required encounters, mission edits or
   forced outcomes. Unrelated interruptions follow [incidental danger](#incidental-danger).
 
+### Typed avatar OMT teleport
+
+From the current native World owner, preview an absolute overmap-tile destination before moving:
+
+```sh
+python3 tools/openclaw_harness/play_cli.py --session SESSION act world.debug_omt_preview --omt X Y Z
+python3 tools/openclaw_harness/play_cli.py --session SESSION act world.debug_omt_teleport --omt X Y Z --preview-request-id PREVIEW_REQUEST_ID
+```
+
+Use the `preview_request_id` from the native preview receipt. X and Y are signed absolute OMTs;
+Z is the absolute level. The preview identifies the source and native landing map square and
+reports existing tile terrain, furniture and floor when available. Unknown is not safe footing;
+floor alone does not prove support from below, absence of hazards or NPC safety. The destination,
+source position, game turn and available tile facts are checked again before movement; a stale
+preview requires a fresh one. The ordinary native placement may create missing terrain only on
+the later teleport action. Check the resulting World position and actual situation. This is an
+avatar-only setup intervention, with no walked-travel or NPC-behavior credit.
+
 For comparisons, keep setup fixed or label the mutation difference as the tested variable. Keep
 existing viewer evidence; do not silently remove traits from its saved continuation and call it
 the same setup. Mutation verification is a start/change check, not a per-wait ritual.

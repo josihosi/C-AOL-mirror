@@ -18,6 +18,46 @@ CLI = Path(__file__).with_name("play_cli.py")
 
 
 class PlayerCliTest(unittest.TestCase):
+    def test_typed_omt_preview_and_move_require_preview_identity(self):
+        self.observe()
+        self.cli("act", "world.debug_omt_teleport", "--omt", "-4", "7", "-1", ok=False)
+        self.assertFalse(any(x.get("request", {}).get("action_id") == "world.debug_omt_teleport" for x in self.requests()))
+        self.cli("act", "world.debug_omt_preview", "--omt", "-4", "7", "-1")
+        sent = next(x["request"] for x in self.requests() if x.get("request", {}).get("action_id") == "world.debug_omt_preview")
+        self.assertEqual(sent["parameters"], {"x_omt": "-4", "y_omt": "7", "z": "-1"})
+
+    def test_typed_omt_move_preserves_exact_preview_and_negative_coordinates(self):
+        self.observe()
+        self.cli("act", "world.debug_omt_teleport", "--omt", "-181", "3", "2",
+                 "--preview-request-id", "native-preview-42")
+        sent = next(x["request"] for x in self.requests() if x.get("request", {}).get("action_id") == "world.debug_omt_teleport")
+        self.assertEqual(sent["parameters"], {"x_omt": "-181", "y_omt": "3", "z": "2",
+                                                "preview_request_id": "native-preview-42"})
+
+    def test_omt_preview_is_visible_in_ordinary_cli_output(self):
+        self.observe()
+        pending = self.cli("act", "world.debug_omt_preview", "--omt", "145", "149", "1")
+        preview = json.dumps({"preview_request_id": "native-preview", "terrain": "t_floor",
+                              "floor": "floor_present", "support_and_hazards": "unknown"})
+        self.reply(pending["request_id"], {"ok": True, "receipt": {"native_receipt": {
+            "action_id": "world.debug_omt_preview", "accepted": True, "outcome": preview}},
+            "observation": {"observation_id": "frame-2", "run_id": "run-a", "surface": {
+                "kind": "world", "facts": {}, "actions": [{"id": "world.wait", "enabled": True}]}}})
+        result = subprocess.run([sys.executable, str(CLI), "--session", str(self.session), "collect"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("t_floor", result.stdout)
+        self.assertIn("native-preview", result.stdout)
+        self.assertIn("unknown", result.stdout)
+
+    def test_omt_options_cannot_be_repurposed_or_duplicate_parameters(self):
+        self.observe()
+        for args in (("world.wait", "--omt", "1", "2", "0"),
+                     ("world.debug_omt_preview", "--omt", "1", "2", "0", "--param", "x_omt=8"),
+                     ("world.debug_omt_preview", "--omt", "1", "2", "0", "--preview-request-id", "old")):
+            self.cli("act", *args, ok=False)
+        self.assertFalse(any(x.get("request", {}).get("action") == "game.act" for x in self.requests()))
+
     def test_ordinary_stopped_wait_reports_gameplay_without_receipt_dump(self):
         operation = {"schema":"caol-native-operation-v1", "kind":"wait", "state":"cancelled",
             "run_id":"run-a", "binding_id":"bound-a", "completed_progress_game_minutes":0,

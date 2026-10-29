@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -75,6 +77,8 @@
 #include "magic_enchantment.h"
 #include "magic_type.h"
 #include "map.h"
+#include "mapbuffer.h"
+#include "submap.h"
 #include "map_iterator.h"
 #include "mapdata.h"
 #include "mapsharing.h"
@@ -1990,6 +1994,110 @@ static std::string openclaw_harness_semantic_step_frame(
         return {};
     }
     return frame_id;
+}
+
+// A preview is bound to one run, exact source/target, turn and existing tile facts.
+// It never asks mapgen to supply missing destination geometry.
+struct harness_omt_preview {
+    std::string request_id;
+    std::string run_id;
+    tripoint_abs_omt target;
+    tripoint_abs_ms source;
+    tripoint_abs_ms landing;
+    int turn = 0;
+    std::string terrain;
+    std::string furniture;
+    std::string floor;
+};
+static std::optional<harness_omt_preview> harness_last_omt_preview;
+
+static std::optional<int> harness_omt_integer( const std::map<std::string, std::string> &params,
+        const char *key )
+{
+    const auto found = params.find( key );
+    if( found == params.end() || found->second.empty() ) {
+        return std::nullopt;
+    }
+    int value = 0;
+    const char *const begin = found->second.data();
+    const char *const end = begin + found->second.size();
+    const auto parsed = std::from_chars( begin, end, value );
+    if( parsed.ec != std::errc() || parsed.ptr != end ) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+static std::optional<harness_omt_preview> harness_read_omt_preview(
+    const semantic_action_request &request, const avatar &player )
+{
+    const auto x = harness_omt_integer( request.parameters, "x_omt" );
+    const auto y = harness_omt_integer( request.parameters, "y_omt" );
+    const auto z = harness_omt_integer( request.parameters, "z" );
+    if( !x || !y || !z || *z < -OVERMAP_DEPTH || *z > OVERMAP_HEIGHT ) {
+        return std::nullopt;
+    }
+    // Preserve game::place_player_overmap's native bubble offset, but prevent
+    // overflow both in its submap conversion and in the resulting map square.
+    const tripoint_bub_ms bubble = player.pos_bub();
+    const int64_t lx = int64_t( *x ) * 2 * SEEX - HALF_MAPSIZE_X + bubble.x();
+    const int64_t ly = int64_t( *y ) * 2 * SEEY - HALF_MAPSIZE_Y + bubble.y();
+    const int64_t lo = std::numeric_limits<int>::min() + 1024LL;
+    const int64_t hi = std::numeric_limits<int>::max() - 1024LL;
+    if( lx < lo || lx > hi || ly < lo || ly > hi ) {
+        return std::nullopt;
+    }
+    const tripoint_abs_omt target( *x, *y, *z );
+    const tripoint_abs_ms landing( static_cast<int>( lx ), static_cast<int>( ly ), *z );
+    // The legacy helper preserves an offset that can otherwise land in an
+    // adjacent OMT; never silently present that as the requested destination.
+    if( project_to<coords::omt>( landing ) != target ) {
+        return std::nullopt;
+    }
+    harness_omt_preview result;
+    result.request_id = request.request_id;
+    result.run_id = request.run_id;
+    result.target = target;
+    result.source = player.pos_abs();
+    result.landing = landing;
+    result.turn = to_turns<int>( calendar::turn - calendar::turn_zero );
+    result.floor = "unknown";
+    tripoint_abs_sm sm_pos;
+    point_sm_ms offset;
+    std::tie( sm_pos, offset ) = project_remain<coords::sm>( landing );
+    mapbuffer::existing_submap_reader reader( MAPBUFFER );
+    const submap *const sm = reader.lookup( sm_pos );
+    if( sm ) {
+        const ter_id ter = sm->get_ter( offset );
+        const furn_id furn = sm->get_furn( offset );
+        result.terrain = ter.id().str();
+        result.furniture = furn.id().str();
+        const bool no_floor = ter.obj().has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
+                              furn.obj().has_flag( ter_furn_flag::TFLAG_NO_FLOOR ) ||
+                              ter.obj().has_flag( ter_furn_flag::TFLAG_NO_FLOOR_WATER ) ||
+                              furn.obj().has_flag( ter_furn_flag::TFLAG_NO_FLOOR_WATER );
+        result.floor = no_floor ? "no_floor_support_unknown" : "floor_present";
+    }
+    return result;
+}
+
+static std::string harness_omt_preview_json( const harness_omt_preview &preview )
+{
+    std::ostringstream stream;
+    JsonOut out( stream );
+    out.start_object();
+    out.member( "schema", "caol-omt-avatar-preview-v1" );
+    out.member( "preview_request_id", preview.request_id );
+    out.member( "source_absolute_ms", std::vector<int>{ preview.source.x(), preview.source.y(), preview.source.z() } );
+    out.member( "target_absolute_omt", std::vector<int>{ preview.target.x(), preview.target.y(), preview.target.z() } );
+    out.member( "landing_absolute_ms", std::vector<int>{ preview.landing.x(), preview.landing.y(), preview.landing.z() } );
+    out.member( "terrain", preview.terrain.empty() ? "unknown" : preview.terrain );
+    out.member( "furniture", preview.furniture.empty() ? "unknown" : preview.furniture );
+    out.member( "floor", preview.floor );
+    out.member( "support_and_hazards", "unknown; preview is not a safety guarantee" );
+    out.member( "gameplay_credit", false );
+    out.end_object();
+    return stream.str();
 }
 
 std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
@@ -5706,6 +5814,8 @@ bool game::handle_action()
     // handoff single-use even if transport retries the completed request.
     npc_ptr semantic_basecamp_mission_actor;
     bool semantic_debug_creature_killed = false;
+    bool semantic_omt_previewed = false;
+    std::optional<tripoint_abs_omt> semantic_omt_destination;
     bool semantic_fixture_lamp_turned_off = false;
     bool semantic_fixture_lamp_bashed = false;
     std::optional<tripoint_bub_ms> semantic_fixture_lamp_position;
@@ -5791,6 +5901,8 @@ bool game::handle_action()
                                                       string_format( _( "Open Base Missions with %s" ), candidate->name ), true } );
                     }
                 }
+                semantic_actions.push_back( { "world.debug_omt_preview", "", "Preview absolute OMT avatar landing", true } );
+                semantic_actions.push_back( { "world.debug_omt_teleport", "", "Teleport avatar to previewed absolute OMT", true } );
                 const auto debug_actions = harness_creature_debug_actions( player_character );
                 semantic_actions.insert( semantic_actions.end(), debug_actions.begin(), debug_actions.end() );
                 const auto inspection_actions = npc_inspection_world_actions( player_character );
@@ -5805,6 +5917,7 @@ bool game::handle_action()
                                               [ &act, &semantic_manager, &semantic_npc_inspection_actor,
                                                       &semantic_camp_npc_inspection_actor,
                                                       &semantic_basecamp_mission_actor, &semantic_debug_creature_killed,
+                                                      &semantic_omt_previewed, &semantic_omt_destination,
                                                       &semantic_fixture_lamp_turned_off, &semantic_fixture_lamp_position,
                                                       &semantic_fixture_lamp_bashed,
                       basecamp_mission_candidates ]( const semantic_action_request & request ) {
@@ -5850,6 +5963,39 @@ bool game::handle_action()
                         act = ACTION_LOOK;
                     } else if( request.action_id == "world.examine" ) {
                         act = ACTION_EXAMINE;
+                    } else if( request.action_id == "world.debug_omt_preview" ) {
+                        if( request.parameters.size() != 3 ) {
+                            return semantic_action_dispatch_result{ false, "invalid_omt_parameters", "" };
+                        }
+                        auto preview = harness_read_omt_preview( request, get_avatar() );
+                        if( !preview ) {
+                            return semantic_action_dispatch_result{ false, "invalid_or_misaligned_omt_destination", "" };
+                        }
+                        harness_last_omt_preview = *preview;
+                        semantic_omt_previewed = true;
+                        return semantic_action_dispatch_result{ true, "", "", false, false,
+                                                                harness_omt_preview_json( *preview ) };
+                    } else if( request.action_id == "world.debug_omt_teleport" ) {
+                        const auto token = request.parameters.find( "preview_request_id" );
+                        if( request.parameters.size() != 4 || token == request.parameters.end() ||
+                            !harness_last_omt_preview || token->second != harness_last_omt_preview->request_id ||
+                            request.run_id != harness_last_omt_preview->run_id ) {
+                            return semantic_action_dispatch_result{ false, "missing_or_stale_omt_preview", "" };
+                        }
+                        const auto current = harness_read_omt_preview( request, get_avatar() );
+                        const auto &old = *harness_last_omt_preview;
+                        if( !current || current->target != old.target || current->source != old.source ||
+                            current->landing != old.landing || current->turn != old.turn ||
+                            current->terrain != old.terrain || current->furniture != old.furniture ||
+                            current->floor != old.floor ) {
+                            harness_last_omt_preview.reset();
+                            return semantic_action_dispatch_result{ false, "stale_omt_preview", "" };
+                        }
+                        semantic_omt_destination = old.target;
+                        harness_last_omt_preview.reset();
+                        semantic_manager.withhold_parent_authority_until_recreated( request.surface_id );
+                        return semantic_action_dispatch_result{ true, "", "", false, true,
+                                                                "avatar_debug_teleport_no_gameplay_credit" };
                     } else if( request.action_id == "world.debug_kill_creature" ) {
                         const std::string result = harness_debug_kill_creature( get_avatar(),
                                                    request.stable_id.value_or( "" ), request.request_id, request.run_id );
@@ -6030,6 +6176,13 @@ bool game::handle_action()
         openclaw_harness_semantic_step_receipt(
             openclaw_harness_pending_world_frame, "world.wait", true );
         openclaw_harness_pending_world_frame.clear();
+    }
+    if( semantic_omt_previewed ) {
+        return false;
+    }
+    if( semantic_omt_destination ) {
+        g->place_player_overmap( *semantic_omt_destination );
+        return false;
     }
     if( semantic_debug_creature_killed ) {
         return false;

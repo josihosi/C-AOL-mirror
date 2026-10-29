@@ -1193,6 +1193,9 @@ def main(argv=None):
     act.add_argument("action")
     act.add_argument("--target", help="Exact advertised stable ID")
     act.add_argument("--param", action="append", default=[], metavar="KEY=VALUE")
+    act.add_argument("--omt", nargs=3, type=int, metavar=("X", "Y", "Z"),
+                     help="Absolute overmap-tile destination, not map squares or overmap regions")
+    act.add_argument("--preview-request-id", help="Exact prior OMT preview request for the same destination")
     trade = commands.add_parser("trade", help="Toggle current Trade item letters together; never commit")
     trade.add_argument("letters", help="Exact current native letters, e.g. ab; invalid/duplicate letters reject the whole batch")
     repeat = commands.add_parser("repeat", help="Repeat native pause or autoattack by exact receipt count")
@@ -1367,6 +1370,19 @@ def main(argv=None):
                         if not separator or not key or key in params:
                             raise ValueError("parameters_need_unique_KEY=VALUE")
                         params[key] = value
+                    omt_actions = {"world.debug_omt_preview", "world.debug_omt_teleport"}
+                    if args.action in omt_actions:
+                        if args.omt is None or args.target is not None or params:
+                            raise ValueError("omt_action_requires_only_typed_omt_and_preview_id")
+                        if args.action == "world.debug_omt_teleport" and not args.preview_request_id:
+                            raise ValueError("omt_teleport_requires_preview_request_id")
+                        if args.action == "world.debug_omt_preview" and args.preview_request_id:
+                            raise ValueError("omt_preview_does_not_accept_preview_request_id")
+                        params = dict(zip(("x_omt", "y_omt", "z"), map(str, args.omt)))
+                        if args.preview_request_id:
+                            params["preview_request_id"] = args.preview_request_id
+                    elif args.omt is not None or args.preview_request_id:
+                        raise ValueError("omt_arguments_require_omt_action")
                     result = client.act(args.action, args.target, params, args.wait_seconds)
                 elif args.command == "trade":
                     result = client.trade_letters(args.letters, args.wait_seconds)
