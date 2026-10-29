@@ -70,6 +70,14 @@ an enabled source zone and an adjacent player. It established persistence and ex
 not automatic refuelling. Later fuel failures still require their actual cause to be resolved;
 stock, distance/loading and tending activity are competing premises, not preset diagnoses.
 
+In the prepared R050 geometry, a player adjacent to the ground brazier waited with the enabled
+kindling zone reachable. The fire stayed lit for 60 minutes; during the second 30 minutes, five
+native fuel-drop messages matched the splinter stock falling from 999 to 994. After walking the
+actual ladder to the roof, the player lit the roof brazier and waited nearby: it stayed lit for
+30 minutes, with five splinters transferred from that same ground-level stock. This is a verified
+recipe for that saved geometry, not a universal cross-level reach or fuel-duration guarantee. The
+roof fire later went out during longer waits; check it and its supply again before relying on it.
+
 Keep the useful sampling window proportional to the question. Source persistence, signal sampling,
 reception and dispatch are separate observations. Once a stable source is sampled and the receiver
 repeatedly refuses the same range or sightline, investigate that reason instead of repeating fuel
