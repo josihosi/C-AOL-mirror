@@ -1999,6 +1999,7 @@ std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
         { "world.pause", "pause" },
         { "world.autoattack", "autoattack" },
         { "world.wait", "wait" },
+        { "world.craft", "craft" },
         { "world.quicksave", "quicksave" },
         { "world.save_quit", "save" },
         { "world.inventory", "inventory" },
@@ -5821,6 +5822,8 @@ bool game::handle_action()
                         // Keep the native action branch authoritative; this merely
                         // selects ACTION_WAIT before handle_action dispatches it.
                         act = ACTION_WAIT;
+                    } else if( request.action_id == "world.craft" ) {
+                        act = ACTION_CRAFT;
                     } else if( request.action_id == "world.quicksave" ) {
                         // Use the ordinary save-without-quit action so a native
                         // semantic setup session can persist its own changes

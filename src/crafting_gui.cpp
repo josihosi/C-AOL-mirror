@@ -31,6 +31,7 @@
 #include "crafting_enums.h"
 #include "crafting_gui_helpers.h"
 #include "display.h"
+#include "do_turn.h"
 #include "flag.h"
 #include "flat_set.h"
 #include "flexbuffer_json.h"
@@ -55,6 +56,7 @@
 #include "recipe.h"
 #include "recipe_dictionary.h"
 #include "requirements.h"
+#include "semantic_surface.h"
 #include "skill.h"
 #include "string_formatter.h"
 #include "text.h"
@@ -409,11 +411,58 @@ class crafting_ui_impl : public cataimgui::window
             return manual_batch;
         }
 
+        void semantic_filter( const std::string &text, input_context &ctxt ) {
+            filterstring = trim( text );
+            recalc = true;
+            keepline = false;
+            process_action( "TIMEOUT", ctxt );
+        }
+        std::vector<semantic_action_descriptor> semantic_actions() const {
+            std::vector<semantic_action_descriptor> actions = {
+                { "craft.filter", "", _( "Filter recipes" ), true },
+                { "craft.cancel", "", _( "Cancel" ), true }
+            };
+            // Require a filter before publishing potentially thousands of entries.
+            if( !filterstring.empty() ) {
+                const size_t visible = std::min( current.size(), semantic_result_limit );
+                for( size_t i = 0; i < visible; ++i ) {
+                    const recipe *entry = current[i];
+                    actions.push_back( { "craft.choose", semantic_recipe_id( i ),
+                                         entry->result_name( true ), true } );
+                }
+            }
+            return actions;
+        }
+        bool semantic_select( const std::string &id ) {
+            if( filterstring.empty() ) {
+                return false;
+            }
+            const size_t visible = std::min( current.size(), semantic_result_limit );
+            for( size_t i = 0; i < visible; ++i ) {
+                if( semantic_recipe_id( i ) == id ) {
+                    line = static_cast<int>( i );
+                    return true;
+                }
+            }
+            return false;
+        }
+        std::map<std::string, std::string> semantic_payload() const {
+            return { { "filter", filterstring }, { "recipe_count", std::to_string( current.size() ) },
+                { "visible_count", std::to_string( filterstring.empty() ? 0 :
+                                                   std::min( current.size(), semantic_result_limit ) ) },
+                { "filter_required", filterstring.empty() ? "true" : "false" },
+                { "refine_required", current.size() > semantic_result_limit ? "true" : "false" } };
+        }
+
     protected:
         void draw_controls() override;
         cataimgui::bounds get_bounds() override;
 
     private:
+        static constexpr size_t semantic_result_limit = 40;
+        std::string semantic_recipe_id( size_t index ) const {
+            return std::to_string( index ) + ":" + current[index]->ident().str();
+        }
         // --- Core state ---
         Character *crafter;
         const recipe *chosen = nullptr;
@@ -2872,9 +2921,74 @@ std::pair<Character *, const recipe *> select_crafter_and_crafting_recipe( int &
     ctxt.set_timeout( 10 );
     impl.set_input_context( &ctxt );
 
+    semantic_surface_manager *manager = active_semantic_surface_manager();
+    std::optional<semantic_surface_scope> semantic_scope;
+    bool semantic_confirm_pending = false;
+    if( manager != nullptr ) {
+        impl.process_action( "TIMEOUT", ctxt );
+        semantic_scope.emplace( *manager, "crafting", _( "Crafting" ), impl.semantic_payload(),
+                                impl.semantic_actions(),
+        [&]( const semantic_action_request &request ) {
+            if( request.action_id == "craft.cancel" ) {
+                impl.process_action( "QUIT", ctxt );
+                if( impl.is_done() ) {
+                    return semantic_action_dispatch_result{ true, "", "", true };
+                }
+                impl.process_action( "TIMEOUT", ctxt );
+            } else if( request.action_id == "craft.filter" ) {
+                const auto text = request.parameters.find( "text" );
+                if( text == request.parameters.end() ) {
+                    return semantic_action_dispatch_result{ false, "invalid_parameters", "" };
+                }
+                if( trim( text->second ) == impl.semantic_payload().at( "filter" ) ) {
+                    return semantic_action_dispatch_result{ false, "unchanged_filter", "" };
+                }
+                impl.semantic_filter( text->second, ctxt );
+            } else if( request.action_id == "craft.choose" ) {
+                if( !request.stable_id || !impl.semantic_select( *request.stable_id ) ) {
+                    return semantic_action_dispatch_result{ false, "invalid_stable_id", "" };
+                }
+                // Receipt the queued intent before native confirmation can open a
+                // blocking child prompt. The native checks still own the result.
+                semantic_confirm_pending = true;
+                return semantic_action_dispatch_result{ true, "", "", false, false,
+                                                        "native_confirmation_queued" };
+            } else {
+                return semantic_action_dispatch_result{ false, "unadvertised_action", "" };
+            }
+            if( !semantic_scope->publish( impl.semantic_payload(), impl.semantic_actions() ) ) {
+                return semantic_action_dispatch_result{ false, "owner_not_topmost", "" };
+            }
+            return semantic_action_dispatch_result{ true, "", manager->top()->frame_id };
+        } );
+    }
+
     while( !impl.is_done() ) {
         ui_manager::redraw_invalidated();
-        std::string action = ctxt.handle_input();
+        // A transport wake can consume the request inside handle_input(), as
+        // well as through consume_request() below. Run the queued native
+        // confirmation after either path has returned to this owner loop.
+        if( semantic_confirm_pending ) {
+            semantic_confirm_pending = false;
+            impl.process_action( "CONFIRM", ctxt );
+            if( !impl.is_done() ) {
+                impl.process_action( "TIMEOUT", ctxt );
+                semantic_scope->publish( impl.semantic_payload(), impl.semantic_actions() );
+            }
+            continue;
+        }
+        const bool pending = semantic_scope && manager->has_pending_request();
+        if( semantic_scope && semantic_scope->consume_request() ) {
+            continue;
+        }
+        if( pending ) {
+            continue;
+        }
+        std::string action;
+        {
+            openclaw_harness_native_input_scope input_phase;
+            action = ctxt.handle_input();
+        }
         if( !impl.get_is_open() ) {
             return { nullptr, nullptr };
         }
