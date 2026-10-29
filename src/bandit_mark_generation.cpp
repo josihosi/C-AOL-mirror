@@ -899,11 +899,12 @@ smoke_projection adapt_smoke_packet( const smoke_packet &packet )
                                             packet.height_bias - packet.spread_bias -
                                             projection.weather_effect.range_penalty +
                                             projection.weather_effect.vertical_range_bonus );
-    projection.projected_range_omt = std::clamp( 4 + packet.source_strength * 2 + packet.persistence * 2
-                                     +
-                                     packet.height_bias - packet.spread_bias -
-                                     projection.weather_effect.range_penalty +
-                                     projection.weather_effect.vertical_range_bonus, 1, 15 );
+    const int smoke_envelope = 4 + packet.source_strength * 2 + packet.persistence * 2 +
+                               packet.height_bias - packet.spread_bias -
+                               projection.weather_effect.range_penalty +
+                               projection.weather_effect.vertical_range_bonus;
+    projection.projected_range_omt = std::clamp( ( std::max( 0, smoke_envelope ) * 30 + 12 ) / 13,
+                                     1, 30 );
     projection.viable = projection.visibility_score > 0 &&
                         packet.observed_range_omt <= projection.projected_range_omt;
     projection.weather_effect.verdict = smoke_weather_verdict( packet.weather, projection.viable );
@@ -982,8 +983,12 @@ light_projection adapt_light_packet( const light_packet &packet )
             projection.concealment.vertical_penalty;
     projection.visibility_score = std::max( 0, packet.source_strength + packet.persistence +
                                             source_bonus + projection.concealment.visibility_modifier );
-    projection.projected_range_omt = std::clamp( 1 + packet.source_strength * 2 + packet.persistence +
-                                     source_bonus + projection.concealment.visibility_modifier, 0, 30 );
+    const int light_envelope = std::max( 0, 1 + packet.source_strength * 2 + packet.persistence +
+                                        source_bonus + projection.concealment.visibility_modifier );
+    const bool elevated_exposed = projection.concealment.elevated_exposure_extended;
+    projection.projected_range_omt = elevated_exposed ?
+                                     std::min( 40, ( light_envelope * 4 + 2 ) / 3 ) :
+                                     std::min( 30, light_envelope );
     projection.viable = projection.visibility_score > 0 &&
                         packet.observed_range_omt <= projection.projected_range_omt;
     projection.concealment.verdict = light_concealment_verdict( packet, projection.concealment,
@@ -1088,7 +1093,10 @@ local_field_signal_projection adapt_local_field_signal_reading(
     light.envelope_id = reading.envelope_id;
     light.region_id = reading.region_id;
     light.observed_range_omt = reading.observed_range_omt;
-    light.source_strength = std::clamp( strongest_light_intensity, 1, 3 );
+    // Existing ground and indoor light calibration remains unchanged. Only a
+    // physically elevated, exposed source can use the stronger lamp bands.
+    light.source_strength = std::clamp( strongest_light_intensity, 1,
+                                        reading.elevated_roof_exposed ? 12 : 3 );
     light.persistence = strongest_light_intensity >= 2 ? 1 : 0;
     const bool exposed_to_sky = reading.outside || reading.elevated_roof_exposed ||
                                 reading.side_leakage >= 2;

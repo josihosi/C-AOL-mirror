@@ -45,6 +45,9 @@ struct loaded_z_source_index;
 }
 namespace live_light
 {
+// Current physical potential of this exact fire, without emitting a signal.
+// A missing observation is not evidence that a prior episode ended.
+std::optional<bool> tended_fire_conspicuous( const tripoint_abs_ms &source );
 struct callbacks {
     std::function<void()> reconcile_riders;
     std::function<void()> age_rider_memory;

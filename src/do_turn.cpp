@@ -11591,6 +11591,19 @@ std::string live_bandit_source_mark_id( const std::string &kind, const tripoint_
 
 int live_bandit_light_intensity_from_luminance( const float luminance )
 {
+    // Native flashlight definitions include 300-luminance and 450-luminance
+    // powered lamps. Preserve stronger bands for exposed roof sources, while
+    // field fire intensity remains on its native 1..3 scale. The 100 band
+    // provides an intermediate step between ordinary light and those lamps.
+    if( luminance >= 450.0f ) {
+        return 12;
+    }
+    if( luminance >= 300.0f ) {
+        return 10;
+    }
+    if( luminance >= 100.0f ) {
+        return 6;
+    }
     if( luminance >= 25.0f ) {
         return 3;
     }
@@ -12488,6 +12501,24 @@ int signal_live_zombie_riders_from_light_observations(
             if( peer.source_omt.z() != signal.source_omt.z() || distance > 1 ) {
                 continue;
             }
+            if( signal.light_projection.packet.exposure ==
+                bandit_mark_generation::light_exposure_band::contained ||
+                peer.light_projection.packet.exposure ==
+                bandit_mark_generation::light_exposure_band::contained ) {
+                continue;
+            }
+            // Proximity in overmap coordinates does not establish a shared
+            // opening: two lamps on opposite sides of a wall stay separate.
+            if( !signal.source_ms || !peer.source_ms ) {
+                continue;
+            }
+            map &here = get_map();
+            const tripoint_bub_ms first = here.get_bub( *signal.source_ms );
+            const tripoint_bub_ms second = here.get_bub( *peer.source_ms );
+            if( !here.inbounds( first ) || !here.inbounds( second ) ||
+                !here.sees( first, second, rl_dist( first, second ) ) ) {
+                continue;
+            }
             used_signal[peer_index] = true;
             aggregate_sources++;
             aggregate_horde_signal_power += peer.horde_signal_power;
@@ -12498,8 +12529,9 @@ int signal_live_zombie_riders_from_light_observations(
             aggregate_projection.packet.id += "_cluster";
             aggregate_projection.visibility_score = std::clamp(
                     aggregate_projection.visibility_score + nearby_light_bonus, 0, 60 );
+            const int cluster_cap = aggregate_projection.concealment.elevated_exposure_extended ? 40 : 30;
             aggregate_projection.projected_range_omt = std::clamp(
-                        aggregate_projection.projected_range_omt + nearby_light_bonus, 0, 30 );
+                        aggregate_projection.projected_range_omt + nearby_light_bonus, 0, cluster_cap );
             aggregate_projection.review_summary += "; nearby camp-light cluster sources=" +
                                                    std::to_string( aggregate_sources );
             aggregate_projection.signal.notes.push_back( "nearby camp-light cluster sources=" +
@@ -15095,6 +15127,50 @@ live_bandit_elevated_recovery_orders recover_live_bandit_local_elevated_watches(
 }
 
 } // namespace
+
+std::optional<bool> live_light::tended_fire_conspicuous( const tripoint_abs_ms &source )
+{
+    map &here = get_map();
+    const tripoint_bub_ms p = here.get_bub( source );
+    if( !here.inbounds( p ) ||
+        !MAPBUFFER.lookup_submap_cached( project_to<coords::sm>( source ) ) ||
+        here.ter( p ) == ter_str_id::NULL_ID() ) {
+        return std::nullopt;
+    }
+    const int fire = here.get_field_intensity( p, fd_fire );
+    if( fire <= 0 ) {
+        return false;
+    }
+    const physical_light::escape escape = physical_light::evaluate_escape( here, p );
+    bandit_mark_generation::local_field_signal_reading reading;
+    reading.fire_intensity = fire;
+    reading.smoke_intensity = here.get_field_intensity( p, fd_smoke );
+    reading.outside = escape.exposed_to_sky;
+    reading.side_leakage = escape.side_leakage;
+    reading.elevated_roof_exposed = escape.elevated_exposed;
+    reading.smoke_weather = live_bandit_smoke_weather_band();
+    reading.light_time = live_bandit_light_time_band();
+    reading.light_weather = live_bandit_light_weather_band();
+    const auto projection = bandit_mark_generation::adapt_local_field_signal_reading( reading );
+    // Match the production sampler's selected-source projection, including
+    // fire-derived smoke potential. An upper smoke field has a separate ID
+    // and cannot be attributed to this fire by position alone.
+    const auto support = physical_light::evaluate_smoke_support( here, p );
+    const bool smoke_candidate = projection.has_smoke_packet && projection.smoke.viable &&
+                                 projection.smoke.projected_range_omt > 3;
+    const bool smoke = smoke_candidate && support.position.has_value();
+    const bool light = projection.has_light_packet && projection.light.viable &&
+                       projection.light.projected_range_omt > 3 &&
+                       projection.light.packet.exposure != bandit_mark_generation::light_exposure_band::contained;
+    if( smoke || light ) {
+        return true;
+    }
+    if( smoke_candidate && ( support.reason == "source_geometry_unavailable" ||
+                             support.reason == "roof_geometry_unavailable" ) ) {
+        return std::nullopt;
+    }
+    return false;
+}
 
 namespace
 {
@@ -21879,6 +21955,17 @@ void process_avatar_activity_turn( avatar &u )
     std::optional<semantic_surface_manager_session> semantic_session;
     if( active_semantic_surface_manager() == nullptr && openclaw_harness_semantic_session_active() ) {
         semantic_session.emplace( openclaw_harness_semantic_surface_manager() );
+    }
+    // The initial activity turn can run immediately after the action that
+    // starts it, before the ordinary distraction loop. Offer this warning
+    // before any work or fuel movement on that turn as well.
+    if( u.activity ) {
+        const auto distractions = u.activity.get_distractions();
+        const auto warning = distractions.find( distraction_type::tended_fire );
+        if( warning != distractions.end() &&
+            g->cancel_activity_or_ignore_query( warning->first, warning->second ) ) {
+            return;
+        }
     }
     u.activity.do_turn( u );
 }

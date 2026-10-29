@@ -4417,35 +4417,71 @@ int get_auto_consume_moves( Character &you, const bool food )
 }
 
 // Try to add fuel to a fire. Return true if there is both fire and fuel; return false otherwise.
-bool try_fuel_fire( Character &you, std::optional<tripoint_bub_ms> fire_target )
+struct fire_tending_selection {
+    tripoint_bub_ms fire;
+    tripoint_bub_ms supply;
+};
+
+static std::optional<fire_tending_selection> select_fire_tending(
+    Character &you, std::optional<tripoint_bub_ms> fire_target = std::nullopt )
 {
     const tripoint_bub_ms pos = you.pos_bub();
-    std::vector<tripoint_bub_ms> adjacent = closest_points_first( pos, 1, PICKUP_RANGE );
-
+    const std::vector<tripoint_bub_ms> adjacent = closest_points_first( pos, 1, PICKUP_RANGE );
     map &here = get_map();
-    std::optional<tripoint_bub_ms> best_fire =
-        fire_target ? fire_target : find_best_fire( adjacent, pos );
-
-    if( !best_fire || !here.accessible_items( *best_fire ) ) {
-        return false;
+    const auto fire = fire_target ? fire_target : find_best_fire( adjacent, pos );
+    if( !fire || !here.accessible_items( *fire ) ) {
+        return std::nullopt;
     }
+    auto supply = find_refuel_spot_zone( pos, _fac_id( you ) );
+    if( !supply ) {
+        supply = find_refuel_spot_trap( adjacent, pos );
+    }
+    if( !supply ) {
+        return std::nullopt;
+    }
+    return fire_tending_selection{ *fire, *supply };
+}
 
-    std::optional<tripoint_bub_ms> refuel_spot = find_refuel_spot_zone( pos, _fac_id( you ) );
-    if( !refuel_spot ) {
-        refuel_spot = find_refuel_spot_trap( adjacent, pos );
-        if( !refuel_spot ) {
-            return false;
+std::optional<tripoint_abs_ms> selected_tended_fire( Character &you )
+{
+    map &here = get_map();
+    const auto selected = select_fire_tending( you );
+    if( !selected ) {
+        return std::nullopt;
+    }
+    const tripoint_bub_ms fire = selected->fire;
+    const bool contained = here.has_flag_furn( ter_furn_flag::TFLAG_FIRE_CONTAINER, fire );
+    for( item &it : here.i_at( selected->supply ) ) {
+        if( it.made_of( phase_id::LIQUID ) ) {
+            continue;
+        }
+        fire_data test( 1, contained );
+        it.simulate_burn( test );
+        if( test.fuel_produced > 0.0f ) {
+            return here.get_abs( fire );
         }
     }
+    return std::nullopt;
+}
+
+bool try_fuel_fire( Character &you, std::optional<tripoint_bub_ms> fire_target )
+{
+    map &here = get_map();
+    const auto selected = select_fire_tending( you, fire_target );
+    if( !selected ) {
+        return false;
+    }
+    const auto best_fire = selected->fire;
+    const auto refuel_spot = selected->supply;
 
     // Special case: fire containers allow burning logs, so use them as fuel if fire is contained
-    bool contained = here.has_flag_furn( ter_furn_flag::TFLAG_FIRE_CONTAINER, *best_fire );
+    bool contained = here.has_flag_furn( ter_furn_flag::TFLAG_FIRE_CONTAINER, best_fire );
     fire_data fd( 1, contained );
-    time_duration fire_age = here.get_field_age( *best_fire, fd_fire );
+    time_duration fire_age = here.get_field_age( best_fire, fd_fire );
 
     // Maybe TODO: - refueling in the rain could use more fuel
     // First, simulate expected burn per turn, to see if we need more fuel
-    map_stack fuel_on_fire = here.i_at( *best_fire );
+    map_stack fuel_on_fire = here.i_at( best_fire );
     for( item &it : fuel_on_fire ) {
         it.simulate_burn( fd );
         // Unconstrained fires grow below -50_minutes age
@@ -4454,7 +4490,7 @@ bool try_fuel_fire( Character &you, std::optional<tripoint_bub_ms> fire_target )
             // Too much - we don't want a firestorm!
             // Move item back to refueling pile
             // Note: move_item() handles messages (they're the generic "you drop x")
-            move_item( you, it, 0, *best_fire, *refuel_spot, std::nullopt );
+            move_item( you, it, 0, best_fire, refuel_spot, std::nullopt );
             return true;
         }
     }
@@ -4466,7 +4502,7 @@ bool try_fuel_fire( Character &you, std::optional<tripoint_bub_ms> fire_target )
     }
 
     // We need to move fuel from stash to fire
-    map_stack potential_fuel = here.i_at( *refuel_spot );
+    map_stack potential_fuel = here.i_at( refuel_spot );
     for( item &it : potential_fuel ) {
         if( it.made_of( phase_id::LIQUID ) ) {
             continue;
@@ -4477,7 +4513,7 @@ bool try_fuel_fire( Character &you, std::optional<tripoint_bub_ms> fire_target )
         if( fd.fuel_produced > last_fuel ) {
             int quantity = std::max( 1, std::min( it.charges, it.charges_per_volume( 250_ml ) ) );
             // Note: move_item() handles messages (they're the generic "you drop x")
-            move_item( you, it, quantity, *refuel_spot, *best_fire, std::nullopt );
+            move_item( you, it, quantity, refuel_spot, best_fire, std::nullopt );
             return true;
         }
     }

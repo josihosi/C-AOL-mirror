@@ -1617,6 +1617,9 @@ void avatar::serialize( JsonOut &json ) const
 void avatar::store( JsonOut &json ) const
 {
     Character::store( json );
+    if( acknowledged_tended_fire ) {
+        json.member( "acknowledged_tended_fire", *acknowledged_tended_fire );
+    }
 
     // player-specific specifics
     if( prof != nullptr ) {
@@ -1710,6 +1713,12 @@ void avatar::deserialize( const JsonObject &data )
 void avatar::load( const JsonObject &data )
 {
     Character::load( data );
+    acknowledged_tended_fire.reset();
+    tripoint_abs_ms fire;
+    if( data.read( "acknowledged_tended_fire", fire ) ) {
+        acknowledged_tended_fire = fire;
+    }
+    tended_fire_warning_candidate.reset();
 
     std::string prof_ident = "(null)";
     if( data.read( "profession", prof_ident ) && string_id<profession>( prof_ident ).is_valid() ) {

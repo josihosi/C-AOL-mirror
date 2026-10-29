@@ -1684,6 +1684,9 @@ bool game::cancel_activity_or_ignore_query( const distraction_type type, const s
     openclaw_harness_trace_activity_query( "return", type, text, action );
 
     if( action == "YES" ) {
+        if( type == distraction_type::tended_fire ) {
+            u.tended_fire_warning_candidate.reset();
+        }
         u.cancel_activity();
         return true;
     }
@@ -1694,9 +1697,17 @@ bool game::cancel_activity_or_ignore_query( const distraction_type type, const s
         }
     }
     if( action == "MANAGER" ) {
+        if( type == distraction_type::tended_fire ) {
+            u.tended_fire_warning_candidate.reset();
+        }
         u.cancel_activity();
         get_distraction_manager().show();
         return true;
+    }
+
+    if( type == distraction_type::tended_fire && ( action == "NO" || action == "IGNORE" ) ) {
+        u.acknowledged_tended_fire = u.tended_fire_warning_candidate;
+        u.tended_fire_warning_candidate.reset();
     }
 
     ui_manager::redraw();

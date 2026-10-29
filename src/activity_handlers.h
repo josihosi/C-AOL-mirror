@@ -157,6 +157,9 @@ struct activity_reason_info {
 };
 
 int get_auto_consume_moves( Character &you, bool food );
+// The normal automatic tending target, only when an accessible source has
+// usable fuel. This query does not move fuel or advance the activity.
+std::optional<tripoint_abs_ms> selected_tended_fire( Character &you );
 bool try_fuel_fire( Character &you,
                     std::optional<tripoint_bub_ms> fire_target = std::nullopt );
 

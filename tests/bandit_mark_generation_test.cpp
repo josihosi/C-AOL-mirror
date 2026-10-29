@@ -108,7 +108,7 @@ TEST_CASE( "bandit_mark_generation_smoke_adapter_keeps_clear_plumes_long_range_b
         bandit_mark_generation::adapt_smoke_packet( fogged_packet );
 
     CHECK( clear_projection.viable );
-    CHECK( clear_projection.projected_range_omt == 15 );
+    CHECK( clear_projection.projected_range_omt == 30 );
     CHECK( clear_projection.signal.kind == "smoke" );
     CHECK( clear_projection.signal.confidence == 1 );
     CHECK( clear_projection.signal.bounty_add == 1 );
@@ -176,9 +176,16 @@ TEST_CASE( "bandit_mark_generation_smoke_weather_refinement_reports_fuzz_and_red
     CHECK( windy_projection.viable );
     CHECK( rainy_projection.viable );
     CHECK( portal_projection.viable );
-    CHECK( windy_projection.projected_range_omt < 15 );
-    CHECK( rainy_projection.projected_range_omt < 15 );
-    CHECK( portal_projection.projected_range_omt < 15 );
+    auto unsaturated_wind = windy_packet;
+    unsaturated_wind.source_strength = 2;
+    unsaturated_wind.persistence = 1;
+    const auto unsaturated_windy = bandit_mark_generation::adapt_smoke_packet( unsaturated_wind );
+    unsaturated_wind.weather = bandit_mark_generation::smoke_weather_band::clear;
+    const auto unsaturated_clear = bandit_mark_generation::adapt_smoke_packet( unsaturated_wind );
+    REQUIRE( unsaturated_windy.viable );
+    CHECK( unsaturated_windy.projected_range_omt < unsaturated_clear.projected_range_omt );
+    CHECK( rainy_projection.projected_range_omt < 30 );
+    CHECK( portal_projection.projected_range_omt < 30 );
     CHECK( windy_projection.signal.confidence == 0 );
     CHECK( rainy_projection.signal.confidence == 0 );
     CHECK( portal_projection.signal.confidence == 0 );
@@ -190,6 +197,47 @@ TEST_CASE( "bandit_mark_generation_smoke_weather_refinement_reports_fuzz_and_red
     CHECK( portal_projection.review_summary.find( "weather=portal_storm" ) != std::string::npos );
     CHECK( portal_projection.review_summary.find( "verdict=fuzzed" ) != std::string::npos );
     CHECK( portal_projection.review_summary.find( "origin_hint=corridorish" ) != std::string::npos );
+}
+
+TEST_CASE( "live field signal envelopes reach their calibrated boundaries", "[bandit][marks]" )
+{
+    using namespace bandit_mark_generation;
+    local_field_signal_reading reading;
+    reading.fire_intensity = 2;
+    reading.smoke_intensity = 1;
+    reading.outside = true;
+    reading.smoke_weather = smoke_weather_band::clear;
+    reading.observed_range_omt = 30;
+    auto projection = adapt_local_field_signal_reading( reading );
+    REQUIRE( projection.smoke.projected_range_omt == 30 );
+    CHECK( projection.smoke.viable );
+    reading.observed_range_omt = 31;
+    CHECK_FALSE( adapt_local_field_signal_reading( reading ).smoke.viable );
+    reading.observed_range_omt = 0;
+    reading.smoke_weather = smoke_weather_band::rain;
+    CHECK( adapt_local_field_signal_reading( reading ).smoke.projected_range_omt < 30 );
+
+    reading.fire_intensity = 0;
+    reading.smoke_intensity = 0;
+    reading.light_intensity = 12;
+    reading.elevated_roof_exposed = true;
+    reading.light_time = light_time_band::night;
+    reading.light_weather = light_weather_band::clear;
+    reading.observed_range_omt = 40;
+    projection = adapt_local_field_signal_reading( reading );
+    REQUIRE( projection.light.projected_range_omt == 40 );
+    CHECK( projection.light.viable );
+    reading.observed_range_omt = 41;
+    CHECK_FALSE( adapt_local_field_signal_reading( reading ).light.viable );
+    reading.elevated_roof_exposed = false;
+    const auto bright_ground = adapt_local_field_signal_reading( reading ).light;
+    CHECK( bright_ground.packet.source_strength == 3 );
+    reading.light_intensity = 3;
+    const auto ordinary_ground = adapt_local_field_signal_reading( reading ).light;
+    CHECK( bright_ground.projected_range_omt == ordinary_ground.projected_range_omt );
+    CHECK( bright_ground.projected_range_omt <= 30 );
+    reading.light_intensity = 1;
+    CHECK( adapt_local_field_signal_reading( reading ).light.projected_range_omt < 30 );
 }
 
 TEST_CASE( "bandit_mark_generation_light_adapter_keeps_night_leaks_long_range_but_bounded",
@@ -508,11 +556,12 @@ TEST_CASE( "bandit_mark_generation_local_field_adapter_accepts_non_fire_light_so
     REQUIRE( window_projection.has_light_packet );
     REQUIRE( window_projection.light.viable );
     CHECK( window_projection.light.packet.source_strength == 2 );
+    // Leakage level two represents an established path to an exterior tile.
     CHECK( window_projection.light.packet.exposure ==
-           bandit_mark_generation::light_exposure_band::screened );
+           bandit_mark_generation::light_exposure_band::exposed );
     CHECK( window_projection.light.signal.kind == "light" );
     CHECK( bandit_mark_generation::horde_signal_power_from_light_projection(
-               window_projection.light ) == 0 );
+               window_projection.light ) > 0 );
 
     bandit_mark_generation::local_field_signal_reading exposed_searchlight = window_light;
     exposed_searchlight.light_id = "road_searchlight";

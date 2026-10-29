@@ -169,7 +169,7 @@ constexpr int max_camp_supply_units = 256;
 constexpr int minutes_per_member_day = 24 * 60;
 constexpr int scout_return_cohesion_minutes = 2 * 60;
 constexpr int scout_missing_grace_minutes = 24 * 60;
-constexpr int base_structural_route_cost_omt = 18;
+constexpr int normal_structural_route_allowance_omt = 360;
 constexpr int local_pair_cohesion_radius_ms = 6;
 constexpr int local_pair_rendezvous_minutes = 10;
 constexpr int local_pair_reroute_cap = 2;
@@ -15023,12 +15023,9 @@ int hostile_camp_routine_unmet_need_days( const site_record &site,
 int hostile_camp_routine_route_budget_omt( const site_record &site,
         const int now_minutes )
 {
-    const int need = evaluate_hostile_camp_routine_dispatch( site, now_minutes, 0 ).need;
-    const int base = base_structural_route_cost_omt + ( 18 * need + 500 ) / 1000;
-    const long long budget = static_cast<long long>( base ) +
-                             18LL * hostile_camp_routine_unmet_need_days( site, now_minutes );
-    return static_cast<int>( std::min<long long>( budget,
-                             std::numeric_limits<int>::max() - 1 ) );
+    static_cast<void>( site );
+    static_cast<void>( now_minutes );
+    return normal_structural_route_allowance_omt;
 }
 
 std::string make_structural_bounty_lead_id( const std::string &site_id,

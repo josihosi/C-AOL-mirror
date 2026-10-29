@@ -6,6 +6,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -104,6 +105,10 @@ class avatar : public Character
             tripoint_abs_ms bbox_max;
         };
         zone_sort_viewport_t zone_sort_viewport; // NOLINT(cata-serialize)
+
+        // Acknowledgment belongs to the fire episode, not to an activity.
+        std::optional<tripoint_abs_ms> acknowledged_tended_fire;
+        std::optional<tripoint_abs_ms> tended_fire_warning_candidate; // NOLINT(cata-serialize)
 
         void store( JsonOut &json ) const;
         void load( const JsonObject &data );

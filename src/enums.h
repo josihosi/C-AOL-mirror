@@ -362,6 +362,7 @@ enum class distraction_type : int {
     oxygen,
     withdrawal,
     craft_step_complete,
+    tended_fire,
     last,
 };
 

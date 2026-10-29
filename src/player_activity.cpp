@@ -20,6 +20,7 @@
 #include "game.h"
 #include "item.h"
 #include "itype.h"
+#include "live_light.h"
 #include "messages.h"
 #include "rng.h"
 #include "skill.h"
@@ -530,6 +531,28 @@ std::map<distraction_type, std::string> player_activity::get_distractions() cons
         }
     }
     avatar &u = get_avatar();
+    if( *this && is_interruptible() && type->will_refuel_fires() ) {
+        // A missing or inaccessible supply does not prove the old fire went
+        // out. Only a current physical observation can rearm that episode.
+        if( u.acknowledged_tended_fire ) {
+            const auto old_state = live_light::tended_fire_conspicuous( *u.acknowledged_tended_fire );
+            if( old_state && !*old_state ) {
+                u.acknowledged_tended_fire.reset();
+            }
+        }
+        const auto selected = have_fire ? selected_tended_fire( u ) : std::nullopt;
+        if( selected && u.acknowledged_tended_fire && *selected != *u.acknowledged_tended_fire ) {
+            u.acknowledged_tended_fire.reset();
+        }
+        if( selected && !u.acknowledged_tended_fire ) {
+            const auto conspicuous = live_light::tended_fire_conspicuous( *selected );
+            if( conspicuous && *conspicuous ) {
+                u.tended_fire_warning_candidate = selected;
+                res.emplace( distraction_type::tended_fire,
+                             _( "The fire you’re tending may attract attention from far away." ) );
+            }
+        }
+    }
     if( uistate.distraction_hunger && !is_distraction_ignored( distraction_type::hunger ) ) {
         // Starvation value of 5300 equates to about 5kCal.
         if( calendar::once_every( 2_hours ) &&

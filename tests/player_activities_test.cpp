@@ -4,14 +4,17 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "activity_actor_definitions.h"
+#include "activity_handlers.h"
 #include "avatar.h"
 #include "calendar.h"
 #include "cata_catch.h"
+#include "cata_scope_helpers.h"
 #include "character.h"
 #include "coordinates.h"
 #include "enums.h"
@@ -22,6 +25,8 @@
 #include "item_group.h"
 #include "item_location.h"
 #include "itype.h"
+#include "json.h"
+#include "json_loader.h"
 #include "iuse.h"
 #include "iuse_actor.h"
 #include "map.h"
@@ -41,6 +46,7 @@
 #include "type_id.h"
 #include "units.h"
 #include "value_ptr.h"
+#include "weather.h"
 #include "weather_type.h"
 
 static const activity_id ACT_AIM( "ACT_AIM" );
@@ -2032,6 +2038,86 @@ static void update_cache( map &m )
     m.update_visibility_cache( 0 );
     m.invalidate_map_cache( 0 );
     m.build_map_cache( 0 );
+}
+
+TEST_CASE( "tended fire warning follows the selected fire and usable fuel", "[activity][fire]" )
+{
+    clear_avatar();
+    clear_map_with_vision( -1, 3, false );
+    set_time_to_day();
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    restore_on_out_of_scope restore_weather( get_weather().weather_id );
+    avatar &u = get_avatar();
+    map &here = get_map();
+    const tripoint_bub_ms fire = u.pos_bub() + tripoint( 1, 0, 0 );
+    const tripoint_bub_ms fuel = u.pos_bub() + tripoint( 0, 1, 0 );
+    here.add_field( fire, field_type_id( "fd_fire" ), 1 );
+    here.trap_set( fuel, trap_id( "tr_firewood_source" ) );
+    u.activity = player_activity( activity_id( "ACT_READ" ), 10000 );
+    u.acknowledged_tended_fire.reset();
+    CHECK_FALSE( selected_tended_fire( u ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    here.add_item_or_charges( fuel, item( itype_id( "glass_shard" ), calendar::turn ) );
+    CHECK_FALSE( selected_tended_fire( u ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    here.i_clear( fuel );
+    here.add_item_or_charges( fuel, item( itype_id( "2x4" ), calendar::turn ) );
+    REQUIRE( selected_tended_fire( u ) == here.get_abs( fire ) );
+    get_weather().weather_id = weather_type_id( "rain" );
+    // An unrelated upper smoke field has a separate source identity.
+    here.add_field( fire + tripoint( 0, 0, 1 ), field_type_id( "fd_smoke" ), 3 );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    get_weather().weather_id = WEATHER_CLEAR;
+    const auto distractions = u.activity.get_distractions();
+    REQUIRE( distractions.count( distraction_type::tended_fire ) == 1 );
+    CHECK( distractions.at( distraction_type::tended_fire ) ==
+           "The fire you’re tending may attract attention from far away." );
+    u.acknowledged_tended_fire = here.get_abs( fire );
+    u.activity = player_activity( activity_id( "ACT_CRAFT" ), 10000 );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    std::ostringstream snapshot;
+    JsonOut out( snapshot );
+    u.serialize( out );
+    u = avatar();
+    u.deserialize( json_loader::from_string( snapshot.str() ).get_object() );
+    CHECK( u.acknowledged_tended_fire == here.get_abs( fire ) );
+    u.activity = player_activity( activity_id( "ACT_CRAFT" ), 10000 );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    const tripoint_bub_ms other = u.pos_bub() + tripoint( -1, 0, 0 );
+    here.furn_set( other, furn_str_id( "f_brazier" ) );
+    here.add_field( other, field_type_id( "fd_fire" ), 1 );
+    here.add_field( other, field_type_id( "fd_smoke" ), 1 );
+    REQUIRE( selected_tended_fire( u ) == here.get_abs( other ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 1 );
+    CHECK( u.tended_fire_warning_candidate == here.get_abs( other ) );
+    u.acknowledged_tended_fire = here.get_abs( other );
+    here.remove_field( other, field_type_id( "fd_fire" ) );
+    here.remove_field( other, field_type_id( "fd_smoke" ) );
+    here.furn_set( other, furn_str_id::NULL_ID() );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 1 );
+    u.acknowledged_tended_fire = here.get_abs( fire );
+    const ter_id fire_terrain = here.ter( fire );
+    here.ter_set( fire, ter_str_id::NULL_ID() );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    CHECK( u.acknowledged_tended_fire == here.get_abs( fire ) );
+    here.ter_set( fire, fire_terrain );
+    here.remove_field( fire, field_type_id( "fd_fire" ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    CHECK_FALSE( u.acknowledged_tended_fire );
+    here.add_field( fire, field_type_id( "fd_fire" ), 1 );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 1 );
+    u.activity = player_activity( activity_id( "ACT_TRY_SLEEP" ), 10000 );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    // An unobservable old source is not a witnessed extinguishing event.
+    u.activity = player_activity( activity_id( "ACT_READ" ), 10000 );
+    here.remove_field( fire, field_type_id( "fd_fire" ) );
+    const tripoint_abs_ms unavailable = here.get_abs( u.pos_bub() + tripoint( 1000, 0, 0 ) );
+    u.acknowledged_tended_fire = unavailable;
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    CHECK( u.acknowledged_tended_fire == unavailable );
+    u.acknowledged_tended_fire.reset();
+    u.tended_fire_warning_candidate.reset();
+    here.trap_set( fuel, trap_id( "tr_null" ) );
 }
 
 TEST_CASE( "activity_interruption_by_distractions", "[activity][interruption]" )

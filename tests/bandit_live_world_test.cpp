@@ -2371,6 +2371,46 @@ TEST_CASE( "live structural signal request diagnostic binds watch footprint and 
            std::string::npos );
 }
 
+TEST_CASE( "live structural route admits useful long field journeys",
+           "[bandit_live_world][structural_bounty][expedition_reach]" )
+{
+    const int distance = GENERATE( 30, 40 );
+    CAPTURE( distance );
+    const tripoint_abs_omt anchor = get_player_character().pos_abs_omt() + tripoint( 20, 20, 0 );
+    const tripoint_abs_omt target = anchor + tripoint( distance, 0, 0 );
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> previous_terrain;
+    for( int y = -4; y <= 4; ++y ) {
+        for( int x = -4; x <= distance + 4; ++x ) {
+            const tripoint_abs_omt omt = anchor + tripoint( x, y, 0 );
+            previous_terrain.emplace_back( omt, overmap_buffer.ter( omt ) );
+            overmap_buffer.ter_set( omt, oter_id( "field" ) );
+        }
+    }
+    on_out_of_scope restore_terrain( [&previous_terrain]() {
+        for( const auto &entry : previous_terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+    } );
+
+    bandit_live_world::site_record site;
+    site.site_id = "test:thirty_omt_field_route";
+    site.anchor = anchor;
+    bandit_live_world::structural_outing_plan plan;
+    plan.target_omt = target;
+    plan.job = bandit_dry_run::job_template::scavenge;
+    int watch_budget = 8;
+    const auto read = live_bandit_structural_route_read_for_test( site, plan, watch_budget );
+    CAPTURE( read.summary, read.complete_route_cost );
+    REQUIRE( read.complete_route_cost > 18 );
+    CHECK( read.reachable );
+    CHECK( read.complete_route_cost == distance * 3 );
+
+    // The wider allowance does not make an impassable target traversable.
+    overmap_buffer.ter_set( target, oter_id( "river_center" ) );
+    const auto blocked = live_bandit_structural_route_read_for_test( site, plan, watch_budget );
+    CHECK_FALSE( blocked.reachable );
+}
+
 TEST_CASE( "live structural bounty watch route read uses overmap geography",
            "[bandit_live_world][structural_bounty]" )
 {
@@ -2626,7 +2666,7 @@ TEST_CASE( "native watch route attempts explain the actual first refusal without
               << " actual=" << payload << '\n';
     const auto diagnostic = json_loader::from_string( payload ).get_object();
     CHECK( diagnostic.get_string( "physical_target" ) == target.to_string() );
-    CHECK( diagnostic.get_int( "route_budget" ) == 18 );
+    CHECK( diagnostic.get_int( "route_budget" ) == 360 );
     CHECK( diagnostic.get_int( "source_cost" ) >= 0 );
     CHECK( diagnostic.get_int( "omitted" ) == 0 );
     const auto attempts = diagnostic.get_array( "attempts" );
@@ -13915,7 +13955,7 @@ TEST_CASE( "bandit_structural_outing_planner_selects_forest_and_town_jobs",
     REQUIRE( beyond_plan.valid );
     CHECK( beyond_plan.full_route_cost == 20 );
     CHECK_FALSE( bandit_live_world::refine_structural_outing_route(
-                     site, 100, { true, 20, 0, "target route exceeds supplied budget" },
+                     site, 100, { true, 361, 0, "target route exceeds supplied budget" },
                      beyond_plan ) );
 }
 
@@ -40948,7 +40988,7 @@ TEST_CASE( "hostile_camp_routed_dispatch_preserves_bounded_rejection_reasons",
         {   { false, -1, 0, "unreachable\nriver=deep\\ford" },
             "route_lookup_unreachable", "unreachable_river_deep_ford"
         },
-        {   { true, 37, 0, "route exceeds configured OMT cap" },
+        {   { true, 361, 0, "route exceeds configured OMT cap" },
             "complete_route_cost_over_cap", "route_exceeds_configured_OMT_cap"
         },
         {   { false, 4, 0, "no bounded safe watch geography", true },
@@ -41109,7 +41149,7 @@ TEST_CASE( "hungry_frontier_search_keeps_route_work_for_a_reachable_known_lead",
     CHECK( site.active_outing.target_omt == target );
 }
 
-TEST_CASE( "hungry_camp_route_budget_tracks_need_bands_and_unresolved_days",
+TEST_CASE( "camp_route_allowance_is_independent_of_need_and_unresolved_days",
            "[bandit][live_world][scheduler][frontier][save]" )
 {
     bandit_live_world::world_state world;
@@ -41120,9 +41160,9 @@ TEST_CASE( "hungry_camp_route_budget_tracks_need_bands_and_unresolved_days",
     REQUIRE( living > 0 );
     site.supply_last_update_minutes = 0;
     const std::vector<std::pair<int, int>> bands = {
-        { 7 * living, 18 }, { 7 * living - 1, 24 },
-        { 3 * living, 24 }, { 3 * living - 1, 30 },
-        { living, 30 }, { living - 1, 36 }
+        { 7 * living, 360 }, { 7 * living - 1, 360 },
+        { 3 * living, 360 }, { 3 * living - 1, 360 },
+        { living, 360 }, { living - 1, 360 }
     };
     for( const auto &band : bands ) {
         site.supply_units = band.first;
@@ -41132,15 +41172,16 @@ TEST_CASE( "hungry_camp_route_budget_tracks_need_bands_and_unresolved_days",
     site.supply_units = 0;
     REQUIRE( bandit_live_world::advance_camp_supply( site, 0 ) );
     CHECK( site.routine_unmet_need_since_minutes == 0 );
-    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( site, 1439 ) == 36 );
-    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( site, 1440 ) == 54 );
-    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( site, 2880 ) == 72 );
+    CHECK( bandit_live_world::hostile_camp_routine_unmet_need_days( site, 1439 ) == 0 );
+    CHECK( bandit_live_world::hostile_camp_routine_unmet_need_days( site, 1440 ) == 1 );
+    CHECK( bandit_live_world::hostile_camp_routine_unmet_need_days( site, 2880 ) == 2 );
+    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( site, 2880 ) == 360 );
     site.routine_no_candidate_streak = 3;
     site.next_routine_dispatch_eligible_minutes = 3000;
     world = round_trip_world( world );
     bandit_live_world::site_record &loaded = world.sites.front();
     CHECK( loaded.routine_unmet_need_since_minutes == 0 );
-    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( loaded, 2880 ) == 72 );
+    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( loaded, 2880 ) == 360 );
     std::string older_save = serialize_world( world );
     const std::size_t need_field = older_save.find( "\"routine_unmet_need_since_minutes\"" );
     REQUIRE( need_field != std::string::npos );
@@ -41154,19 +41195,19 @@ TEST_CASE( "hungry_camp_route_budget_tracks_need_bands_and_unresolved_days",
     REQUIRE( bandit_live_world::advance_camp_supply( migrated_older_save.sites.front(), 2880 ) );
     CHECK( migrated_older_save.sites.front().routine_unmet_need_since_minutes == 2880 );
     CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt(
-               migrated_older_save.sites.front(), 2880 ) == 36 );
+               migrated_older_save.sites.front(), 2880 ) == 360 );
     loaded.supply_units = 7 * living;
     loaded.supply_last_update_minutes = 2880;
     CHECK( bandit_live_world::advance_camp_supply( loaded, 2880 ) );
     CHECK( loaded.routine_unmet_need_since_minutes == -1 );
-    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( loaded, 2880 ) == 18 );
+    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( loaded, 2880 ) == 360 );
     loaded.supply_units = 3 * living - 1;
     CHECK( bandit_live_world::advance_camp_supply( loaded, 2880 ) );
     CHECK( loaded.routine_unmet_need_since_minutes == 2880 );
-    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( loaded, 2880 ) == 30 );
+    CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( loaded, 2880 ) == 360 );
 }
 
-TEST_CASE( "routine_route_refinement_accepts_each_inclusive_need_budget_boundary",
+TEST_CASE( "routine_route_refinement_accepts_the_inclusive_normal_allowance",
            "[bandit][live_world][scheduler][structural_bounty][route_budget]" )
 {
     for( const int expected_budget : {
@@ -41190,18 +41231,17 @@ TEST_CASE( "routine_route_refinement_accepts_each_inclusive_need_budget_boundary
             site.intelligence_map.find_lead( bandit_live_world::make_structural_bounty_lead_id(
                     site.site_id, target, "forest" ) );
         REQUIRE( lead != nullptr );
-        CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( site, 0 ) ==
-               expected_budget );
+        CHECK( bandit_live_world::hostile_camp_routine_route_budget_omt( site, 0 ) == 360 );
         const bandit_live_world::structural_outing_plan plan =
             bandit_live_world::plan_structural_bounty_outing( site, *lead, 0 );
         REQUIRE( plan.valid );
         CHECK( plan.full_route_cost == expected_budget );
         bandit_live_world::structural_outing_plan at_limit = plan;
         CHECK( bandit_live_world::refine_structural_outing_route(
-                   site, 0, { true, expected_budget, 0, "at limit" }, at_limit ) );
+                   site, 0, { true, 360, 0, "at limit" }, at_limit ) );
         bandit_live_world::structural_outing_plan over_limit = plan;
         CHECK_FALSE( bandit_live_world::refine_structural_outing_route(
-                         site, 0, { true, expected_budget + 1, 0, "over limit" }, over_limit ) );
+                         site, 0, { true, 361, 0, "over limit" }, over_limit ) );
     }
 }
 
@@ -41510,9 +41550,11 @@ TEST_CASE( "hostile_camp_urgent_sound_signal_uses_retained_score_floor",
     CHECK( site.active_outing.target_id == signal.lead_id );
 }
 
-TEST_CASE( "hostile_camp_generic_route_keeps_acquire_score_floor",
+TEST_CASE( "hostile_camp_generic_route_quality_affects_acquire_floor",
            "[bandit][live_world][scheduler][structural_bounty][routed_dispatch]" )
 {
+    const int route_cost = GENERATE( 14, 250 );
+    CAPTURE( route_cost );
     const auto terrain_lookup = []( const tripoint_abs_omt & ) -> std::optional<std::string> {
         return std::nullopt;
     };
@@ -41541,25 +41583,38 @@ TEST_CASE( "hostile_camp_generic_route_keeps_acquire_score_floor",
     lead.last_checked_minutes = now_minutes - 6 * 60;
     lead.last_scouted_minutes = now_minutes - 6 * 60;
     REQUIRE( bandit_live_world::upsert_camp_map_lead( site, lead ) );
-    // This case isolates the generic lead's acquire floor; frontier dispatch
-    // has its own due path and may outrank it when terrain memory is unknown.
+    // Isolate this generic lead: a short route earns enough information value
+    // to dispatch, while an expensive detour remains below the acquire floor.
     site.intelligence_map.frontier_last_resolved_minutes.assign( 8, now_minutes );
+
+    const auto *stored_lead = site.intelligence_map.find_lead( lead.lead_id );
+    REQUIRE( stored_lead != nullptr );
+    auto scored_plan = bandit_live_world::plan_structural_bounty_outing( site, *stored_lead,
+                       now_minutes );
+    REQUIRE( scored_plan.valid );
+    REQUIRE( bandit_live_world::refine_structural_outing_route(
+                 site, now_minutes, { true, route_cost, 300, "route within normal allowance" },
+                 scored_plan ) );
+    CAPTURE( scored_plan.final_score );
+    CHECK( scored_plan.final_score == ( route_cost == 14 ? 347 : 282 ) );
+    CHECK( bandit_live_world::hostile_camp_routine_score_eligible( scored_plan.final_score,
+           false ) == ( route_cost == 14 ) );
 
     int route_calls = 0;
     const bandit_live_world::structural_bounty_maintenance_result result =
         bandit_live_world::advance_structural_bounty_maintenance(
             world, now_minutes, 0, 1, terrain_lookup, threat_lookup,
-            [&route_calls]( const bandit_live_world::site_record &,
+            [&route_calls, route_cost]( const bandit_live_world::site_record &,
     const bandit_live_world::structural_outing_plan & ) {
         route_calls++;
-        return bandit_live_world::structural_route_read{ true, 14, 300,
-                "bounded generic route" };
+        return bandit_live_world::structural_route_read{ true, route_cost, 300,
+                "route within normal allowance" };
     } );
 
     CHECK( route_calls == 1 );
-    CHECK( result.dispatches_planned == 0 );
-    CHECK( result.dispatches_applied == 0 );
-    CHECK_FALSE( site.active_outing.is_active() );
+    CHECK( result.dispatches_planned == ( route_cost == 14 ? 1 : 0 ) );
+    CHECK( result.dispatches_applied == ( route_cost == 14 ? 1 : 0 ) );
+    CHECK( site.active_outing.is_active() == ( route_cost == 14 ) );
 }
 
 TEST_CASE( "authoritative_player_opportunity_is_not_starved_by_route_candidate_cap",
@@ -41800,7 +41855,7 @@ TEST_CASE( "retained_fresh_smoke_survives_cheap_trim_before_urgent_dispatch",
         const auto individual = plan_structural_bounty_outing( site, *site.intelligence_map.find_lead(
                                     smoke_id ), now );
         REQUIRE( individual.valid );
-        CHECK( individual.cheap_score == 245 );
+        CHECK( individual.cheap_score == 251 );
         const auto ordinary = plan_structural_bounty_outing_candidates( site, now );
         CHECK( ordinary.size() == 6 );
         CHECK( std::none_of( ordinary.begin(), ordinary.end(), [&smoke_id]( const auto & plan ) {
@@ -41981,7 +42036,7 @@ TEST_CASE( "bandit_live_world_scheduler_replay_and_frontier_due_state_are_determ
         bandit_live_world::site_record &site = world.sites.front();
         site.routine_activated_minutes = 0;
         site.intelligence_map.frontier_last_resolved_minutes.assign( 8, 0 );
-        const tripoint_abs_omt unreachable( site.anchor.x() + 100,
+        const tripoint_abs_omt unreachable( site.anchor.x() + 200,
                                             site.anchor.y(), site.anchor.z() );
         const bandit_live_world::structural_bounty_read read =
             bandit_live_world::classify_structural_bounty_terrain( "forest" );

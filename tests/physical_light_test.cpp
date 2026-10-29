@@ -30,6 +30,7 @@
 #include "mtype.h"
 #include "overmapbuffer.h"
 #include "overmap.h"
+#include "options_helpers.h"
 #include "path_info.h"
 #include "json_loader.h"
 #include "physical_light.h"
@@ -37,6 +38,7 @@
 #include "pocket_type.h"
 #include "vehicle.h"
 #include "veh_type.h"
+#include "weather_type.h"
 #include "worldfactory.h"
 
 namespace
@@ -1239,6 +1241,150 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
            first_abstract_lead.source_sample_id );
 }
 
+TEST_CASE( "production loaded strong fire emits the calibrated smoke envelope",
+           "[physical_light][smoke_first]" )
+{
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    const bandit_live_world::world_state previous_world =
+        overmap_buffer.global_state.bandit_live_world;
+    on_out_of_scope restore_world( [&]() {
+        overmap_buffer.global_state.bandit_live_world = previous_world;
+    } );
+    setup_dark_native_lightmap();
+    overmap_buffer.global_state.bandit_live_world.clear();
+    calendar::turn = calendar::turn_zero + 101_turns;
+    reset_live_light_sample_cache();
+    map &here = get_map();
+    const tripoint_bub_ms source = get_avatar().pos_bub();
+    const tripoint_abs_ms source_abs = here.get_abs( source );
+    here.add_field( source, field_type_id( "fd_fire" ), 2 );
+    here.add_field( source, field_type_id( "fd_smoke" ), 1 );
+    on_out_of_scope cleanup( [&]() {
+        here.remove_field( source, field_type_id( "fd_fire" ) );
+        here.remove_field( source, field_type_id( "fd_smoke" ) );
+        reset_live_light_sample_cache();
+    } );
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    run_live_light_delivery_for_test();
+    const auto &samples = live_light::samples_for_turn( calendar::turn );
+    const auto smoke = std::find_if( samples.begin(), samples.end(), [&]( const auto &sample ) {
+        return sample.mark.kind == "smoke" && sample.source_ms == source_abs;
+    } );
+    REQUIRE( smoke != samples.end() );
+    CHECK( smoke->range_cap_omt == 30 );
+    CHECK( smoke->smoke_observable_ms );
+}
+
+TEST_CASE( "production powered roof lamp emits the elevated light envelope",
+           "[physical_light][optics]" )
+{
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    const bandit_live_world::world_state previous_world =
+        overmap_buffer.global_state.bandit_live_world;
+    on_out_of_scope restore_world( [&]() {
+        overmap_buffer.global_state.bandit_live_world = previous_world;
+        reset_live_light_sample_cache();
+    } );
+    clear_avatar();
+    clear_map_with_vision( -1, 3, false );
+    map &here = get_map();
+    avatar &u = get_avatar();
+    const tripoint_bub_ms roof( u.pos_bub().x(), u.pos_bub().y(), 1 );
+    here.ter_set( roof, ter_str_id( "t_flat_roof" ) );
+    here.invalidate_map_cache( 1 );
+    here.build_map_cache( 1 );
+    u.setpos( here, roof, false );
+    item battery( itype_id( "light_battery_cell" ) );
+    battery.ammo_set( battery.ammo_default(), 1000 );
+    item lamp( itype_id( "diving_flashlight_small_hipower_on" ) );
+    lamp.put_in( battery, pocket_type::MAGAZINE_WELL );
+    here.add_item( roof, lamp );
+    on_out_of_scope cleanup( [&]() {
+        here.i_clear( roof );
+    } );
+    overmap_buffer.global_state.bandit_live_world.clear();
+    calendar::turn = calendar::turn_zero + 101_turns;
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    const auto &samples = live_light::samples_for_turn( calendar::turn );
+    const tripoint_abs_ms source = here.get_abs( roof );
+    const auto light = std::find_if( samples.begin(), samples.end(), [&]( const auto &sample ) {
+        return sample.has_light_projection && sample.source_ms == source;
+    } );
+    REQUIRE( light != samples.end() );
+    CHECK( light->light_projection.concealment.elevated_exposure_extended );
+    CHECK( light->range_cap_omt == 40 );
+}
+
+TEST_CASE( "production rider light clusters respect walls and source escape",
+           "[physical_light][rider_cluster]" )
+{
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    auto &memories = overmap_buffer.global_state.zombie_rider_light_memory;
+    const auto previous_memories = memories;
+    on_out_of_scope restore( [&]() {
+        memories = previous_memories;
+        reset_live_light_sample_cache();
+    } );
+    clear_avatar();
+    clear_map_with_vision( -1, 3, false );
+    map &here = get_map();
+    avatar &u = get_avatar();
+    const tripoint_bub_ms a = u.pos_bub();
+    const tripoint_bub_ms b = a + tripoint( 24, 0, 0 );
+    REQUIRE( here.inbounds( b ) );
+    REQUIRE( coords::project_to<coords::omt>( here.get_abs( a ) ) !=
+             coords::project_to<coords::omt>( here.get_abs( b ) ) );
+    here.add_field( a, field_type_id( "fd_fire" ), 3 );
+    here.add_field( b, field_type_id( "fd_fire" ), 3 );
+    calendar::turn = calendar::turn_zero + 101_turns;
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    u.setpos( here, b, false );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    memories.clear();
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( memories.size() == 1 );
+
+    here.ter_set( a + tripoint( 12, 0, 0 ), ter_str_id( "t_wall" ) );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    memories.clear();
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( memories.size() == 2 );
+
+    // Enclose both sources without an aperture; a roof alone would not
+    // establish containment if a nearby side path still escaped.
+    for( const tripoint_bub_ms source : { a, b } ) {
+        here.ter_set( source, ter_str_id( "t_floor" ) );
+        for( int x = -1; x <= 1; ++x ) {
+            for( int y = -1; y <= 1; ++y ) {
+                if( x != 0 || y != 0 ) {
+                    here.ter_set( source + tripoint( x, y, 0 ), ter_str_id( "t_wall" ) );
+                }
+                here.ter_set( source + tripoint( x, y, 1 ), ter_str_id( "t_flat_roof" ) );
+            }
+        }
+    }
+    for( int z = 0; z <= 1; ++z ) {
+        here.invalidate_map_cache( z );
+        here.build_map_cache( z );
+    }
+    CHECK_FALSE( physical_light::evaluate_escape( here, a ).exposed_to_sky );
+    CHECK_FALSE( physical_light::evaluate_escape( here, b ).exposed_to_sky );
+    CHECK( physical_light::evaluate_escape( here, a ).side_leakage == 0 );
+    CHECK( physical_light::evaluate_escape( here, b ).side_leakage == 0 );
+    memories.clear();
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( memories.empty() );
+}
+
 TEST_CASE( "physical_light_respects_depletion_and_movement", "[physical_light]" )
 {
     clear_avatar();
@@ -1605,6 +1751,26 @@ TEST_CASE( "physical_light_detects_each_escaped_source_without_terrain_recogniti
 
     // Clear glass attenuates but transmits; it is not equivalent to a curtain.
     CHECK( detected( 2, 0, true, true, { 1 } ).visible );
+}
+
+TEST_CASE( "physical light maximum requires an exposed clear route", "[physical_light][optics]" )
+{
+    physical_light::route route;
+    route.brightness_range_omt = 40;
+    route.distance_omt = 40;
+    route.vertical_offset = 1;
+    route.source_exposed = true;
+    route.vertical_sightline = true;
+    CHECK( physical_light::detect( route ).visible );
+    CHECK_FALSE( physical_light::detect( route ).recognizes_identity );
+    route.distance_omt = 41;
+    CHECK_FALSE( physical_light::detect( route ).visible );
+    route.distance_omt = 40;
+    route.terrain_see_costs = { 1 };
+    CHECK_FALSE( physical_light::detect( route ).visible );
+    route.terrain_see_costs.clear();
+    route.source_exposed = false;
+    CHECK_FALSE( physical_light::detect( route ).visible );
 }
 
 TEST_CASE( "physical_light_keeps_same_omt_escape_and_position_per_source",
