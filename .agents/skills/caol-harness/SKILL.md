@@ -25,6 +25,10 @@ from flexible setup using [scenario intent](references/playtest-suite.md#scenari
 
 Use a coherent initial save for a full journey and a compatible checkpoint for a focused question;
 a checkpoint does not prove skipped stages. Continue the same journey through ordinary save/reload.
+Prefer [Josef's prepared two-brazier templates](GAME-MANUAL.md#verified-save-templates) where
+compatible, preserving the chosen scenario's actors, camp, windows and route. A similarly named
+fixture is not necessarily that template. Rough distances are setup targets: 31 OMT is fine for a
+roughly 30-OMT journey. Use the actual distance to explain a range result, not to demand a restart.
 Reuse a compatible, qualified mixed-load continuation when its source, build, population and setup
 fit the question; additional load is not a replay and inactive actors do not prove active work.
 [Selection and launch](references/selection-and-launch.md) covers the distinctions.
@@ -68,6 +72,13 @@ survival, setup, recovery, saves and exit without per-step approval. The chapero
 and closeout; the coordinator owns priorities, capacity and lifecycle, and the mutator owns
 semantic working-contract changes unless delegated. Preserve original ownership and pending input;
 a worker return or timeout does not prove process exit.
+
+Keep the mutable chaperone brief current: the question, selected starting conditions, ownership,
+remaining work and links to current results. Replace superseded tactics and build claims there;
+retain historical evidence in its original result, not as competing instructions. Relay material
+corrections to the original player through the existing message route; do not rewrite sealed packets.
+Choose the observation that will distinguish the outcome before an irreversible transition—for
+example, the current return forecast before settlement—using existing evidence rather than a new log.
 
 ## Operate from current controls
 

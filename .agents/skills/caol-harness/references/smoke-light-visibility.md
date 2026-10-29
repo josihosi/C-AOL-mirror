@@ -1,7 +1,7 @@
 # Brazier smoke and light: strength, time and visibility
 
-Use this when a fire is burning but a camp has not noticed it. Values below describe the current
-production adapter inspected 2026-09-28; a source-bound run's measured packet is authoritative.
+Use this when preparing a sustained fire or when a camp has not noticed it. Use the bound
+product's actual source and receiver observations; historical calibration is not current reach.
 The standard indoor brazier is [3159,3449,0], roof brazier [3156,3447,1]. Verify the selected
 save's actual furniture, fuel, fire, windows and source positions.
 
@@ -16,7 +16,10 @@ native observer-to-source distance and measured reception cap; diagonal layout s
 not establish that a source is in range. For 30–40 OMT reach scenarios, use substantially greater
 separation that exercises the claimed reach, with actual signal strength, terrain and weather
 supporting the selected case. Ten OMTs is a floor, not sufficient coverage of long-range reach.
-Prepare15 OMT by default for ordinary full stories. Keep the emitter actually loaded/active
+For ordinary full stories, choose a believable separated setup; about15 OMT is a useful starting
+point, not a precision target. Josef explicitly accepts31 OMT for a roughly30-OMT journey. Do not
+reposition or restart solely to match a nominal number. Exact distances matter when interpreting
+a specific range/threshold result, and must be distinguished from the intended setup. Keep the emitter actually loaded/active
 when its sampling requires that; the remote party is the camp, not necessarily the fire.
 
 Closer setups remain explicitly labelled component, near-contact, combat or diagnostic controls;
@@ -48,20 +51,29 @@ existing input owner and preserve the first divergence and its reproduction cont
 
 ## Keep the source alive through the useful scan
 
-Before a sustained fire observation, check physical fuel quantity, the enabled SOURCE_FIREWOOD
-zone's actual coverage, reachable stock and the player's loaded position together. Ignite using
-current native controls and keep the source loaded through the useful sampling window; adjust
-stock, zone or tactical position when those conditions change. One paper or wood item is not a
-sustained-source recipe. Use an existing compatible stocked save when it already supplies the
-needed conditions, rather than rebuilding the scene.
+Prefer the compatible [prepared two-brazier template](../GAME-MANUAL.md#verified-save-templates)
+and its actual stock/zone geometry. Keep the source loaded and choose a practical tending position.
+The [fire and zone recipe](../GAME-MANUAL.md#normalized-firewood-zones-and-stock) owns source selection,
+reach/access and the activity condition: use a real refuelling-enabled activity such as `ACT_WAIT`
+when automatic tending is intended. A cancelled wait, nearby avatar or enabled zone alone does not
+prove replenishment.
 
-The minute8355 Mixed checkpoint demonstrated eight added firewood pieces on the fire tile,
-an enabled3-by-3 source zone and an adjacent player sustaining a fire for300 turns with actual
-exterior smoke/light samples. This is a practical stocked-fire starting recipe, not a universal
-fuel duration or proof of automatic refuelling. Verify replenishment separately if it matters.
-Source persistence, signal sampling, reception and dispatch are separate observations. A sampled
-source refused by an exit ray or detection check calls for sightline diagnosis, not more identical
-fuel waits or a claim that no source exists.
+Distinguish fuel already on the burning tile from reachable burnable stock inside the enabled
+`SOURCE_FIREWOOD` zone. Expand the zone over usable wood or add ordinary stock where needed;
+keep it separate enough to observe transfer when testing automatic tending. Inspect the actual
+activity and fire behavior after an interruption or setup correction. Fuel movement/messages and
+before/after stock support replenishment; an unchanged stock can be normal while existing fuel is
+sufficient. Do not infer a universal duration from a wood count or the number of serialized entries.
+
+The minute8355 Mixed checkpoint sustained a fire for300 turns with eight added firewood pieces,
+an enabled source zone and an adjacent player. It established persistence and exterior samples,
+not automatic refuelling. Later fuel failures still require their actual cause to be resolved;
+stock, distance/loading and tending activity are competing premises, not preset diagnoses.
+
+Keep the useful sampling window proportional to the question. Source persistence, signal sampling,
+reception and dispatch are separate observations. Once a stable source is sampled and the receiver
+repeatedly refuses the same range or sightline, investigate that reason instead of repeating fuel
+waits or declaring that no source exists.
 
 ## Do not conclude from the first puff
 
@@ -89,46 +101,30 @@ of dispatch: observer eligibility, existing outings and retained knowledge also 
 
 ## Smoke: nominal range in OMT
 
-From `bandit_mark_generation.cpp::adapt_local_field_signal_reading` and `adapt_smoke_packet`:
-let F be sampled fire intensity, S smoke intensity on **that same tile**, A=clamp(F+S,1,3),
-P=1 if S>0 else0, H=1 if F>=2 else0. With F>0 or S>0:
-
-`cap = clamp(4 + 2*A + 2*P + H - weather_penalty, 1, 15)`
-
-The packet is viable only if `A + P + H - weather_penalty > 0`. Therefore a positive
-printed cap alone is insufficient. Clear-weather examples:
-
-- F1/S0: cap6; F1/S1: cap10; F1/S2 or S3: cap12.
-- F2/S0: cap9; F2 with smoke: cap13. F3/S0: cap11; F3 with smoke: cap13.
-- A separate smoke-only tile F0/S1, S2, S3: caps8,10,12.
-
-Subtract0 clear,1 windy,2 rain,3 fog,1 portal storm from the cap and visibility score.
-The runtime classifies portal storm first, then precipitation, then sight_penalty>=2 as fog,
-then windspeed>=20 as windy. Smoke has **no day/night penalty** in this adapter.
-These are emitted range limits, not guaranteed detection radii through terrain.
+Read the actual smoke packet and its receiver projection for the bound executable.
+[`adapt_smoke_packet`](../../../../src/bandit_mark_generation.cpp) derives viability and projected
+range from source strength, persistence, height/spread and weather. The current source supports a
+30-OMT ceiling; this is not a promise that an ordinary brazier produces a maximum-strength packet.
+A cap alone does not establish reception: actual distance, terrain and physical visibility still apply.
+Smoke does not gain the night-time light advantage. A visible puff, an emitted packet and a camp's
+received observation are different facts.
 
 ## Ordinary brazier light: nominal range in OMT
 
-For a brazier without another emitter on the tile, A=clamp(F,1,3), P=1 if F>=2 else0.
-The formula is `cap = clamp(1 + 2*A + P + M, 0, 30)`, viable only if `A + P + M > 0`.
-M combines exposure, aperture leakage, roof elevation, weather and time; this is ordinary fire,
-not the searchlight bonus.
+Qualify the prepared roof brazier at **night in clear weather**, with actual supported roof footing,
+fuel and exposure. Read the LIGHT channel independently from smoke; weak or absent visible smoke
+does not settle whether the fire emits useful light.
 
-For an exposed flat-roof brazier, M=2 exposure + L leakage +2 roof bonus - T - W.
-L is the measured1 or2, not assumed. T=0 night,2 dawn/dusk,6 daylight. W=0 clear,2 rain,3 fog.
-Clear roof examples (L1–2), before terrain costs:
+[`adapt_light_packet`](../../../../src/bandit_mark_generation.cpp) combines source strength,
+persistence, exposure/aperture, elevation, weather and daylight. The current source allows an
+extended ceiling of40 OMT for qualifying elevated exposed light; ground/other light has a30-OMT
+ceiling. These are limits, not expected brazier reach. The actual packet and receiver determine
+whether this fire under these conditions is sufficient. Use current projections rather than old
+intensity-to-range tables from another build.
 
-- F1: night8–9, twilight6–7, day2–3. Day/L1 is **nonviable** despite cap2.
-- F2: night11–12, twilight9–10, day5–6.
-- F3: night13–14, twilight11–12, day7–8.
-
-An exposed ground-level fire lacks the roof +2. A direct indoor-to-exterior aperture uses
-leakage2 and exposed classification but no roof bonus. `physical_light::evaluate_escape`
-checks an actual transparent path to an outside tile within three local tiles, not a README's
-“windows open” label. Fully contained light is rejected by `physical_light::detect`; it cannot
-shine through a sealed room just because its packet has a positive cap.
-Portal storms normally subtract3 for exposed light, reduced to1 for exposed F>=2 at night/twilight;
-contained light has additional penalty. Inspect the actual packet rather than assuming clear weather.
+`physical_light::evaluate_escape` checks an actual transparent path to an outside tile, not a
+README's “windows open” label. Fully contained light cannot shine through a sealed room merely
+because its packet has a positive cap. Keep window, roof and weather distinctions meaningful.
 
 ## Terrain, height and actual reach
 
@@ -160,8 +156,7 @@ channel/transition logs and compact native observations; no normal-game analytic
 A live_smoke packet can be generated from fire alone, so separately inspect fd_smoke when proving
 visible smoke fields. Extinguished fire can leave smoke and already learned camp knowledge.
 
-The earlier roof sample cap6 smoke/cap4 light versus distance7 was out of range **then**;
-it does not establish the mature fire's maximum. A changed packet can change reach. A hard cross-z
+An early weak sample does not establish the mature fire's maximum. A changed packet can change reach. A hard cross-z
 rejection or an unchanged valid range/occlusion failure is a different diagnosis. If something
 “worked five seconds ago,” compare exact source/sample IDs, intensities, height, weather, build and
 observer—not just the fire's name. Keep progressing while the inputs are evolving; preserve the

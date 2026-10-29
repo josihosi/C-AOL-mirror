@@ -108,7 +108,14 @@ Only Luna operates live sessions. Sol can analyze source, logs and saved data or
 
 ### Josef's two-brazier base save
 
-Use a disposable copy of the [verified template](#verified-save-templates). The closed-window
+Prefer a disposable copy of Josef's [prepared templates](#verified-save-templates) for compatible
+playtests. Preserve actual scenario differences; do not replace a useful current continuation or
+replay accepted work merely to standardize its starting save. Resolve the exact template, not a
+similar scenario name. Josef describes the basecamp NPC priorities as 5 across the board; inspect
+the selected save's actual roster/settings when they matter to the test. Several wood stacks can
+exist while only one is covered by a firewood zone.
+
+The closed-window
 archive is the basic unlit start; progressed raid saves carry their own fire, knowledge and
 actor history. Match the selected save identity and current World before applying this map.
 The normalized house spans `[3148,3440,0]` through `[3163,3455,0]`. Coordinates below describe
@@ -136,6 +143,18 @@ The canonical [r050 bandit-only INITIAL](../../../tools/openclaw_harness/fixture
 Both are ordinary nonpersonal, nonvehicle zones, with identical start/end z=0 and no temporary disabling. Saved `2x4` wood is at `[3159,3448,0]` and `[3157,3449,0]`; `[3158,3449,0]` mixes `2x4` with lighters, whistles and flashlights. The roof brazier `[3156,3447,1]` is also empty and unlit. No firewood trap is present on these six inspected tiles. Neither listed zone is a roof-level source; inspect actual roof fuel/access if maintaining the roof fire. This extraction establishes item types and geometry, not the quantity or duration of usable fuel in an altered run.
 
 [Native refuelling](../../../src/activity_item_handling.cpp) (`find_refuel_spot_zone`, `try_fuel_fire`) unions enabled matching-faction `SOURCE_FIREWOOD` tiles within `PICKUP_RANGE=6` of the actor, sorts them by distance, and chooses the first tile with items, accessible contents and a clear pickup path. Only then does it test that selected tile's nonliquid items for burnability. It does not try a second zone when the selected tile has no useful burnable item; the firewood-trap fallback is used only when no zone tile qualifies. The fire destination is an accessible existing fire selected separately (or an explicit fire target). There is no distinct `FIREWOOD_SOURCE` zone type in this recipe. Zone Manager's Source label, a kindling label, a loot-storage zone and the burning destination are different roles.
+
+Stock and proximity alone do not start automatic tending. [Player activity handling](../../../src/player_activity.cpp)
+calls `try_fuel_fire` for an active activity with `refuel_fires`; ordinary `ACT_WAIT` enables this in
+[player activities](../../../data/json/player_activities.json). Inspect the actual activity after
+starting a wait or recovering an interruption. A short step, a look or merely standing nearby is
+not proof of an active tending interval. The caller can stop attempting when no suitable fire/supply
+is found; after correcting setup, verify the resumed activity and actual behavior.
+
+Use the [sustained-source recipe](references/smoke-light-visibility.md#keep-the-source-alive-through-the-useful-scan)
+to distinguish fuel already on the fire from fuel transferred out of the stock zone. Tending need
+not transfer an item immediately when the existing fire already has enough fuel. Count actual
+pieces/charges, not serialized item entries; retain exact quantities only when they affect the finding.
 
 Widen a source across the **whole accessible wood pile** through the current native zone controls when useful; no one-tile restriction applies. Inspect both sources, stock, actor/fire positions and access before attributing a maintenance failure. Mixed tools or payment goods can be selected and burned; keep the intended fuel supply explicit without inventing a universal ban on brazier or tool coordinates. Fire expiry plus an unassessed report does not establish that one zone caused the failed assessment. The closed Fight run's full initial stock and selected refuel tile were not retained, so that causal conclusion is withdrawn.
 
