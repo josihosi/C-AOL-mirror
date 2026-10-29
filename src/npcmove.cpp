@@ -3599,6 +3599,9 @@ void npc::move()
             rl_dist( pos_bub(), target->pos_bub() ) <= 1 &&
             !has_flag( json_flag_CANNOT_ATTACK ) ) {
             action = method_of_attack();
+            if( action == npc_undecided && !has_flag( json_flag_CANNOT_MOVE ) ) {
+                action = method_of_fleeing();
+            }
         } else if( !has_flag( json_flag_CANNOT_MOVE ) ) {
             action = method_of_fleeing();
         }
@@ -3607,7 +3610,10 @@ void npc::move()
                  has_charges( itype_oxygen_tank, 1 ) ||
                  has_charges( itype_smoxygen_tank, 1 ) ) ) {
         action = npc_heal;
-    } else if( target != nullptr && ai_cache.danger > 0 &&
+    } else if( target != nullptr &&
+               ( ai_cache.danger > 0 ||
+                 ( assault_site != nullptr && sees( here, *target ) &&
+                   attitude_to( *target ) == Creature::Attitude::HOSTILE ) ) &&
                !has_flag( json_flag_CANNOT_ATTACK ) ) {
         action = method_of_attack();
     } else if( fight_withdrawal_order ) {

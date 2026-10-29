@@ -52701,6 +52701,78 @@ TEST_CASE( "combat released local visitors and raids use actual combat while pre
             scene.collector->getID() ) == nullptr );
 }
 
+TEST_CASE( "committed hostile visitor engages a visible low threat defender",
+           "[bandit_live_world][encounter_066][negative_threat_combat]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    r066_visit_scene scene;
+    npc &defender = scene.camp_receiver();
+    scene.distant_adjacent_avatar();
+    defender.setpos( scene.collector->pos_abs() + point( 1, 0 ), false );
+    scene.collector->personality.aggression = 20;
+    scene.collector->personality.bravery = 6;
+    scene.collector->op_of_u.fear = -100;
+    defender.set_dodge_bonus( -6 );
+    REQUIRE( scene.communicate() );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( defender ), defender );
+    REQUIRE( active_local_assault_site_for( overmap_buffer.global_state.bandit_live_world,
+                                            scene.collector->getID() ) == &scene.site() );
+    item weapon( itype_id( "knife_combat" ), calendar::turn );
+    scene.collector->wield( weapon );
+    scene.collector->set_skill_level( skill_id( "melee" ), 8 );
+    scene.collector->rules.clear_flag( ally_rule::forbid_engage );
+    scene.rebuild();
+    REQUIRE( scene.collector->evaluate_character_threat_without_perception_fuzz(
+                 defender, false, true ) < 0 );
+    scene.collector->regen_ai_cache();
+    REQUIRE( scene.collector->sees( get_map(), defender ) );
+    REQUIRE( scene.collector->current_target() == &defender );
+    REQUIRE( scene.collector->get_ai_danger() <= 0 );
+    const int hp = defender.get_hp();
+    for( int action = 0; action < 20 && defender.get_hp() == hp; ++action ) {
+        scene.collector->set_moves( 100 );
+        scene.collector->move();
+        calendar::turn += 1_turns;
+    }
+    CHECK( defender.get_hp() < hp );
+}
+
+TEST_CASE( "unarmed fleeing resident can escape an adjacent attacker",
+           "[bandit_live_world][encounter_066][adjacent_flee]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    r066_visit_scene scene;
+    npc &defender = scene.camp_receiver();
+    scene.distant_adjacent_avatar();
+    defender.setpos( scene.collector->pos_abs() + point( 1, 0 ), false );
+    defender.remove_weapon();
+    defender.personality.bravery = -3;
+    REQUIRE( scene.communicate() );
+    choose_bandit_shakedown_fight_for_test( scene.site(), scene.surface( defender ), defender );
+    defender.set_mission( NPC_MISSION_GUARD_ALLY );
+    defender.set_attitude( NPCATT_NULL );
+    defender.assigned_camp.reset();
+    defender.goal = defender.pos_abs_omt();
+    defender.add_effect( efftype_id( "npc_run_away" ), 1_hours );
+    scene.rebuild();
+    defender.regen_ai_cache();
+    REQUIRE( defender.current_target() != nullptr );
+    REQUIRE( defender.attitude_to( *defender.current_target() ) == Creature::Attitude::HOSTILE );
+    REQUIRE( rl_dist( defender.pos_bub(), defender.current_target()->pos_bub() ) <= 1 );
+    REQUIRE( defender.has_effect( efftype_id( "npc_run_away" ) ) );
+    REQUIRE( defender.get_ai_danger() > 0 );
+    defender.evaluate_best_attack( defender.current_target() );
+    const auto attack_value = defender.get_current_attack_evaluation().value();
+    REQUIRE( ( !attack_value || *attack_value <= 0 ) );
+    const tripoint_abs_ms before = defender.pos_abs();
+    defender.set_moves( 100 );
+    defender.move();
+    REQUIRE( defender.has_effect( efftype_id( "npc_run_away" ) ) );
+    CHECK( defender.pos_abs() != before );
+}
+
 TEST_CASE( "unheard visit cannot turn distant road travel into war",
            "[bandit_live_world][encounter_066][unheard_road_066]" )
 {
