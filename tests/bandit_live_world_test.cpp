@@ -152,6 +152,10 @@ static JsonValue native_trace_value( const std::string &line )
 }
 
 std::string live_bandit_homeward_boundary_discriminator_for_test();
+std::vector<tripoint_abs_omt> live_bandit_clock_outbound_path_for_test(
+    const bandit_live_world::site_record &site, const std::vector<tripoint_abs_omt> &preflight );
+std::vector<tripoint_abs_omt> live_bandit_clock_homeward_path_for_test(
+    const bandit_live_world::site_record &site, const std::vector<tripoint_abs_omt> &direct );
 std::string live_bandit_homeward_unsafe_current_route_read_for_test( character_id member_id );
 std::string live_bandit_homeward_partner_route_read_for_test(
     character_id member_id, character_id partner_id );
@@ -2404,6 +2408,63 @@ TEST_CASE( "live structural route admits useful long field journeys",
     REQUIRE( read.complete_route_cost > 18 );
     CHECK( read.reachable );
     CHECK( read.complete_route_cost == distance * 3 );
+    REQUIRE_FALSE( read.preflight_outbound_path.empty() );
+    CHECK( read.preflight_outbound_path.front() == target );
+    CHECK( read.preflight_outbound_path.back() == anchor );
+    CHECK( read.preflight_outbound_path.size() == static_cast<std::size_t>( distance + 1 ) );
+
+    // Actual executor first travels via the approach even when the admitted
+    // direct path skips it. The selected-party clock must use both native legs.
+    auto &outing = site.active_outing;
+    outing.schema_version = 9;
+    outing.kind = bandit_live_world::outing_kind::structural_sortie;
+    outing.job_type = "scout";
+    outing.target_omt = target;
+    outing.target_id = "frontier_probe:0:" + target.to_string();
+    outing.target_lead_id = outing.target_id;
+    outing.target_lead_revision = 1;
+    const tripoint_abs_omt approach = anchor + point( 0, 3 );
+    outing.shared_route = { anchor, approach, target, anchor };
+    REQUIRE( std::find( read.preflight_outbound_path.begin(), read.preflight_outbound_path.end(),
+                        approach ) == read.preflight_outbound_path.end() );
+    const auto via = live_bandit_clock_outbound_path_for_test( site, read.preflight_outbound_path );
+    REQUIRE_FALSE( via.empty() );
+    CHECK( via.front() == target );
+    CHECK( via.back() == anchor );
+    CHECK( std::count( via.begin(), via.end(), approach ) == 1 );
+    for( std::size_t i = 1; i < via.size(); ++i ) {
+        CHECK( rl_dist( via[i - 1], via[i] ) == 1 );
+    }
+    outing.shared_route[1] = anchor + point( 1, 0 );
+    CHECK( live_bandit_clock_outbound_path_for_test( site, read.preflight_outbound_path ) ==
+           read.preflight_outbound_path );
+    outing.shared_route[1] = approach;
+    const auto direct_home = overmap_buffer.get_travel_path( target, anchor,
+                             overmap_path_params::for_npc() ).points;
+    REQUIRE_FALSE( direct_home.empty() );
+    // Completed frontier returns directly; completed watch must first reach
+    // its actual return staging waypoint, even if the direct path skips it.
+    REQUIRE( bandit_live_world::structural_outing_uses_frontier_route( outing ) );
+    CHECK( live_bandit_clock_homeward_path_for_test( site, direct_home ) == direct_home );
+    outing.selected_watch_kind = bandit_live_world::structural_watch_kind::exact;
+    outing.selected_watch_omt = target;
+    outing.shared_route = { anchor, approach, target, approach, anchor };
+    REQUIRE( std::find( direct_home.begin(), direct_home.end(), approach ) == direct_home.end() );
+    const auto staged_home = live_bandit_clock_homeward_path_for_test( site, direct_home );
+    REQUIRE_FALSE( staged_home.empty() );
+    CHECK( staged_home.front() == anchor );
+    CHECK( staged_home.back() == target );
+    CHECK( std::count( staged_home.begin(), staged_home.end(), approach ) == 1 );
+    for( std::size_t i = 1; i < staged_home.size(); ++i ) {
+        CHECK( rl_dist( staged_home[i - 1], staged_home[i] ) == 1 );
+    }
+    outing.shared_route[3] = anchor + point( 1, 0 );
+    CHECK( live_bandit_clock_homeward_path_for_test( site, direct_home ) == direct_home );
+    outing.shared_route[3] = approach;
+    overmap_buffer.ter_set( approach, oter_id( "river_center" ) );
+    CHECK( live_bandit_clock_outbound_path_for_test( site, read.preflight_outbound_path ).empty() );
+    CHECK( live_bandit_clock_homeward_path_for_test( site, direct_home ).empty() );
+    overmap_buffer.ter_set( approach, oter_id( "field" ) );
 
     // The wider allowance does not make an impassable target traversable.
     overmap_buffer.ter_set( target, oter_id( "river_center" ) );
@@ -41347,9 +41408,18 @@ TEST_CASE( "hostile_camp_routed_dispatch_enforces_global_eight_solve_two_start_b
     const bandit_live_world::camp_map_lead & ) {
         return bandit_live_world::structural_threat_read{};
     };
+    int clock_calls = 0;
+    const auto clock_lookup = [&clock_calls]( const bandit_live_world::site_record &site,
+    const bandit_live_world::structural_outing_plan & ) {
+        CHECK( site.active_outing.is_active() );
+        ++clock_calls;
+        return bandit_live_world::structural_coarse_clock_read{};
+    };
     const bandit_live_world::structural_bounty_maintenance_result first =
         bandit_live_world::advance_structural_bounty_maintenance(
-            world, 60, 0, 99, terrain_lookup, threat_lookup, route_lookup );
+            world, 60, 0, 99, terrain_lookup, threat_lookup, route_lookup,
+            {}, {}, {}, {}, {}, {}, {}, {}, {}, clock_lookup );
+    CHECK( clock_calls == 2 );
     CHECK( route_calls == 8 );
     CHECK( first.full_route_solves == 8 );
     CHECK( first.dispatches_applied == 2 );
@@ -41357,13 +41427,18 @@ TEST_CASE( "hostile_camp_routed_dispatch_enforces_global_eight_solve_two_start_b
     for( const bandit_live_world::site_record &site : world.sites ) {
         if( site.active_outing.kind == bandit_live_world::outing_kind::none ) {
             CHECK( site.routine_no_candidate_streak == 0 );
+        } else {
+            CHECK( site.active_outing.route_clock_enrolled );
+            CHECK( site.active_outing.route_clock_anchor_minutes == -1 );
         }
     }
 
     const std::string before_replay = serialize_world( world );
     const bandit_live_world::structural_bounty_maintenance_result replay =
         bandit_live_world::advance_structural_bounty_maintenance(
-            world, 60, 0, 99, terrain_lookup, threat_lookup, route_lookup );
+            world, 60, 0, 99, terrain_lookup, threat_lookup, route_lookup,
+            {}, {}, {}, {}, {}, {}, {}, {}, {}, clock_lookup );
+    CHECK( clock_calls == 2 );
     CHECK( replay.scheduler_replay_suppressed );
     CHECK( replay.full_route_solves == 0 );
     CHECK( route_calls == 8 );
@@ -57901,6 +57976,37 @@ TEST_CASE( "assessment return transfers preserve the deadline clock and real phy
         const auto handoff = plan_local_pair_handoff( *site, cursor, now + 1, handoff_reads );
         CAPTURE( handoff.notes );
         REQUIRE( handoff.valid );
+        // Exercise the real ownership transaction with a previously qualified
+        // homeward clock. A handoff alone cannot renew it as a reroute.
+        auto clock_site = *site;
+        auto &clock_outing = clock_site.active_outing;
+        REQUIRE( deadline >= clock_outing.started_minutes );
+        clock_outing.route_clock_enrolled = true;
+        clock_outing.route_clock_anchor_minutes = clock_outing.started_minutes;
+        clock_outing.route_clock_remaining_minutes = deadline - clock_outing.started_minutes;
+        clock_outing.route_clock_travel_minutes = 0;
+        clock_outing.route_clock_homeward_minutes = 0;
+        clock_outing.route_clock_homeward_actual = true;
+        clock_outing.missing_deadline_minutes = deadline + 360;
+        REQUIRE( commit_local_pair_handoff( clock_site, handoff,
+        []( const auto & ) {
+            return true;
+        }, []( const auto & ) {} ) == local_handoff_commit_result::applied );
+        CHECK_FALSE( clock_site.active_outing.route_clock_stale );
+        CHECK( clock_site.active_outing.expected_return_minutes == deadline );
+        const auto clock_cursor = current_external_simulation_cursor( clock_site );
+        REQUIRE( clock_cursor );
+        std::vector<tripoint_abs_omt> same_path { clock_site.anchor };
+        while( same_path.back() != progressed ) {
+            const auto current = same_path.back();
+            const int dx = ( progressed.x() > current.x() ) - ( progressed.x() < current.x() );
+            const int dy = ( progressed.y() > current.y() ) - ( progressed.y() < current.y() );
+            same_path.push_back( current + point( dx, dy ) );
+        }
+        const std::vector<std::vector<tripoint_abs_omt>> paths( members.size(), same_path );
+        CHECK_FALSE( refresh_structural_coarse_homeward_clock( clock_site, *clock_cursor,
+                     members, paths, now + 1 ) );
+        CHECK( clock_site.active_outing.expected_return_minutes == deadline );
         REQUIRE( commit_local_pair_handoff( *site, handoff,
         []( const auto & ) {
             return true;
@@ -73881,7 +73987,8 @@ TEST_CASE( "fresh_physical_scout_return_reaches_home_rally_before_same_call_resp
     using namespace bandit_live_world;
     const bool scheduler_already_serviced = GENERATE( false, true );
     const bool report_ready = GENERATE( true, false );
-    CAPTURE( scheduler_already_serviced, report_ready );
+    const bool return_before_forecast = GENERATE( false, true );
+    CAPTURE( scheduler_already_serviced, report_ready, return_before_forecast );
     override_option llm( "LLM_INTENT_ENABLE", "false" );
     clear_npcs();
     clear_avatar();
@@ -73964,6 +74071,122 @@ TEST_CASE( "fresh_physical_scout_return_reaches_home_rally_before_same_call_resp
     REQUIRE( apply_structural_bounty_outing_plan( prepared, plan, 100 ) );
     REQUIRE( prepared.active_outing.member_ids.size() == 2 );
     REQUIRE( prepared.active_outing.schema_version == 10 );
+    if( return_before_forecast && !scheduler_already_serviced && report_ready ) {
+        auto forecast_world = world;
+        auto &forecast_site = forecast_world.sites.front();
+        forecast_site.active_outing.route_clock_enrolled = true;
+        auto clock_plan = plan;
+        clock_plan.preflight_outbound_path = { watch, approach, home + point( 1, 0 ), home };
+        structural_coarse_clock_read clock_read;
+        clock_read.homeward_path = { home, home + point( 1, 0 ), approach, watch };
+        CHECK_FALSE( bind_structural_coarse_route_clock( forecast_site, clock_plan, clock_read, 100 ) );
+        clock_read.party_qualified = true;
+        auto broken = clock_read;
+        broken.homeward_path.pop_back();
+        CHECK_FALSE( bind_structural_coarse_route_clock( forecast_site, clock_plan, broken, 100 ) );
+        auto detour_site = forecast_site;
+        auto detour_read = clock_read;
+        detour_read.outbound_path = { watch, home + point( 3, 1 ), home + point( 2, 1 ),
+                                      approach, home + point( 1, 0 ), home };
+        REQUIRE( bind_structural_coarse_route_clock( detour_site, clock_plan, detour_read, 100 ) );
+        CHECK( detour_site.active_outing.route_clock_travel_minutes == 40 );
+        CHECK( detour_site.active_outing.expected_return_minutes == 475 );
+        REQUIRE( bind_structural_coarse_route_clock( forecast_site, clock_plan, clock_read, 100 ) );
+        CHECK( forecast_site.active_outing.route_clock_remaining_minutes == 365 );
+        CHECK( forecast_site.active_outing.route_clock_travel_minutes == 30 );
+        CHECK( forecast_site.active_outing.expected_return_minutes == 465 );
+        CHECK( forecast_site.active_outing.missing_deadline_minutes == 825 );
+        CHECK_FALSE( bind_structural_coarse_route_clock( forecast_site, clock_plan, clock_read, 100 ) );
+        CHECK( forecast_site.active_outing.expected_return_minutes == 465 );
+        auto home_site = forecast_site;
+        auto &home_outing = home_site.active_outing;
+        home_outing.phase = scout_phase::returning_home;
+        home_outing.waypoint_index = static_cast<int>( home_outing.shared_route.size() ) - 2;
+        home_outing.assessment.exit_reason = "watch completed";
+        const auto home_members = home_outing.member_ids;
+        const auto home_cursor = current_external_simulation_cursor( home_site );
+        REQUIRE( home_cursor );
+        const std::vector<std::vector<tripoint_abs_omt>> home_paths( 2, clock_read.homeward_path );
+        // A real homeward refresh after a freeze starts a new remaining-work
+        // anchor. Pre-refresh suspension must not be charged twice, and a
+        // later freeze must still delay the new missing timer.
+        auto frozen_site = home_site;
+        auto &frozen = frozen_site.active_outing;
+        frozen.activation.evaluate( 100 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        frozen.activation.evaluate( 110 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        frozen.activation.evaluate( 160 * 60, false, frozen.activation_anchors(), {}, 100 * 60 );
+        frozen.activation.evaluate( 180 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        const auto frozen_cursor = current_external_simulation_cursor( frozen_site );
+        REQUIRE( frozen_cursor );
+        REQUIRE( refresh_structural_coarse_homeward_clock( frozen_site, *frozen_cursor,
+                 home_members, home_paths, 180 ) );
+        CHECK( frozen.expected_return_minutes == 255 );
+        CHECK( frozen.missing_deadline_minutes == 615 );
+        frozen.activation.evaluate( 181 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        CHECK( frozen.activation.elapsed_turns( activation_timer::missing_deadline, 615, 181 ) ==
+               -434 * 60 );
+        frozen.activation.evaluate( 190 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        frozen.activation.evaluate( 240 * 60, false, frozen.activation_anchors(), {}, 100 * 60 );
+        frozen.activation.evaluate( 260 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        frozen.activation.evaluate( 685 * 60, true, frozen.activation_anchors(), {}, 100 * 60 );
+        CHECK( frozen.activation.elapsed_turns( activation_timer::missing_deadline, 615, 685 ) == 0 );
+        REQUIRE( refresh_structural_coarse_homeward_clock( home_site, *home_cursor, home_members,
+                 home_paths, 130 ) );
+        CHECK( home_site.active_outing.expected_return_minutes == 205 );
+        CHECK( home_site.active_outing.missing_deadline_minutes == 565 );
+        CHECK_FALSE( refresh_structural_coarse_homeward_clock( home_site, *home_cursor, home_members,
+                     home_paths, 131 ) );
+        CHECK( home_site.active_outing.expected_return_minutes == 205 );
+        REQUIRE( mark_structural_coarse_route_stale( home_site, *home_cursor ) );
+        CHECK_FALSE( mark_structural_coarse_route_stale( home_site, *home_cursor ) );
+        CHECK( home_site.active_outing.expected_return_minutes == 205 );
+        const std::vector<tripoint_abs_omt> detour = { home, home + point( 0, 1 ),
+                home + point( 1, 1 ), home + point( 2, 1 ), watch };
+        const std::vector<std::vector<tripoint_abs_omt>> detour_paths( 2, detour );
+        REQUIRE( refresh_structural_coarse_homeward_clock( home_site, *home_cursor, home_members,
+                 detour_paths, 131 ) );
+        CHECK( home_site.active_outing.expected_return_minutes == 211 );
+        CHECK( home_site.active_outing.missing_deadline_minutes == 571 );
+        auto early_world = forecast_world;
+        auto &early_site = early_world.sites.front();
+        auto &early_outing = early_site.active_outing;
+        early_outing.phase = scout_phase::returning_home;
+        early_outing.waypoint_index = static_cast<int>( early_outing.shared_route.size() ) - 2;
+        early_outing.last_progress_minutes = 220;
+        early_outing.last_advanced_minutes = 220;
+        early_outing.actor_departure_observed = true;
+        early_outing.actor_route_waypoint = static_cast<int>( early_outing.shared_route.size() ) - 1;
+        early_outing.assessment.exit_reason = "completed watch returned by physical carriers";
+        const auto early_members = early_outing.member_ids;
+        for( const character_id id : early_members ) {
+            REQUIRE( record_structural_member_physical_return( early_site,
+                     *current_external_simulation_cursor( early_site ), id, home, 239 ) );
+        }
+        CHECK( early_site.active_outing.expected_return_minutes == 465 );
+        CHECK( advance_structural_bounty_outings( early_world, 240, {} ).members_returned == 2 );
+        CHECK_FALSE( early_site.active_outing.is_active() );
+        CHECK( early_site.current_scout_report.is_present() );
+        const int delivered_generation = early_site.applied_report_generation;
+        CHECK( advance_structural_bounty_outings( early_world, 300, {} ).members_returned == 0 );
+        CHECK( early_site.applied_report_generation == delivered_generation );
+        auto &forecast = forecast_site.active_outing;
+        const auto anchors = forecast.activation_anchors();
+        forecast.activation.evaluate( 100 * 60, true, anchors, {}, 100 * 60 );
+        forecast.activation.evaluate( 110 * 60, true, anchors, {}, 100 * 60 );
+        forecast.activation.evaluate( 160 * 60, false, anchors, {}, 100 * 60 );
+        forecast.activation.evaluate( 180 * 60, true, anchors, {}, 100 * 60 );
+        const auto effective = forecast.activation.elapsed_turns(
+                                   activation_timer::expected_return, 465, 180 );
+        CHECK( effective == ( 180 - 465 - 70 ) * 60 );
+        auto restored_forecast = round_trip_world( forecast_world );
+        const auto &restored = restored_forecast.sites.front().active_outing;
+        CHECK( restored.activation.elapsed_turns( activation_timer::expected_return, 465, 180 ) ==
+               effective );
+        CHECK( restored.route_clock_anchor_minutes == 100 );
+        CHECK( restored.route_clock_remaining_minutes == 365 );
+        CHECK( restored.expected_return_minutes == 465 );
+        CHECK( restored.missing_deadline_minutes == 825 );
+    }
     const auto carriers = prepared.active_outing.member_ids;
     npc &away = *bodies.back();
     REQUIRE( std::find( carriers.begin(), carriers.end(), away.getID() ) == carriers.end() );
@@ -73995,13 +74218,53 @@ TEST_CASE( "fresh_physical_scout_return_reaches_home_rally_before_same_call_resp
     outing.assessment.danger_high = 1;
     outing.assessment.bounty_estimate = 1;
     outing.assessment.exit_reason = "completed native watch returned by physical carriers";
-    const int returned = ( ( outing.expected_return_minutes + 59 ) / 60 ) * 60;
+    // The early case reaches the next ordinary service at 240 while the
+    // authenticated existing forecast remains at 250.
+    const int returned = return_before_forecast ? 240 :
+                         ( ( outing.expected_return_minutes + 59 ) / 60 ) * 60;
+    if( return_before_forecast && !scheduler_already_serviced && report_ready ) {
+        auto no_arrival = world;
+        advance_structural_bounty_outings( no_arrival, 300, {} );
+        CHECK( no_arrival.sites.front().active_outing.is_active() );
+        CHECK_FALSE( no_arrival.sites.front().current_scout_report.is_present() );
+    }
     for( const auto id : carriers ) {
         const auto body = overmap_buffer.find_npc( id );
         REQUIRE( body );
         REQUIRE( contains_home( prepared, body->pos_abs_omt() ) );
         REQUIRE( record_structural_member_physical_return( prepared,
                  *current_external_simulation_cursor( prepared ), id, home, returned - 1 ) );
+        if( return_before_forecast && !scheduler_already_serviced && report_ready &&
+            prepared.active_outing.member_return_receipts.size() == 1 ) {
+            auto partial = world;
+            advance_structural_bounty_outings( partial, returned, {} );
+            CHECK( partial.sites.front().active_outing.is_active() );
+            CHECK_FALSE( partial.sites.front().current_scout_report.is_present() );
+        }
+    }
+    if( return_before_forecast && !scheduler_already_serviced && report_ready ) {
+        auto expired_valid = world;
+        auto &expired_outing = expired_valid.sites.front().active_outing;
+        expired_outing.assessment.exit_reason.clear();
+        expired_outing.expected_return_minutes = 205;
+        expired_outing.missing_deadline_minutes = 205 + return_grace;
+        advance_structural_bounty_outings( expired_valid, 300, {} );
+        CHECK_FALSE( expired_valid.sites.front().active_outing.is_active() );
+        for( const bool expired : { false, true } ) {
+            auto stale = world;
+            auto &stale_outing = stale.sites.front().active_outing;
+            stale_outing.member_return_receipts.front().application_key += "-stale";
+            if( expired ) {
+                stale_outing.assessment.exit_reason.clear();
+                // Without an assessment-owned homeward leg, the existing
+                // three-OMT legacy clock is start100 + 105 minutes.
+                stale_outing.expected_return_minutes = 205;
+                stale_outing.missing_deadline_minutes = 205 + return_grace;
+            }
+            advance_structural_bounty_outings( stale, expired ? 300 : returned, {} );
+            CHECK( stale.sites.front().active_outing.is_active() );
+            CHECK_FALSE( stale.sites.front().current_scout_report.is_present() );
+        }
     }
     REQUIRE_FALSE( prepared.current_scout_report.is_present() );
     REQUIRE( prepared.camp_decision.state == camp_decision_state::idle );

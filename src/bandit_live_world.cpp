@@ -707,6 +707,10 @@ int structural_expected_return_for_state(
     const bandit_live_world::active_outing_state &outing,
     const bandit_live_world::site_record &site )
 {
+    if( outing.route_clock_anchor_minutes >= 0 ) {
+        return minutes_after_saturated( outing.route_clock_anchor_minutes,
+                                        outing.route_clock_remaining_minutes );
+    }
     int expected = structural_expected_return_minutes(
                        outing.started_minutes, site.anchor,
                        structural_outing_travel_destination( outing ) );
@@ -719,6 +723,38 @@ int structural_expected_return_for_state(
                                        outing.waypoint_index )] ) );
     }
     return expected;
+}
+
+int structural_missing_deadline_for_state(
+    const bandit_live_world::active_outing_state &outing )
+{
+    const int grace = outing.route_clock_anchor_minutes >= 0 ?
+                      std::max( 6 * 60, outing.route_clock_travel_minutes / 2 +
+                                outing.route_clock_travel_minutes % 2 ) :
+                      scout_missing_grace_minutes;
+    return minutes_after_saturated( outing.expected_return_minutes, grace );
+}
+
+bool invalidate_structural_route_clock( bandit_live_world::active_outing_state &outing )
+{
+    if( outing.route_clock_anchor_minutes < 0 ) {
+        return false;
+    }
+    // Keep the existing deadline; an unqualified change must not renew it.
+    outing.route_clock_stale = true;
+    return true;
+}
+
+void rebase_structural_route_clock_homeward( bandit_live_world::active_outing_state &outing,
+        const int now_minutes )
+{
+    if( outing.route_clock_anchor_minutes < 0 || outing.route_clock_stale || now_minutes < 0 ) {
+        return;
+    }
+    outing.route_clock_anchor_minutes = now_minutes;
+    outing.route_clock_remaining_minutes = minutes_after_saturated(
+            outing.route_clock_homeward_minutes, 60 );
+    outing.route_clock_travel_minutes = outing.route_clock_homeward_minutes;
 }
 
 bool structural_expected_return_is_consistent(
@@ -6224,12 +6260,14 @@ local_handoff_commit_result commit_local_pair_alternate_watch_reposition(
     next.last_progress_minutes = plan.resume_snapshot.committed_minutes;
     next.assessment.last_progress_minutes = plan.resume_snapshot.committed_minutes;
     resume_interrupted_watch( next, plan.resume_snapshot.committed_minutes );
-    next.expected_return_minutes = structural_expected_return_minutes(
-                                       next.started_minutes, candidate.anchor,
-                                       next.selected_watch_omt );
-    next.missing_deadline_minutes = minutes_after_saturated(
-                                        next.expected_return_minutes,
-                                        scout_missing_grace_minutes );
+    if( !invalidate_structural_route_clock( next ) ) {
+        next.expected_return_minutes = structural_expected_return_minutes(
+                                           next.started_minutes, candidate.anchor,
+                                           next.selected_watch_omt );
+        next.missing_deadline_minutes = minutes_after_saturated(
+                                            next.expected_return_minutes,
+                                            scout_missing_grace_minutes );
+    }
     next.local_handoff = plan.resume_snapshot;
     record_committed_owner_crossing( next, simulation_owner::local );
     for( const local_handoff_member_snapshot &member_snapshot :
@@ -6321,12 +6359,14 @@ local_handoff_commit_result commit_loaded_local_pair_alternate_watch_reposition(
     next.last_progress_minutes = plan.resume_snapshot.committed_minutes;
     next.assessment.last_progress_minutes = plan.resume_snapshot.committed_minutes;
     resume_interrupted_watch( next, plan.resume_snapshot.committed_minutes );
-    next.expected_return_minutes = structural_expected_return_minutes(
-                                       next.started_minutes, candidate.anchor,
-                                       next.selected_watch_omt );
-    next.missing_deadline_minutes = minutes_after_saturated(
-                                        next.expected_return_minutes,
-                                        scout_missing_grace_minutes );
+    if( !invalidate_structural_route_clock( next ) ) {
+        next.expected_return_minutes = structural_expected_return_minutes(
+                                           next.started_minutes, candidate.anchor,
+                                           next.selected_watch_omt );
+        next.missing_deadline_minutes = minutes_after_saturated(
+                                            next.expected_return_minutes,
+                                            scout_missing_grace_minutes );
+    }
     next.local_handoff = plan.resume_snapshot;
     next.local_handoff.handoff_epoch = next.handoff_epoch;
     for( const local_handoff_member_snapshot &member_snapshot :
@@ -6447,9 +6487,9 @@ local_handoff_commit_result complete_structural_frontier_arrival(
     next.last_progress_minutes = current_minutes;
     next.last_advanced_minutes = current_minutes;
     next.assessment.exit_reason = "frontier outer route physically checked";
+    rebase_structural_route_clock_homeward( next, current_minutes );
     next.expected_return_minutes = structural_expected_return_for_state( next, candidate );
-    next.missing_deadline_minutes = minutes_after_saturated( next.expected_return_minutes,
-                                    scout_missing_grace_minutes );
+    next.missing_deadline_minutes = structural_missing_deadline_for_state( next );
     if( local ) {
         auto &snapshot = next.local_handoff;
         snapshot.waypoint_index = next.waypoint_index;
@@ -6817,6 +6857,7 @@ bool reconcile_local_pair_casualties( site_record &site,
     site_record candidate = site;
     advance_camp_supply( candidate, current_minutes );
     active_outing_state &next = candidate.active_outing;
+    invalidate_structural_route_clock( next );
     const bool interrupted_alternate_reposition =
         next.alternate_watch_reposition_pending;
     if( interrupted_alternate_reposition ) {
@@ -7380,9 +7421,9 @@ bool commit_local_pair_cohesion( site_record &site, const local_cohesion_plan &p
         next.last_progress_minutes = std::max( next.last_progress_minutes,
                                                next.local_handoff.committed_minutes );
         if( structural_assessment_owns_homeward_clock( next ) ) {
+            rebase_structural_route_clock_homeward( next, next.last_progress_minutes );
             next.expected_return_minutes = structural_expected_return_for_state( next, candidate );
-            next.missing_deadline_minutes = minutes_after_saturated(
-                                                next.expected_return_minutes, scout_missing_grace_minutes );
+            next.missing_deadline_minutes = structural_missing_deadline_for_state( next );
         }
     }
     next.last_advanced_minutes = next.local_handoff.committed_minutes;
@@ -9974,6 +10015,17 @@ void active_outing_state::serialize( JsonOut &json ) const
     json.member( "last_progress_minutes", std::max( -1, last_progress_minutes ) );
     json.member( "expected_return_minutes", std::max( -1, expected_return_minutes ) );
     json.member( "missing_deadline_minutes", std::max( -1, missing_deadline_minutes ) );
+    if( route_clock_enrolled ) {
+        json.member( "route_clock_enrolled", route_clock_enrolled );
+    }
+    if( route_clock_anchor_minutes >= 0 ) {
+        json.member( "route_clock_anchor_minutes", route_clock_anchor_minutes );
+        json.member( "route_clock_remaining_minutes", route_clock_remaining_minutes );
+        json.member( "route_clock_travel_minutes", route_clock_travel_minutes );
+        json.member( "route_clock_homeward_minutes", route_clock_homeward_minutes );
+        json.member( "route_clock_stale", route_clock_stale );
+        json.member( "route_clock_homeward_actual", route_clock_homeward_actual );
+    }
     json.member( "simulation_owner", to_string( owner ) );
     json.member( "handoff_epoch", handoff_epoch );
     json.member( "last_advanced_minutes", last_advanced_minutes );
@@ -10124,6 +10176,35 @@ void active_outing_state::deserialize( const JsonObject &jo )
     jo.read( "last_progress_minutes", candidate.last_progress_minutes );
     jo.read( "expected_return_minutes", candidate.expected_return_minutes );
     jo.read( "missing_deadline_minutes", candidate.missing_deadline_minutes );
+    jo.read( "route_clock_enrolled", candidate.route_clock_enrolled );
+    if( candidate.route_clock_enrolled && candidate.kind != outing_kind::structural_sortie ) {
+        jo.throw_error( "route clock belongs to a structural outing" );
+    }
+    const bool has_route_clock = jo.has_member( "route_clock_anchor_minutes" );
+    if( has_route_clock || jo.has_member( "route_clock_remaining_minutes" ) ||
+        jo.has_member( "route_clock_travel_minutes" ) ||
+        jo.has_member( "route_clock_homeward_minutes" ) || jo.has_member( "route_clock_stale" ) ||
+        jo.has_member( "route_clock_homeward_actual" ) ) {
+        if( !has_route_clock || !jo.has_member( "route_clock_remaining_minutes" ) ||
+            !jo.has_member( "route_clock_travel_minutes" ) ||
+            !jo.has_member( "route_clock_homeward_minutes" ) ) {
+            jo.throw_error( "incomplete structural route clock" );
+        }
+        jo.read( "route_clock_anchor_minutes", candidate.route_clock_anchor_minutes );
+        jo.read( "route_clock_remaining_minutes", candidate.route_clock_remaining_minutes );
+        jo.read( "route_clock_travel_minutes", candidate.route_clock_travel_minutes );
+        jo.read( "route_clock_homeward_minutes", candidate.route_clock_homeward_minutes );
+        jo.read( "route_clock_stale", candidate.route_clock_stale );
+        jo.read( "route_clock_homeward_actual", candidate.route_clock_homeward_actual );
+        if( candidate.kind != outing_kind::structural_sortie || !candidate.route_clock_enrolled ||
+            candidate.route_clock_anchor_minutes < 0 || candidate.route_clock_remaining_minutes < 0 ||
+            candidate.route_clock_travel_minutes < 0 || candidate.route_clock_homeward_minutes < 0 ||
+            candidate.route_clock_homeward_minutes > candidate.route_clock_travel_minutes ||
+            candidate.route_clock_remaining_minutes < candidate.route_clock_travel_minutes ||
+            candidate.route_clock_anchor_minutes < candidate.started_minutes ) {
+            jo.throw_error( "invalid structural route clock" );
+        }
+    }
     candidate.started_minutes = std::max( -1, candidate.started_minutes );
     candidate.local_contact_minutes = std::max( -1, candidate.local_contact_minutes );
     candidate.last_progress_minutes = std::max( -1, candidate.last_progress_minutes );
@@ -10131,6 +10212,9 @@ void active_outing_state::deserialize( const JsonObject &jo )
     candidate.missing_deadline_minutes = std::max( -1, candidate.missing_deadline_minutes );
     if( candidate.expected_return_minutes >= 0 &&
         candidate.missing_deadline_minutes < candidate.expected_return_minutes ) {
+        if( candidate.route_clock_anchor_minutes >= 0 ) {
+            jo.throw_error( "structural route clock has invalid missing deadline" );
+        }
         candidate.missing_deadline_minutes = minutes_after_saturated( candidate.expected_return_minutes,
                                              scout_missing_grace_minutes );
     }
@@ -11458,8 +11542,8 @@ void site_record::deserialize( const JsonObject &jo,
           structural_route_is_canonical_for_outing( active_outing, anchor,
                   *structural_lead ) &&
           structural_expected_return_is_consistent( active_outing, *this ) &&
-          active_outing.missing_deadline_minutes == minutes_after_saturated(
-              active_outing.expected_return_minutes, scout_missing_grace_minutes ) &&
+          active_outing.missing_deadline_minutes ==
+          structural_missing_deadline_for_state( active_outing ) &&
           structural_phase_is_consistent );
     const bool active_outing_schema_is_consistent =
         active_outing.kind == outing_kind::structural_sortie ?
@@ -17384,6 +17468,7 @@ bool apply_structural_route_read( const site_record &site, const int now_minutes
     }
 
     plan.full_route_cost = read.complete_route_cost;
+    plan.preflight_outbound_path = read.preflight_outbound_path;
     plan.max_route_segment_risk = read.max_segment_risk;
     plan.final_route_quality = structural_candidate_route_quality( plan.full_route_cost,
                                hostile_camp_routine_route_budget_omt( site, now_minutes ) );
@@ -17503,6 +17588,134 @@ structural_outing_plan plan_structural_bounty_outing( const site_record &site,
         best.notes.push_back( "structural outing planner found no routed score-eligible lead" );
     }
     return best;
+}
+
+bool bind_structural_coarse_route_clock( site_record &site,
+        const structural_outing_plan &plan, const structural_coarse_clock_read &read,
+        const int now_minutes )
+{
+    active_outing_state &outing = site.active_outing;
+    if( !read.party_qualified || !outing.is_active() || !outing.route_clock_enrolled ||
+        outing.kind != outing_kind::structural_sortie ||
+        outing.activity_id != plan.activity_id || outing.generation != plan.generation ||
+        outing.member_ids != plan.member_ids || outing.started_minutes != now_minutes ||
+        outing.route_clock_anchor_minutes >= 0 || plan.shared_route.size() < 3 ) {
+        return false;
+    }
+    const tripoint_abs_omt destination = structural_outing_travel_destination( outing );
+    const auto &outbound = read.outbound_path.empty() ? plan.preflight_outbound_path :
+                           read.outbound_path;
+    const auto &homeward = read.homeward_path;
+    const auto valid_path = []( const std::vector<tripoint_abs_omt> &path,
+                                const tripoint_abs_omt &from, const tripoint_abs_omt &to ) {
+        if( path.empty() || path.front() != to || path.back() != from ) {
+            return false;
+        }
+        for( std::size_t i = 1; i < path.size(); ++i ) {
+            if( rl_dist( path[i - 1], path[i] ) != 1 ) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if( !valid_path( outbound, site.anchor, destination ) ||
+        !valid_path( homeward, destination, site.anchor ) ) {
+        return false;
+    }
+    const auto approach = std::find( outbound.begin(), outbound.end(), outing.shared_route[1] );
+    if( approach == outbound.end() ) {
+        return false;
+    }
+    const int cadence = to_minutes<int>( time_between_npc_OM_moves );
+    const std::int64_t outbound_minutes = static_cast<std::int64_t>( outbound.size() - 1 ) * cadence;
+    const std::int64_t homeward_minutes = static_cast<std::int64_t>( homeward.size() - 1 ) * cadence;
+    const std::int64_t movement_minutes = outbound_minutes + homeward_minutes;
+    const std::int64_t before_approach = static_cast<std::int64_t>(
+            std::distance( approach, outbound.end() ) - 1 ) * cadence;
+    const std::int64_t after_approach = outbound_minutes - before_approach;
+    // Service occurs hourly. The finite watch has a two-hour minimum; later
+    // observations, native local motion and interruptions remain uncertain.
+    const std::int64_t outbound_work = structural_outing_uses_watch_route( outing ) ?
+            std::max<std::int64_t>( structural_stalking_delay_minutes( site.anchor, destination ),
+                                    before_approach ) + 60 + after_approach + 120 + 60 :
+            std::max<std::int64_t>( structural_arrival_delay_minutes( site.anchor, destination ),
+                                    outbound_minutes ) + 60;
+    const std::int64_t remaining_minutes = outbound_work + homeward_minutes + 60;
+    if( cadence <= 0 || movement_minutes > INT_MAX || homeward_minutes > INT_MAX ||
+        remaining_minutes > INT_MAX ) {
+        return false;
+    }
+    outing.route_clock_anchor_minutes = now_minutes;
+    outing.route_clock_remaining_minutes = static_cast<int>( remaining_minutes );
+    outing.route_clock_travel_minutes = static_cast<int>( movement_minutes );
+    outing.route_clock_homeward_minutes = static_cast<int>( homeward_minutes );
+    outing.expected_return_minutes = structural_expected_return_for_state( outing, site );
+    outing.missing_deadline_minutes = structural_missing_deadline_for_state( outing );
+    return true;
+}
+
+bool mark_structural_coarse_route_stale( site_record &site,
+        const simulation_advance_cursor &cursor )
+{
+    active_outing_state &outing = site.active_outing;
+    if( !outing.route_clock_enrolled || outing.route_clock_anchor_minutes < 0 ||
+        outing.route_clock_stale || outing.kind != outing_kind::structural_sortie ||
+        !simulation_cursor_matches( outing, cursor ) ) {
+        return false;
+    }
+    return invalidate_structural_route_clock( outing );
+}
+
+bool refresh_structural_coarse_homeward_clock( site_record &site,
+        const simulation_advance_cursor &cursor, const std::vector<character_id> &member_ids,
+        const std::vector<std::vector<tripoint_abs_omt>> &homeward_paths,
+        const int now_minutes )
+{
+    active_outing_state &outing = site.active_outing;
+    if( !outing.route_clock_enrolled || !outing.is_active() ||
+        outing.kind != outing_kind::structural_sortie ||
+        !scout_phase_requires_homeward_only( outing.phase ) ||
+        !simulation_cursor_matches( outing, cursor ) || now_minutes < outing.last_advanced_minutes ||
+        ( outing.activation.initialized() && !outing.activation.active ) ||
+        ( outing.route_clock_homeward_actual && !outing.route_clock_stale ) ||
+        member_ids.empty() || member_ids.size() != homeward_paths.size() ) {
+        return false;
+    }
+    std::vector<character_id> expected_ids;
+    for( const character_id id : outing.member_ids ) {
+        if( !outing.member_is_resolved( id ) ) {
+            expected_ids.push_back( id );
+        }
+    }
+    if( member_ids != expected_ids ) {
+        return false;
+    }
+    const int cadence = to_minutes<int>( time_between_npc_OM_moves );
+    std::int64_t longest = 0;
+    for( const auto &path : homeward_paths ) {
+        if( path.empty() || path.front() != site.anchor ) {
+            return false;
+        }
+        for( std::size_t i = 1; i < path.size(); ++i ) {
+            if( rl_dist( path[i - 1], path[i] ) != 1 ) {
+                return false;
+            }
+        }
+        longest = std::max<std::int64_t>( longest,
+                    static_cast<std::int64_t>( path.size() - 1 ) * cadence );
+    }
+    if( cadence <= 0 || longest > INT_MAX - 60 ) {
+        return false;
+    }
+    outing.route_clock_anchor_minutes = now_minutes;
+    outing.route_clock_homeward_minutes = static_cast<int>( longest );
+    outing.route_clock_travel_minutes = static_cast<int>( longest );
+    outing.route_clock_remaining_minutes = static_cast<int>( longest ) + 60;
+    outing.route_clock_stale = false;
+    outing.route_clock_homeward_actual = true;
+    outing.expected_return_minutes = structural_expected_return_for_state( outing, site );
+    outing.missing_deadline_minutes = structural_missing_deadline_for_state( outing );
+    return true;
 }
 
 bool apply_structural_bounty_outing_plan( site_record &site, const structural_outing_plan &plan,
@@ -18808,18 +19021,38 @@ static bool deliver_structural_scout_assessment_report( site_record &site,
     return true;
 }
 
+static bool structural_return_receipt_is_authenticated( const site_record &site,
+        const structural_member_return_receipt &receipt, const int now_minutes )
+{
+    const active_outing_state &outing = site.active_outing;
+    const member_record *member = site.find_member( receipt.member_id );
+    return member != nullptr && member->state == member_state::at_home &&
+           outing.member_is_resolved( receipt.member_id ) &&
+           receipt.returned_minutes >= outing.started_minutes &&
+           receipt.returned_minutes <= now_minutes &&
+           receipt.application_key == bandit_pursuit_handoff::make_operation_component_key(
+               outing.activity_id, outing.generation, "return",
+               std::to_string( receipt.member_id.get_value() ) );
+}
+
 static bool reduce_structural_member_return_reports( site_record &site, const int now_minutes )
 {
     const active_outing_state &outing = site.active_outing;
     if( outing.kind != outing_kind::structural_sortie ||
-        outing.member_return_receipts.empty() || outing.assessment.exit_reason.empty() ) {
+        outing.member_return_receipts.empty() ) {
         return true;
     }
     std::vector<character_id> carrier_ids;
     int delivered_minutes = -1;
     for( const structural_member_return_receipt &receipt : outing.member_return_receipts ) {
+        if( !structural_return_receipt_is_authenticated( site, receipt, now_minutes ) ) {
+            return false;
+        }
         carrier_ids.push_back( receipt.member_id );
         delivered_minutes = std::max( delivered_minutes, receipt.returned_minutes );
+    }
+    if( outing.assessment.exit_reason.empty() ) {
+        return true;
     }
     const bool provisional = outing.member_return_receipts.size() < outing.member_ids.size();
     // A physical local return is not a report boundary while its partner is
@@ -19385,14 +19618,20 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
             outing.owner == simulation_owner::abstract ) {
             outing.phase = scout_phase::returning_home;
             outing.waypoint_index = static_cast<int>( outing.shared_route.size() ) - 2;
-            outing.expected_return_minutes = minutes_after_saturated(
-                                                 now_minutes, structural_homeward_delay_minutes(
-                                                         candidate.anchor,
-                                                         outing.shared_route[static_cast<std::size_t>( outing.waypoint_index )] ) );
-            outing.missing_deadline_minutes = minutes_after_saturated(
-                                                  outing.expected_return_minutes,
-                                                  scout_missing_grace_minutes );
             outing.last_progress_minutes = now_minutes;
+            if( outing.route_clock_anchor_minutes >= 0 ) {
+                rebase_structural_route_clock_homeward( outing, now_minutes );
+                outing.expected_return_minutes = structural_expected_return_for_state( outing, candidate );
+                outing.missing_deadline_minutes = structural_missing_deadline_for_state( outing );
+            } else {
+                outing.expected_return_minutes = minutes_after_saturated(
+                                                     now_minutes, structural_homeward_delay_minutes(
+                                                             candidate.anchor,
+                                                             outing.shared_route[static_cast<std::size_t>( outing.waypoint_index )] ) );
+                outing.missing_deadline_minutes = minutes_after_saturated(
+                                                      outing.expected_return_minutes,
+                                                      scout_missing_grace_minutes );
+            }
             if( outing.local_handoff.is_abstract_resume() ) {
                 outing.local_handoff.phase = scout_phase::returning_home;
                 outing.last_advanced_minutes = now_minutes;
@@ -19411,24 +19650,35 @@ structural_outing_result advance_structural_bounty_outings( world_state &state,
             continue;
         }
         if( outing.phase == scout_phase::returning_home ) {
-            if( outing.activation.elapsed_turns( activation_timer::expected_return,
+            const bool has_complete_physical_return_receipts =
+                outing.member_return_receipts.size() + outing.casualty_ids.size() ==
+                outing.member_ids.size() &&
+                std::all_of( outing.member_ids.begin(), outing.member_ids.end(),
+            [&outing]( const character_id member_id ) {
+                if( std::find( outing.casualty_ids.begin(), outing.casualty_ids.end(), member_id ) !=
+                    outing.casualty_ids.end() ) {
+                    return outing.member_is_resolved( member_id );
+                }
+                return std::count_if( outing.member_return_receipts.begin(),
+                                      outing.member_return_receipts.end(),
+                [&member_id]( const structural_member_return_receipt & receipt ) {
+                    return receipt.member_id == member_id;
+                } ) == 1;
+            } );
+            const bool authenticated_physical_returns =
+                has_complete_physical_return_receipts && !outing.member_return_receipts.empty() &&
+                std::all_of( outing.member_return_receipts.begin(),
+                             outing.member_return_receipts.end(),
+            [&candidate, now_minutes]( const structural_member_return_receipt & receipt ) {
+                return structural_return_receipt_is_authenticated( candidate, receipt, now_minutes );
+            } );
+            // Complete authenticated physical returns settle on the ordinary
+            // service cadence, even when their forecast has not expired.
+            // Legacy time-driven progression still retains its existing gate.
+            if( authenticated_physical_returns ||
+                outing.activation.elapsed_turns( activation_timer::expected_return,
                                                  outing.expected_return_minutes, now_minutes ) >= 0 ) {
                 const bool has_physical_resume = outing.local_handoff.is_abstract_resume();
-                const bool has_complete_physical_return_receipts =
-                    outing.member_return_receipts.size() + outing.casualty_ids.size() ==
-                    outing.member_ids.size() &&
-                    std::all_of( outing.member_ids.begin(), outing.member_ids.end(),
-                [&outing]( const character_id member_id ) {
-                    if( std::find( outing.casualty_ids.begin(), outing.casualty_ids.end(), member_id ) !=
-                        outing.casualty_ids.end() ) {
-                        return outing.member_is_resolved( member_id );
-                    }
-                    return std::count_if( outing.member_return_receipts.begin(),
-                                          outing.member_return_receipts.end(),
-                    [&member_id]( const structural_member_return_receipt & receipt ) {
-                        return receipt.member_id == member_id;
-                    } ) == 1;
-                } );
                 const int complete_physical_return_members =
                     static_cast<int>( outing.member_return_receipts.size() );
                 if( ( ( outing.schema_version >= 10 ||
@@ -19871,7 +20121,9 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         const std::function<bool( site_record &, const authorized_hostile_operation_plan & )>
         &hostile_operation_apply,
         const std::function<bool( const site_record &, const site_record & )> &projection_commit,
-        const std::set<std::string> &deferred_dispatch_site_ids )
+        const std::set<std::string> &deferred_dispatch_site_ids,
+        const std::function<structural_coarse_clock_read( const site_record &,
+                const structural_outing_plan & )> &coarse_clock_lookup )
 {
     bandit_live_world_probe::scoped_section probe_section(
         bandit_live_world_probe::section::structural_maintenance );
@@ -20787,7 +21039,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                 exact_plan = plan_structural_bounty_outing_impl(
                                  materialized_site, *lead, now_minutes, true, true );
             }
-            const structural_route_read cached_route{
+            structural_route_read cached_route{
                 true, contender.plan.full_route_cost, contender.plan.max_route_segment_risk,
                 "scheduler-owned route retained across exact-pair materialization",
                 contender.plan.watch_geography_supplied, contender.plan.target_footprint,
@@ -20795,6 +21047,7 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                 contender.plan.watch_geography_supplied ? contender.plan.shared_route :
                 std::vector<tripoint_abs_omt>()
             };
+            cached_route.preflight_outbound_path = contender.plan.preflight_outbound_path;
             if( exact_plan.valid && !apply_structural_route_read(
                     materialized_site, now_minutes, cached_route, exact_plan ) ) {
                 exact_plan.valid = false;
@@ -20818,6 +21071,13 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         }
         if( apply_structural_bounty_outing_plan( site, dispatch_plan, now_minutes ) ) {
             result.dispatches_applied++;
+            if( coarse_clock_lookup ) {
+                site.active_outing.route_clock_enrolled = true;
+                const structural_coarse_clock_read clock = coarse_clock_lookup( site, dispatch_plan );
+                if( !bind_structural_coarse_route_clock( site, dispatch_plan, clock, now_minutes ) ) {
+                    result.notes.push_back( "structural route clock unavailable for site=" + site.site_id );
+                }
+            }
             result.notes.push_back( "structural maintenance dispatched site=" + site.site_id +
                                     " lead=" + dispatch_plan.lead_id );
         } else {
@@ -22959,7 +23219,8 @@ structural_watch_route_apply_result apply_structural_watch_route_selection(
     next.alternate_watch_route_cost = has_alternate_route ?
                                       alternate_selection.route_cost : -1;
     next.alternate_watch_shared_route = alternate_watch_shared_route;
-    if( has_alternate_route && next.started_minutes >= 0 ) {
+    const bool invalidated_clock = invalidate_structural_route_clock( next );
+    if( !invalidated_clock && has_alternate_route && next.started_minutes >= 0 ) {
         next.expected_return_minutes = structural_expected_return_minutes(
                                            next.started_minutes, candidate.anchor,
                                            selection.omt );
@@ -23076,10 +23337,12 @@ structural_watch_route_apply_result recover_local_elevated_signal_watch(
     }
     next.last_advanced_minutes = current_minutes;
     next.last_progress_minutes = current_minutes;
-    next.expected_return_minutes = structural_expected_return_minutes(
-                                       next.started_minutes, candidate.anchor, selection.omt );
-    next.missing_deadline_minutes = minutes_after_saturated(
-                                        next.expected_return_minutes, scout_missing_grace_minutes );
+    if( !invalidate_structural_route_clock( next ) ) {
+        next.expected_return_minutes = structural_expected_return_minutes(
+                                           next.started_minutes, candidate.anchor, selection.omt );
+        next.missing_deadline_minutes = minutes_after_saturated(
+                                            next.expected_return_minutes, scout_missing_grace_minutes );
+    }
     if( !simulation_owner_state_is_consistent( next ) || !candidate.roster().valid ) {
         return structural_watch_route_apply_result::rejected;
     }
@@ -23532,7 +23795,7 @@ bool note_active_sortie_local_contact( site_record &site,
                        "active sortie local contact writeback failed" );
         return false;
     }
-    if( first_local_contact ) {
+    if( first_local_contact && candidate.active_outing.route_clock_anchor_minutes < 0 ) {
         candidate.active_outing.expected_return_minutes = minutes_after_saturated(
                     current_minutes,
                     ordinary_scout_sortie_limit_minutes() + scout_return_cohesion_minutes );
@@ -24727,12 +24990,14 @@ scout_assessment_result advance_structural_scout_assessment(
         next.waypoint_index = structural_outing_destination_waypoint( next );
         next.last_progress_minutes = no_progress_deadline;
         next.assessment.last_progress_minutes = no_progress_deadline;
-        next.expected_return_minutes = structural_expected_return_minutes(
-                                           next.started_minutes, candidate.anchor,
-                                           next.selected_watch_omt );
-        next.missing_deadline_minutes = minutes_after_saturated(
-                                            next.expected_return_minutes,
-                                            scout_missing_grace_minutes );
+        if( !invalidate_structural_route_clock( next ) ) {
+            next.expected_return_minutes = structural_expected_return_minutes(
+                                               next.started_minutes, candidate.anchor,
+                                               next.selected_watch_omt );
+            next.missing_deadline_minutes = minutes_after_saturated(
+                                                next.expected_return_minutes,
+                                                scout_missing_grace_minutes );
+        }
         const int second_watch_deadline = minutes_after_saturated(
                                               no_progress_deadline, 2 * 60 );
         const bool second_watch_elapsed = current_minutes >= second_watch_deadline;
@@ -27383,6 +27648,9 @@ bool record_matching_external_outing_casualty( site_record &site,
     }
     candidate_outing->casualty_ids.push_back( npc_id );
     candidate_outing->resolved_member_ids.push_back( npc_id );
+    if( candidate_outing->kind == outing_kind::structural_sortie ) {
+        invalidate_structural_route_clock( *candidate_outing );
+    }
     if( candidate_outing->leader_id == npc_id ) {
         const auto survivor = std::find_if( candidate_outing->member_ids.begin(),
                                             candidate_outing->member_ids.end(),

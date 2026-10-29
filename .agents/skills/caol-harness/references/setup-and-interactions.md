@@ -79,10 +79,12 @@ survival friction. This is not a global mutation allowlist. Preserve each measur
   bounds, actor ownership and elapsed time; it does not prove walked travel or NPC movement.
   For the debug **specific overmap** prompt, each horizontal component is
   `major-overmap-region'minor-OMT`, not OMT followed by a local map tile. The absolute OMT
-  coordinate is `180 * major + minor`; z is the third integer directly. For example,
-  absolute OMT `(140, 138, 1)` is `0'140,0'138,1`. A bare component supplies the major
-  region with minor zero, so `140,138,1` is not that destination. Check the currently
-  advertised prompt and verify the resulting actual coordinates and terrain before setup.
+  coordinate is `180 * major + minor`; z is the third integer directly. As a syntax
+  example, absolute OMT `(140, 138, 0)` is `0'140,0'138,0`; this is not a safe-landmark
+  claim. A bare component supplies the major region with minor zero, so `140,138,0` is
+  not that destination. Check the current prompt and verify the resulting coordinates.
+  Before choosing an elevated landing, establish its terrain and support in the current
+  world; a remembered coordinate or a correct parser value does not establish safe footing.
 - Do not bypass the tested NPC behavior by editing its mission or moving it to the expected endpoint. Preserve explicitly selected controlled variants: the [panic branch](rural-roof-replay.md#panic-and-withdrawal-regression) induces flight, the night-alarm arm permits its stated threat setup, and the [X4 procedure](playtest-suite.md#x4-party-survivor-and-casualty-handover)
   separately permits one identified bandit debug kill; [X4b](playtest-suite.md#x4b-rider-ambush-during-bandit-return)
   permits one hostile zombie rider spawn. These controlled interventions do not authorize other

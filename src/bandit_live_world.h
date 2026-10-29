@@ -901,6 +901,15 @@ struct active_outing_state {
     int last_progress_minutes = -1;
     int expected_return_minutes = -1;
     int missing_deadline_minutes = -1;
+    // Optional coarse forecast provenance; -1 means no qualified route read.
+    // This is a prediction, not a physical progress or arrival cursor.
+    bool route_clock_enrolled = false;
+    int route_clock_anchor_minutes = -1;
+    int route_clock_remaining_minutes = -1;
+    int route_clock_travel_minutes = -1;
+    int route_clock_homeward_minutes = -1;
+    bool route_clock_stale = false;
+    bool route_clock_homeward_actual = false;
     simulation_owner owner = simulation_owner::abstract;
     int handoff_epoch = 0;
     int last_advanced_minutes = -1;
@@ -1483,6 +1492,8 @@ struct structural_outing_plan {
     bandit_dry_run::job_template job = bandit_dry_run::job_template::hold_chill;
     std::vector<character_id> member_ids;
     std::vector<tripoint_abs_omt> shared_route;
+    // Native preflight path is a forecast input, not the outing's waypoint route.
+    std::vector<tripoint_abs_omt> preflight_outbound_path;
     int frontier_sector = -1;
     int frontier_search_option_index = -1;
     int frontier_prior_resolved_minutes = -1;
@@ -1520,6 +1531,7 @@ struct structural_route_read {
     std::vector<watch_selection_candidate> watch_candidates;
     std::vector<tripoint_abs_omt> watch_shared_route;
     std::vector<tripoint_abs_omt> alternate_watch_shared_route;
+    std::vector<tripoint_abs_omt> preflight_outbound_path;
 
     structural_route_read() = default;
     structural_route_read( bool reachable_, int complete_route_cost_, int max_segment_risk_,
@@ -1536,6 +1548,29 @@ struct structural_route_read {
         watch_shared_route( std::move( watch_shared_route_ ) ),
         alternate_watch_shared_route( std::move( alternate_watch_shared_route_ ) ) {}
 };
+
+// Both paths are native overmap solves; an unavailable or unqualified party
+// has no clock read. Paths run from destination to origin, like the executor.
+struct structural_coarse_clock_read {
+    bool party_qualified = false;
+    std::vector<tripoint_abs_omt> homeward_path;
+    // Optional executor-waypoint route, in destination-to-origin order.
+    std::vector<tripoint_abs_omt> outbound_path;
+};
+
+bool bind_structural_coarse_route_clock( site_record &site,
+        const structural_outing_plan &plan, const structural_coarse_clock_read &read,
+        int now_minutes );
+
+// Refresh once from an authenticated current homeward route, or after a
+// material change marked the previous estimate stale.
+bool refresh_structural_coarse_homeward_clock( site_record &site,
+        const simulation_advance_cursor &cursor, const std::vector<character_id> &member_ids,
+        const std::vector<std::vector<tripoint_abs_omt>> &homeward_paths,
+        int now_minutes );
+
+bool mark_structural_coarse_route_stale( site_record &site,
+        const simulation_advance_cursor &cursor );
 
 // The lead and outing keep the observed source z; a watch is selected on the
 // traversable plane used by the scouts.
@@ -2127,7 +2162,9 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         const std::function<bool( site_record &, const authorized_hostile_operation_plan & )>
         &hostile_operation_apply = {},
         const std::function<bool( const site_record &, const site_record & )> &projection_commit = {},
-        const std::set<std::string> &deferred_dispatch_site_ids = {} );
+        const std::set<std::string> &deferred_dispatch_site_ids = {},
+        const std::function<structural_coarse_clock_read( const site_record &,
+                const structural_outing_plan & )> &coarse_clock_lookup = {} );
 std::string render_structural_bounty_maintenance_report(
     const structural_bounty_maintenance_result &result );
 std::string render_evidence_debug_report( const world_state &state, int current_minutes );
