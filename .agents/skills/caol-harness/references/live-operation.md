@@ -121,9 +121,33 @@ supplies no recipe defaults.
 Give the command the finite task-time budget that remains. Submission and bounded collection then
 occur in one tool execution, waking on the response, cooperative cancellation, owner/bridge death,
 or the deadline. Continue from its terminal observation, or use `look` only when that observation
-does not retain usable authority. If an external tool timeout interrupts the command, run
-`--wait-seconds REMAINING_SECONDS collect` for that same pending request
-before doing anything else; never resubmit the action or advance game time.
+does not retain usable authority. When using `functions.exec` to run the player client, retain
+the **whole** nested command result, including `session_id`. A completed functions cell can
+leave the nested command running. For example, substitute the actual session path:
+
+```javascript
+const r = await tools.exec_command({
+  cmd: "python3 tools/openclaw_harness/play_cli.py --session SESSION --wait-seconds 60 collect",
+  yield_time_ms: 1000
+});
+store("play_collect", r);
+text(JSON.stringify(r));
+```
+
+If that result has `session_id`, poll the same process in later functions cells, retaining each
+result until it has an `exit_code`:
+
+```javascript
+let r = load("play_collect");
+if (r.session_id) {
+  r = await tools.write_stdin({session_id: r.session_id, chars: "", yield_time_ms: 10000});
+  store("play_collect", r);
+}
+text(JSON.stringify(r));
+```
+
+Only after the original command has exited may a still-pending request be collected again.
+Inspect the same request and never resubmit the action or advance game time to recover a client.
 
 When a successful action response contains a complete current World/menu surface, the client
 retains that result frame and the next legitimate `act` reuses its observation ID directly; no

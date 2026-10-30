@@ -1290,7 +1290,14 @@ TEST_CASE( "production powered roof lamp emits the elevated light envelope",
     map &here = get_map();
     avatar &u = get_avatar();
     const tripoint_bub_ms roof( u.pos_bub().x(), u.pos_bub().y(), 1 );
-    here.ter_set( roof, ter_str_id( "t_flat_roof" ) );
+    const ter_str_id roof_terrain = GENERATE( ter_str_id( "t_flat_roof" ),
+                                    ter_str_id( "t_shingle_flat_roof" ),
+                                    ter_str_id( "t_tar_flat_roof" ), ter_str_id( "t_metal_flat_roof" ),
+                                    ter_str_id( "t_tile_flat_roof" ), ter_str_id( "t_thatch_roof" ),
+                                    ter_str_id( "t_concrete_roof" ), ter_str_id( "t_wood_roof" ),
+                                    ter_str_id( "t_drystone_roof" ), ter_str_id( "t_log_sod_roof" ) );
+    CAPTURE( roof_terrain.str() );
+    here.ter_set( roof, roof_terrain );
     here.invalidate_map_cache( 1 );
     here.build_map_cache( 1 );
     u.setpos( here, roof, false );
@@ -1315,6 +1322,42 @@ TEST_CASE( "production powered roof lamp emits the elevated light envelope",
     REQUIRE( light != samples.end() );
     CHECK( light->light_projection.concealment.elevated_exposure_extended );
     CHECK( light->range_cap_omt == 40 );
+}
+
+TEST_CASE( "elevated light requires an exposed roof deck", "[physical_light][optics]" )
+{
+    clear_avatar();
+    clear_map_with_vision( -1, 3, false );
+    map &here = get_map();
+    const tripoint_bub_ms base = get_avatar().pos_bub();
+    const tripoint_bub_ms upper( base.x(), base.y(), 1 );
+
+    here.ter_set( base, ter_str_id( "t_shingle_flat_roof" ) );
+    here.ter_set( upper, ter_str_id( "t_open_air" ) );
+    for( int z = 0; z <= 2; ++z ) {
+        here.invalidate_map_cache( z );
+        here.build_map_cache( z );
+    }
+    CHECK_FALSE( physical_light::evaluate_escape( here, base ).elevated_exposed );
+    CHECK_FALSE( physical_light::evaluate_escape( here, upper ).elevated_exposed );
+    here.ter_set( upper, ter_str_id( "t_floor" ) );
+    here.invalidate_map_cache( 1 );
+    here.build_map_cache( 1 );
+    CHECK_FALSE( physical_light::evaluate_escape( here, upper ).elevated_exposed );
+
+    here.ter_set( upper, ter_str_id( "t_shingle_flat_roof" ) );
+    here.ter_set( upper + tripoint( 1, 0, 0 ), ter_str_id( "t_floor" ) );
+    for( int x = -1; x <= 1; ++x ) {
+        for( int y = -1; y <= 1; ++y ) {
+            here.ter_set( upper + tripoint( x, y, 1 ), ter_str_id( "t_flat_roof" ) );
+        }
+    }
+    for( int z = 1; z <= 2; ++z ) {
+        here.invalidate_map_cache( z );
+        here.build_map_cache( z );
+    }
+    CHECK_FALSE( physical_light::evaluate_escape( here, upper ).exposed_to_sky );
+    CHECK_FALSE( physical_light::evaluate_escape( here, upper ).elevated_exposed );
 }
 
 TEST_CASE( "production rider light clusters respect walls and source escape",

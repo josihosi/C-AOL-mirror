@@ -18,13 +18,12 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <vector>
 
 namespace physical_light
 {
 namespace
 {
-static const ter_str_id ter_t_flat_roof( "t_flat_roof" );
-static const ter_str_id ter_t_tile_flat_roof( "t_tile_flat_roof" );
 static const field_type_str_id field_fd_fire( "fd_fire" );
 static const field_type_str_id field_fd_smoke( "fd_smoke" );
 
@@ -381,8 +380,23 @@ escape evaluate_escape( map &here, const tripoint_bub_ms &source )
         }
     }
     const ter_id terrain = here.ter( source );
-    result.elevated_exposed = result.exposed_to_sky && source.z() > 0 &&
-                              ( terrain == ter_t_flat_roof || terrain == ter_t_tile_flat_roof );
+    // Explicit roof decks, not generic FLAT tiles such as upper floors.
+    // Skylights and open air are excluded; they are not roof decks.
+    static const std::vector<ter_str_id> roof_decks = {
+        ter_str_id( "t_flat_roof" ), ter_str_id( "t_tar_flat_roof" ),
+        ter_str_id( "t_shingle_flat_roof" ), ter_str_id( "t_thatch_roof" ),
+        ter_str_id( "t_metal_flat_roof" ), ter_str_id( "t_tile_flat_roof" ),
+        ter_str_id( "t_rock_roof" ), ter_str_id( "t_drystone_roof" ),
+        ter_str_id( "t_warped_roof" ), ter_str_id( "t_roof_paper" ),
+        ter_str_id( "t_roof_paper_hard" ), ter_str_id( "t_concrete_roof" ),
+        ter_str_id( "t_wood_roof" ), ter_str_id( "t_wood_treated_roof" ),
+        ter_str_id( "t_metal_roof" ), ter_str_id( "t_metal_roof_red" ),
+        ter_str_id( "t_metal_roof_sloped" ), ter_str_id( "t_log_sod_roof" ),
+        ter_str_id( "t_brick_roof" ), ter_str_id( "t_canvas_roof" )
+    };
+    const bool roof = std::any_of( roof_decks.begin(), roof_decks.end(),
+    [&]( const ter_str_id &id ) { return terrain == id; } );
+    result.elevated_exposed = result.exposed_to_sky && source.z() > 0 && roof;
     return result;
 }
 
