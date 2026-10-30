@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "sounds.h"
 #include "avatar.h"
 #include "calendar.h"
 #include "cata_catch.h"
@@ -712,6 +713,7 @@ TEST_CASE( "production channel audit batches identical bound packet records",
         CHECK( binding.get_string( "binding_id" ) == std::string( 64, '3' ) );
         CHECK( binding.get_string( "scenario_id" ) == "physical-light-control" );
         if( object.get_bool( "observed" ) && object.get_string( "signal_origin" ) == "local_field" ) {
+            CHECK( object.get_bool( "sampled" ) );
             observed_samples.insert( object.get_string( "detail" ) );
         }
     }
@@ -739,16 +741,60 @@ TEST_CASE( "production channel audit batches identical bound packet records",
         CHECK( object.get_int( "sequence" ) == static_cast<int>( second.records ) );
         CHECK( object.get_string( "scan_id" ) == "channel-output-control:2" );
     }
+    sounds::sound( get_avatar().pos_bub(), 120, sounds::sound_t::combat, "gunfire", false,
+                   "", "default", sounds::significant_sound_t::gunfire );
+    CHECK( observe_live_bandit_sounds_for_test() == 1 );
+    {
+        std::ifstream appended( path );
+        int optical_rows = 0;
+        while( std::getline( appended, line ) ) {
+            const auto object = json_loader::from_string( line ).get_object();
+            object.allow_omitted_members();
+            if( object.get_string( "scan_id" ) == "channel-output-control:3" &&
+                ( object.get_string( "channel" ) == "smoke" ||
+                  object.get_string( "channel" ) == "light" ) ) {
+                ++optical_rows;
+                CHECK_FALSE( object.get_bool( "sampled" ) );
+                CHECK_FALSE( object.get_bool( "observed" ) );
+                CHECK( object.get_string( "detail" ) == "not_sampled" );
+            }
+        }
+        CHECK( optical_rows == 2 );
+    }
+    here.remove_field( source, field_type_id( "fd_fire" ) );
+    here.remove_field( source, field_type_id( "fd_smoke" ) );
+    calendar::turn += 5_minutes;
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    process_overmap_npc_move_for_test();
+    const auto absent_stats = live_channel_output_statistics_for_test();
+    {
+        std::ifstream appended( path );
+        int optical_rows = 0;
+        while( std::getline( appended, line ) ) {
+            const auto object = json_loader::from_string( line ).get_object();
+            object.allow_omitted_members();
+            if( object.get_string( "scan_id" ) == "channel-output-control:4" &&
+                ( object.get_string( "channel" ) == "smoke" ||
+                  object.get_string( "channel" ) == "light" ) ) {
+                ++optical_rows;
+                CHECK( object.get_bool( "sampled" ) );
+                CHECK_FALSE( object.get_bool( "observed" ) );
+                CHECK( object.get_string( "detail" ) == "absent" );
+            }
+        }
+        CHECK( optical_rows == 2 );
+    }
     const auto bytes = std::filesystem::file_size( path );
     assign( "OPENCLAW_HARNESS_RUN_ID", "foreign-channel-run" );
     process_overmap_npc_move_for_test();
     CHECK( std::filesystem::file_size( path ) == bytes );
-    CHECK( live_channel_output_statistics_for_test().open_calls == second.open_calls );
+    CHECK( live_channel_output_statistics_for_test().open_calls == absent_stats.open_calls );
     assign( "OPENCLAW_HARNESS_RUN_ID", "channel-output-control" );
     assign( "OPENCLAW_HARNESS_BINDING_ID", std::nullopt );
     process_overmap_npc_move_for_test();
     CHECK( std::filesystem::file_size( path ) == bytes );
-    CHECK( live_channel_output_statistics_for_test().open_calls == second.open_calls );
+    CHECK( live_channel_output_statistics_for_test().open_calls == absent_stats.open_calls );
     assign( "OPENCLAW_HARNESS_BINDING_ID", std::string( 64, '3' ) );
     // A failed open disables this exact audit stream. Recovery must not append
     // a partial or foreign successor behind a previously failed writer.
@@ -758,9 +804,9 @@ TEST_CASE( "production channel audit batches identical bound packet records",
     process_overmap_npc_move_for_test();
     const auto failed = live_channel_output_statistics_for_test();
     CHECK( failed.write_failed );
-    CHECK( failed.records == second.records );
-    CHECK( failed.open_calls == second.open_calls + 1 );
-    CHECK( failed.flush_calls == second.flush_calls );
+    CHECK( failed.records == absent_stats.records );
+    CHECK( failed.open_calls == absent_stats.open_calls + 1 );
+    CHECK( failed.flush_calls == absent_stats.flush_calls );
     std::filesystem::remove( path );
     process_overmap_npc_move_for_test();
     CHECK_FALSE( std::filesystem::exists( path ) );

@@ -92,6 +92,21 @@ class R008IndoorChannelObservationTest(unittest.TestCase):
         self.assertTrue(result["eligible"])
         self.assertEqual(result["channels"], sorted(R008_CHANNELS))
 
+    def test_sampling_state_is_preserved_and_contradictions_are_rejected(self):
+        rows = _stream()
+        rows[0].update(sampled=False, observed=False, detail="not_sampled")
+        result = read_r008_indoor_channel_observation(
+            self.write(rows), run_id="run-a", source_sha256="source-a",
+            executable_sha256="exe-a", scenario_id="scenario-a", binding_id="binding-a")
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["records"][0]["sampled"])
+        self.assertNotIn("sampled", result["records"][1])  # legacy is unknown
+        rows[0]["observed"] = True
+        result = read_r008_indoor_channel_observation(
+            self.write(rows), run_id="run-a", source_sha256="source-a",
+            executable_sha256="exe-a", scenario_id="scenario-a", binding_id="binding-a")
+        self.assertIn("observed_without_sampling", result["issues"])
+
     def test_rejects_missing_stale_wrong_run_and_unisolated_rows(self):
         rows = _stream()
         rows.pop()

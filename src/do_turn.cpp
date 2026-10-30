@@ -8000,7 +8000,7 @@ bool r008_channel_stream_enabled()
 void append_r008_channel_record( std::ostream &output, const std::string_view channel,
                                  const std::string_view signal_origin,
                                  const std::string_view consumer,
-                                 const bool observed, const int game_minutes,
+                                 const bool observed, const bool sampled, const int game_minutes,
                                  const std::string_view source_omt,
                                  const std::string_view scan_id,
                                  const std::string_view detail )
@@ -8046,6 +8046,7 @@ void append_r008_channel_record( std::ostream &output, const std::string_view ch
     json.member( "signal_origin", signal_origin );
     json.member( "consumer", consumer );
     json.member( "observed", observed );
+    json.member( "sampled", sampled );
     json.member( "isolated", true );
     if( !source_omt.empty() ) {
         json.member( "source_omt", source_omt );
@@ -8059,7 +8060,8 @@ void append_r008_channel_record( std::ostream &output, const std::string_view ch
 
 void record_r008_production_channel_scan(
     const std::vector<live_bandit_signal_observation> &signals,
-    const std::vector<live_bandit_sound_observation> &sounds )
+    const std::vector<live_bandit_sound_observation> &sounds,
+    const bool optical_sampled )
 {
     if( !r008_channel_stream_enabled() ) {
         return;
@@ -8098,36 +8100,40 @@ void record_r008_production_channel_scan(
         if( signal.mark.kind == "smoke" ) {
             smoke = true;
             append_r008_channel_record( output, "smoke", "local_field", "bandit_live_world.signal_scan",
-                                        true, now_minutes, source, scan_id, signal.mark.mark_id );
+                                        true, true, now_minutes, source, scan_id, signal.mark.mark_id );
         } else if( signal.mark.kind == "light" || signal.mark.kind == "searchlight" ) {
             light = true;
             append_r008_channel_record( output, "light", "local_field", "bandit_live_world.signal_scan",
-                                        true, now_minutes, source, scan_id, signal.mark.mark_id );
+                                        true, true, now_minutes, source, scan_id, signal.mark.mark_id );
         }
     }
     for( const live_bandit_sound_observation &sound : sounds ) {
         sound_observed = true;
         append_r008_channel_record( output, "sound", "significant_sound", "bandit_live_world.sound_adapter",
-                                    true, now_minutes, sound.source_omt.to_string(),
+                                    true, true, now_minutes, sound.source_omt.to_string(),
                                     scan_id, std::to_string( sound.volume ) );
     }
     if( !sound_observed ) {
         append_r008_channel_record( output, "sound", "significant_sound", "bandit_live_world.sound_adapter",
-                                    false, now_minutes, "", scan_id, "absent" );
+                                    false, true, now_minutes, "", scan_id, "absent" );
     }
     if( !smoke ) {
         append_r008_channel_record( output, "smoke", "local_field", "bandit_live_world.signal_scan",
-                                    false, now_minutes, "", scan_id, "absent" );
+                                    false, optical_sampled, now_minutes, "", scan_id,
+                                    optical_sampled ? "absent" : "not_sampled" );
     }
     if( !light ) {
         append_r008_channel_record( output, "light", "local_field", "bandit_live_world.signal_scan",
-                                    false, now_minutes, "", scan_id, "absent" );
+                                    false, optical_sampled, now_minutes, "", scan_id,
+                                    optical_sampled ? "absent" : "not_sampled" );
     }
-    append_r008_channel_record( output, "scent", "none", "bandit_live_world.signal_scan", false,
+    append_r008_channel_record( output, "scent", "none", "bandit_live_world.signal_scan", false, false,
                                 now_minutes, "", scan_id, "not_consumed" );
-    append_r008_channel_record( output, "prior_knowledge", "none", "bandit_live_world.signal_scan", false,
+    append_r008_channel_record( output, "prior_knowledge", "none", "bandit_live_world.signal_scan",
+                                false, false,
                                 now_minutes, "", scan_id, "not_consumed" );
-    append_r008_channel_record( output, "incidental_contact", "none", "bandit_live_world.signal_scan", false,
+    append_r008_channel_record( output, "incidental_contact", "none", "bandit_live_world.signal_scan",
+                                false, false,
                                 now_minutes, "", scan_id, "not_consumed" );
     ++r008_channels.statistics.flush_calls;
     if( raid_perf_current ) {
@@ -14802,7 +14808,7 @@ int observe_live_bandit_sounds()
         return 0;
     }
     const std::vector<live_bandit_signal_observation> no_visual_signals;
-    record_r008_production_channel_scan( no_visual_signals, events );
+    record_r008_production_channel_scan( no_visual_signals, events, false );
     bandit_live_world::world_state &state = overmap_buffer.global_state.bandit_live_world;
     record_live_bandit_structural_sounds( state, events );
     record_live_bandit_local_structural_sounds( state, events );
@@ -19942,7 +19948,7 @@ void overmap_npc_move()
     }
     if( signal_cadence_due || !live_sounds.empty() ) {
         raid_perf_scope diagnostic_scope( raid_perf_stage::npc_channel_audit );
-        record_r008_production_channel_scan( live_signals, live_sounds );
+        record_r008_production_channel_scan( live_signals, live_sounds, signal_cadence_due );
     }
     const auto signal_done = std::chrono::steady_clock::now();
     if( dispatch_cadence_due || structural_cadence_due ) {

@@ -153,6 +153,12 @@ def read_r008_indoor_channel_observation(
             issues.append("unknown_channel")
         if not isinstance(row.get("observed"), bool):
             issues.append("invalid_observed_flag")
+        # Older records do not say whether an empty optical channel was sampled.
+        if "sampled" in row:
+            if not isinstance(row["sampled"], bool):
+                issues.append("invalid_sampled_flag")
+            elif not row["sampled"] and row.get("observed") is True:
+                issues.append("observed_without_sampling")
         record_count += 1
         if row.get("channel") in R008_CHANNELS:
             channels.add(str(row["channel"]))
