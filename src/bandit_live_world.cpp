@@ -18621,6 +18621,7 @@ camp_signal_observation_result record_staffed_camp_signal_observations( world_st
                     event.weather = read.summary;
                     event.visibility_input = read.observer_sight_points;
                     event.visibility_result = read.line_of_sight;
+                    event.source_sample_id = read.source_id;
                     event.lead_outcome = "no_new_lead";
                     event.work_reads = 0;
                     event.work_callbacks = 1;

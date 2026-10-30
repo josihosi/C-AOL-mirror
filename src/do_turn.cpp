@@ -14249,7 +14249,9 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_staffed_camp_
                 read.sense = select_smoke ? bandit_live_world::sortie_observation_sense::smoke :
                              bandit_live_world::sortie_observation_sense::light;
                 read.source_omt = source->source_omt;
+                read.source_id = source->sample_id;
                 read.range_cap_omt = source->range_cap_omt;
+                read.strength = std::clamp( source->mark.strength, 1, 6 );
                 read.rejected = true;
                 read.rejection_reason = "home_sensor_no_visual_senses";
                 result.push_back( std::move( read ) );
@@ -14282,7 +14284,9 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_staffed_camp_
                 read.sense = select_smoke ? bandit_live_world::sortie_observation_sense::smoke :
                              bandit_live_world::sortie_observation_sense::light;
                 read.source_omt = blocked->source_omt;
+                read.source_id = blocked->sample_id;
                 read.range_cap_omt = blocked->range_cap_omt;
+                read.strength = std::clamp( blocked->mark.strength, 1, 6 );
                 read.observer_sight_points = sight_points;
                 read.line_of_sight = false;
                 read.rejected = true;
@@ -14321,6 +14325,7 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_staffed_camp_
                     read.sense = select_smoke ? bandit_live_world::sortie_observation_sense::smoke :
                                  bandit_live_world::sortie_observation_sense::light;
                     read.source_omt = out_of_range->source_omt;
+                    read.source_id = out_of_range->sample_id;
                     read.range_cap_omt = out_of_range->range_cap_omt;
                     read.strength = std::clamp( out_of_range->mark.strength, 1, 6 );
                     read.observer_sight_points = sight_points;

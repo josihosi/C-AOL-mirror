@@ -22984,6 +22984,7 @@ TEST_CASE( "staffed camp blocked signal reads preserve leads and emit bounded re
         read.line_of_sight = false;
         read.rejected = true;
         read.rejection_reason = "blocked_line_of_sight";
+        read.source_id = "live_smoke@10,20,0#210";
         return std::vector<bandit_live_world::structural_signal_read> { read };
     } );
     restore_environment();
@@ -23016,6 +23017,9 @@ TEST_CASE( "staffed camp blocked signal reads preserve leads and emit bounded re
         CHECK( source_receipt.get_int( "intensity" ) == 6 );
         CHECK( receipt.get_object( "channel" ).get_string( "kind" ) == "smoke" );
         CHECK_FALSE( receipt.get_object( "line_of_sight" ).get_bool( "result" ) );
+        const JsonObject clocks = receipt.get_object( "observation_clocks" );
+        clocks.allow_omitted_members();
+        CHECK( clocks.get_string( "sample_id" ) == "live_smoke@10,20,0#210" );
         CHECK( receipt.get_object( "outcome" ).get_string( "kind" ) == "no_new_lead" );
         const JsonObject persistence = receipt.get_object( "persistence" );
         persistence.allow_omitted_members();
@@ -23087,6 +23091,7 @@ TEST_CASE( "staffed camp out of range signal reads preserve leads and emit bound
         read.rejected = true;
         read.rejection_reason = "out_of_range";
         read.range_cap_omt = 3;
+        read.source_id = "live_smoke@11,20,0#215";
         return std::vector<bandit_live_world::structural_signal_read> { read };
     } );
     restore_environment();
@@ -23122,6 +23127,9 @@ TEST_CASE( "staffed camp out of range signal reads preserve leads and emit bound
         CHECK( range.get_int( "actual" ) == 7 );
         CHECK( range.get_int( "cap" ) == 3 );
         CHECK( receipt.get_object( "line_of_sight" ).get_bool( "result" ) );
+        const JsonObject clocks = receipt.get_object( "observation_clocks" );
+        clocks.allow_omitted_members();
+        CHECK( clocks.get_string( "sample_id" ) == "live_smoke@11,20,0#215" );
         CHECK( receipt.get_object( "outcome" ).get_string( "kind" ) == "no_new_lead" );
         const JsonObject persistence = receipt.get_object( "persistence" );
         persistence.allow_omitted_members();
@@ -42987,6 +42995,8 @@ TEST_CASE( "elevated open-air smoke reaches lower camp and routed scout only thr
     REQUIRE( enclosed_roof.size() == 1 );
     CHECK( enclosed_roof.front().rejected );
     CHECK( enclosed_roof.front().rejection_reason == "blocked_line_of_sight" );
+    CHECK( enclosed_roof.front().source_id == smoke.sample_id );
+    CHECK( enclosed_roof.front().strength == smoke.mark.strength );
     CHECK( scout_reads( smoke ).empty() );
     smoke.smoke_source_exposed_to_sky = true;
 
@@ -42995,6 +43005,13 @@ TEST_CASE( "elevated open-air smoke reaches lower camp and routed scout only thr
     REQUIRE( out_of_range.size() == 1 );
     CHECK( out_of_range.front().rejected );
     CHECK( out_of_range.front().rejection_reason == "out_of_range" );
+    CHECK( out_of_range.front().source_id == smoke.sample_id );
+    smoke.sample_id.clear();
+    const auto missing_sample = camp_reads( smoke );
+    REQUIRE( missing_sample.size() == 1 );
+    CHECK( missing_sample.front().rejected );
+    CHECK( missing_sample.front().source_id.empty() );
+    smoke.sample_id = "roof-smoke-test#1";
     CHECK( scout_reads( smoke ).empty() );
     smoke.range_cap_omt = 4;
 
@@ -43007,6 +43024,8 @@ TEST_CASE( "elevated open-air smoke reaches lower camp and routed scout only thr
     REQUIRE( blocked_roof.size() == 1 );
     CHECK( blocked_roof.front().rejected );
     CHECK( blocked_roof.front().rejection_reason == "blocked_line_of_sight" );
+    CHECK( blocked_roof.front().source_id == smoke.sample_id );
+    CHECK( blocked_roof.front().strength == smoke.mark.strength );
     CHECK( scout_reads( smoke ).empty() );
 
     for( int x = 1; x <= 2; ++x ) {
@@ -73364,6 +73383,32 @@ TEST_CASE( "staffed signal refusal capture is change-only without hiding causal 
             emit( event );
             CHECK( records().size() == ++count );
         }
+    }
+    SECTION( "refusal sampling clocks do not hide a different physical source" ) {
+        event.source_sample_id = "live_smoke@10,20,0#210";
+        emit( event );
+        event.source_sample_id = "live_smoke@10,20,0#211";
+        ++event.game_minutes;
+        emit( event );
+        REQUIRE( records().size() == 1 );
+        event.source_sample_id = "live_smoke@11,20,0#211";
+        emit( event );
+        const auto rows = records();
+        REQUIRE( rows.size() == 2 );
+        const JsonObject first = native_trace_value( rows.front() );
+        const JsonObject second = native_trace_value( rows.back() );
+        first.allow_omitted_members();
+        second.allow_omitted_members();
+        const JsonObject first_receipt = first.get_object( "staffed_camp_signal_read" );
+        const JsonObject second_receipt = second.get_object( "staffed_camp_signal_read" );
+        first_receipt.allow_omitted_members();
+        second_receipt.allow_omitted_members();
+        const JsonObject first_clock = first_receipt.get_object( "observation_clocks" );
+        const JsonObject second_clock = second_receipt.get_object( "observation_clocks" );
+        first_clock.allow_omitted_members();
+        second_clock.allow_omitted_members();
+        CHECK( first_clock.get_string( "sample_id" ) == "live_smoke@10,20,0#210" );
+        CHECK( second_clock.get_string( "sample_id" ) == "live_smoke@11,20,0#211" );
     }
     SECTION( "mutations successes unknown persistence and ordinary commits always remain visible" ) {
         emit( event );

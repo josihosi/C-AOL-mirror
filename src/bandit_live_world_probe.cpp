@@ -553,8 +553,8 @@ void write_scout_homeward_observation( JsonOut &json,
     json.end_object();
 }
 
-// Share the recorded payload with refusal comparison. Signal sample/freshness
-// clocks remain causal inputs; only this diagnostic's emission clock is omitted.
+// Share the recorded payload with refusal comparison. The comparison omits the
+// diagnostic clock and numeric sample-clock suffix, retaining physical identity.
 void write_staffed_camp_signal_read( JsonOut &json,
                                     const bandit_live_world_probe::transition_event &event,
                                     const bool include_game_clock )
@@ -629,7 +629,17 @@ void write_staffed_camp_signal_read( JsonOut &json,
     }
     json.member( "emitted_minutes", event.emitted_minutes );
     json.member( "observed_minutes", event.observed_minutes );
-    json.member( "sample_id", event.source_sample_id );
+    // Refusal deduplication tracks the physical source, not each advancing
+    // sample clock. The emitted receipt still retains the exact sample ID.
+    std::string sample_id = event.source_sample_id;
+    const std::size_t suffix = sample_id.rfind( '#' );
+    if( !include_game_clock && suffix != std::string::npos && suffix + 1 < sample_id.size() &&
+        std::all_of( sample_id.begin() + suffix + 1, sample_id.end(), []( char c ) {
+        return c >= '0' && c <= '9';
+    } ) ) {
+        sample_id.erase( suffix );
+    }
+    json.member( "sample_id", sample_id );
     json.member( "uncertainty_radius_omt", event.uncertainty_radius_omt );
     json.end_object();
     json.member( "lead" );
