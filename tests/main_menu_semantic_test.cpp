@@ -40,9 +40,13 @@ extern "C" int ungetch( int );
 #include "faction.h"
 #include "npc.h"
 #include "map_helpers.h"
+#include "map_helpers_tests.h"
 #include "map.h"
 #include "options_helpers.h"
 #include "player_helpers.h"
+#include "recipe.h"
+#include "weather.h"
+#include "weather_type.h"
 #include "scores_ui.h"
 #include "output.h"
 #include "input_context.h"
@@ -67,6 +71,7 @@ void assign_environment( const char *name, const std::optional<std::string> &val
     } else {
         unsetenv( name );
     }
+
 #endif
 }
 
@@ -1570,6 +1575,119 @@ TEST_CASE( "NPC viewer direct entry retains native off mode and bound session li
     CHECK( active_semantic_surface_manager() == nullptr );
     CHECK( manager.stack().empty() );
     CHECK_FALSE( manager.has_pending_request() );
+}
+
+
+TEST_CASE( "tended fire query stops or continues real reading and crafts",
+           "[activity][fire][semantic_surface]" )
+{
+    const std::string activity = GENERATE( "reading", "crafting", "cooking" );
+    const bool stop = GENERATE( false, true );
+    DYNAMIC_SECTION( activity << ( stop ? " stop" : " continue" ) ) {
+        const std::string run = "tended-fire-query-" + activity + ( stop ? "-stop" : "-continue" );
+        const auto transport = std::filesystem::temp_directory_path() /
+                               ( run + std::to_string( std::chrono::steady_clock::now().time_since_epoch().count() ) + ".jsonl" );
+        std::ofstream( transport, std::ios::binary ).close();
+        scoped_environment run_env( "OPENCLAW_HARNESS_RUN_ID", run );
+        scoped_environment bound_env( "OPENCLAW_HARNESS_SEMANTIC_RUN_ID", run );
+        scoped_environment transport_env( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", transport.string() );
+        on_out_of_scope remove_transport( [&] { std::filesystem::remove( transport ); } );
+        semantic_surface_manager &manager = openclaw_harness_semantic_surface_manager();
+        REQUIRE( manager.stack().empty() );
+        const std::string old_locale = std::setlocale( LC_CTYPE, nullptr );
+        REQUIRE( std::setlocale( LC_CTYPE, "en_US.UTF-8" ) != nullptr );
+        on_out_of_scope restore_locale( [&] { std::setlocale( LC_CTYPE, old_locale.c_str() ); } );
+        if( ImGui::GetCurrentContext() == nullptr ) {
+            catacurses::init_interface();
+            catacurses::resizeterm();
+        }
+        on_out_of_scope cleanup( [&] {
+            manager.set_descriptor_observer( {} );
+            manager.set_receipt_observer( {} );
+            catacurses::endwin();
+        } );
+        restore_on_out_of_scope<bool> restore_test_mode( test_mode );
+        test_mode = true;
+        clear_avatar();
+        clear_map_with_vision( -1, 3, false );
+        set_time_to_day();
+        scoped_weather_override clear_weather( weather_type_id( "clear" ) );
+        avatar &u = get_avatar();
+        map &here = get_map();
+        const tripoint_bub_ms fire = u.pos_bub() + tripoint( 1, 0, 0 );
+        const tripoint_bub_ms fuel = u.pos_bub() + tripoint( 0, 1, 0 );
+        here.add_field( fire, field_type_id( "fd_fire" ), 1 );
+        here.trap_set( fuel, trap_id( "tr_firewood_source" ) );
+        here.add_item_or_charges( fuel, item( itype_id( "2x4" ), calendar::turn ) );
+        u.wear_item( item( itype_id( "test_backpack" ), calendar::turn ), false );
+        if( activity == "reading" ) {
+            item_location book = u.i_add( item( itype_id( "novel_western" ), calendar::turn ) );
+            REQUIRE( u.read( book ) );
+            REQUIRE( u.activity.id() == activity_id( "ACT_READ" ) );
+        } else {
+            const recipe_id id( activity == "cooking" ? "meat_cooked_test_no_tools" :
+                                "makeshift_crowbar_test_no_tools" );
+            u.learn_recipe( &id.obj() );
+            item component( itype_id( "2x4" ), calendar::turn );
+            u.i_add_or_drop( component );
+            u.make_craft( id, 1 );
+            REQUIRE( u.activity.id() == activity_id( "ACT_CRAFT" ) );
+            REQUIRE( u.get_wielded_item() );
+        }
+        u.acknowledged_tended_fire.reset();
+        const auto found = u.activity.get_distractions();
+        REQUIRE( found.count( distraction_type::tended_fire ) == 1 );
+        const int moves_before = u.activity.moves_left;
+        const int avatar_moves_before = u.get_moves();
+        int item_before = activity == "reading" ? 0 : u.get_wielded_item()->item_counter;
+        const std::string request_id = run + "-answer";
+        int accepted = 0;
+        bool submitted = false;
+        manager.set_receipt_observer( [&]( const semantic_action_receipt &receipt ) {
+            if( receipt.request_id == request_id && receipt.accepted ) {
+                ++accepted;
+            }
+        } );
+        manager.set_descriptor_observer( [&]( const semantic_surface_descriptor &descriptor ) {
+            if( descriptor.kind == "activity_distraction" && !submitted ) {
+                submitted = true;
+                CHECK( descriptor.payload.at( "distraction_type" ) == "tended_fire" );
+                CHECK( manager.submit_request( { run, descriptor.surface_id, descriptor.frame_id,
+                                                 request_id, stop ? "activity.stop" : "activity.continue",
+                                                 std::nullopt, {} } ) );
+            }
+        } );
+        test_mode = false;
+        CHECK( g->cancel_activity_or_ignore_query( distraction_type::tended_fire,
+                found.at( distraction_type::tended_fire ) ) == stop );
+        CHECK( submitted );
+        CHECK( accepted == 1 );
+        CHECK( here.get_field_intensity( fire, field_type_id( "fd_fire" ) ) == 1 );
+        if( stop ) {
+            CHECK_FALSE( u.activity );
+            CHECK_FALSE( u.acknowledged_tended_fire );
+            CHECK( u.get_moves() == avatar_moves_before );
+            if( activity != "reading" ) {
+                REQUIRE( u.get_wielded_item() );
+                CHECK( u.get_wielded_item()->item_counter == item_before );
+            }
+        } else {
+            REQUIRE( u.activity );
+            CHECK( u.acknowledged_tended_fire == here.get_abs( fire ) );
+            CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+            u.set_moves( 100 );
+            u.activity.do_turn( u );
+            REQUIRE( u.activity );
+            if( activity == "reading" ) {
+                CHECK( u.activity.moves_left < moves_before );
+            } else {
+                REQUIRE( u.get_wielded_item() );
+                CHECK( u.get_wielded_item()->item_counter > item_before );
+            }
+        }
+        u.cancel_activity();
+        here.trap_set( fuel, trap_id( "tr_null" ) );
+    }
 }
 
 

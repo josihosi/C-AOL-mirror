@@ -12,6 +12,7 @@
 #include "activity_actor_definitions.h"
 #include "activity_handlers.h"
 #include "avatar.h"
+#include "bandit_mark_generation.h"
 #include "calendar.h"
 #include "cata_catch.h"
 #include "cata_scope_helpers.h"
@@ -38,6 +39,7 @@
 #include "options_helpers.h"
 #include "pimpl.h"
 #include "player_activity.h"
+#include "physical_light.h"
 #include "player_helpers.h"
 #include "pocket_type.h"
 #include "point.h"
@@ -2118,6 +2120,130 @@ TEST_CASE( "tended fire warning follows the selected fire and usable fuel", "[ac
     u.acknowledged_tended_fire.reset();
     u.tended_fire_warning_candidate.reset();
     here.trap_set( fuel, trap_id( "tr_null" ) );
+}
+
+TEST_CASE( "tended fire warning uses the selected source channel and strict range threshold",
+           "[activity][fire]" )
+{
+    using namespace bandit_mark_generation;
+    clear_avatar();
+    clear_map_with_vision( -1, 3, false );
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    restore_on_out_of_scope restore_weather( get_weather().weather_id );
+    restore_on_out_of_scope restore_wind( get_weather().windspeed );
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    get_weather().windspeed = 0;
+    avatar &u = get_avatar();
+    map &here = get_map();
+    const tripoint_bub_ms fire = u.pos_bub() + tripoint( 1, 0, 0 );
+    const tripoint_bub_ms fuel = u.pos_bub() + tripoint( 0, 1, 0 );
+    here.trap_set( fuel, trap_id( "tr_firewood_source" ) );
+    here.add_item_or_charges( fuel, item( itype_id( "2x4" ), calendar::turn ) );
+    u.activity = player_activity( activity_id( "ACT_READ" ), 10000 );
+    u.acknowledged_tended_fire.reset();
+
+    const auto check = [&]( light_time_band time, bool rain, int expected_light,
+                            bool expected_smoke, bool expected_warning ) {
+        const time_point midnight = calendar::turn - time_past_midnight( calendar::turn );
+        set_time( time == light_time_band::twilight ? sunrise( midnight ) - 1_minutes :
+                  midnight + ( time == light_time_band::night ? 1_hours : 12_hours ) );
+        get_weather().weather_id = weather_type_id( rain ? "rain" : "clear" );
+        here.remove_field( fire, field_type_id( "fd_fire" ) );
+        here.add_field( fire, field_type_id( "fd_fire" ), 1 );
+        REQUIRE( selected_tended_fire( u ) == here.get_abs( fire ) );
+        const physical_light::escape escape = physical_light::evaluate_escape( here, fire );
+        const auto support = physical_light::evaluate_smoke_support( here, fire );
+        local_field_signal_reading reading;
+        reading.fire_intensity = 1;
+        reading.outside = escape.exposed_to_sky;
+        reading.side_leakage = escape.side_leakage;
+        reading.elevated_roof_exposed = escape.elevated_exposed;
+        reading.smoke_weather = rain ? smoke_weather_band::rain : smoke_weather_band::clear;
+        reading.light_weather = rain ? light_weather_band::rain : light_weather_band::clear;
+        reading.light_time = time;
+        const auto projection = adapt_local_field_signal_reading( reading );
+        const bool smoke = projection.smoke.viable && projection.smoke.projected_range_omt > 3 &&
+                           support.position.has_value();
+        const bool light = projection.light.viable && projection.light.projected_range_omt > 3 &&
+                           projection.light.packet.exposure != light_exposure_band::contained;
+        CHECK( projection.light.projected_range_omt == expected_light );
+        CHECK( smoke == expected_smoke );
+        CHECK( ( smoke || light ) == expected_warning );
+        CHECK( ( u.activity.get_distractions().count( distraction_type::tended_fire ) == 1 ) ==
+               expected_warning );
+    };
+    check( light_time_band::daylight, false, 1, true, true ); // Smoke alone.
+    check( light_time_band::twilight, true, 3, false, false ); // Exact threshold.
+    check( light_time_band::night, true, 5, false, true ); // Light alone.
+    check( light_time_band::daylight, true, 0, false, false ); // Both below.
+    // A bright unrelated fire cannot upgrade the selected weak source.
+    const tripoint_bub_ms unrelated = u.pos_bub() + tripoint( 5, 0, 0 );
+    here.add_field( unrelated, field_type_id( "fd_fire" ), 3 );
+    item battery( itype_id( "medium_battery_cell" ) );
+    battery.ammo_set( battery.ammo_default(), 56 );
+    item lamp( itype_id( "flashlight_on" ) );
+    lamp.put_in( battery, pocket_type::MAGAZINE_WELL );
+    here.add_item_or_charges( unrelated, lamp );
+    const auto emitters = physical_light::collect_item_emitters( u, here, 6 );
+    REQUIRE( std::any_of( emitters.begin(), emitters.end(), [&]( const auto &emitter ) {
+        return emitter.position == here.get_abs( unrelated ) && emitter.luminance > 0;
+    } ) );
+    CHECK( selected_tended_fire( u ) == here.get_abs( fire ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    here.remove_field( unrelated, field_type_id( "fd_fire" ) );
+    here.i_clear( unrelated );
+    check( light_time_band::daylight, false, 1, true, true );
+    here.furn_set( fuel, furn_str_id( "f_safe_c" ) );
+    REQUIRE_FALSE( here.accessible_items( fuel ) );
+    CHECK_FALSE( selected_tended_fire( u ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    here.furn_set( fuel, furn_str_id::NULL_ID() );
+    here.i_clear( fuel );
+    CHECK_FALSE( selected_tended_fire( u ) );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    here.trap_set( fuel, trap_id( "tr_null" ) );
+    u.tended_fire_warning_candidate.reset();
+}
+
+TEST_CASE( "tended fire warning requires escape from the selected source",
+           "[activity][fire]" )
+{
+    clear_avatar();
+    clear_map_with_vision( -1, 3, false );
+    set_time_to_day();
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    avatar &u = get_avatar();
+    const tripoint_abs_ms original_position = u.pos_abs();
+    on_out_of_scope restore_position( [&] { u.setpos( original_position, false ); } );
+    map &here = get_map();
+    const tripoint_bub_ms position( u.pos_bub().x(), u.pos_bub().y(), -1 );
+    const tripoint_bub_ms fire = position + tripoint( 1, 0, 0 );
+    const tripoint_bub_ms fuel = position + tripoint( 0, 1, 0 );
+    for( int dx = -4; dx <= 4; ++dx ) {
+        for( int dy = -4; dy <= 4; ++dy ) {
+            here.ter_set( position + tripoint( dx, dy, 0 ), ter_str_id( "t_rock" ) );
+            here.ter_set( position + tripoint( dx, dy, 1 ), ter_str_id( "t_rock" ) );
+        }
+    }
+    here.ter_set( position, ter_str_id( "t_rock_floor" ) );
+    here.ter_set( fire, ter_str_id( "t_rock_floor" ) );
+    here.ter_set( fuel, ter_str_id( "t_rock_floor" ) );
+    here.build_map_cache( -1, true );
+    here.build_map_cache( 0, true );
+    u.setpos( here.get_abs( position ), false );
+    here.add_field( fire, field_type_id( "fd_fire" ), 1 );
+    here.trap_set( fuel, trap_id( "tr_firewood_source" ) );
+    here.add_item_or_charges( fuel, item( itype_id( "2x4" ), calendar::turn ) );
+    u.activity = player_activity( activity_id( "ACT_READ" ), 10000 );
+    u.acknowledged_tended_fire.reset();
+    REQUIRE( selected_tended_fire( u ) == here.get_abs( fire ) );
+    const auto escape = physical_light::evaluate_escape( here, fire );
+    CHECK_FALSE( escape.exposed_to_sky );
+    CHECK( escape.side_leakage == 0 );
+    CHECK_FALSE( physical_light::evaluate_smoke_support( here, fire ).position );
+    CHECK( u.activity.get_distractions().count( distraction_type::tended_fire ) == 0 );
+    here.trap_set( fuel, trap_id( "tr_null" ) );
+    u.tended_fire_warning_candidate.reset();
 }
 
 TEST_CASE( "activity_interruption_by_distractions", "[activity][interruption]" )
