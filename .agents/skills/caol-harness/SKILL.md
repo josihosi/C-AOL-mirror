@@ -17,11 +17,24 @@ that contradicts this vision; a mismatch calls for diagnosis, not an unauthorize
 
 ## Own a scenario through its outcome
 
-The coordinator supplies the outcome, current bindings and real constraints; the player chooses
-practical strategy and recovery. Reach the tested condition and judge its endpoint. Adapt when a
-setup or tactic does not exercise it; a save, first injury or partial report is not completion.
-Actual death, defeat or retreat can satisfy an assigned outcome. Distinguish required gameplay
-from flexible setup using [scenario intent](references/playtest-suite.md#scenario-intent-and-closed-categories).
+Read testing recipes and setup instructions for the question they intend to answer, even when
+worded as exact contracts. The chaperone designs a simple, believable test from that question:
+what behavior matters, what would expose a failure, and what evidence would settle it? Distinguish
+those essentials from incidental choices of location, distance, actors, equipment, sequence and
+fixture. Choose the least costly informative setup, not the easiest passing case. Compare the actual
+prepared scene with that premise and revise incidental parameters within setup authority when they
+stop answering the question; the first plan is not a commitment. Exact boundaries remain essential
+when the boundary itself is being tested.
+
+The coordinator judges whether the evidence answers the intended question, rather than compliance
+with a recipe. Explain material coverage limits; a justified setup variation needs no separate
+approval or replay. Preserve genuine behavior, consequences, evidence, owner stops and input/custody
+permissions. Do not simplify away the challenge, manufacture success or erase failed observations.
+Bring a change to the requested product behavior or reserved permissions to the coordinator; routine
+test design belongs to the chaperone and player. Reach the meaningful endpoint: a save, first injury
+or partial report is not completion, while actual death, defeat or retreat can be. Use
+[scenario intent](references/playtest-suite.md#scenario-intent-and-closed-categories) to distinguish
+the question from its reusable recipe.
 
 Use a coherent initial save for a full journey and a compatible checkpoint for a focused question;
 a checkpoint does not prove skipped stages. Continue the same journey through ordinary save/reload.
@@ -67,7 +80,8 @@ The cockpit also offers `scenario.browse` and exact-identity `scenario.select`.
 
 GPT-6.1 Terra normally chaperones each assigned story and spawns one direct GPT-6 Luna game owner.
 Only Luna operates native input, with one owner per game/save and no extra player layer. Give Luna
-the intended outcome, current save/build/input binding and relevant recipe. Luna handles ordinary
+the concrete scene's premise, behavior to observe, relevant setup freedoms and current save/build/input
+binding, with recipe details only where useful. Luna handles ordinary
 survival, setup, recovery, saves and exit without per-step approval. The chaperone owns diagnosis
 and closeout; the coordinator owns priorities, capacity and lifecycle, and the mutator owns
 semantic working-contract changes unless delegated. Preserve original ownership and pending input;

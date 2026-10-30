@@ -25,6 +25,18 @@ measured capacity; the work ledger owns scheduling. Then select one useful world
 [single-world month crash soak](long-running-soak.md#final-single-world-month-crash-soak),
 continuing to30 actual game days total with minimal logging and brief failure-focused notes.
 
+## Scenario intent and closed categories
+
+Interpret recipe start/end conditions through
+[the skill's test-design guidance](../SKILL.md#own-a-scenario-through-its-outcome), including when
+an arm uses strict wording. Preserve conditions that make the gameplay question meaningful; adapt
+incidental setup rather than turn examples into acceptance gates. A nearby camp can isolate signal
+reception but cannot establish a believable long expedition; a routing test need not arrange visibility
+at an arbitrary exact distance. Compare the prepared scene with its intended premise and revise the
+setup when it does not exercise the behavior. Keep genuine failures and coverage limits visible.
+Current assignments select relevant behavior and variants; historical recipes add no runs or new
+acceptance obligations. Existing accepted evidence retains its original scope.
+
 ## Current shared two-round execution — 2026-10-12
 
 Current scheduling, parallel host allocations, repair batches and release sequencing belong in
