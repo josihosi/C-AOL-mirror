@@ -14,6 +14,22 @@ or a requirement to run every historical variant. Keep stable IDs and historical
 current assignments/results belong in the ledger and task context. The original collection had
 51 scoped passes and one E4B observed failure, not52 current-build successes.
 
+## Performance and routing comparisons
+
+Follow [performance responsibility](witness-and-finish.md#performance-findings-in-ordinary-playtests)
+when current evidence contradicts maintained performance. This library does not dispatch historical
+pending runs, preserve old game processes or select a routing redesign; current work belongs to the
+existing assignment and task context.
+
+Choose comparisons from the demonstrated cost: distinguish discovery, actor/light preparation,
+site bootstrap, packet copying, diagnostic output and travel bookkeeping rather than naming their
+aggregate as map scanning. Match workload, build, active populations and actual AI behavior. When
+output is implicated, distinguish logical bytes from physical disk writes and preserve required error
+evidence. When route reuse is implicated, select controls that expose invalid reuse or changed
+geometry, bodies, occupancy and hazards. Useful comparisons must preserve actual journeys and
+loading behavior; a cheap but behaviorally empty run proves no improvement. Do not turn these
+examples into a required matrix, prescribe an architecture before diagnosis or replay old suites.
+
 ## Final long-running soak batch
 
 After the planned mechanism/regression playtests, run the owner-selected

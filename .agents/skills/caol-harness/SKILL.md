@@ -100,9 +100,10 @@ Use current advertised actions, not historical menu or actor IDs; collect a pend
 than resubmit it. Observe actual positions, time and conditions before concluding a behavior is
 absent. Screenshots help locate controls, while native actions, events and saves support gameplay
 conclusions. For safe mode, waiting, prompts, recovery and save/reload, follow
-[live operation](references/live-operation.md). Record and investigate material sustained
-performance alarms and isolated multi-second spikes separately, without inventing a cause or
-selecting optimization automatically: [performance findings](references/witness-and-finish.md#performance-findings-in-ordinary-playtests).
+[live operation](references/live-operation.md). Treat maintained performance as part of the outcome: turns should generally stay below100ms.
+Investigate observed exceedances and deterioration promptly, distinguishing individual turns from
+window averages; correct costs caused by our code without waiting for another permission request.
+Preserve useful baselines and follow through on causal evidence and verification: [performance findings](references/witness-and-finish.md#performance-findings-in-ordinary-playtests).
 
 ## Closing a game
 

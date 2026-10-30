@@ -77,23 +77,30 @@ closure or disposal never supplies that proof.
 
 ## Performance findings in ordinary playtests
 
-Surface existing supported performance alarms promptly. Investigate material sustained breaches
-and individual multi-second spikes at a useful safe boundary; do not hide a spike inside an
-acceptable average. The existing100-turn wait mean above100ms remains its sustained rule;
-Josef separately selected the observed4.16second turn for diagnosis. Do not invent a new universal
-threshold or stop every game on every slow turn.
+Turns should generally stay below100ms. Occasional exceedances are allowed, but investigate them
+and sustained deterioration promptly while the workload and recent changes are still known. Luna
+surfaces the observation; the chaperone owns coherent diagnosis, repair and verification, and the
+coordinator keeps that responsibility active. Do not wait for another owner prompt or continue
+ordinary coverage while treating an unexplained material slowdown as harmless. Preserve current
+input and a useful checkpoint; this does not require abruptly closing a game on every slow turn.
 
-Keep concise findings in the existing task result/performance surface: run/build, game turn,
-action/phase, metric and sampling window, ordinary workload/local creature context and original
-source handles. Use a bounded decision-changing comparison to distinguish overmap AI/dispatch
-bookkeeping from local simulation, loading, rendering or external waits. Record an evidenced
-causal explanation before closing a material performance finding. Unknown cause is only a temporary
-investigation state: continue diagnosis, and resolve or escalate a concrete missing-tool/evidence
-blocker rather than completing an unknown-cause finding. Never fabricate a reason or use speculative
-blame to satisfy closeout. Creature density alone is not an explanation or waiver. Keep material
-performance findings open until their supported cause is established.
+Distinguish individual simulation turns, averages over100-turn windows, rendering frames and
+external waits. A low average does not explain a spike. Retrieve the useful prior baseline and
+compare build, workload, actors, phase and instrumentation; an old fast number is neither forgotten
+nor treated as a universal guarantee. Use existing timings and a bounded comparison that separates
+actual costs. Inspect changes made by our agents first where relevant, without asserting their
+causality before evidence. Keep run/build, metric/window, concise findings and reproduction in the
+existing task context, not another tracker or growing raw journal.
 
-Diagnosis is authorized; optimization remains a separate evidence-based decision and may be
-unnecessary. Preserve live input/source ownership and useful saves. Use existing timing/alarms;
-no new tracker, background monitor, continuous profiler, per-turn log growth or automatic wider
-repair campaign. This applies current and future ordinary playtests as well as final soaks.
+If our code causes the cost, fix it and verify performance and behavior. A demonstrated inherited
+CDDA cost may remain with its explanation and limits; calling upstream code more often or with
+more work because of our changes is still our responsibility. Unknown cause is an investigation
+state, not closure. Surface a concrete missing-evidence or tool blocker when necessary, rather than
+asking whether to investigate an authorized regression. Reuse a supported explanation for unchanged
+symptoms; reopen it for changed workload or contrary evidence instead of repeating identical tests.
+Preserve intentional perception delays and diagnose cost before changing sensing frequency.
+
+Use existing measurements first and targeted measurement when needed to decide a repair. No broad
+optimization campaign, continuous profiler or extra per-turn logging follows automatically. Preserve
+source/input custody, useful saves, accepted behavior and honest unresolved findings. This applies
+to ordinary playtests and final soaks alike.
