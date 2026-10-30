@@ -2494,7 +2494,7 @@ bool talk_function::companion_om_combat_check( const std::vector<npc_ptr> &group
             overmap &omi = overmap_buffer.get( omp );
 
             // TODO: Interact with dormant horde monsters as well?
-            for( std::unordered_map<tripoint_abs_ms, horde_entity> *bucket :
+            for( std::unordered_multimap<tripoint_abs_ms, horde_entity> *bucket :
                  omi.hordes.entity_group_at( local_omt ) ) {
                 for( std::pair<const tripoint_abs_ms, horde_entity> &monster_entry : *bucket ) {
                     // TODO: figure out hwat to do if this involves lightweight horde entities?

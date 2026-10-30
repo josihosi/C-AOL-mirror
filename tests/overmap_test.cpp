@@ -876,7 +876,7 @@ TEST_CASE( "horde_light_interest_save_roundtrip_and_legacy_entry",
     const tripoint_abs_ms position = project_combine( origin, local_position );
     const tripoint_abs_ms source = position + point_rel_ms( 24, 0 );
     std::unique_ptr<overmap> original = std::make_unique<overmap>( origin );
-    const std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> inserted =
+    const std::optional<std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator> inserted =
         original->hordes.spawn_entity( position, mon_zombie );
     REQUIRE( inserted.has_value() );
     horde_entity &entity = ( *inserted )->second;

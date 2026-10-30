@@ -26,6 +26,7 @@
 #include "horde_entity.h"
 #include "item.h"
 #include "json.h"
+#include "json_loader.h"
 #include "line.h"
 #include "map.h"
 #include "map_helpers.h"
@@ -941,6 +942,399 @@ TEST_CASE( "predator occupied exact handoff retains abstract owner", "[monster][
         CHECK( placed->predator_state().handoff_epoch == epoch + 1 );
         g->remove_zombie( *placed );
     }
+}
+
+TEST_CASE( "distinct colliding monsters survive an overmap relocation",
+           "[monster][hordes][handoff_collision]" )
+{
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    calendar::turn = calendar::turn_zero;
+    clear_overmaps();
+    clear_map_and_put_player_underground();
+    map &here = get_map();
+    const tripoint_bub_ms local( 65, 65, here.get_abs_sub().z() );
+    const tripoint_abs_ms absolute = here.get_abs( local );
+    const tripoint_abs_omt destination = get_player_character().pos_abs_omt() + point( 10, 10 );
+    here.ter_set( local, ter_t_floor );
+
+    // The two representations are distinct actors, as in the retained save:
+    // an ordinary local zombie occupies an abstract stalker's exact square.
+    overmap_buffer.spawn_monster( absolute, mtype_id( "mon_writhing_stalker" ) );
+    horde_entity *stalker = overmap_buffer.entity_at( absolute );
+    REQUIRE( stalker != nullptr );
+    stalker->ensure_predator_payload( absolute );
+    REQUIRE( stalker->monster_data != nullptr );
+    const std::string actor_id = stalker->monster_data->predator_state().actor_id;
+    const int stalker_hp = stalker->monster_data->get_hp();
+    REQUIRE_FALSE( actor_id.empty() );
+    stalker->tracking_intensity = 100;
+    overmap *const initial_overmap = overmap_buffer.get_existing(
+                                        project_to<coords::om>( absolute ).xy() );
+    REQUIRE( initial_overmap != nullptr );
+    initial_overmap->hordes.refresh_entity_bucket( absolute );
+    stalker = initial_overmap->entity_at( project_remain<coords::om>(
+                   absolute ).remainder_tripoint );
+    REQUIRE( stalker != nullptr );
+    REQUIRE_FALSE( initial_overmap->hordes.spawn_entity( absolute, *stalker->monster_data, true ) );
+    monster *zombie = g->place_critter_at( mtype_id( "mon_zombie" ), local );
+    REQUIRE( zombie != nullptr );
+    zombie->set_hp( 37 );
+    zombie->wander_to( absolute + point( 2, 0 ), 100 );
+    std::ostringstream original_local_save;
+    {
+        JsonOut out( original_local_save );
+        get_creature_tracker().serialize( out );
+    }
+
+    const std::string warnings = capture_debugmsg_during( [&] {
+        g->place_player_overmap( destination );
+    } );
+    CHECK( warnings.find( "Refusing to delete local monster after failed horde handoff" ) ==
+           std::string::npos );
+    CHECK_FALSE( here.inbounds( absolute ) );
+    CHECK( get_creature_tracker().find( absolute ) == nullptr );
+    point_abs_om ignored;
+    tripoint_om_ms relative;
+    std::tie( ignored, relative ) = project_remain<coords::om>( absolute );
+    const auto retained = initial_overmap->entities_at( relative );
+    REQUIRE( retained.size() == 2 );
+    const horde_entity *retained_zombie = nullptr;
+    const horde_entity *retained_stalker = nullptr;
+    for( const horde_entity *entity : retained ) {
+        if( entity->get_type()->id == mtype_id( "mon_zombie" ) ) {
+            retained_zombie = entity;
+        } else if( entity->get_type()->id == mtype_id( "mon_writhing_stalker" ) ) {
+            retained_stalker = entity;
+        }
+    }
+    REQUIRE( retained_zombie != nullptr );
+    REQUIRE( retained_stalker != nullptr );
+    REQUIRE( retained_zombie->monster_data != nullptr );
+    REQUIRE( retained_stalker->monster_data != nullptr );
+    CHECK( retained_zombie->monster_data->get_hp() == 37 );
+    CHECK( retained_zombie->tracking_intensity == 100 );
+    CHECK( retained_stalker->monster_data->predator_state().actor_id == actor_id );
+    CHECK( retained_stalker->monster_data->get_hp() == stalker_hp );
+
+    // Both independently owned payloads must survive the actual serializers.
+    std::ostringstream local_save;
+    {
+        JsonOut out( local_save );
+        get_creature_tracker().serialize( out );
+    }
+    creature_tracker local_reload;
+    local_reload.deserialize( json_loader::from_string( local_save.str() ).get_array() );
+    CHECK( local_reload.find( absolute ) == nullptr );
+    const point_abs_om overmap_position = project_to<coords::om>( absolute ).xy();
+    overmap *const source_overmap = overmap_buffer.get_existing( overmap_position );
+    REQUIRE( source_overmap != nullptr );
+    std::ostringstream abstract_save;
+    source_overmap->serialize( abstract_save );
+    auto abstract_reload = std::make_unique<overmap>( overmap_position );
+    std::istringstream abstract_input( abstract_save.str() );
+    abstract_reload->unserialize( abstract_input );
+    const auto reloaded = abstract_reload->entities_at( relative );
+    REQUIRE( reloaded.size() == 2 );
+    for( const horde_entity *entity : reloaded ) {
+        REQUIRE( entity->monster_data != nullptr );
+        if( entity->get_type()->id == mtype_id( "mon_zombie" ) ) {
+            CHECK( entity->monster_data->get_hp() == 37 );
+            CHECK( entity->tracking_intensity == 100 );
+        } else {
+            CHECK( entity->monster_data->predator_state().actor_id == actor_id );
+            CHECK( entity->monster_data->get_hp() == stalker_hp );
+        }
+    }
+    // Recreate the retained-save split with one owner in each real store,
+    // then use the ordinary nonlocal retry rather than a synthetic transfer.
+    const auto zombie_owner = initial_overmap->hordes.find( relative, retained_zombie );
+    REQUIRE( zombie_owner != initial_overmap->hordes.end() );
+    initial_overmap->hordes.erase( zombie_owner );
+    get_creature_tracker().deserialize( json_loader::from_string(
+                                           original_local_save.str() ).get_array() );
+    REQUIRE( get_creature_tracker().find( absolute ) != nullptr );
+    const std::string retry_warnings = capture_debugmsg_during( [&] {
+        g->despawn_nonlocal_monsters();
+    } );
+    CHECK( retry_warnings.find( "Refusing to delete local monster after failed horde handoff" ) ==
+           std::string::npos );
+    CHECK( get_creature_tracker().find( absolute ) == nullptr );
+    const auto retried = initial_overmap->entities_at( relative );
+    REQUIRE( retried.size() == 2 );
+    bool retry_kept_hp = false;
+    for( const horde_entity *entity : retried ) {
+        if( entity->get_type()->id == mtype_id( "mon_zombie" ) && entity->monster_data &&
+            entity->monster_data->get_hp() == 37 ) {
+            retry_kept_hp = true;
+        }
+    }
+    CHECK( retry_kept_hp );
+    // The conserved ordinary owner participates in the native active
+    // scheduler rather than becoming a permanently parked handoff.
+    const tripoint_abs_ms step = absolute + point( 1, 0 );
+    for( const tripoint_abs_ms &candidate : squares_closer_to( absolute,
+            absolute + point( 2, 0 ) ) ) {
+        overmap_buffer.set_passable( candidate, candidate == step );
+    }
+    overmap_buffer.set_passable( step, true );
+    calendar::turn += 1_turns;
+    overmap_buffer.move_hordes();
+    point_abs_om ignored_step;
+    tripoint_om_ms step_local;
+    std::tie( ignored_step, step_local ) = project_remain<coords::om>( step );
+    overmap *const source_after = overmap_buffer.get_existing( overmap_position );
+    REQUIRE( source_after != nullptr );
+    bool zombie_moved = false;
+    for( const horde_entity *entity : source_after->entities_at( step_local ) ) {
+        if( entity->get_type()->id == mtype_id( "mon_zombie" ) && entity->monster_data &&
+            entity->monster_data->get_hp() == 37 ) {
+            zombie_moved = true;
+        }
+    }
+    CHECK( zombie_moved );
+    // The distinct predator remains independently scheduled as well. Give
+    // its existing native route one admitted step, retaining its real ID/HP.
+    horde_entity *scheduled_stalker = nullptr;
+    tripoint_abs_ms stalker_position;
+    for( const auto &entry : source_after->horde_entities() ) {
+        if( entry.second->monster_data && entry.second->monster_data->is_caol_predator() &&
+            entry.second->monster_data->predator_state().actor_id == actor_id ) {
+            scheduled_stalker = entry.second;
+            stalker_position = entry.first;
+            break;
+        }
+    }
+    REQUIRE( scheduled_stalker != nullptr );
+    const tripoint_abs_ms stalker_step = stalker_position + point( 0, 1 );
+    const tripoint_abs_ms stalker_destination = stalker_position + point( 0, 2 );
+    scheduled_stalker->destination = stalker_destination;
+    scheduled_stalker->tracking_intensity = 100;
+    scheduled_stalker->moves = 47;
+    calendar::turn += 1_turns;
+    scheduled_stalker->monster_data->predator_state().last_advanced_turn = to_turn<int>( calendar::turn );
+    source_after->hordes.refresh_entity_bucket( stalker_position, scheduled_stalker );
+    for( const tripoint_abs_ms &candidate : squares_closer_to( stalker_position,
+            stalker_destination ) ) {
+        overmap_buffer.set_passable( candidate, candidate == stalker_step );
+    }
+    overmap_buffer.set_passable( stalker_step, true );
+    overmap_buffer.move_hordes();
+    overmap *const stalker_owner = overmap_buffer.get_existing( overmap_position );
+    REQUIRE( stalker_owner != nullptr );
+    const auto stalker_step_local = project_remain<coords::om>( stalker_step ).remainder_tripoint;
+    bool stalker_moved = false;
+    for( const horde_entity *entity : stalker_owner->entities_at( stalker_step_local ) ) {
+        if( entity->monster_data && entity->monster_data->is_caol_predator() &&
+            entity->monster_data->predator_state().actor_id == actor_id &&
+            entity->monster_data->get_hp() == stalker_hp ) {
+            stalker_moved = true;
+        }
+    }
+    CHECK( stalker_moved );
+    clear_overmaps();
+}
+
+TEST_CASE( "map shift conserves a local actor beside a distinct abstract owner",
+           "[monster][hordes][handoff_collision]" )
+{
+    clear_overmaps();
+    clear_map_without_vision();
+    map &here = get_map();
+    get_player_character().setpos( here, tripoint_bub_ms( 66, 66, 0 ) );
+    const tripoint_bub_ms edge( 0, 66, 0 );
+    const tripoint_abs_ms absolute = here.get_abs( edge );
+    monster &zombie = spawn_test_monster( "mon_zombie", edge );
+    zombie.set_hp( 37 );
+    overmap_buffer.spawn_monster( absolute, mtype_id( "mon_writhing_stalker" ) );
+    horde_entity *stalker = overmap_buffer.entity_at( absolute );
+    REQUIRE( stalker != nullptr );
+    stalker->ensure_predator_payload( absolute );
+    REQUIRE( stalker->monster_data != nullptr );
+    const std::string actor_id = stalker->monster_data->predator_state().actor_id;
+    const int stalker_hp = stalker->monster_data->get_hp();
+    int steps = 0;
+    const std::string warnings = capture_debugmsg_during( [&] {
+        while( get_creature_tracker().find( absolute ) && steps++ < 36 ) {
+            g->place_player( get_player_character().pos_bub() + point::east );
+        }
+    } );
+    CHECK( warnings.find( "Refusing to delete local monster after failed horde handoff" ) ==
+           std::string::npos );
+    CHECK( get_creature_tracker().find( absolute ) == nullptr );
+    overmap *owner = overmap_buffer.get_existing( project_to<coords::om>( absolute ).xy() );
+    REQUIRE( owner != nullptr );
+    const auto local = project_remain<coords::om>( absolute ).remainder_tripoint;
+    const auto owners = owner->entities_at( local );
+    REQUIRE( owners.size() == 2 );
+    bool zombie_saved = false;
+    bool stalker_saved = false;
+    for( const horde_entity *entity : owners ) {
+        if( entity->monster_data && entity->get_type()->id == mtype_id( "mon_zombie" ) ) {
+            zombie_saved = entity->monster_data->get_hp() == 37;
+        } else if( entity->monster_data && entity->monster_data->is_caol_predator() ) {
+            stalker_saved = entity->monster_data->predator_state().actor_id == actor_id &&
+                            entity->monster_data->get_hp() == stalker_hp;
+        }
+    }
+    CHECK( zombie_saved );
+    CHECK( stalker_saved );
+    clear_overmaps();
+}
+
+TEST_CASE( "ordinary horde migrations do not share a newly occupied destination",
+           "[monster][hordes][handoff_collision]" )
+{
+    restore_on_out_of_scope restore_calendar_turn( calendar::turn );
+    calendar::turn = calendar::turn_zero + 100_turns;
+    clear_overmaps();
+    clear_map_and_put_player_underground();
+    const tripoint_abs_ms destination = get_map().get_abs( tripoint_bub_ms( -24, 66, 0 ) );
+    const tripoint_abs_ms first_pos = destination + point( -1, 0 );
+    const tripoint_abs_ms second_pos = destination + point( 1, 0 );
+    const point_abs_om om_position = project_to<coords::om>( destination ).xy();
+    REQUIRE( project_to<coords::om>( first_pos ).xy() == om_position );
+    REQUIRE( project_to<coords::om>( second_pos ).xy() == om_position );
+    overmap &owner = overmap_buffer.get( om_position );
+    monster first( mtype_id( "mon_zombie" ) );
+    monster second( mtype_id( "mon_zombie" ) );
+    first.set_pos_abs_only( first_pos );
+    second.set_pos_abs_only( second_pos );
+    first.set_hp( 31 );
+    second.set_hp( 47 );
+    first.add_item( item( itype_id( "rock" ) ) );
+    second.add_item( item( itype_id( "rock" ) ) );
+    first.wander_to( destination, 100 );
+    second.wander_to( destination, 100 );
+    const auto first_inserted = owner.hordes.spawn_entity( first_pos, first );
+    REQUIRE( first_inserted );
+    REQUIRE( ( *first_inserted )->second.monster_data->inv.size() == 1 );
+    const auto first_uid = ( *first_inserted )->second.monster_data->inv.front().uid().get_value();
+    const auto second_inserted = owner.hordes.spawn_entity( second_pos, second );
+    REQUIRE( second_inserted );
+    REQUIRE( ( *second_inserted )->second.monster_data->inv.size() == 1 );
+    const auto second_uid = ( *second_inserted )->second.monster_data->inv.front().uid().get_value();
+    REQUIRE( first_uid > 0 );
+    REQUIRE( second_uid > 0 );
+    REQUIRE( first_uid != second_uid );
+    for( const tripoint_abs_ms &source : { first_pos, second_pos } ) {
+        for( const tripoint_abs_ms &candidate : squares_closer_to( source, destination ) ) {
+            overmap_buffer.set_passable( candidate, candidate == destination );
+        }
+    }
+    overmap_buffer.set_passable( destination, true );
+    overmap_buffer.move_hordes();
+    overmap *const after = overmap_buffer.get_existing( om_position );
+    REQUIRE( after != nullptr );
+    const auto at_destination = after->entities_at( project_remain<coords::om>(
+                                    destination ).remainder_tripoint );
+    CHECK( at_destination.size() == 1 );
+    std::set<int> health;
+    int accounted = 0;
+    for( const auto &entry : after->horde_entities() ) {
+        if( entry.second->monster_data && entry.second->get_type()->id == mtype_id( "mon_zombie" ) &&
+            ( entry.first == first_pos || entry.first == second_pos || entry.first == destination ) ) {
+            health.insert( entry.second->monster_data->get_hp() );
+            REQUIRE( entry.second->monster_data->inv.size() == 1 );
+            CHECK( entry.second->monster_data->inv.front().uid().get_value() ==
+                   ( entry.second->monster_data->get_hp() == 31 ? first_uid : second_uid ) );
+            ++accounted;
+        }
+    }
+    CHECK( accounted == 2 );
+    CHECK( ( health == std::set<int>{ 31, 47 } ) );
+    REQUIRE( at_destination.size() == 1 );
+    horde_entity *winner = at_destination.front();
+    const tripoint_abs_ms next = destination + point( 0, 1 );
+    winner->destination = next;
+    winner->tracking_intensity = 100;
+    after->hordes.refresh_entity_bucket( destination, winner );
+    overmap_buffer.set_passable( next, true );
+    for( int turn = 0; turn < 2; ++turn ) {
+        calendar::turn += 1_turns;
+        overmap_buffer.move_hordes();
+    }
+    overmap *const retried = overmap_buffer.get_existing( om_position );
+    REQUIRE( retried != nullptr );
+    const auto destination_after = retried->entities_at( project_remain<coords::om>(
+                                       destination ).remainder_tripoint );
+    const auto next_after = retried->entities_at( project_remain<coords::om>(
+                                next ).remainder_tripoint );
+    CHECK( destination_after.size() == 1 );
+    CHECK( next_after.size() == 1 );
+    std::set<int> after_health;
+    for( const horde_entity *entity : destination_after ) {
+        REQUIRE( entity->monster_data );
+        after_health.insert( entity->monster_data->get_hp() );
+        REQUIRE( entity->monster_data->inv.size() == 1 );
+        CHECK( entity->monster_data->inv.front().uid().get_value() ==
+               ( entity->monster_data->get_hp() == 31 ? first_uid : second_uid ) );
+    }
+    for( const horde_entity *entity : next_after ) {
+        REQUIRE( entity->monster_data );
+        after_health.insert( entity->monster_data->get_hp() );
+        REQUIRE( entity->monster_data->inv.size() == 1 );
+        CHECK( entity->monster_data->inv.front().uid().get_value() ==
+               ( entity->monster_data->get_hp() == 31 ? first_uid : second_uid ) );
+    }
+    CHECK( ( after_health == std::set<int>{ 31, 47 } ) );
+    clear_overmaps();
+}
+
+TEST_CASE( "coincident abstract owners both receive a sound and reload",
+           "[monster][hordes][handoff_collision]" )
+{
+    clear_overmaps();
+    clear_map_and_put_player_underground();
+    const tripoint_abs_ms position = get_map().get_abs( tripoint_bub_ms( 65, 65, 0 ) );
+    const point_abs_om om_position = project_to<coords::om>( position ).xy();
+    overmap &owner = overmap_buffer.get( om_position );
+    monster first( mtype_id( "mon_zombie" ) );
+    monster second( mtype_id( "mon_zombie" ) );
+    first.set_pos_abs_only( position );
+    second.set_pos_abs_only( position );
+    first.set_hp( 31 );
+    second.set_hp( 47 );
+    REQUIRE( owner.hordes.spawn_entity( position, first, true ) );
+    REQUIRE( owner.hordes.spawn_entity( position, second, true ) );
+    const auto local = project_remain<coords::om>( position ).remainder_tripoint;
+    REQUIRE( owner.entities_at( local ).size() == 2 );
+    const horde_entity lightweight( mtype_id( "mon_zombie" ) );
+    const horde_entity full_payload( first );
+    CHECK_FALSE( owner.hordes.can_accept_entity( position, lightweight ) );
+    CHECK_FALSE( owner.hordes.can_accept_entity( position, full_payload ) );
+    CHECK( owner.hordes.can_accept_entity( position, lightweight, true ) );
+    CHECK( owner.hordes.can_accept_entity( position, full_payload, true ) );
+
+    owner.hordes.signal_entities( position + point( 2, 0 ), 10 );
+    int active = 0;
+    for( const auto &entry : owner.hordes.get_view( horde_map_flavors::active ) ) {
+        if( entry.first == position ) {
+            CHECK( entry.second.tracking_intensity > 0 );
+            ++active;
+        }
+    }
+    CHECK( active == 2 );
+    const tripoint_abs_ms alert_destination = position + point( 3, 0 );
+    overmap_buffer.alert_entity( position, alert_destination, 200 );
+    for( const horde_entity *entity : owner.entities_at( local ) ) {
+        CHECK( entity->destination == alert_destination );
+        CHECK( entity->tracking_intensity == 200 );
+    }
+    std::ostringstream saved;
+    owner.serialize( saved );
+    auto restored = std::make_unique<overmap>( om_position );
+    std::istringstream input( saved.str() );
+    restored->unserialize( input );
+    const auto entries = restored->entities_at( local );
+    REQUIRE( entries.size() == 2 );
+    std::set<int> health;
+    for( const horde_entity *entity : entries ) {
+        REQUIRE( entity->monster_data != nullptr );
+        health.insert( entity->monster_data->get_hp() );
+        CHECK( entity->tracking_intensity > 0 );
+    }
+    CHECK( ( health == std::set<int>{ 31, 47 } ) );
+    clear_overmaps();
 }
 
 TEST_CASE( "predator blocked cross overmap route retains the exact abstract owner",

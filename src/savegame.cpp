@@ -574,7 +574,7 @@ void overmap::unserialize_monster_owners( const JsonMember &om_member,
                 overmap_buffer.adopt_legacy_predator_identity( new_monster,
                         "monster_map:" + new_monster.pos_abs().to_string() );
             }
-            const auto accepted = hordes.spawn_entity( new_monster.pos_abs(), new_monster );
+            const auto accepted = hordes.spawn_entity( new_monster.pos_abs(), new_monster, true );
             if( accepted ) {
                 new_monster.transfer_owned_items_to( *( *accepted )->second.monster_data );
             }
@@ -588,7 +588,7 @@ void overmap::unserialize_monster_owners( const JsonMember &om_member,
         JsonArray monster_map_json = om_member;
         while( monster_map_json.has_more() ) {
             tripoint_abs_ms monster_location;
-            std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> result;
+            std::optional<std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator> result;
             monster_location.deserialize( monster_map_json.next_value() );
             point_abs_om omp;
             tripoint_om_sm monster_submap;
@@ -596,7 +596,7 @@ void overmap::unserialize_monster_owners( const JsonMember &om_member,
                                               ( monster_location ) );
             if( monster_map_json.test_string() ) {
                 mtype_id monster_id( monster_map_json.next_string() );
-                result = hordes.spawn_entity( monster_location, monster_id );
+                result = hordes.spawn_entity( monster_location, monster_id, true );
             } else {
                 monster new_monster;
                 JsonObject saved = monster_map_json.next_object();
@@ -605,7 +605,7 @@ void overmap::unserialize_monster_owners( const JsonMember &om_member,
                     overmap_buffer.adopt_legacy_predator_identity( new_monster,
                             "horde:" + monster_location.to_string() + ":" + new_monster.type->id.str() );
                 }
-                result = hordes.spawn_entity( monster_location, new_monster );
+                result = hordes.spawn_entity( monster_location, new_monster, true );
                 if( result ) {
                     new_monster.transfer_owned_items_to( *( *result )->second.monster_data );
                 }
@@ -634,7 +634,7 @@ void overmap::unserialize_monster_owners( const JsonMember &om_member,
                     overmap_buffer.confirm_predator_position( *entity.monster_data,
                             predator_activation::representation::abstract, monster_location );
                 }
-                hordes.refresh_entity_bucket( monster_location );
+                hordes.refresh_entity_bucket( monster_location, &entity );
             } else {
                 // We deserialized something nasty, skip the rest of the stored values
                 monster_map_json.next_value();

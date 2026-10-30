@@ -5768,6 +5768,22 @@ TEST_CASE( "native_migo_response_recalls_an_available_away_body_before_readiness
             REQUIRE( g->despawn_monster( **operation_body ) );
             REQUIRE( g->despawn_monster( **ordinary ) );
             REQUIRE( g->despawn_monster( *bodies.back() ) );
+            // A distinct abstract resident can share the recalled actor's
+            // transfer key. Rally must authenticate the Mi-go, not whichever
+            // owner the coordinate lookup happens to encounter first.
+            const auto collision_local = project_remain<coords::om>( recalled_position ).remainder_tripoint;
+            auto collision = owner->hordes.spawn_entity( recalled_position, mtype_id( "mon_zombie" ), true );
+            REQUIRE( collision );
+            horde_entity *const other = &( *collision )->second;
+            other->tracking_intensity = 1;
+            other->destination = recalled_position;
+            owner->hordes.refresh_entity_bucket( recalled_position, other );
+            on_out_of_scope release_other( [&]() {
+                auto found = owner->hordes.find( collision_local, other );
+                if( found != owner->hordes.end() ) {
+                    owner->hordes.erase( found );
+                }
+            } );
             const auto body_bytes = []( const monster &body ) {
                 std::ostringstream out;
                 { JsonOut json( out ); body.serialize( json ); }
@@ -5778,11 +5794,14 @@ TEST_CASE( "native_migo_response_recalls_an_available_away_body_before_readiness
                                          geometry->id )->find( recalled_id );
                 REQUIRE( member->current_position );
                 if( member->owner == migo_population::representation::abstract ) {
-                    auto *entry = owner->entity_at( project_remain<coords::om>(
-                                                       *member->current_position ).remainder_tripoint );
-                    REQUIRE( entry );
-                    REQUIRE( entry->monster_data );
-                    return *entry->monster_data;
+                    for( auto *entry : owner->entities_at( project_remain<coords::om>(
+                                 *member->current_position ).remainder_tripoint ) ) {
+                        if( entry->monster_data &&
+                            entry->monster_data->population_identity().member_id == recalled_id ) {
+                            return *entry->monster_data;
+                        }
+                    }
+                    FAIL( "recalled abstract owner was not found" );
                 }
                 monster *local = nullptr;
                 for( monster &body : g->all_monsters() ) {

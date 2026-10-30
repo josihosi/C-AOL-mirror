@@ -1571,13 +1571,16 @@ bool overmap::release_monster_payload( const tripoint_abs_ms &p, const std::stri
     point_abs_om ignored;
     tripoint_om_ms local;
     std::tie( ignored, local ) = project_remain<coords::om>( p );
-    auto it = hordes.find( local );
-    if( actor_id.empty() || it == hordes.end() || !it->second.monster_data ||
-        it->second.monster_data->handoff_actor_id() != actor_id ) {
+    if( actor_id.empty() ) {
         return false;
     }
-    hordes.erase( it );
-    return true;
+    for( horde_entity *entity : hordes.entities_at( local ) ) {
+        if( entity->monster_data && entity->monster_data->handoff_actor_id() == actor_id ) {
+            hordes.erase( hordes.find( local, entity ) );
+            return true;
+        }
+    }
+    return false;
 }
 
 // Seeks through the submap looking for open areas.
@@ -1626,7 +1629,7 @@ void overmap::spawn_monsters( const tripoint_om_sm &p, std::vector<monster> &mon
                 !overmap_buffer.transfer_predator_owner( placed,
                         predator_activation::representation::group, source,
                         predator_activation::representation::abstract, destination ) ) {
-                hordes.erase( hordes.find( *open_space ) );
+                hordes.erase( hordes.find( *open_space, &( *accepted )->second ) );
                 ++body;
                 continue;
             }
@@ -1661,6 +1664,11 @@ horde_entity *overmap::entity_at( const tripoint_om_ms &p )
     return hordes.entity_at( p );
 }
 
+std::vector<horde_entity *> overmap::entities_at( const tripoint_om_ms &p )
+{
+    return hordes.entities_at( p );
+}
+
 std::vector<std::pair<tripoint_abs_ms, horde_entity *>> overmap::horde_entities()
 {
     std::vector<std::pair<tripoint_abs_ms, horde_entity *>> result;
@@ -1671,7 +1679,7 @@ std::vector<std::pair<tripoint_abs_ms, horde_entity *>> overmap::horde_entities(
 }
 
 // This should really be const but I don't want to mess with it right now.
-std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> overmap::hordes_at(
+std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> overmap::hordes_at(
     const tripoint_om_omt &p, int filter )
 {
     return hordes.entity_group_at( p, filter );
@@ -1702,6 +1710,7 @@ void overmap::move_hordes( bool migo_operations_only, bool predators_only )
         tripoint_abs_ms source_position;
         horde_entity source_state;
         horde_map::node_type node;
+        bool prepared_transfer;
     };
     std::vector<pending_horde_migration> migrating_hordes;
     for( horde_map::iterator mon = hordes.get_view( horde_map_flavors::active ).begin(),
@@ -1873,7 +1882,8 @@ void overmap::move_hordes( bool migo_operations_only, bool predators_only )
                     // returns an all-flavor iterator and would subsequently
                     // admit unrelated idle/dormant entries into this pass.
                     mon = hordes.get_view( horde_map_flavors::active ).begin();
-                    while( mon != hordes.end() && mon->first != origin ) {
+                    while( mon != hordes.end() &&
+                           ( mon->first != origin || mon->second.monster_data.get() != canonical ) ) {
                         ++mon;
                     }
                     if( mon == hordes.end() ) {
@@ -2089,7 +2099,7 @@ void overmap::move_hordes( bool migo_operations_only, bool predators_only )
             }
             monster_node.key() = viable_candidates.front();
             migrating_hordes.push_back( { source_position, std::move( source_state ),
-                                          std::move( monster_node ) } );
+                                          std::move( monster_node ), prepared_predator.has_value() } );
         } else if( prepared_predator ) {
             // Scheduling/intent with no selected step remains an abstract
             // state transition, so commit it once rather than reprocessing it
@@ -2141,6 +2151,19 @@ void overmap::move_hordes( bool migo_operations_only, bool predators_only )
         if( pending_source ||
             !dest_om->hordes.can_accept_entity( monster_node.key(), monster_node.mapped() ) ) {
             monster_node.key() = source_position;
+            if( !migrating.prepared_transfer && monster_node.mapped().monster_data &&
+                migrating.source_state.monster_data ) {
+                // The ordinary in-place path still owns the original items in
+                // its node. The pre-scheduler snapshot copied those items;
+                // move the originals back before discarding that node.
+                monster &original = *monster_node.mapped().monster_data;
+                monster &snapshot = *migrating.source_state.monster_data;
+                cata_assert( original.inv.size() >= snapshot.inv.size() );
+                // Evolution can append drops; a rejected step must discard
+                // that suffix before transferring the original owned items.
+                original.inv.erase( original.inv.begin() + snapshot.inv.size(), original.inv.end() );
+                original.transfer_owned_items_to( snapshot );
+            }
             monster_node.mapped() = std::move( migrating.source_state );
             // The source ownership snapshot is otherwise authoritative, but
             // this scheduler invocation has been consumed.  Keep its guard
@@ -2393,12 +2416,12 @@ int overmap::attract_hordes_to_light( const tripoint_abs_ms &source, const int i
 void overmap::alert_entity( const tripoint_om_ms &location, const tripoint_abs_ms &destination,
                             int intensity )
 {
-    horde_map::iterator target = hordes.find( location );
-    if( target != hordes.end() && intensity > target->second.tracking_intensity ) {
-        auto monster_node = hordes.extract( target );
-        monster_node.mapped().tracking_intensity = intensity;
-        monster_node.mapped().destination = destination;
-        hordes.insert( std::move( monster_node ) );
+    for( horde_entity *target : hordes.entities_at( location ) ) {
+        if( intensity > target->tracking_intensity ) {
+            target->tracking_intensity = intensity;
+            target->destination = destination;
+            hordes.refresh_entity_bucket( project_combine( pos(), location ), target );
+        }
     }
 }
 

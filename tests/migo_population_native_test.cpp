@@ -621,6 +621,11 @@ TEST_CASE( "migo_native_local_abstract_refusal_reload_and_casualty_preserve_one_
     payload.set_hp( 113 );
     monster *loaded = g->place_critter_at( make_shared_fast<monster>( payload ), position );
     REQUIRE( loaded );
+    // A different native owner at the same key must survive rollback of the
+    // prepared Mi-go handoff, even though position-only lookup finds it first.
+    overmap &collision_owner = overmap_buffer.get( project_to<coords::om>( absolute ).xy() );
+    REQUIRE( collision_owner.hordes.spawn_entity( absolute, mtype_id( "mon_zombie" ) ) );
+    const tripoint_om_ms collision_local = project_remain<coords::om>( absolute ).remainder_tripoint;
     // Force the checked lease's real post-insertion refusal. Its receiver
     // must be removed from the actual immobile native bucket before return.
     const auto saturated_epoch = std::numeric_limits<std::uint64_t>::max();
@@ -638,6 +643,12 @@ TEST_CASE( "migo_native_local_abstract_refusal_reload_and_casualty_preserve_one_
     CHECK( record.owner == representation::local );
     CHECK( record.token.epoch == saturated_epoch );
     CHECK( abstract_members( id, anchor ).empty() );
+    const auto occupants = collision_owner.entities_at( collision_local );
+    REQUIRE( occupants.size() == 1 );
+    CHECK( occupants.front()->get_type()->id == mtype_id( "mon_zombie" ) );
+    const auto zombie_owner = collision_owner.hordes.find( collision_local, occupants.front() );
+    REQUIRE( zombie_owner != collision_owner.hordes.end() );
+    collision_owner.hordes.erase( zombie_owner );
     record.token.epoch = 0;
     loaded->population_identity().epoch = 0;
     REQUIRE( g->despawn_monster( *loaded ) );

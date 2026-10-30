@@ -677,7 +677,7 @@ class overmapbuffer
         bool despawn_monster( monster &critter );
         void spawn_mongroup( const tripoint_abs_sm &p, const mongroup_id &type, int count );
         horde_entity *entity_at( const tripoint_abs_ms &p );
-        std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> hordes_at(
+        std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> hordes_at(
             const tripoint_abs_omt &p, int filter = horde_map_flavors::active | horde_map_flavors::idle |
                     horde_map_flavors::dormant | horde_map_flavors::immobile );
         /**

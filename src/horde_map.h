@@ -40,7 +40,7 @@ class monster;
 class horde_map
 {
         using map_type = std::unordered_map
-                         <tripoint_om_sm, std::unordered_map<tripoint_abs_ms, horde_entity>>;
+                         <tripoint_om_sm, std::unordered_multimap<tripoint_abs_ms, horde_entity>>;
 
         map_type active_monster_map;
         // Monsters with the DORMANT flag get placed in this parallell structure that is
@@ -51,7 +51,7 @@ class horde_map
         point_abs_om location;
 
     public:
-        using node_type = std::unordered_map<tripoint_abs_ms, horde_entity>::node_type;
+        using node_type = std::unordered_multimap<tripoint_abs_ms, horde_entity>::node_type;
         void set_location( point_abs_om loc ) {
             location = loc;
         }
@@ -59,21 +59,23 @@ class horde_map
             return location;
         }
         horde_entity *entity_at( const tripoint_om_ms &p );
-        std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> entity_group_at(
+        std::vector<horde_entity *> entities_at( const tripoint_om_ms &p );
+        std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> entity_group_at(
             const tripoint_om_omt &p, int filter = horde_map_flavors::active | horde_map_flavors::idle |
                     horde_map_flavors::dormant | horde_map_flavors::immobile );
-        std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> entity_group_at(
+        std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> entity_group_at(
             const tripoint_om_sm &p, int filter = horde_map_flavors::active | horde_map_flavors::idle |
                     horde_map_flavors::dormant | horde_map_flavors::immobile );
-        std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator>
-        spawn_entity( const tripoint_abs_ms &p, mtype_id id );
-        std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> spawn_entity(
+        std::optional<std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator>
+        spawn_entity( const tripoint_abs_ms &p, mtype_id id, bool allow_occupied = false );
+        std::optional<std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator> spawn_entity(
             const tripoint_abs_ms &p,
-            const monster &mon );
+            const monster &mon, bool allow_occupied = false );
         // A predator's opaque ID identifies one owner.  This is deliberately
         // map-local: transfers ask the destination owner before releasing the
         // source, rather than maintaining a second global actor registry.
-        bool can_accept_entity( const tripoint_abs_ms &p, const horde_entity &entity );
+        bool can_accept_entity( const tripoint_abs_ms &p, const horde_entity &entity,
+                                bool allow_occupied = false );
         void signal_entities( const tripoint_abs_ms &origin, int volume );
         /** Apply visual-light interest to ordinary horde entities.  This is
          * deliberately separate from sound signalling: no mongroups, random
@@ -91,6 +93,7 @@ class horde_map
         // Reclassify an existing owner after restoring fields such as its
         // destination and tracking intensity from persistent storage.
         void refresh_entity_bucket( const tripoint_abs_ms &p );
+        void refresh_entity_bucket( const tripoint_abs_ms &p, horde_entity *entity );
         void clear();
         void clear_chunk( const tripoint_om_sm &p );
 
@@ -104,7 +107,7 @@ class horde_map
                 horde_map *parent = nullptr;
                 map_type *outer_map = nullptr;
                 map_type::iterator outer_iter;
-                std::unordered_map<tripoint_abs_ms, horde_entity>::iterator inner_iter;
+                std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator inner_iter;
                 int filter = horde_map_flavors::active | horde_map_flavors::idle | horde_map_flavors::dormant |
                              horde_map_flavors::immobile;
             public:
@@ -125,7 +128,7 @@ class horde_map
                 }
                 // Sets the members directly. TODO: make private but accessable to horde_map
                 explicit iterator( const horde_map &p, map_type &m, map_type::iterator oi,
-                                   std::unordered_map<tripoint_abs_ms, horde_entity>::iterator ii ) : parent( const_cast<horde_map *>
+                                   std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator ii ) : parent( const_cast<horde_map *>
                                                ( &p ) ), outer_map( &m ),
                     outer_iter( oi ), inner_iter( ii ) {}
                 void next_map();
@@ -151,6 +154,7 @@ class horde_map
             return iterator();
         }
         iterator find( const tripoint_om_ms &loc );
+        iterator find( const tripoint_om_ms &loc, const horde_entity *entity );
         iterator erase( iterator iter );
         node_type extract( iterator iter );
 

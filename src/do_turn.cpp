@@ -12830,40 +12830,38 @@ live_bandit_omt_threat_read live_bandit_threats_at_existing_omt(
     for( int y = 0; y < 2 * SEEY; ++y ) {
         for( int x = 0; x < 2 * SEEX; ++x ) {
             const tripoint_om_ms entity_position = omt_origin + point_rel_ms( x, y );
-            const horde_entity *entity_ptr = existing->entity_at( entity_position );
-            if( entity_ptr == nullptr ) {
-                continue;
+            for( const horde_entity *entity_ptr : existing->entities_at( entity_position ) ) {
+                const horde_entity &entity = *entity_ptr;
+                const mtype *type = entity.get_type();
+                if( type == nullptr ) {
+                    continue;
+                }
+                bool hostile = entity.monster_data &&
+                               entity.monster_data->attitude_to( observer ) ==
+                               Creature::Attitude::HOSTILE;
+                if( !entity.monster_data ) {
+                    const faction *observer_faction = observer.get_faction();
+                    hostile = type->aggro_character && type->agro >= 10 &&
+                              ( observer_faction == nullptr ||
+                                type->default_faction != observer_faction->mon_faction );
+                }
+                if( !hostile ) {
+                    continue;
+                }
+                const int danger = entity.monster_data ?
+                                   static_cast<int>( std::ceil( observer.evaluate_monster(
+                                           *entity.monster_data, 1 ) ) ) :
+                                   static_cast<int>( std::ceil( std::min<float>(
+                                           std::max<float>( type->get_total_difficulty(),
+                                                   NPC_DANGER_VERY_LOW ),
+                                           NPC_MONSTER_DANGER_MAX ) ) );
+                add_danger( danger, danger );
+                read.visible_count++;
+                read.stable_ids.push_back( "entity:" +
+                                           project_combine( overmap_position,
+                                                   entity_position ).to_string() + ':' +
+                                           type->id.str() );
             }
-            const horde_entity &entity = *entity_ptr;
-            const mtype *type = entity.get_type();
-            if( type == nullptr ) {
-                continue;
-            }
-            bool hostile = entity.monster_data &&
-                           entity.monster_data->attitude_to( observer ) ==
-                           Creature::Attitude::HOSTILE;
-            if( !entity.monster_data ) {
-                const faction *observer_faction = observer.get_faction();
-                hostile = type->aggro_character && type->agro >= 10 &&
-                          ( observer_faction == nullptr ||
-                            type->default_faction != observer_faction->mon_faction );
-            }
-            if( !hostile ) {
-                continue;
-            }
-            const int danger = entity.monster_data ?
-                               static_cast<int>( std::ceil( observer.evaluate_monster(
-                                       *entity.monster_data, 1 ) ) ) :
-                               static_cast<int>( std::ceil( std::min<float>(
-                                       std::max<float>( type->get_total_difficulty(),
-                                               NPC_DANGER_VERY_LOW ),
-                                       NPC_MONSTER_DANGER_MAX ) ) );
-            add_danger( danger, danger );
-            read.visible_count++;
-            read.stable_ids.push_back( "entity:" +
-                                       project_combine( overmap_position,
-                                               entity_position ).to_string() + ':' +
-                                       type->id.str() );
         }
     }
 
@@ -17050,12 +17048,10 @@ bool live_bandit_inactive_homeward_reunion(
                 return refuse( "reunion_retained_custody_unavailable" );
             }
             custody_omts.insert( project_to<coords::omt>( position ) );
-            const horde_entity *entity = found->second->entity_at( local_position );
-            if( !entity ) {
-                continue;
-            }
-            if( !consider_retained( *entity, position ) ) {
-                return false;
+            for( const horde_entity *entity : found->second->entities_at( local_position ) ) {
+                if( !consider_retained( *entity, position ) ) {
+                    return false;
+                }
             }
         }
         // Route-cell custody is not nearby-threat absence. Query only spatial

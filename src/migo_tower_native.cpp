@@ -239,8 +239,14 @@ physical_navigation::step_read read_owned_step( monster &body,
         tripoint_om_ms local;
         std::tie( om_position, local ) = project_remain<coords::om>( p );
         overmap *existing = overmap_buffer.get_existing( om_position );
-        const horde_entity *resident = existing ? existing->entity_at( local ) : nullptr;
-        return resident && !resident->is_active();
+        if( existing ) {
+            for( const horde_entity *resident : existing->entities_at( local ) ) {
+                if( !resident->is_active() ) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }, prepared, &intent.navigation, movement );
 }
 
@@ -991,8 +997,15 @@ monster *confirmed_body( const migo_population::site_record &home,
         tripoint_om_ms local;
         std::tie( position, local ) = project_remain<coords::om>( *member.current_position );
         overmap *owner = overmap_buffer.find_loaded_overmap( position );
-        const horde_entity *entry = owner ? owner->entity_at( local ) : nullptr;
-        body = entry && entry->monster_data ? entry->monster_data.get() : nullptr;
+        if( owner ) {
+            for( horde_entity *entry : owner->entities_at( local ) ) {
+                if( entry->monster_data &&
+                    entry->monster_data->population_identity().member_id == member.token.member_id ) {
+                    body = entry->monster_data.get();
+                    break;
+                }
+            }
+        }
     }
     return body && !body->is_dead() && body->pos_abs() == *member.current_position &&
            body->population_identity().member_id == member.token.member_id &&

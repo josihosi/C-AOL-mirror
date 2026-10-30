@@ -1157,12 +1157,12 @@ void overmap_sidebar::draw_debug()
             }
         }
 
-        std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> hordes =
+        std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> hordes =
             overmap_buffer.hordes_at( cursor_pos );
 
         if( !hordes.empty() ) {
             int horde_size = 0;
-            for( std::unordered_map<tripoint_abs_ms, horde_entity> *horde : hordes ) {
+            for( std::unordered_multimap<tripoint_abs_ms, horde_entity> *horde : hordes ) {
                 horde_size += horde->size();
                 for( std::pair<const tripoint_abs_ms, horde_entity> &entity : *horde ) {
                     const mtype *horde_type = entity.second.get_type();
@@ -1989,7 +1989,7 @@ static void draw_ascii( const catacurses::window &w, overmap_draw_data_t &data )
             // Are we debugging monster groups?
             if( blink && uistate.overmap_debug_mongroup ) {
                 // TODO Check if this tile is a target of the currently highlighted horde.
-                std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> hordes = overmap_buffer.hordes_at(
+                std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> hordes = overmap_buffer.hordes_at(
                             omp );
                 if( !hordes.empty() ) {
                     ter_sym = "+";

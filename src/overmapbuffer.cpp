@@ -1725,9 +1725,9 @@ bool overmapbuffer::has_horde( const tripoint_abs_omt &p )
 int overmapbuffer::get_horde_size( const tripoint_abs_omt &p, int filter )
 {
     int horde_size = 0;
-    std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> hordes = overmap_buffer.hordes_at(
+    std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> hordes = overmap_buffer.hordes_at(
                 p, filter );
-    for( std::unordered_map<tripoint_abs_ms, horde_entity> *horde_group : hordes ) {
+    for( std::unordered_multimap<tripoint_abs_ms, horde_entity> *horde_group : hordes ) {
         horde_size += horde_group->size();
     }
 
@@ -2048,9 +2048,17 @@ void overmapbuffer::move_hordes()
             // nearby envelope without belonging to an assault operation.
             // Admit only its resident, authenticated native container.
             overmap *owner = find_loaded_overmap( project_to<coords::om>( *lease->current_position ).xy() );
-            const auto *entry = owner ? owner->entity_at( project_remain<coords::om>(
-                                    *lease->current_position ).remainder_tripoint ) : nullptr;
-            const monster *body = entry ? entry->monster_data.get() : nullptr;
+            const monster *body = nullptr;
+            if( owner ) {
+                for( const horde_entity *entry : owner->entities_at( project_remain<coords::om>(
+                         *lease->current_position ).remainder_tripoint ) ) {
+                    if( entry->monster_data &&
+                        entry->monster_data->population_identity().member_id == member_id ) {
+                        body = entry->monster_data.get();
+                        break;
+                    }
+                }
+            }
             const auto *intent = body ? body->migo_intent() : nullptr;
             if( body && intent && body->pos_abs() == *lease->current_position &&
                 body->population_identity().member_id == member_id &&
@@ -3822,7 +3830,7 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
     tripoint_om_sm current_submap_loc;
     std::tie( omp, current_submap_loc ) = project_remain<coords::om>( p );
     overmap &om = get( omp );
-    std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> monster_bucket =
+    std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> monster_bucket =
         om.hordes.entity_group_at( current_submap_loc );
     if( monster_bucket.empty() ) {
         return;
@@ -3834,7 +3842,7 @@ void overmapbuffer::spawn_monster( const tripoint_abs_sm &p, bool spawn_nonlocal
         horde_map::node_type node;
     };
     std::vector<queued_node> to_spawn;
-    for( std::unordered_map<tripoint_abs_ms, horde_entity> *monster_tree : monster_bucket ) {
+    for( std::unordered_multimap<tripoint_abs_ms, horde_entity> *monster_tree : monster_bucket ) {
         for( auto it = monster_tree->begin(); it != monster_tree->end(); ) {
             auto cur = it++;
             tripoint_abs_ms pos = cur->first;
@@ -3982,14 +3990,14 @@ bool overmapbuffer::despawn_monster( monster &critter )
         // the abstract bucket accepts that exact snapshot.
         monster snapshot( critter );
         snapshot.on_unload();
-        const std::optional<std::unordered_map<tripoint_abs_ms, horde_entity>::iterator> inserted =
-            om.hordes.spawn_entity( critter.pos_abs(), snapshot );
+        const std::optional<std::unordered_multimap<tripoint_abs_ms, horde_entity>::iterator> inserted =
+            om.hordes.spawn_entity( critter.pos_abs(), snapshot, true );
         if( inserted && !migo_population::transfer( *( *inserted )->second.monster_data,
                 migo_population::representation::local, migo_population::representation::abstract ) ) {
             point_abs_om ignored;
             tripoint_om_ms local;
             std::tie( ignored, local ) = project_remain<coords::om>( critter.pos_abs() );
-            om.hordes.erase( om.hordes.find( local ) );
+            om.hordes.erase( om.hordes.find( local, &( *inserted )->second ) );
             return false;
         }
         if( inserted && ( *inserted )->second.monster_data->is_caol_predator() ) {
@@ -4001,7 +4009,7 @@ bool overmapbuffer::despawn_monster( monster &critter )
                 point_abs_om ignored;
                 tripoint_om_ms local;
                 std::tie( ignored, local ) = project_remain<coords::om>( critter.pos_abs() );
-                om.hordes.erase( om.hordes.find( local ) );
+                om.hordes.erase( om.hordes.find( local, &( *inserted )->second ) );
                 return false;
             }
             state.last_advanced_turn = to_turn<int>( calendar::turn );
@@ -4012,7 +4020,7 @@ bool overmapbuffer::despawn_monster( monster &critter )
                                        migo_population::representation::abstract ) ) {
                 // Classification preceded the lease commit. Reconcile only
                 // the accepted native owner, after the last iterator use.
-                om.refresh_monster_schedule( critter.pos_abs() );
+                om.hordes.refresh_entity_bucket( critter.pos_abs(), &( *inserted )->second );
             }
         }
         return inserted.has_value();
@@ -4028,7 +4036,7 @@ horde_entity *overmapbuffer::entity_at( const tripoint_abs_ms &p )
     return om.entity_at( oms );
 }
 
-std::vector<std::unordered_map<tripoint_abs_ms, horde_entity>*> overmapbuffer::hordes_at(
+std::vector<std::unordered_multimap<tripoint_abs_ms, horde_entity>*> overmapbuffer::hordes_at(
     const tripoint_abs_omt &p, int filter )
 {
     point_abs_om omp;
