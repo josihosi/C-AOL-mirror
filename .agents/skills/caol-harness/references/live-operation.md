@@ -96,6 +96,15 @@ reentry. Record the completed segment and submit its witness with `finish` only 
 the declared process replacement without reinstalling the fixture. `quit` ends the entire scenario
 and skips that continuation. Saving alone does not establish new-process persistence.
 
+For a fresh detached selection continuing a task-local saved world, a fixture-based
+`next_action` still describes a fresh fixture launch. Add `--profile PROFILE`,
+`--post-relaunch-continuation`, and `--saved-world-snapshot ABSOLUTE_WORLD_PATH` to the
+selected launch. A profile override alone does not select continuation and can replace an
+existing world when the scenario allows replacement. Before launch, verify the intended
+snapshot and profile world hashes and that the continuation setup disables fixture installation;
+retain the returned selection and process bindings. A scenario that already declares its own
+saved-world snapshot can supply those continuation defaults.
+
 ## Save a checkpoint
 
 From World, use `play act world.quicksave` alone. Collect a pending request before another
