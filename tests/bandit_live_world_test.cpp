@@ -38443,6 +38443,20 @@ TEST_CASE( "loaded cannibal approach requires a reachable target boundary",
         overmap_buffer.insert_npc( member );
         generated_npc_ids.push_back( member->getID() );
     }
+    // Keep the route prerequisite independent of the generated world's terrain.
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> route_terrain;
+    for( int x = -6; x <= 6; ++x ) {
+        for( int y = -6; y <= 6; ++y ) {
+            const tripoint_abs_omt omt = site.anchor + point( x, y );
+            route_terrain.emplace_back( omt, overmap_buffer.ter( omt ) );
+            overmap_buffer.ter_set( omt, oter_str_id( "field" ) );
+        }
+    }
+    on_out_of_scope restore_route_terrain( [&]() {
+        for( const auto &entry : route_terrain ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+    } );
     std::optional<bandit_live_world::canonical_hostile_operation_route> route;
     for( const tripoint_abs_omt &candidate : {
              tripoint_abs_omt( 6, 20, 0 ),
@@ -38528,6 +38542,77 @@ TEST_CASE( "loaded cannibal approach requires a reachable target boundary",
     bool confirmed_leader_death = false;
     bool unresolved_missing_leader = false;
     bool entire_party_dead = false;
+    const auto remove_test_body = [&]( const character_id id, const bool confirmed_dead ) {
+        if( confirmed_dead ) {
+            get_event_bus().send<event_type::character_dies>( id );
+        }
+        g->remove_npc( id );
+        overmap_buffer.remove_npc( id );
+        generated_npc_ids.erase( std::remove( generated_npc_ids.begin(), generated_npc_ids.end(),
+                                              id ), generated_npc_ids.end() );
+    };
+    const auto resolve_all_but_last = [&]() {
+        for( std::size_t i = 0; i + 1 < party_ids.size(); ++i ) {
+            remove_test_body( party_ids[i], true );
+        }
+        advance_live_bandit_hostile_approaches_for_test();
+        for( std::size_t i = 0; i + 1 < party_ids.size(); ++i ) {
+            REQUIRE( live_site.find_member( party_ids[i] )->state ==
+                     bandit_live_world::member_state::dead );
+        }
+        REQUIRE( live_site.active_hostile_operation.is_active() );
+    };
+    SECTION( "sequential confirmed deaths settle after activation refresh" ) {
+        resolve_all_but_last();
+        remove_test_body( party_ids.back(), true );
+        refresh_live_bandit_activation();
+        CHECK( live_site.active_hostile_operation.reservation.activation.active );
+        advance_live_bandit_hostile_approaches_for_test();
+        CHECK_FALSE( live_site.active_hostile_operation.is_active() );
+        CHECK( live_site.find_member( party_ids.back() )->state ==
+               bandit_live_world::member_state::dead );
+        return;
+    }
+    SECTION( "unconfirmed missing survivor remains frozen after activation refresh" ) {
+        resolve_all_but_last();
+        remove_test_body( party_ids.back(), false );
+        refresh_live_bandit_activation();
+        CHECK_FALSE( live_site.active_hostile_operation.reservation.activation.active );
+        advance_live_bandit_hostile_approaches_for_test();
+        CHECK( live_site.active_hostile_operation.is_active() );
+        CHECK( live_site.find_member( party_ids.back() )->state ==
+               bandit_live_world::member_state::outbound );
+        return;
+    }
+    SECTION( "a living body takes precedence over a historical death record" ) {
+        resolve_all_but_last();
+        npc *survivor = g->find_npc( party_ids.back() );
+        REQUIRE( survivor != nullptr );
+        REQUIRE_FALSE( survivor->is_dead() );
+        get_event_bus().send<event_type::character_dies>( party_ids.back() );
+        refresh_live_bandit_activation();
+        advance_live_bandit_hostile_approaches_for_test();
+        CHECK( live_site.active_hostile_operation.is_active() );
+        CHECK( live_site.find_member( party_ids.back() )->state ==
+               bandit_live_world::member_state::outbound );
+        CHECK_FALSE( survivor->is_dead() );
+        return;
+    }
+    SECTION( "a distant living survivor keeps the party frozen" ) {
+        resolve_all_but_last();
+        npc *survivor = g->find_npc( party_ids.back() );
+        REQUIRE( survivor != nullptr );
+        const tripoint_abs_omt distant( survivor->pos_abs_omt().xy() + point( 41, 0 ),
+                                        survivor->pos_abs_omt().z() );
+        get_avatar().setpos( project_to<coords::ms>( distant ) + point( 12, 12 ), false );
+        refresh_live_bandit_activation();
+        CHECK_FALSE( live_site.active_hostile_operation.reservation.activation.active );
+        advance_live_bandit_hostile_approaches_for_test();
+        CHECK( live_site.active_hostile_operation.is_active() );
+        CHECK( live_site.find_member( party_ids.back() )->state ==
+               bandit_live_world::member_state::outbound );
+        return;
+    }
     SECTION( "doors admit the pack at the border" ) {
         for( std::size_t index = 0; index < party_ids.size(); ++index ) {
             const int offset = 10 + static_cast<int>( index );

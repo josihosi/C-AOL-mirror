@@ -2384,6 +2384,9 @@ raid_sweep::home_rally_member *live_bandit_home_rally_member( const npc &body )
     return nullptr;
 }
 
+bool live_bandit_confirmed_character_death( character_id member_id,
+        int started_minutes, int current_minutes );
+
 void evaluate_live_bandit_activation()
 {
     using namespace bandit_live_world;
@@ -2416,7 +2419,7 @@ void evaluate_live_bandit_activation()
         return to_turns<int>( body.get_last_updated() - calendar::start_of_cataclysm );
     };
     for( auto &site : world.sites ) {
-        const auto party = [&]( active_outing_state & outing ) {
+        const auto party = [&]( active_outing_state & outing, const bool hostile ) {
             if( !outing.is_active() && outing.member_ids.empty() ) {
                 return;
             }
@@ -2428,7 +2431,10 @@ void evaluate_live_bandit_activation()
                     continue;
                 }
                 const auto actor = overmap_buffer.find_npc( id );
-                if( !actor || !actor->is_dead() ) {
+                const bool confirmed_dead = actor ? actor->is_dead() :
+                                            hostile && live_bandit_confirmed_character_death(
+                                                id, outing.started_minutes, now / 60 );
+                if( !confirmed_dead ) {
                     all_confirmed_dead = false;
                 }
                 if( actor && !actor->is_dead() ) {
@@ -2443,8 +2449,8 @@ void evaluate_live_bandit_activation()
                                         static_cast<int>( std::clamp<std::int64_t>(
                                                     world_turn( outing.last_advanced_minutes ), 0, now ) ) );
         };
-        party( site.active_outing );
-        party( site.active_hostile_operation.reservation );
+        party( site.active_outing, false );
+        party( site.active_hostile_operation.reservation, true );
 
         if( site.response_home_rally ) {
             for( const auto &member : site.members ) {
