@@ -69056,6 +69056,106 @@ TEST_CASE( "legacy impossible scout departure cancels only an authenticated unst
     }
 }
 
+TEST_CASE( "retained homeward scouts revise a materially blocked route clock",
+           "[bandit_live_world][expedition_homeward_clock_reroute]" )
+{
+    using namespace bandit_live_world;
+    override_option food( "NO_NPC_FOOD", "true" );
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    scoped_weather_override weather( weather_type_id( "clear" ) );
+    r067_fresh_scout_journey journey;
+    journey.start( false, false, true );
+    journey.reach_watch();
+    journey.complete_watch( false );
+    const int limit = journey.minute() + 40;
+    while( journey.minute() < limit ) {
+        const auto &outing = journey.site().active_outing;
+        const auto actor = overmap_buffer.find_npc( journey.members().front() );
+        REQUIRE( actor );
+        if( outing.owner == simulation_owner::abstract &&
+            outing.local_handoff.is_abstract_resume() &&
+            scout_phase_requires_homeward_only( outing.phase ) &&
+            actor->goal == journey.home && !actor->omt_path.empty() &&
+            rl_dist( actor->pos_abs_omt(), journey.home ) >= 3 ) {
+            break;
+        }
+        journey.next_minute();
+    }
+    const auto &before = journey.site().active_outing;
+    REQUIRE( before.owner == simulation_owner::abstract );
+    REQUIRE( before.local_handoff.is_abstract_resume() );
+    REQUIRE( scout_phase_requires_homeward_only( before.phase ) );
+    REQUIRE( before.route_clock_enrolled );
+    const int original_forecast = before.expected_return_minutes;
+    const int original_missing = before.missing_deadline_minutes;
+    const auto original_activity = before.activity_id;
+    const int original_generation = before.generation;
+    const auto first = overmap_buffer.find_npc( journey.members().front() );
+    REQUIRE( first );
+    REQUIRE( first->goal == journey.home );
+    const auto origin = first->pos_abs_omt();
+    const auto previous_route = live_bandit_member_route_to_for_test( *first, journey.site(), journey.home );
+    REQUIRE( previous_route.size() >= 3 );
+    REQUIRE( previous_route.back() == origin );
+    const auto blocked_step = previous_route[previous_route.size() - 2];
+    REQUIRE( blocked_step.x() != origin.x() );
+    REQUIRE( blocked_step.x() != journey.home.x() );
+    for( const auto id : journey.members() ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( actor );
+        REQUIRE_FALSE( actor->is_active() );
+        REQUIRE( actor->pos_abs_omt() == origin );
+        REQUIRE( actor->goal == journey.home );
+    }
+    std::vector<std::pair<tripoint_abs_omt, oter_id>> changed;
+    on_out_of_scope restore( [&]() {
+        for( const auto &entry : changed ) {
+            overmap_buffer.ter_set( entry.first, entry.second );
+        }
+    } );
+    for( int y = origin.y() - 30; y <= origin.y() + 30; ++y ) {
+        for( int x = std::min( origin.x(), journey.home.x() ) - 2;
+             x <= std::max( origin.x(), journey.home.x() ) + 2; ++x ) {
+            const tripoint_abs_omt pos( x, y, origin.z() );
+            changed.emplace_back( pos, overmap_buffer.ter( pos ) );
+            overmap_buffer.ter_set( pos, oter_id( x == blocked_step.x() &&
+                                                 std::abs( y - origin.y() ) < 30 ?
+                                                 "river_center" : "field" ) );
+        }
+    }
+    REQUIRE_FALSE( overmap_travel_step_valid( origin, blocked_step, overmap_path_params::for_npc() ) );
+    const auto detour = live_bandit_member_route_to_for_test( *first, journey.site(), journey.home );
+    REQUIRE_FALSE( detour.empty() );
+    REQUIRE( detour.front() == journey.home );
+    REQUIRE( detour.back() == origin );
+    const int physical_minimum = journey.minute() +
+                                 static_cast<int>( detour.size() - 1 ) *
+                                 to_minutes<int>( time_between_npc_OM_moves );
+    INFO( "old forecast=" << original_forecast << " old missing=" << original_missing <<
+          " now=" << journey.minute() << " detour edges=" << detour.size() - 1 <<
+          " physical minimum=" << physical_minimum );
+    REQUIRE( physical_minimum > original_forecast );
+    const int advance_limit = journey.minute() + 10;
+    while( journey.minute() < advance_limit && first->pos_abs_omt() == origin ) {
+        journey.next_minute();
+    }
+    REQUIRE( first->pos_abs_omt() != origin );
+    for( const auto id : journey.members() ) {
+        const auto actor = overmap_buffer.find_npc( id );
+        REQUIRE( actor );
+        REQUIRE( actor->pos_abs_omt() == first->pos_abs_omt() );
+        CHECK( overmap_buffer.ter( actor->pos_abs_omt() ) != oter_id( "river_center" ) );
+    }
+    const auto remaining = live_bandit_member_route_to_for_test( *first, journey.site(), journey.home );
+    REQUIRE_FALSE( remaining.empty() );
+    const int remaining_minimum = journey.minute() + static_cast<int>( remaining.size() - 1 ) *
+                                  to_minutes<int>( time_between_npc_OM_moves );
+    const auto &after = journey.site().active_outing;
+    REQUIRE( after.activity_id == original_activity );
+    REQUIRE( after.generation == original_generation );
+    CHECK( after.expected_return_minutes >= remaining_minimum );
+}
+
 TEST_CASE( "outbound scout orders recheck a changed next step",
            "[bandit_live_world][expedition_outbound_clock_reroute]" )
 {
