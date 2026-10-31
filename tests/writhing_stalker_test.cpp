@@ -52,6 +52,12 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
 {
     // Diagnostic only: the retained-reader arm uses the existing optical API,
     // not a changed native planner. No physical mutation/turn spans this batch.
+    const std::string scene = GENERATE( std::string( "near_roof_day" ),
+                                       std::string( "far_house_night" ), std::string( "far_open_day" ) );
+    const bool roof = scene == "near_roof_day";
+    const bool night = scene == "far_house_night";
+    const bool distant = !roof;
+    CAPTURE( scene );
     clear_map( -2, 2 );
     clear_npcs();
     clear_avatar();
@@ -62,15 +68,34 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
         set_time( old_turn );
         rng_get_engine() = old_rng;
     } );
-    set_time( calendar::turn_zero + 12_hours );
+    set_time( calendar::turn_zero + ( night ? 0_hours : 12_hours ) );
     scoped_weather_override weather( weather_type_id( "clear" ) );
     map &here = get_map();
     auto &you = get_avatar();
     you.setpos( here, tripoint_bub_ms( 66, 60, 0 ) );
-    monster &stalker = spawn_test_monster( "mon_writhing_stalker", tripoint_bub_ms( 60, 60, 0 ) );
+    monster &stalker = spawn_test_monster( "mon_writhing_stalker",
+                                         tripoint_bub_ms( distant ? 12 : 60, 60, 0 ) );
     monster &near = spawn_test_monster( "mon_zombie", tripoint_bub_ms( 66, 64, 0 ) );
     monster &blocked = spawn_test_monster( "mon_zombie", tripoint_bub_ms( 68, 66, 0 ) );
-    here.ter_set( tripoint_bub_ms( 67, 65, 0 ), ter_str_id( "t_wall" ) );
+    for( int y = 50; y <= 80; ++y ) {
+        here.ter_set( tripoint_bub_ms( 67, y, 0 ), ter_str_id( "t_wall" ) );
+    }
+    if( roof ) {
+        for( const auto &p : here.points_in_radius( near.pos_bub() + tripoint::above, 12 ) ) {
+            if( p.z() == 1 ) { here.ter_set( p, ter_str_id( "t_flat_roof" ) ); }
+        }
+    }
+    if( night ) {
+        // Outdoor targets beside a house still request its native aperture
+        // inputs for exact light. This is the far night pressure workload,
+        // with the same physical scene and eight calls in both arms.
+        for( int x = 35; x <= 95; ++x ) {
+            for( int y = 76; y <= 100; ++y ) {
+                here.ter_set( tripoint_bub_ms( x, y, 0 ), ter_str_id( "t_floor" ) );
+                here.ter_set( tripoint_bub_ms( x, y, 1 ), ter_str_id( "t_flat_roof" ) );
+            }
+        }
+    }
     for( int z = -2; z <= OVERMAP_HEIGHT; ++z ) {
         here.build_map_cache( z );
     }
@@ -123,10 +148,22 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
         CHECK( std::distance( MAPBUFFER.begin(), MAPBUFFER.end() ) == residents );
         CHECK( cache_values() == main_cache );
     };
+    {
+        scout_observation::site_reader mixed;
+        const auto predicate = mixed.read_actor( stalker, near, capability, true );
+        const auto exact = mixed.read_actor( stalker, near, capability );
+        CHECK( predicate.visible == exact.visible );
+        REQUIRE( exact.known );
+        // A prior predicate result is not an exact ambient cache entry. A
+        // later exact reader must still calculate and publish that value.
+        CHECK( mixed.cached_lighting_at( near.pos_abs() ).has_value() );
+        conserved();
+    }
     for( int repeat = 0; repeat < 3; ++repeat ) {
         std::vector<bool> native;
         std::vector<scout_observation::visibility_read> fresh;
         std::vector<scout_observation::visibility_read> retained;
+        std::vector<scout_observation::visibility_read> predicate;
         const auto timed = [&]( const auto &call ) {
             const auto start = std::chrono::steady_clock::now();
             const auto cpu = std::clock();
@@ -140,6 +177,8 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
         };
         size_t fresh_views = 0, fresh_physical = 0, fresh_summaries = 0;
         size_t reused_views = 0, reused_physical = 0, reused_summaries = 0;
+        size_t predicate_summaries = 0;
+        bool predicate_exact_light = false;
         const auto public_arm = [&]() {
             for( const auto *target : targets ) {
                 native.push_back( writhing_stalker::can_observe_actor( stalker, *target ) );
@@ -163,9 +202,18 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
             reused_physical = reader.cached_lighting_submap_count();
             reused_summaries = reader.cached_sunlight_summary_count();
         };
-        std::pair<double, double> public_time, fresh_time, retained_time;
+        const auto predicate_arm = [&]() {
+            scout_observation::site_reader reader;
+            for( const auto *target : targets ) {
+                predicate.push_back( reader.read_actor( stalker, *target, capability, true ) );
+            }
+            predicate_summaries = reader.cached_sunlight_summary_count();
+            predicate_exact_light = reader.cached_lighting_at( near.pos_abs() ).has_value();
+        };
+        std::pair<double, double> public_time, fresh_time, retained_time, predicate_time;
         // Reverse arm order as a bounded warm-order countercontrol.
         if( repeat == 1 ) {
+            predicate_time = timed( predicate_arm );
             retained_time = timed( retained_arm );
             fresh_time = timed( fresh_arm );
             public_time = timed( public_arm );
@@ -173,12 +221,14 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
             public_time = timed( public_arm );
             fresh_time = timed( fresh_arm );
             retained_time = timed( retained_arm );
+            predicate_time = timed( predicate_arm );
         }
         REQUIRE( native.size() == targets.size() );
         REQUIRE( fresh.size() == targets.size() );
         REQUIRE( retained.size() == targets.size() );
-        CHECK( native[0] );
-        CHECK( native[1] );
+        REQUIRE( predicate.size() == targets.size() );
+        CHECK( native[0] == !night );
+        CHECK( native[1] == !night );
         CHECK_FALSE( native[3] );
         for( size_t i = 0; i < targets.size(); ++i ) {
             CHECK( fresh[i].known );
@@ -186,12 +236,16 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
             CHECK( retained[i].known == fresh[i].known );
             CHECK( retained[i].visible == fresh[i].visible );
             CHECK( retained[i].reason == fresh[i].reason );
+            CHECK( predicate[i].visible == fresh[i].visible );
         }
+        CHECK( predicate_exact_light == ( distant && !night ) );
+        if( !predicate_exact_light ) { CHECK( predicate_summaries == 0 ); }
         CHECK( reused_physical <= fresh_physical );
         CHECK( reused_summaries <= fresh_summaries );
         std::ostringstream out;
         { JsonOut js( out );
             js.start_object();
+            js.member( "scene", scene );
             js.member( "repeat", repeat );
             js.member( "queries", targets.size() );
             js.member( "public_fresh_wall_seconds", public_time.first );
@@ -200,6 +254,9 @@ TEST_CASE( "stalker_immutable_observation_reader_lifetime_comparison",
             js.member( "direct_fresh_process_cpu_seconds", fresh_time.second );
             js.member( "decision_retained_wall_seconds", retained_time.first );
             js.member( "decision_retained_process_cpu_seconds", retained_time.second );
+            js.member( "predicate_wall_seconds", predicate_time.first );
+            js.member( "predicate_process_cpu_seconds", predicate_time.second );
+            js.member( "predicate_summaries", predicate_summaries );
             js.member( "fresh_views_sum", fresh_views );
             js.member( "fresh_physical_sum", fresh_physical );
             js.member( "fresh_summaries_sum", fresh_summaries );
@@ -2486,6 +2543,16 @@ TEST_CASE( "writhing_stalker_pressure_history_is_visible_absolute_and_lifecycle_
     pressure.aggro_character = true;
     REQUIRE( stalker.sees( here, pressure ) );
     REQUIRE( pressure.sees( here, you ) );
+    const scout_observation::actor_capability capability{ 72, 1.0f };
+    const auto compare_visible_read = [&]() {
+        scout_observation::site_reader complete;
+        scout_observation::site_reader visible_only;
+        const auto full = complete.read_actor( stalker, pressure, capability );
+        const auto fast = visible_only.read_actor( stalker, pressure, capability, true );
+        CHECK( fast.visible == full.visible );
+        return fast;
+    };
+    CHECK( compare_visible_read().visible );
 
     writhing_stalker::reset_transient_pressure_history();
     CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 1 );
@@ -2494,15 +2561,32 @@ TEST_CASE( "writhing_stalker_pressure_history_is_visible_absolute_and_lifecycle_
     CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 1 );
     CHECK( writhing_stalker::transient_pressure_sample_count() == 1 );
 
+    // The stalker can see the zombie, but the zombie cannot see the target.
+    // Neither pressure nor a position sample may be recorded for that view.
+    writhing_stalker::reset_transient_pressure_history();
+    here.ter_set( center + point::east, ter_id( "t_wall" ) );
+    refresh_writhing_stalker_arena( here );
+    REQUIRE( stalker.sees( here, pressure ) );
+    REQUIRE_FALSE( pressure.sees( here, you ) );
+    CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 0 );
+    CHECK( writhing_stalker::transient_pressure_sample_count() == 0 );
+    here.ter_set( center + point::east, ter_id( "t_floor" ) );
+
     // Occluded motion supplies no sample. After reacquisition, current native
     // target intent qualifies independently of any unobserved closing motion.
     writhing_stalker::reset_transient_pressure_history();
     here.ter_set( center + point::east * 4, ter_id( "t_wall" ) );
     refresh_writhing_stalker_arena( here );
     REQUIRE_FALSE( stalker.sees( here, pressure ) );
+    const auto blocked = compare_visible_read();
+    CHECK_FALSE( blocked.visible );
+    CHECK( blocked.reason == "actor_physical_ray_blocked" );
     CHECK( writhing_stalker::observed_zombie_pressure( stalker, here, you ) == 0 );
     CHECK( writhing_stalker::transient_pressure_sample_count() == 0 );
     here.ter_set( center + point::east * 4, ter_id( "t_floor" ) );
+    pressure.setpos( here, center + point::east * 5 );
+    refresh_writhing_stalker_arena( here );
+    CHECK( compare_visible_read().visible ); // Native adjacent-actor rule.
     pressure.setpos( here, center + point::east * 2 );
     pressure.set_dest( you.pos_abs() );
     set_time( calendar::turn_zero + 1_turns );
@@ -3074,10 +3158,13 @@ TEST_CASE( "stalker_actor_weather_uses_the_physical_ray_without_indoor_range_pen
         const bool physical = stalker.sees_site_with_range( here, you, range, footprint );
         scout_observation::site_reader reader;
         const auto read = reader.read_actor( stalker, you, { 72, 72.0f / 35 } );
+        scout_observation::site_reader visible_only;
+        const auto fast = visible_only.read_actor( stalker, you, { 72, 72.0f / 35 }, true );
         CAPTURE( indoors, weather_id, range, read.reason, physical );
         REQUIRE( here.is_outside( you.pos_bub() ) == !indoors );
         REQUIRE( read.known );
         CHECK( read.visible == physical );
+        CHECK( fast.visible == read.visible );
         CHECK( read.visible == ( indoors || std::string( weather_id ) == "clear" ) );
     }
     clear_map_without_vision();

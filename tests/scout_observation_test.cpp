@@ -1946,12 +1946,19 @@ TEST_CASE( "native source brightness remains distinct from ambient actor illumin
         scout_observation::site_reader reader;
         const auto human = reader.read_actor( observer, *target, capability );
         const auto alien = reader.read_actor( *migo, *target, capability );
+        scout_observation::site_reader predicate_reader;
+        const auto human_predicate = predicate_reader.read_actor( observer, *target, capability, true );
+        const auto alien_predicate = predicate_reader.read_actor( *migo, *target, capability, true );
         CAPTURE( context, human.reason, alien.reason, observer.sight_range( ambient ),
                  observer.sight_range( default_daylight_level() ) );
         CHECK( human.known );
         CHECK( human.visible == human_expected );
         CHECK( alien.known );
         CHECK( alien.visible == migo_expected );
+        CHECK( human_predicate.known == human.known );
+        CHECK( human_predicate.visible == human.visible );
+        CHECK( alien_predicate.known == alien.known );
+        CHECK( alien_predicate.visible == alien.visible );
         const auto threats = reader.perceived_threats( observer );
         CHECK( ( std::find( threats.begin(), threats.end(), endpoint ) != threats.end() ) ==
                native_unmagnified );
@@ -1990,6 +1997,8 @@ TEST_CASE( "native source brightness remains distinct from ambient actor illumin
     const auto hidden = dark.read_actor( observer, *target, capability );
     CHECK( hidden.known );
     CHECK_FALSE( hidden.visible );
+    scout_observation::site_reader dark_predicate;
+    CHECK_FALSE( dark_predicate.read_actor( observer, *target, capability, true ).visible );
 
     // Same native source/caster channel for a genuine charged item.
     item battery( itype_id( "medium_battery_cell" ) );
@@ -2043,6 +2052,10 @@ TEST_CASE( "native source brightness remains distinct from ambient actor illumin
     const auto refused = unbound.read_actor( *migo, *target, capability );
     CHECK_FALSE( refused.known );
     CHECK_FALSE( refused.visible );
+    scout_observation::site_reader unbound_predicate;
+    const auto refused_predicate = unbound_predicate.read_actor( *migo, *target, capability, true );
+    CHECK_FALSE( refused_predicate.known );
+    CHECK_FALSE( refused_predicate.visible );
     CHECK( bytes( *target ) == target_before );
     CHECK( bytes( *migo ) == migo_before );
     CHECK( calendar::turn == turn );
@@ -2293,6 +2306,10 @@ TEST_CASE( "authenticated vehicle roof preserves native ledge cover away from th
     }();
     REQUIRE( near.known );
     CHECK( near.visible == native );
+    if( whole_actor_ray ) {
+        scout_observation::site_reader visible_only;
+        CHECK( visible_only.read_actor( *migo, target, capability, true ).visible == near.visible );
+    }
     for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
         here.clear_vehicle_list( z );
     }
@@ -2309,6 +2326,10 @@ TEST_CASE( "authenticated vehicle roof preserves native ledge cover away from th
     CAPTURE( far.reason );
     CHECK( far.known );
     CHECK( far.visible == native );
+    if( whole_actor_ray ) {
+        scout_observation::site_reader visible_only;
+        CHECK( visible_only.read_actor( *migo, target, capability, true ).visible == far.visible );
+    }
     CHECK( roof->pos_abs() == vehicle_position );
     CHECK( roof->sm_pos == owner );
     CHECK( observer.pos_abs() == from );
@@ -2327,6 +2348,10 @@ TEST_CASE( "authenticated vehicle roof preserves native ledge cover away from th
                              unconfirmed.read_character( observer, target, footprint );
         CHECK_FALSE( refused.known );
         CHECK_FALSE( refused.visible );
+        if( whole_actor_ray ) {
+            scout_observation::site_reader visible_only;
+            CHECK_FALSE( visible_only.read_actor( *migo, target, capability, true ).visible );
+        }
         CHECK( bytes( *roof ) == vehicle_before );
         CHECK( calendar::turn == fixed_turn );
     }

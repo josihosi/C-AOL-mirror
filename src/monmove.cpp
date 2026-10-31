@@ -795,9 +795,12 @@ static const std::vector<writhing_stalker_pressure_position> &writhing_stalker_o
             other.is_hallucination() || other.attitude_to( target ) != Creature::Attitude::HOSTILE ) {
             continue;
         }
-        const bool visible = ( reader ? writhing_stalker_watches( stalker, other, *reader ) :
-                               writhing_stalker::can_observe_actor( stalker, other ) ) &&
-                             other.sees( here, target );
+        // Both views are required for the pressure sample.  Check the native
+        // local view first so an occluded target does not require an isolated
+        // lighting projection for the stalker's view of this creature.
+        const bool visible = other.sees( here, target ) &&
+                             ( reader ? writhing_stalker_watches( stalker, other, *reader ) :
+                               writhing_stalker::can_observe_actor( stalker, other ) );
         const bool recent_attack = writhing_stalker::has_recent_observed_attack( &stalker, &other,
                                    &target, now, 3 );
         const bool same_target = recent_attack ||
@@ -1246,7 +1249,7 @@ static bool writhing_stalker_watches( const monster &stalker, const Creature &ta
     return stalker.friendly == 0 && stalker.can_see() && !stalker.is_dead() &&
            reader.read_actor( stalker, target, { 72, 72.0f /
                              std::max( 1, std::max( stalker.type->vision_day,
-                                       stalker.type->vision_night ) ) } ).visible;
+                                       stalker.type->vision_night ) ) }, true ).visible;
 }
 
 bool writhing_stalker::can_observe_actor( const monster &stalker, const Creature &actor )

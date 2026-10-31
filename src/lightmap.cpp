@@ -882,7 +882,8 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
         const sunlight_prefix_input *prefix_input,
         const std::function<bool( float )> *sufficient,
         std::optional<float> *source_light,
-        const std::function<void( int, int )> *prepare_cache )
+        const std::function<void( int, int )> *prepare_cache,
+        const std::function<bool( float, float )> *predicate_bounds )
 {
     if( source_light ) {
         source_light->reset();
@@ -967,6 +968,13 @@ std::optional<float> map::generate_observed_lightmap( const tripoint_bub_ms &tar
                                           LIGHT_AMBIENT_DIM * 0.8f, LIGHT_AMBIENT_LOW } );
         if( artificial > solar_cap ) {
             return artificial;
+        }
+        // The same max-composition bound also brackets ambient when solar
+        // remains relevant. Only a predicate caller may use it to avoid an
+        // exact solar read; never advertise the lower bound as exact ambient.
+        if( predicate_bounds && ( *predicate_bounds )( artificial,
+                std::max( artificial, solar_cap ) ) ) {
+            return std::nullopt;
         }
     }
     bool complete = true;

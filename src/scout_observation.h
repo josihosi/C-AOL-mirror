@@ -50,7 +50,8 @@ class site_reader
         // Unlike site-directed scouts this requires the entire physical ray,
         // including the observer. Unknown cells cannot reveal an occupant.
         visibility_read read_actor( const Creature &observer, const Creature &target,
-                                    const actor_capability &capability );
+                                    const actor_capability &capability,
+                                    bool visibility_only = false );
         // Exact physical geometry only, including the origin. Signal consumers
         // use this for the actual lookout's exit ray, separately from distant
         // source reach and from recognition of any creature.
