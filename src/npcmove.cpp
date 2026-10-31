@@ -8908,7 +8908,7 @@ bool npc::wear_warmest_item()
         return false;
     }
     item_location loc( *this, best );
-    return wear( loc, false ).has_value();
+    return wear_item_at( loc );
 }
 
 bool npc::take_shelter_nearby()
@@ -9182,7 +9182,12 @@ bool npc::wear_item_at( item_location loc )
     if( !loc.get_item() ) {
         return false;
     }
-    return wear( loc, false ).has_value();
+    const int wear_cost = item_wear_cost( *loc );
+    if( !wear( loc, false ).has_value() ) {
+        return false;
+    }
+    mod_moves( -wear_cost );
+    return true;
 }
 
 bool npc::move_to_and_verify( const tripoint_bub_ms &target, bool no_bashing )

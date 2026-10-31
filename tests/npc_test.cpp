@@ -8961,7 +8961,10 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
     using need_source = npc_short_term_cache::need_source;
 
     SECTION( "inventory sweater: wear immediately, progressed" ) {
-        guy.i_add( item( itype_sweater ) );
+        item_location sweater = guy.i_add( item( itype_sweater ) );
+        const auto sweater_uid = sweater->uid().get_value();
+        const int wear_cost = guy.item_wear_cost( *sweater );
+        REQUIRE( wear_cost > 0 );
         REQUIRE_FALSE( guy.is_wearing( itype_sweater ) );
 
         guy.set_moves( 100 );
@@ -8969,17 +8972,44 @@ TEST_CASE( "npc_warmth_executor_contract", "[npc][needs][warmth]" )
         // One sweater may not resolve extreme cold, so progressed not satisfied.
         CHECK( result == npc::need_result::progressed );
         CHECK( guy.is_wearing( itype_sweater ) );
+        CHECK( guy.get_moves() == 100 - wear_cost );
+        const auto worn = guy.worn.all_items_loc( guy );
+        CHECK( std::count_if( worn.begin(), worn.end(), [&]( const item_location &loc ) {
+            return loc->uid().get_value() == sweater_uid;
+        } ) == 1 );
     }
 
     SECTION( "adjacent ground clothing: wear in place, progressed" ) {
         const tripoint_bub_ms adj = guy.pos_bub() + point::east;
-        here.add_item_or_charges( adj, item( itype_sweater ) );
+        item sweater( itype_sweater );
+        const int wear_cost = guy.item_wear_cost( sweater );
+        REQUIRE( wear_cost > 0 );
+        here.add_item_or_charges( adj, std::move( sweater ) );
+        REQUIRE_FALSE( here.i_at( adj ).empty() );
+        const auto sweater_uid = here.i_at( adj ).begin()->uid().get_value();
         here.build_map_cache( 0 );
 
         guy.set_moves( 100 );
         npc::need_result result = guy.execute_need_goal( "seek_warmth" );
         CHECK( result == npc::need_result::progressed );
         CHECK( guy.is_wearing( itype_sweater ) );
+        CHECK( guy.get_moves() == 100 - wear_cost );
+        const auto worn = guy.worn.all_items_loc( guy );
+        CHECK( std::count_if( worn.begin(), worn.end(), [&]( const item_location &loc ) {
+            return loc->uid().get_value() == sweater_uid;
+        } ) == 1 );
+        CHECK( here.i_at( adj ).empty() );
+    }
+
+    SECTION( "unwearable item and absent item do not spend moves or transfer" ) {
+        item_location rock = guy.i_add( item( itype_id( "rock" ) ) );
+        const auto rock_uid = rock->uid().get_value();
+        guy.set_moves( 100 );
+        CHECK_FALSE( guy.wear_item_at( rock ) );
+        CHECK_FALSE( guy.wear_item_at( item_location() ) );
+        CHECK( guy.get_moves() == 100 );
+        REQUIRE( rock );
+        CHECK( rock->uid().get_value() == rock_uid );
     }
 
     SECTION( "distant ground clothing: move toward, progressed" ) {
