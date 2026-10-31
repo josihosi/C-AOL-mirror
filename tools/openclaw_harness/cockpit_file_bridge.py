@@ -391,43 +391,34 @@ class FileBackedCockpitBridge:
                 self._child.kill()
                 self._child.wait(timeout=2)
         # Progress is diagnostic, not process ownership authority.
-        game_pid = 0
-        from startup_harness import (cleanup_game_process, process_command_identity,
-                                     process_generation_snapshot,
-                                     public_process_generation)
+        from startup_harness import cleanup_game_process, process_command_identity
         ownership_path = self.session_dir / "game-process.json"
         if ownership_path.exists():
-            ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
-            owned_pid = int(ownership.get("pid", 0) or 0)
-            if ownership.get("binding_id") == self.binding_id and owned_pid > 0 and \
-                    process_command_identity(ownership) and \
-                    process_command_identity(ownership) == process_command_identity(process_generation_snapshot(owned_pid)):
-                game_pid = owned_pid
-            else:
-                game_pid = 0
-                cleanup["ownership"] = "process_exited_or_identity_changed"
-        else:
-            cleanup["ownership"] = "unconfirmed_missing_process_record"
-        if game_pid:
-            expected_generation = ownership.get("process_generation")
-            if isinstance(expected_generation, Mapping) and \
-                    expected_generation.get("birth_identity") and process_command_identity(expected_generation):
+            try:
+                ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+                owned_pid = ownership.get("pid")
+                expected_generation = ownership.get("process_generation")
+                valid = (isinstance(ownership, Mapping) and
+                         ownership.get("binding_id") == self.binding_id and
+                         type(owned_pid) is int and owned_pid > 0 and
+                         isinstance(expected_generation, Mapping) and
+                         expected_generation.get("pid") == owned_pid and
+                         expected_generation.get("birth_identity") and
+                         process_command_identity(ownership) and
+                         process_command_identity(ownership) == process_command_identity(expected_generation))
+            except (ValueError, TypeError, AttributeError):
+                valid = False
+            if valid:
+                # The shared cleanup owner distinguishes an absent PID from a
+                # live reused PID and never signals without a generation match.
                 cleanup["game"] = cleanup_game_process(
-                    game_pid, explicit_quit=explicit_quit,
+                    owned_pid, explicit_quit=explicit_quit,
                     expected_process_generation=expected_generation,
                 )
             else:
-                cleanup["game"] = {
-                    "status": "retained_process_identity_unavailable",
-                    "pid": game_pid,
-                    "recorded_process": public_process_generation(ownership),
-                    "native_exit_credit": False,
-                    "next_action": {
-                        "owner": "launching_worker",
-                        "action": "inspect_bound_process_identity",
-                        "reason": "legacy bridge ownership has no stable process birth identity",
-                    },
-                }
+                cleanup["ownership"] = "unconfirmed_invalid_process_record"
+        else:
+            cleanup["ownership"] = "unconfirmed_missing_process_record"
         self._close_child_streams()
         return cleanup
 

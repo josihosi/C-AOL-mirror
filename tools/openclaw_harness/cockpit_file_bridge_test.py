@@ -201,6 +201,62 @@ class AtomicJsonTest(unittest.TestCase):
             self.assertEqual(list(Path(temp).iterdir()), [destination])
 
 
+class OfflineCleanupCliTest(unittest.TestCase):
+    def test_bound_absent_and_reused_processes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            status = root / "status.json"
+            status.write_text(json.dumps({"state": "bridge_failed", "binding_id": "bound-a"}))
+            record = root / "game-process.json"
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            try:
+                generation = startup_harness.process_generation_snapshot(proc.pid)
+                self.assertTrue(generation.get("alive"))
+                owner = {"binding_id": "bound-a", "pid": proc.pid,
+                         "command_sha256": startup_harness.process_command_identity(generation),
+                         "process_generation": generation}
+                def run(binding="bound-a"):
+                    completed = subprocess.run(
+                        [sys.executable, str(Path(__file__).with_name("cockpit_file_bridge.py")),
+                         "cleanup", "--session-dir", str(root), "--binding-id", binding],
+                        capture_output=True, text=True, check=True)
+                    return json.loads(completed.stdout)
+
+                # A live reused PID must never be signalled.
+                owner["process_generation"] = {**generation, "birth_identity": "different birth"}
+                record.write_text(json.dumps(owner))
+                reused = run()
+                self.assertFalse(reused["ok"])
+                self.assertEqual(reused["cleanup"]["game"]["status"], "retained_process_identity_changed")
+                self.assertIsNone(proc.poll())
+                self.assertFalse(reused["cleanup"]["native_exit_credit"])
+
+                proc.terminate()
+                proc.wait(timeout=5)
+                owner["process_generation"] = generation
+                record.write_text(json.dumps(owner))
+                with patch.object(startup_harness.os, "kill", wraps=os.kill) as kill:
+                    direct = FileBackedCockpitBridge.cleanup(root, "bound-a")
+                    self.assertTrue(direct["ok"], direct)
+                    self.assertTrue(all(call.args[1] == 0 for call in kill.call_args_list))
+                for _ in range(2):
+                    absent = run()
+                    self.assertTrue(absent["ok"], absent)
+                    self.assertEqual(absent["cleanup"]["game"]["status"], "already_exited")
+                    self.assertFalse(absent["cleanup"]["native_exit_credit"])
+                self.assertFalse(run("wrong-binding")["ok"])
+                record.unlink()
+                self.assertFalse(run()["ok"])
+                for bad in ("{", json.dumps({**owner, "binding_id": "wrong"}),
+                            json.dumps({**owner, "process_generation": {}})):
+                    record.write_text(bad)
+                    self.assertFalse(run()["ok"])
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+
+
 class CockpitFileBridgeTest(unittest.TestCase):
     def test_launcher_utf8_round_trips_live_unicode_result_and_eof(self):
         # Exercise the real streaming service and bridge reader in a child pipe,
