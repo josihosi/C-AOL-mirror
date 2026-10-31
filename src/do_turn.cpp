@@ -10609,6 +10609,9 @@ bool pending_abstract_scout_arrival_order( const npc &member,
     return true;
 }
 
+std::vector<tripoint_abs_omt> live_bandit_clock_homeward_path(
+    const bandit_live_world::site_record &site, const std::vector<tripoint_abs_omt> &direct );
+
 std::set<character_id> prepare_live_bandit_abstract_scout_travel()
 {
     std::set<character_id> held;
@@ -10887,7 +10890,15 @@ std::set<character_id> prepare_live_bandit_abstract_scout_travel()
                                           member->omt_path.back() == member->pos_abs_omt();
                 const bool covert_ok = live_bandit_route_respects_covert_ring( outing,
                                        member->omt_path );
-                if( endpoints_ok && covert_ok ) {
+                // The OMT may have changed since this route was assigned.
+                // travel_overmap itself only relocates the actor, so qualify
+                // the next step using the same native rules as the pathfinder.
+                const bool next_step_ok = member->omt_path.size() > 1 &&
+                                          overmap_travel_step_valid(
+                                              member->pos_abs_omt(),
+                                              member->omt_path[member->omt_path.size() - 2],
+                                              overmap_path_params::for_npc() );
+                if( endpoints_ok && covert_ok && next_step_ok ) {
                     routes.push_back( member->omt_path );
                     std::ostringstream detail;
                     detail << "route=reused len=" << member->omt_path.size()
@@ -10936,6 +10947,44 @@ std::set<character_id> prepare_live_bandit_abstract_scout_travel()
             }
             held.insert( outing.member_ids.begin(), outing.member_ids.end() );
             continue;
+        }
+        if( outing.phase == bandit_live_world::scout_phase::outbound &&
+            outing.actor_route_waypoint == 0 && outing.route_clock_anchor_minutes >= 0 &&
+            !outing.route_clock_stale ) {
+            std::vector<character_id> route_members;
+            std::vector<std::vector<tripoint_abs_omt>> previous_routes;
+            bool material_change = false;
+            bool previous_routes_bound = true;
+            for( std::size_t index = 0; index < members.size(); ++index ) {
+                const npc &member = *members[index];
+                route_members.push_back( member.getID() );
+                previous_routes.push_back( member.omt_path );
+                previous_routes_bound &= member.goal == destination &&
+                                         !member.omt_path.empty() &&
+                                         member.omt_path.front() == destination &&
+                                         member.omt_path.back() == member.pos_abs_omt();
+                material_change |= member.omt_path != routes[index];
+            }
+            if( material_change && previous_routes_bound ) {
+                const auto cursor = bandit_live_world::current_external_simulation_cursor( site );
+                auto return_owner = outing;
+                return_owner.phase = bandit_live_world::scout_phase::returning_home;
+                const auto return_origin = outing.selected_watch_kind !=
+                                           bandit_live_world::structural_watch_kind::none ?
+                                           outing.selected_watch_omt :
+                                           outing.shared_route[outing.shared_route.size() - 2];
+                const auto direct_home = overmap_buffer.get_travel_path(
+                                             return_origin, site.anchor, overmap_path_params::for_npc(),
+                                             live_bandit_covert_route_exclusions( return_owner ) ).points;
+                const auto homeward_path = live_bandit_clock_homeward_path( site, direct_home );
+                if( !cursor || !bandit_live_world::revise_structural_coarse_outbound_clock(
+                        site, *cursor, route_members, previous_routes, routes,
+                        homeward_path, live_bandit_current_minutes() ) ) {
+                    if( cursor ) {
+                        bandit_live_world::mark_structural_coarse_route_stale( site, *cursor );
+                    }
+                }
+            }
         }
         for( std::size_t index = 0; index < members.size(); ++index ) {
             npc &member = *members[index];
@@ -16615,9 +16664,16 @@ void service_live_bandit_home_rallies( const std::optional<std::size_t> only_sit
                     if( body && body->is_active() ) {
                         body->catch_up_body(); // Finish rightful loaded physiology before adopting the new trip.
                     }
-                    if( member.wounded_or_unready || !body || !live_bandit_inside_activation( body->pos_abs_omt() ) ||
+                    // Home dispatch readiness also marks an otherwise healthy
+                    // actor away from the camp as unavailable. Recall must
+                    // evaluate that actor's real body and wound deadline;
+                    // location is precisely why this trip is being offered.
+                    if( !body || site.home_activation.member_deadline_pending( member.npc_id,
+                                member.abstract_wound_until_minutes, live_bandit_current_minutes() ) ||
+                        !live_bandit_inside_activation( body->pos_abs_omt() ) ||
                         !live_bandit_abstract_scout_member_can_travel( *body ) ||
-                        body->has_flag( json_flag_CANNOT_MOVE ) || body->get_last_updated() > calendar::turn ||
+                        !live_bandit_member_can_take_homeward_step( *body ) ||
+                        body->get_last_updated() > calendar::turn ||
                         body->hp_percentage() <= 50 || body->is_player_ally() || body->activity ||
                         ( body->current_target() && body->get_ai_danger() > 0 ) ||
                         ( body->has_omt_destination() && !site_contains_omt( site, body->goal ) ) ||

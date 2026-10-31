@@ -1561,6 +1561,11 @@ struct structural_coarse_clock_read {
 bool bind_structural_coarse_route_clock( site_record &site,
         const structural_outing_plan &plan, const structural_coarse_clock_read &read,
         int now_minutes );
+bool revise_structural_coarse_outbound_clock( site_record &site,
+        const simulation_advance_cursor &cursor, const std::vector<character_id> &member_ids,
+        const std::vector<std::vector<tripoint_abs_omt>> &old_paths,
+        const std::vector<std::vector<tripoint_abs_omt>> &new_paths,
+        const std::vector<tripoint_abs_omt> &homeward_path, int now_minutes );
 
 // Refresh once from an authenticated current homeward route, or after a
 // material change marked the previous estimate stale.

@@ -17654,6 +17654,121 @@ bool bind_structural_coarse_route_clock( site_record &site,
     return true;
 }
 
+bool revise_structural_coarse_outbound_clock( site_record &site,
+        const simulation_advance_cursor &cursor, const std::vector<character_id> &member_ids,
+        const std::vector<std::vector<tripoint_abs_omt>> &old_paths,
+        const std::vector<std::vector<tripoint_abs_omt>> &new_paths,
+        const std::vector<tripoint_abs_omt> &homeward_path, const int now_minutes )
+{
+    active_outing_state &outing = site.active_outing;
+    if( !outing.route_clock_enrolled || outing.route_clock_anchor_minutes < 0 ||
+        outing.route_clock_stale || outing.kind != outing_kind::structural_sortie ||
+        outing.phase != scout_phase::outbound || outing.actor_route_waypoint != 0 ||
+        outing.shared_route.size() < 3 || !simulation_cursor_matches( outing, cursor ) ||
+        now_minutes < outing.last_advanced_minutes ||
+        ( outing.activation.initialized() && !outing.activation.active ) ||
+        member_ids.empty() || member_ids.size() != old_paths.size() ||
+        member_ids.size() != new_paths.size() || homeward_path.empty() ||
+        homeward_path.front() != site.anchor ||
+        homeward_path.back() != structural_outing_travel_destination( outing ) ) {
+        return false;
+    }
+    std::vector<character_id> expected_ids;
+    for( const character_id id : outing.member_ids ) {
+        if( !outing.member_is_resolved( id ) ) {
+            expected_ids.push_back( id );
+        }
+    }
+    if( member_ids != expected_ids ) {
+        return false;
+    }
+    std::int64_t old_edges = 0;
+    std::int64_t new_edges = 0;
+    bool changed = false;
+    for( std::size_t i = 0; i < member_ids.size(); ++i ) {
+        const auto &old_path = old_paths[i];
+        const auto &new_path = new_paths[i];
+        if( old_path.empty() || new_path.empty() ||
+            old_path.front() != outing.shared_route[1] ||
+            new_path.front() != old_path.front() || new_path.back() != old_path.back() ) {
+            return false;
+        }
+        const auto adjacent = []( const auto &path ) {
+            for( std::size_t j = 1; j < path.size(); ++j ) {
+                if( rl_dist( path[j - 1], path[j] ) != 1 ) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if( !adjacent( old_path ) || !adjacent( new_path ) ) {
+            return false;
+        }
+        changed |= old_path != new_path;
+        old_edges = std::max<std::int64_t>( old_edges, old_path.size() - 1 );
+        new_edges = std::max<std::int64_t>( new_edges, new_path.size() - 1 );
+    }
+    if( !changed ) {
+        return false;
+    }
+    for( std::size_t i = 1; i < homeward_path.size(); ++i ) {
+        if( rl_dist( homeward_path[i - 1], homeward_path[i] ) != 1 ) {
+            return false;
+        }
+    }
+    if( outing.activation.initialized() &&
+        outing.activation.timers[static_cast<std::size_t>( activation_timer::started )].world_turn !=
+        static_cast<std::int64_t>( outing.started_minutes ) * 60 ) {
+        return false;
+    }
+    const int elapsed = outing.activation.elapsed_minutes( activation_timer::started,
+                        outing.started_minutes, now_minutes );
+    const int cadence = to_minutes<int>( time_between_npc_OM_moves );
+    if( elapsed < 0 || cadence <= 0 ) {
+        return false;
+    }
+    const int gate_remaining = std::max( 0, structural_stalking_delay_minutes(
+                                   site.anchor, structural_outing_travel_destination( outing ) ) - elapsed );
+    const std::int64_t old_travel = old_edges * cadence;
+    const std::int64_t new_travel = new_edges * cadence;
+    const std::int64_t new_homeward = static_cast<std::int64_t>( homeward_path.size() - 1 ) * cadence;
+    const std::int64_t homeward_change = new_homeward - outing.route_clock_homeward_minutes;
+    const std::int64_t remaining = static_cast<std::int64_t>( outing.route_clock_remaining_minutes ) +
+                                   std::max<std::int64_t>( gate_remaining, new_travel ) -
+                                   std::max<std::int64_t>( gate_remaining, old_travel ) + homeward_change;
+    const std::int64_t travel = static_cast<std::int64_t>( outing.route_clock_travel_minutes ) +
+                                new_travel - old_travel + homeward_change;
+    if( remaining < travel || travel < new_homeward || new_homeward > INT_MAX ||
+        remaining > INT_MAX || travel > INT_MAX ) {
+        return false;
+    }
+    // Retain suspension already owned by each absolute deadline when its
+    // anchor changes. No active work or paused interval is earned here.
+    const int old_expected = outing.expected_return_minutes;
+    const int old_missing = outing.missing_deadline_minutes;
+    if( outing.activation.initialized() ) {
+        for( const auto &entry : { std::pair{ activation_timer::expected_return, old_expected },
+                                   std::pair{ activation_timer::missing_deadline, old_missing } } ) {
+            const auto &mark = outing.activation.timers[static_cast<std::size_t>( entry.first )];
+            if( mark.world_turn != static_cast<std::int64_t>( entry.second ) * 60 ) {
+                return false;
+            }
+        }
+    }
+    outing.route_clock_remaining_minutes = static_cast<int>( remaining );
+    outing.route_clock_travel_minutes = static_cast<int>( travel );
+    outing.route_clock_homeward_minutes = static_cast<int>( new_homeward );
+    outing.expected_return_minutes = structural_expected_return_for_state( outing, site );
+    outing.missing_deadline_minutes = structural_missing_deadline_for_state( outing );
+    if( outing.activation.initialized() ) {
+        outing.activation.timers[static_cast<std::size_t>( activation_timer::expected_return )].world_turn =
+            static_cast<std::int64_t>( outing.expected_return_minutes ) * 60;
+        outing.activation.timers[static_cast<std::size_t>( activation_timer::missing_deadline )].world_turn =
+            static_cast<std::int64_t>( outing.missing_deadline_minutes ) * 60;
+    }
+    return true;
+}
+
 bool mark_structural_coarse_route_stale( site_record &site,
         const simulation_advance_cursor &cursor )
 {
