@@ -28,6 +28,7 @@ class GenericQuitTest(unittest.TestCase):
 
     def test_explicit_abort_actual_finalizer_intercepts_signal_without_native_credit(self):
         service, _ = fixtures.LiveSessionTest().service([fixtures.frame(1, 100)])
+        self.assertTrue(service.call({"action": "game.observe"})["ok"])
         generation = {"pid": 123, "alive": True, "birth_identity": "fixture-birth",
                       "command": "/fixture/cataclysm --userdir /fixture/owned"}
         owned = {"pid": 123, "status": "alive", "expected": generation}
@@ -41,7 +42,7 @@ class GenericQuitTest(unittest.TestCase):
             service.run_channel._finalize_session = lambda report: harness.finalize_cockpit_live_session(
                 directory, 123, report)
             with patch.object(harness, "current_owned_process_generation", return_value=owned), \
-                    patch.object(harness, "process_generation_snapshot", side_effect=lambda *a, **k: dict(current)), \
+                    patch.object(harness, "_process_generation_snapshot", side_effect=lambda *a, **k: dict(current)), \
                     patch.object(harness.os, "kill", side_effect=intercepted) as signal:
                 result = service.call({"action": "run.quit", "abort": True,
                                        "stop_reason": "explicit test abort, never native save"})

@@ -4069,6 +4069,20 @@ class CockpitRunChannel:
             return {"ok": False, "error": "native_graceful_close_required",
                     "termination_requested": False,
                     "next_action": "Use current native SaveQuit/YES, verify the serializer, then current MainMenuQuit/YES and actual process exit before reporting. An explicitly authorized abort uses abort=true and earns no save or normal-exit credit."}
+        if not self._run_id:
+            # Startup can be aborted before any native frame exists.  Bind the
+            # final to the already-owned process and archive, never a guessed
+            # frame or an unauthenticated replacement process.
+            process = dict(self._read_process_state()) if self._read_process_state else {}
+            run_id = process.get("run_id")
+            if (self.archive is None or not isinstance(run_id, str) or not run_id.strip()
+                    or type(process.get("pid")) is not int or process["pid"] <= 0
+                    or process.get("identity_status") not in {"alive", "exited"}
+                    or process.get("alive") is not (process.get("identity_status") == "alive")
+                    or run_id != self.archive.run_id or not self._binding_id
+                    or self.archive.binding_id != self._binding_id or not self._binding_matches()):
+                return {"ok": False, "error": "startup_abort_identity_unavailable"}
+            self._run_id = run_id
         return {"ok": True, "result": self._stop(reason or "player_abort", {
             "unused_authority": "released", "explicit_player_quit": True,
             "explicit_player_abort": True, "gameplay_credit": False,
