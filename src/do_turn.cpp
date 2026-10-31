@@ -3505,6 +3505,35 @@ bool advance_live_bandit_hostile_approaches()
     return changed;
 }
 
+// Hostile survivors can return together or resolve individually while their
+// partners remain outside. Preserve the existing body interval before either
+// boundary stops selecting the reservation as this body's owner. Physiology
+// stays with its normal native service, including when home is frozen.
+bool transfer_live_bandit_hostile_body_home( bandit_live_world::site_record &site,
+        const npc &body )
+{
+    const auto id = body.getID();
+    const auto &returning = site.active_hostile_operation.reservation;
+    if( body.is_dead() || body.pos_abs_omt() != site.anchor ||
+        body.get_last_updated() > calendar::turn ||
+        overmap_buffer.find_npc( id ).get() != &body || returning.member_is_resolved( id ) ||
+        std::find( returning.member_ids.begin(), returning.member_ids.end(), id ) ==
+        returning.member_ids.end() ) {
+        return false;
+    }
+    if( !returning.activation.initialized() ) {
+        return true; // Legacy state has no authenticated interval to transfer.
+    }
+    const auto mark = returning.activation.bodies.find( id );
+    if( !site.home_activation.initialized() || mark == returning.activation.bodies.end() ||
+        mark->second.world_turn != to_turns<int>( body.get_last_updated() -
+                calendar::start_of_cataclysm ) ) {
+        return false;
+    }
+    site.home_activation.bodies[id] = mark->second;
+    return true;
+}
+
 bool advance_live_bandit_hostile_returns()
 {
     bandit_live_world::world_state &state = overmap_buffer.global_state.bandit_live_world;
@@ -3716,6 +3745,16 @@ bool advance_live_bandit_hostile_returns()
         }
         const bool released = commit_live_bandit_local_progress( site, [&]( bandit_live_world::site_record &
         next ) {
+            const auto &returning = next.active_hostile_operation.reservation;
+            for( const character_id id : returning.member_ids ) {
+                if( returning.member_is_resolved( id ) ) {
+                    continue;
+                }
+                const auto body = overmap_buffer.find_npc( id );
+                if( !body || !transfer_live_bandit_hostile_body_home( next, *body ) ) {
+                    return std::optional<int>();
+                }
+            }
             return bandit_live_world::release_matching_external_reservation( next, activity_id,
                     generation, operation.operation_kind ==
                     bandit_live_world::hostile_operation_kind::raid ?
@@ -4839,7 +4878,8 @@ bool live_hostile_advance_withdrawals( bandit_live_world::site_record &site )
             }
         };
         if( actor->pos_abs_omt() == site.anchor ) {
-            if( !bandit_live_world::update_member_state( site, member_id,
+            if( !transfer_live_bandit_hostile_body_home( site, *actor ) ||
+                !bandit_live_world::update_member_state( site, member_id,
                     bandit_live_world::member_state::at_home,
                     "frightened hostile member physically returned home" ) ) {
                 continue;
@@ -5717,6 +5757,21 @@ bool live_bandit_advance_hidden_shakedown_search( bandit_live_world::site_record
             return false;
         }
         if( operation.site_search_waypoint_attempted ) {
+            // The native local order is transient. Restore this operation's
+            // pending waypoint if it was lost on load, without replacing a
+            // different live order or advancing the search.
+            if( searcher->pos_abs() != goal && !searcher->goto_to_this_pos &&
+                searcher->path.empty() ) {
+                searcher->goto_to_this_pos = goal;
+            }
+            // A newly issued or reloaded order may not yet have run through
+            // the NPC action loop. An empty path is a failure only after the
+            // ordinary native pathfinder has actually checked this goal.
+            if( searcher->pos_abs() != goal && searcher->goto_to_this_pos == goal &&
+                searcher->path.empty() && searcher->update_path( local_goal, false, false ) &&
+                !searcher->path.empty() ) {
+                return false;
+            }
             if( searcher->pos_abs() == goal || searcher->goto_to_this_pos != goal ||
                 searcher->path.empty() ) {
                 searcher->goto_to_this_pos.reset();
@@ -8193,41 +8248,138 @@ npc_template_id live_bandit_template_for_site( bandit_live_world::owned_site_kin
     return npc_template_id::NULL_ID();
 }
 
-void refresh_live_bandit_member_readiness( bandit_live_world::world_state &state )
+void refresh_live_bandit_site_readiness( bandit_live_world::site_record &site )
 {
+    if( !live_bandit_home_active( site ) ) {
+        return;
+    }
     const int now_minutes = live_bandit_current_minutes();
-    for( bandit_live_world::site_record &site : state.sites ) {
-        if( !live_bandit_home_active( site ) ) {
+    for( bandit_live_world::member_record &member : site.members ) {
+        if( member.state != bandit_live_world::member_state::at_home ) {
             continue;
         }
-        for( bandit_live_world::member_record &member : site.members ) {
-            if( member.state != bandit_live_world::member_state::at_home ) {
-                continue;
+        if( site.home_activation.member_deadline_pending( member.npc_id,
+                member.abstract_wound_until_minutes, now_minutes ) ) {
+            member.wounded_or_unready = true;
+            continue;
+        }
+        if( member.abstract_wound_until_minutes >= 0 ) {
+            member.abstract_wound_until_minutes = -1;
+        }
+        const auto found = overmap_buffer.find_npc( member.npc_id );
+        const npc *guy = found.get();
+        bandit_live_world::routine_member_readiness_snapshot snapshot;
+        // A home assignment is not evidence that the body is at home, or
+        // that its predecessor clock can be settled for a new departure.
+        snapshot.present = guy != nullptr &&
+                           ( guy->pos_abs_omt() == site.anchor ||
+                             site_contains_omt( site, guy->pos_abs_omt() ) );
+        if( guy != nullptr ) {
+            const auto mark = site.home_activation.bodies.find( member.npc_id );
+            if( !guy->is_dead() && ( guy->get_last_updated() > calendar::turn ||
+                mark == site.home_activation.bodies.end() ||
+                mark->second.world_turn != to_turns<int>( guy->get_last_updated() -
+                        calendar::start_of_cataclysm ) ) ) {
+                snapshot.present = false;
             }
-            if( site.home_activation.member_deadline_pending( member.npc_id,
-                    member.abstract_wound_until_minutes, now_minutes ) ) {
-                member.wounded_or_unready = true;
-                continue;
-            }
-            if( member.abstract_wound_until_minutes >= 0 ) {
-                member.abstract_wound_until_minutes = -1;
-            }
-            const auto found = overmap_buffer.find_npc( member.npc_id );
-            const npc *guy = found.get();
-            bandit_live_world::routine_member_readiness_snapshot snapshot;
-            snapshot.present = guy != nullptr;
-            if( guy != nullptr ) {
-                snapshot.dead = guy->is_dead();
-                snapshot.hp_percent = guy->hp_percentage();
-                snapshot.sleeping = guy->in_sleep_state();
-                snapshot.incapacitated = guy->has_effect( effect_downed ) ||
-                                         guy->has_effect( effect_stunned ) ||
-                                         guy->has_effect( effect_psi_stunned ) ||
-                                         guy->has_effect( effect_narcosis );
-            }
-            member.wounded_or_unready = bandit_live_world::routine_member_is_unready( snapshot );
+            snapshot.dead = guy->is_dead();
+            snapshot.hp_percent = guy->hp_percentage();
+            snapshot.sleeping = guy->in_sleep_state();
+            snapshot.incapacitated = guy->has_effect( effect_downed ) ||
+                                     guy->has_effect( effect_stunned ) ||
+                                     guy->has_effect( effect_psi_stunned ) ||
+                                     guy->has_effect( effect_narcosis );
+        }
+        member.wounded_or_unready = bandit_live_world::routine_member_is_unready( snapshot );
+    }
+}
+
+void refresh_live_bandit_member_readiness( bandit_live_world::world_state &state )
+{
+    for( bandit_live_world::site_record &site : state.sites ) {
+        refresh_live_bandit_site_readiness( site );
+    }
+}
+
+// Settle the home owner's exact body intervals before choosing a departing
+// party. Once an outing is committed its clock is the body owner, so waiting
+// until then would discard active home time as an untracked pre-outing gap.
+bool prepare_live_bandit_home_admission( bandit_live_world::world_state &world,
+        const std::size_t site_index )
+{
+    using namespace bandit_live_world;
+    if( site_index >= world.sites.size() ) {
+        return false;
+    }
+    // A newly materialized home roster may postdate this turn's first
+    // activation pass. Enroll it through the ordinary conservative owner.
+    refresh_live_bandit_activation();
+    site_record &site = world.sites[site_index];
+    if( !live_bandit_home_active( site ) || !site.home_activation.initialized() ) {
+        return false;
+    }
+    std::vector<shared_ptr_fast<npc>> local;
+    std::map<tripoint_abs_omt, std::vector<shared_ptr_fast<npc>>> remote;
+    std::vector<shared_ptr_fast<npc>> authenticated;
+    for( const member_record &member : site.members ) {
+        if( member.state != member_state::at_home ) {
+            continue;
+        }
+        const auto body = overmap_buffer.find_npc( member.npc_id );
+        // Unavailable individuals are excluded by readiness below. They do
+        // not veto a different authenticated party or receive remote catch-up.
+        if( !body || ( body->pos_abs_omt() != site.anchor &&
+                       !site_contains_omt( site, body->pos_abs_omt() ) ) ||
+            body->get_last_updated() > calendar::turn ) {
+            continue;
+        }
+        const auto mark = site.home_activation.bodies.find( member.npc_id );
+        if( !body->is_dead() && ( mark == site.home_activation.bodies.end() ||
+            mark->second.world_turn != to_turns<int>( body->get_last_updated() -
+                    calendar::start_of_cataclysm ) ) ) {
+            continue;
+        }
+        authenticated.push_back( body );
+        if( !body->is_dead() && body->get_last_updated() == calendar::turn ) {
+            continue;
+        }
+        if( get_map().inbounds( body->pos_abs() ) ) {
+            local.push_back( body );
+        } else {
+            remote[body->pos_abs_omt()].push_back( body );
         }
     }
+    for( const auto &body : local ) {
+        if( !body->is_dead() ) {
+            body->catch_up_body();
+        }
+    }
+    for( const auto &group : remote ) {
+        tinymap body_map;
+        body_map.load( group.first, false );
+        swap_map current( *body_map.cast_to_map() );
+        for( const auto &body : group.second ) {
+            if( !body->is_dead() ) {
+                body->catch_up_body();
+            }
+        }
+        body_map.save();
+    }
+    bool supply_settled = false;
+    for( const auto &body : authenticated ) {
+        if( body->is_dead() ) {
+            if( !supply_settled ) {
+                advance_camp_supply( site, live_bandit_current_minutes() );
+                supply_settled = true;
+            }
+            if( !update_member_state( site, body->getID(), member_state::dead,
+                                      "home body died before expedition admission" ) ) {
+                return false;
+            }
+        }
+    }
+    refresh_live_bandit_site_readiness( site );
+    return true;
 }
 
 std::vector<bandit_live_world::response_member_power_read>
@@ -8274,7 +8426,9 @@ live_bandit_response_member_power_reads_impl( const bandit_live_world::site_reco
                                      guy->has_effect( effect_stunned ) ||
                                      guy->has_effect( effect_psi_stunned ) ||
                                      guy->has_effect( effect_narcosis );
-            read.ready = !bandit_live_world::routine_member_is_unready( snapshot );
+            const bandit_live_world::member_record *member = site.find_member( npc_id );
+            read.ready = member != nullptr && !member->wounded_or_unready &&
+                         !bandit_live_world::routine_member_is_unready( snapshot );
             if( read.at_source_camp && read.ready ) {
                 const bool has_gun = guy->get_wielded_item() &&
                                      guy->get_wielded_item()->is_gun();
@@ -14725,7 +14879,7 @@ bandit_live_world::structural_bounty_maintenance_result maintain_live_bandit_str
         }
         read.party_qualified = true;
         return read;
-    } );
+    }, prepare_live_bandit_home_admission );
     DebugLog( D_INFO, DC_ALL ) << bandit_live_world::render_structural_bounty_maintenance_report(
                                    result );
     DebugLog( D_INFO, DC_ALL ) << bandit_live_world::render_evidence_debug_report(

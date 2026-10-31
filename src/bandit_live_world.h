@@ -2164,7 +2164,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         const std::function<bool( const site_record &, const site_record & )> &projection_commit = {},
         const std::set<std::string> &deferred_dispatch_site_ids = {},
         const std::function<structural_coarse_clock_read( const site_record &,
-                const structural_outing_plan & )> &coarse_clock_lookup = {} );
+                const structural_outing_plan & )> &coarse_clock_lookup = {},
+        const std::function<bool( world_state &, std::size_t )> &prepare_home_admission = {} );
 std::string render_structural_bounty_maintenance_report(
     const structural_bounty_maintenance_result &result );
 std::string render_evidence_debug_report( const world_state &state, int current_minutes );

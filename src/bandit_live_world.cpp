@@ -180,7 +180,7 @@ constexpr int routine_scheduler_consider_cap = 16;
 constexpr int routine_scheduler_urgent_signal_cap = 8;
 constexpr int routine_scheduler_full_route_solve_cap = 8;
 constexpr int routine_scheduler_start_cap = 2;
-constexpr int routine_frontier_recurrence_minutes = 72 * 60;
+constexpr int routine_frontier_recurrence_minutes = 24 * 60;
 constexpr int routine_remembered_ground_candidate_cap = 6;
 constexpr std::size_t max_structural_route_rejection_summary_length = 160;
 constexpr int routine_acquire_score = 300;
@@ -20124,7 +20124,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
         const std::function<bool( const site_record &, const site_record & )> &projection_commit,
         const std::set<std::string> &deferred_dispatch_site_ids,
         const std::function<structural_coarse_clock_read( const site_record &,
-                const structural_outing_plan & )> &coarse_clock_lookup )
+                const structural_outing_plan & )> &coarse_clock_lookup,
+        const std::function<bool( world_state &, std::size_t )> &prepare_home_admission )
 {
     bandit_live_world_probe::scoped_section probe_section(
         bandit_live_world_probe::section::structural_maintenance );
@@ -20322,10 +20323,22 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                                static_cast<int>( state.sites[site_index].camp_decision.state ) ) );
                 continue;
             }
+            if( prepare_home_admission && !prepare_home_admission( state, site_index ) ) {
+                result.response_operation_rejections++;
+                scheduler_exit_diagnostic( &state.sites[site_index], "response_home_preparation_failed", "" );
+                continue;
+            }
             if( materialize_for_response ) {
                 result.response_materialization_attempts++;
-                result.response_members_materialized += std::max( 0,
-                                                        materialize_for_response( state, site_index ) );
+                const int materialized = std::max( 0, materialize_for_response( state, site_index ) );
+                result.response_members_materialized += materialized;
+                if( materialized > 0 && prepare_home_admission &&
+                    !prepare_home_admission( state, site_index ) ) {
+                    result.response_operation_rejections++;
+                    scheduler_exit_diagnostic( &state.sites[site_index],
+                                               "response_home_preparation_failed_after_materialization", "" );
+                    continue;
+                }
             }
             site_record &site = state.sites[site_index];
             if( site.camp_decision.state !=
@@ -20606,9 +20619,8 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                        "dispatch_cap=0" );
             continue;
         }
-        const routine_scout_policy_result routine_policy = routine_scout_policy( site );
-        const routine_scout_pair_selection_result pair_selection =
-            select_routine_scout_pair( site );
+        routine_scout_policy_result routine_policy = routine_scout_policy( site );
+        routine_scout_pair_selection_result pair_selection = select_routine_scout_pair( site );
         const bool active_outside_pressure = site.has_active_outside_pressure();
         const bool camp_decision_allowed = camp_decision_allows_dispatch( site.camp_decision,
                                            bandit_dry_run::job_template::scout );
@@ -20624,16 +20636,6 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                                            static_cast<int>( site.camp_decision.state ) ) );
             continue;
         }
-        if( !routine_policy.eligible ) {
-            scheduler_exit_diagnostic( &site, "routine_policy_ineligible",
-                                       "policy_reason=" + routine_policy.rejection_reason );
-            continue;
-        }
-        if( !defer_exact_pair && !pair_selection.eligible ) {
-            scheduler_exit_diagnostic( &site, "scout_pair_unavailable",
-                                       "pair_reason=" + pair_selection.rejection_reason );
-            continue;
-        }
         const bool has_structural_candidate_source = std::any_of(
                     site.intelligence_map.leads.begin(), site.intelligence_map.leads.end(),
         []( const camp_map_lead & lead ) {
@@ -20645,6 +20647,28 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
             scheduler_exit_diagnostic( &site, "no_structural_candidate_source",
                                        "lead_count=" + std::to_string(
                                            site.intelligence_map.leads.size() ) );
+            continue;
+        }
+        // A stale home body can recover while its home clock remains active.
+        // Give a potentially eligible camp one preparation before rejecting
+        // readiness, then use the refreshed real roster for all later checks.
+        if( !routine_policy.eligible && prepare_home_admission && routine_policy.applies &&
+            !site.retired_empty_site && site.roster().valid && site.roster().living_total >= 2 ) {
+            if( !prepare_home_admission( state, site_index ) ) {
+                scheduler_exit_diagnostic( &site, "dispatch_home_preparation_failed", "" );
+                continue;
+            }
+            routine_policy = routine_scout_policy( site );
+            pair_selection = select_routine_scout_pair( site );
+        }
+        if( !routine_policy.eligible ) {
+            scheduler_exit_diagnostic( &site, "routine_policy_ineligible",
+                                       "policy_reason=" + routine_policy.rejection_reason );
+            continue;
+        }
+        if( !defer_exact_pair && !pair_selection.eligible ) {
+            scheduler_exit_diagnostic( &site, "scout_pair_unavailable",
+                                       "pair_reason=" + pair_selection.rejection_reason );
             continue;
         }
         std::vector<structural_outing_plan> cheap_plans =
@@ -21009,6 +21033,11 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
             result.dispatch_cap_reached = true;
             break;
         }
+        if( prepare_home_admission && !prepare_home_admission( state, contender.site_index ) ) {
+            result.dispatches_blocked++;
+            scheduler_exit_diagnostic( &state.sites[contender.site_index], "dispatch_home_preparation_failed", "" );
+            continue;
+        }
         structural_outing_plan dispatch_plan = contender.plan;
         if( defer_exact_pair ) {
             const routine_scout_pair_selection_result existing_pair =
@@ -21022,9 +21051,16 @@ structural_bounty_maintenance_result advance_structural_bounty_maintenance( worl
                     continue;
                 }
                 result.materialization_attempts++;
-                result.members_materialized += std::max(
-                                                   0, materialize_for_dispatch( state,
-                                                           contender.site_index ) );
+                const int materialized = std::max( 0, materialize_for_dispatch( state,
+                                                  contender.site_index ) );
+                result.members_materialized += materialized;
+                if( materialized > 0 && prepare_home_admission &&
+                    !prepare_home_admission( state, contender.site_index ) ) {
+                    result.dispatches_blocked++;
+                    scheduler_exit_diagnostic( &state.sites[contender.site_index],
+                                               "dispatch_home_preparation_failed_after_materialization", "" );
+                    continue;
+                }
             }
 
             site_record &materialized_site = state.sites[contender.site_index];
