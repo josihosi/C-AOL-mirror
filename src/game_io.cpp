@@ -170,6 +170,35 @@ bool crossing_actor_copies_match( const bandit_live_world::site_record &site )
 bandit_live_world::local_projection_reconciliation_result
 reconcile_loaded_bandit_live_world_projections()
 {
+    // A saved Local pair can be outside the avatar's newly loaded overmaps.
+    // Resolve only existing overmaps named by its bounded, authenticated
+    // handoff before collecting claims; absence still fails reconciliation.
+    std::set<point_abs_om> handoff_overmaps;
+    for( const auto &site : overmap_buffer.global_state.bandit_live_world.sites ) {
+        const auto *outing = site.active_external_outing();
+        if( outing == nullptr || outing->kind != bandit_live_world::outing_kind::structural_sortie ||
+            outing->owner != bandit_live_world::simulation_owner::local ||
+            !outing->local_handoff.is_active() || outing->member_ids.size() != 2 ||
+            outing->local_handoff.members.size() != outing->member_ids.size() ||
+            !site.roster().valid || !bandit_live_world::current_external_simulation_cursor( site ) ) {
+            continue;
+        }
+        for( const auto &member : outing->local_handoff.members ) {
+            if( member.dead || std::find( outing->member_ids.begin(), outing->member_ids.end(),
+                                         member.npc_id ) == outing->member_ids.end() ) {
+                continue;
+            }
+            for( const tripoint_abs_ms &position : { member.prior_position, member.entry_position,
+                                                     member.staging_position, member.exit_position } ) {
+                if( !position.is_invalid() ) {
+                    handoff_overmaps.insert( project_to<coords::om>( position.xy() ) );
+                }
+            }
+        }
+    }
+    for( const point_abs_om &position : handoff_overmaps ) {
+        overmap_buffer.get_existing( position );
+    }
     std::map<character_id, std::vector<const npc *>> copies;
     const auto collect_copy = [&copies]( const npc & member ) {
         auto &group = copies[member.getID()];
