@@ -547,7 +547,7 @@ view_snapshot query_bandit_ecology( const bandit_live_world::world_state &world,
                 continue;
             }
             const migo_tower::site_state *tower = request.migo_towers ?
-                    request.migo_towers->find( site.id ) : nullptr;
+                                                  request.migo_towers->find( site.id ) : nullptr;
             auto retain_migo = [&]( mobile_entity_read row ) {
                 candidate_read candidate;
                 candidate.kind = row.kind;

@@ -658,6 +658,12 @@ bool receives( const monster &observer, const migo_population::site_geometry &ge
                observation_entry *observation = nullptr )
 {
     const auto origin = observer.pos_abs();
+    if( !live_light::within_range( sample, origin ) ) {
+        if( observation ) {
+            observation->finish( "outside_exact_range" );
+        }
+        return false;
+    }
     // An absent exact source remains absent in the record. The OMT centre is
     // only a bearing hypothesis for an uncertain signal, never actor knowledge.
     const tripoint_abs_ms bearing = sample.smoke_observable_ms.value_or(
@@ -670,6 +676,10 @@ bool receives( const monster &observer, const migo_population::site_geometry &ge
     route.distance_omt = rl_dist( project_to<coords::omt>( origin ).xy(), sample.source_omt.xy() );
     route.vertical_offset = bearing.z() - origin.z();
     route.brightness_range_omt = sample.range_cap_omt;
+    route.brightness_range_ms = sample.range_cap_ms;
+    if( sample.source_ms ) {
+        route.distance_ms = rl_dist( origin.xy(), sample.source_ms->xy() );
+    }
     route.source_exposed = true; // valid_sample checked this packet's actual support.
     route.vertical_sightline = true;
     for( const auto &p : line_to( project_to<coords::omt>( origin ),

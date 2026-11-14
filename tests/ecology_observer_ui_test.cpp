@@ -1,11 +1,15 @@
 #include "overmap_ui.h"
 
+#include <algorithm>
 #include <string>
 
 #include "avatar.h"
+#include "bandit_live_world.h"
 #include "cata_catch.h"
 #include "game.h"
 #include "json_loader.h"
+#include "migo_population.h"
+#include "migo_tower_ai.h"
 #include "player_helpers.h"
 #include "type_id.h"
 
@@ -34,7 +38,8 @@ TEST_CASE( "ecology_observer_marker_legend_is_stable_and_distinct",
     CHECK( zombie_horde.first == "H" );
     CHECK( writhing_stalker.first == "S" );
     CHECK( overmap_ui::ecology_marker_display( ecology_debug::entity_kind::migo_tower ).first == "M" );
-    CHECK( overmap_ui::ecology_marker_display( ecology_debug::entity_kind::migo_dispatch ).first == "m" );
+    CHECK( overmap_ui::ecology_marker_display( ecology_debug::entity_kind::migo_dispatch ).first ==
+           "m" );
     CHECK( bandit_camp.second == c_light_red );
     CHECK( cannibal_camp.second == c_red );
     CHECK( bandit_dispatch.second == c_yellow );
@@ -261,4 +266,66 @@ TEST_CASE( "ecology_observer_export_uses_the_process_local_overmap_filter",
 
     overmap_ui::remember_ecology_observer_controls( saved_controls );
     player_character.unset_mutation( trait_DEBUG_CLAIRVOYANCE );
+}
+
+TEST_CASE( "ecology overmap facts follow gated canonical migo projection",
+           "[ecology_debug][observer_ui][migo]" )
+{
+    bandit_live_world::world_state humans;
+    migo_population::world_state population;
+    migo_tower::world_state towers;
+    population.sites.emplace_back();
+    auto &site = population.sites.back();
+    site.id = "ui-tower";
+    site.tower = true;
+    site.anchor = tripoint_abs_omt( 12, 15, 0 );
+    site.members.emplace_back();
+    auto &member = site.members.back();
+    member.token.site_id = site.id;
+    member.token.member_id = "ui-member";
+    member.owner = migo_population::representation::abstract;
+    member.assignment = migo_population::duty::dispatched;
+    member.hp = 200;
+    member.current_position = project_to<coords::ms>( tripoint_abs_omt( 13, 15, 0 ) );
+    towers.sites.emplace_back();
+    auto &tower = towers.sites.back();
+    tower.site_id = site.id;
+    tower.operation.emplace();
+    tower.operation->generation = 2;
+    tower.operation->source.source_omt = tripoint_abs_omt( 20, 15, 0 );
+    tower.operation->sweep.begin( tower.operation->source.source_omt, 2 );
+    tower.operation->members.emplace_back();
+    tower.operation->members.back().member_id = member.token.member_id;
+    ecology_debug::query_request request;
+    request.enabled = true;
+    request.migo_population = &population;
+    request.migo_towers = &towers;
+    auto view = ecology_debug::query_bandit_ecology( humans, request );
+    REQUIRE( view.entities.size() == 2 );
+    const auto dispatch = std::find_if( view.entities.begin(),
+    view.entities.end(), []( const auto & row ) {
+        return row.kind == ecology_debug::entity_kind::migo_dispatch;
+    } );
+    REQUIRE( dispatch != view.entities.end() );
+    request.selected_id = dispatch->id;
+    overmap_ui::overmap_draw_data_t data;
+    data.cursor_pos = dispatch->omt;
+    data.ecology_selected_id = dispatch->id;
+    data.ecology_view = ecology_debug::query_bandit_ecology( humans, request );
+    const auto closed = overmap_ui::ecology_semantic_facts( data, data.cursor_pos );
+    CHECK( closed.at( "ecology_enabled" ) == "false" );
+    CHECK( closed.count( "ecology_cursor_id" ) == 0 );
+    data.ecology_enabled = true;
+    const auto facts = overmap_ui::ecology_semantic_facts( data, data.cursor_pos );
+    CHECK( facts.at( "ecology_cursor_id" ) == request.selected_id );
+    CHECK( facts.at( "ecology_cursor_kind" ) == "migo_dispatch_member" );
+    CHECK( facts.at( "ecology_selected_id" ) == request.selected_id );
+    CHECK( facts.at( "ecology_population" ) == "1" );
+    CHECK( facts.at( "ecology_signal_source" ) == tower.operation->source.source_omt.to_string() );
+    CHECK( overmap_ui::ecology_marker_display( dispatch->kind ).first == "m" );
+    request.filters.migos = false;
+    data.ecology_view = ecology_debug::query_bandit_ecology( humans, request );
+    const auto filtered = overmap_ui::ecology_semantic_facts( data, data.cursor_pos );
+    CHECK( filtered.at( "ecology_count" ) == "0" );
+    CHECK( filtered.count( "ecology_cursor_id" ) == 0 );
 }

@@ -2127,6 +2127,7 @@ std::vector<std::pair<std::string, std::string>> openclaw_harness_world_actions(
         { "world.zone_manager", "zones" },
         { "world.look", "look" },
         { "world.examine", "examine" },
+        { "world.control_vehicle", "control_vehicle" },
         { "world.close", "close" },
         { "world.overmap", "map" },
         { "world.messages", "messages" },
@@ -2338,6 +2339,7 @@ static std::vector<semantic_action_descriptor> semantic_surface_actions(
             { "world.fixture_lamp_turn_off", _( "Inspect the fixture lamp (native examine)" ) },
             { "world.fixture_lamp_bash", _( "Bash the fixture lamp (native source-off)" ) },
             { "world.examine", _( "Examine nearby terrain or furniture" ) },
+            { "world.control_vehicle", _( "Use nearby vehicle controls" ) },
             { "world.close", _( "Close a nearby door or window" ) },
             { "world.fire", _( "Fire wielded weapon" ) },
             { "world.reload", _( "Reload wielded weapon" ) },
@@ -5976,6 +5978,8 @@ bool game::handle_action()
                         act = ACTION_LOOK;
                     } else if( request.action_id == "world.examine" ) {
                         act = ACTION_EXAMINE;
+                    } else if( request.action_id == "world.control_vehicle" ) {
+                        act = ACTION_CONTROL_VEHICLE;
                     } else if( request.action_id == "world.close" ) {
                         act = ACTION_CLOSE;
                     } else if( request.action_id == "world.debug_omt_preview" ) {

@@ -376,6 +376,44 @@ static std::string ecology_faction_filter_name(
     return _( "all factions" );
 }
 
+std::map<std::string, std::string> overmap_ui::ecology_semantic_facts(
+    const overmap_draw_data_t &data, const tripoint_abs_omt &cursor )
+{
+    std::map<std::string, std::string> payload;
+    payload.emplace( "ecology_enabled", data.ecology_enabled ? "true" : "false" );
+    if( !data.ecology_enabled ) {
+        return payload;
+    }
+    payload.emplace( "ecology_filter", ecology_filter_name( data.ecology_filter ) );
+    payload.emplace( "ecology_faction_filter",
+                     ecology_faction_filter_name( data.ecology_faction_filter ) );
+    payload.emplace( "ecology_loaded_only", data.ecology_loaded_only ? "true" : "false" );
+    payload.emplace( "ecology_count", std::to_string( data.ecology_view.entities.size() ) );
+    if( const auto *marker = ecology_marker_at( data, cursor ) ) {
+        payload.emplace( "ecology_cursor_id", marker->id );
+        payload.emplace( "ecology_cursor_kind", ecology_debug::to_string( marker->kind ) );
+        payload.emplace( "ecology_cursor_state", marker->state );
+        payload.emplace( "ecology_cursor_owner", marker->owner );
+    }
+    if( data.ecology_view.selected &&
+        data.ecology_view.selected->entity_id == data.ecology_selected_id ) {
+        const auto &detail = *data.ecology_view.selected;
+        payload.emplace( "ecology_selected_id", detail.entity_id );
+        payload.emplace( "ecology_source", detail.source_camp_id );
+        payload.emplace( "ecology_phase", detail.phase );
+        if( detail.population ) {
+            payload.emplace( "ecology_population", std::to_string( *detail.population ) );
+        }
+        if( detail.target ) {
+            payload.emplace( "ecology_target", detail.target->to_string() );
+        }
+        if( detail.signal_source ) {
+            payload.emplace( "ecology_signal_source", detail.signal_source->to_string() );
+        }
+    }
+    return payload;
+}
+
 ecology_debug::query_filters overmap_ui::ecology_query_filters( ecology_filter_mode filter,
         ecology_faction_filter_mode faction_filter, bool loaded_only )
 {
@@ -943,6 +981,10 @@ void overmap_sidebar::draw_controls()
     // This info can be scrolled through
     overmap_sidebar_uistate &om_sidebar_state = uistate.overmap_sidebar_state;
     ImGui::BeginChild( "Overmap Sidebar Scrolling Content", {0, 0}, 0, ImGuiWindowFlags_NoNav );
+    if( draw_data.ecology_enabled ) {
+        ImGui::Separator();
+        draw_ecology();
+    }
     bool &quickref = om_sidebar_state.quickref_header;
     ImGui::SetNextItemOpen( quickref );
     quickref = ImGui::CollapsingHeader( _( "Quick Reference" ) );
@@ -963,10 +1005,6 @@ void overmap_sidebar::draw_controls()
         if( debug_info ) {
             draw_debug();
         }
-    }
-    if( draw_data.ecology_enabled ) {
-        ImGui::Separator();
-        draw_ecology();
     }
     ImGui::EndChild();
 }
@@ -1204,16 +1242,21 @@ void overmap_sidebar::draw_ecology()
                                       ecology_faction_filter_name( draw_data.ecology_faction_filter ),
                                       draw_data.ecology_loaded_only ? _( "loaded" ) : _( "any load state" ) ),
                        c_light_gray );
-    draw_sidebar_text( _( "B bandit camp" ), c_light_red );
-    draw_sidebar_text( _( "C cannibal camp" ), c_red );
-    draw_sidebar_text( _( "b bandit dispatch" ), c_yellow );
-    draw_sidebar_text( _( "c cannibal dispatch" ), c_pink );
-    print_hint( "ECOLOGY_FILTER", c_light_blue );
-    print_hint( "ECOLOGY_FACTION_FILTER", c_light_blue );
-    print_hint( "ECOLOGY_LOADED_FILTER", draw_data.ecology_loaded_only ? c_pink : c_light_blue );
-    print_hint( "ECOLOGY_SELECT", c_light_blue );
-    print_hint( "ECOLOGY_FOLLOW", draw_data.ecology_pinned ? c_pink : c_light_blue );
-    print_hint( "ECOLOGY_EDIT", c_light_blue );
+    const auto draw_help = [this]() {
+        draw_sidebar_text( _( "B bandit camp" ), c_light_red );
+        draw_sidebar_text( _( "C cannibal camp" ), c_red );
+        draw_sidebar_text( _( "b bandit dispatch" ), c_yellow );
+        draw_sidebar_text( _( "c cannibal dispatch" ), c_pink );
+        draw_sidebar_text( _( "M Mi-go tower" ), c_magenta );
+        draw_sidebar_text( _( "m Mi-go dispatch member" ), c_pink );
+        print_hint( "ECOLOGY_FILTER", c_light_blue );
+        print_hint( "ECOLOGY_FACTION_FILTER", c_light_blue );
+        print_hint( "ECOLOGY_LOADED_FILTER", draw_data.ecology_loaded_only ? c_pink : c_light_blue );
+        print_hint( "ECOLOGY_SELECT", c_light_blue );
+        print_hint( "ECOLOGY_FOLLOW", draw_data.ecology_pinned ? c_pink : c_light_blue );
+        print_hint( "ECOLOGY_EDIT", c_light_blue );
+
+    };
 
     const ecology_debug::query_metadata &metadata = draw_data.ecology_view.metadata;
     draw_sidebar_text( string_format( _( "Observer: %d considered, %d shown, %lld us" ),
@@ -1233,6 +1276,7 @@ void overmap_sidebar::draw_ecology()
     } );
     if( selected_marker == draw_data.ecology_view.entities.end() ) {
         draw_sidebar_text( _( "No ecology entity selected." ), c_dark_gray );
+        draw_help();
         return;
     }
 
@@ -1247,6 +1291,7 @@ void overmap_sidebar::draw_ecology()
                                       ecology_debug::to_string( selected_marker->provenance ) ),
                        c_light_gray );
     if( !draw_data.ecology_view.selected ) {
+        draw_help();
         return;
     }
     const ecology_debug::selected_detail &detail = *draw_data.ecology_view.selected;
@@ -1298,6 +1343,7 @@ void overmap_sidebar::draw_ecology()
                                           member.npc_id.get_value(), hp, member.status,
                                           member.loaded ? _( "; loaded" ) : "" ), c_light_gray );
     }
+    draw_help();
 }
 
 void overmap_sidebar::draw_mission_info()
@@ -3479,6 +3525,7 @@ static tripoint_abs_omt display()
     std::string action;
     std::optional<std::string> semantic_native_action;
     uint64_t completed_editor_actions = 0;
+    uint64_t completed_ecology_actions = 0;
     data.show_explored = true;
     int fast_scroll_offset = get_option<int>( "FAST_SCROLL_OFFSET" );
     std::optional<tripoint_rel_omt> mouse_pos;
@@ -3492,14 +3539,21 @@ static tripoint_abs_omt display()
     const auto cursor_stable_id = [&curs]() {
         return "omt:" + curs.to_string();
     };
-    const auto semantic_payload = [&curs, &cursor_stable_id, &data, &completed_editor_actions]() {
+    const auto semantic_payload = [&curs, &cursor_stable_id, &data, &completed_editor_actions,
+           &completed_ecology_actions]() {
         std::map<std::string, std::string> payload;
         const avatar &player_character = get_avatar();
         payload.emplace( "player_position", player_character.pos_abs_omt().to_string() );
         payload.emplace( "cursor_position", curs.to_string() );
         payload.emplace( "level", std::to_string( curs.z() ) );
         payload.emplace( "debug_editor", data.debug_editor ? "true" : "false" );
+        const auto ecology = overmap_ui::ecology_semantic_facts( data, curs );
+        payload.insert( ecology.begin(), ecology.end() );
         payload.emplace( "completed_editor_actions", std::to_string( completed_editor_actions ) );
+        if( data.ecology_enabled ) {
+            payload.emplace( "ecology_following", data.ecology_pinned ? "true" : "false" );
+            payload.emplace( "completed_ecology_actions", std::to_string( completed_ecology_actions ) );
+        }
         payload.emplace( "cursor_discovered",
                          overmap_buffer.seen( curs ) == om_vision_level::unseen ? "false" : "true" );
         if( overmap_buffer.seen( curs ) != om_vision_level::unseen ) {
@@ -3523,6 +3577,13 @@ static tripoint_abs_omt display()
             { "overmap.add_note", cursor_stable_id(), "Add note", true },
             { "overmap.close", "", "Close overmap", true }
         };
+        if( data.ecology_enabled ) {
+            actions.emplace_back( semantic_action_descriptor{ "overmap.ecology_filter", "", "Cycle ecology type filter", true } );
+            actions.emplace_back( semantic_action_descriptor{ "overmap.ecology_faction", "", "Cycle ecology faction filter", true } );
+            actions.emplace_back( semantic_action_descriptor{ "overmap.ecology_loaded", "", "Toggle ecology loaded filter", true } );
+            actions.emplace_back( semantic_action_descriptor{ "overmap.ecology_select", "", "Select ecology entity", true } );
+            actions.emplace_back( semantic_action_descriptor{ "overmap.ecology_follow", "", "Follow selected ecology entity", true } );
+        }
         if( data.debug_editor && !curs.is_invalid() ) {
             actions.push_back( { "overmap.place_terrain", cursor_stable_id(), "Place overmap terrain", true } );
             actions.push_back( { "overmap.place_special", cursor_stable_id(), "Place overmap special", true } );
@@ -3565,6 +3626,21 @@ static tripoint_abs_omt display()
                 }
             } else if( request.action_id == "overmap.close" && stable_id.empty() ) {
                 semantic_native_action = "QUIT";
+            } else if( data.ecology_enabled && stable_id.empty() &&
+                       request.action_id == "overmap.ecology_filter" ) {
+                semantic_native_action = "ECOLOGY_FILTER";
+            } else if( data.ecology_enabled && stable_id.empty() &&
+                       request.action_id == "overmap.ecology_faction" ) {
+                semantic_native_action = "ECOLOGY_FACTION_FILTER";
+            } else if( data.ecology_enabled && stable_id.empty() &&
+                       request.action_id == "overmap.ecology_loaded" ) {
+                semantic_native_action = "ECOLOGY_LOADED_FILTER";
+            } else if( data.ecology_enabled && stable_id.empty() &&
+                       request.action_id == "overmap.ecology_select" ) {
+                semantic_native_action = "ECOLOGY_SELECT";
+            } else if( data.ecology_enabled && stable_id.empty() &&
+                       request.action_id == "overmap.ecology_follow" ) {
+                semantic_native_action = "ECOLOGY_FOLLOW";
             } else if( stable_id == cursor_stable_id() ) {
                 if( data.debug_editor && !request.parameters.empty() &&
                     ( request.action_id == "overmap.place_terrain" || request.action_id == "overmap.place_special" ) ) {
@@ -3605,6 +3681,8 @@ static tripoint_abs_omt display()
 
     do {
         if( semantic_scope ) {
+            // Publish the same current projection that the map will render.
+            refresh_ecology_view( data );
             semantic_scope->publish( semantic_payload(), semantic_actions() );
             semantic_scope->consume_request();
         }
@@ -3826,6 +3904,7 @@ static tripoint_abs_omt display()
             data.ecology_loaded_only = !data.ecology_loaded_only;
             overmap_ui::remember_ecology_observer_controls( data );
         } else if( action == "ECOLOGY_SELECT" && data.ecology_enabled ) {
+            ++completed_ecology_actions;
             std::vector<const ecology_debug::entity_marker *> at_cursor;
             for( const ecology_debug::entity_marker &entity : data.ecology_view.entities ) {
                 if( entity.omt == curs ) {
@@ -3844,6 +3923,7 @@ static tripoint_abs_omt display()
                 overmap_ui::remember_ecology_observer_controls( data );
             }
         } else if( action == "ECOLOGY_FOLLOW" && data.ecology_enabled ) {
+            ++completed_ecology_actions;
             const auto selected_entity = std::find_if( data.ecology_view.entities.begin(),
             data.ecology_view.entities.end(), [&data]( const ecology_debug::entity_marker & entity ) {
                 return entity.id == data.ecology_selected_id;

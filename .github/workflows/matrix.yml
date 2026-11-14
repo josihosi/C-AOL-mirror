@@ -204,7 +204,9 @@ jobs:
     - name: Check zone identity and Zone Manager controls
       run: python3 tests/zone_identity_ci.py tests/cata_test
     - name: Check travelling controls and fixture regressions
-      run: python3 tests/travelling_contact_ci.py tests/cata_test
+      run: |
+        python3 tests/test_travelling_contact_ci.py
+        python3 tests/travelling_contact_ci.py tests/cata_test --tiles 0
 
   varied_builds:
     needs: [ skip-duplicates-code, skip-duplicates-data, matrix-variables, compile-shaders ]
@@ -440,7 +442,9 @@ jobs:
       run: python3 tests/zone_identity_ci.py tests/cata_test
     - name: Check travelling controls and fixture regressions (Linux)
       if: ${{ env.SKIP == 'false' && runner.os == 'Linux' && (matrix.test-stage == 1 || (matrix.compiler == 'clang++-18' && matrix.sanitize == 'address' && matrix.native == 'linux64')) }}
-      run: python3 tests/travelling_contact_ci.py tests/cata_test
+      run: |
+        python3 tests/test_travelling_contact_ci.py
+        python3 tests/travelling_contact_ci.py tests/cata_test --tiles ${{ matrix.tiles }}
     - name: post-build ccache manipulation
       if: ${{ env.SKIP == 'false' && !failure() && (runner.os == 'Linux' || runner.os == 'macOS') && matrix.ccache_key != '' }}
       run: |

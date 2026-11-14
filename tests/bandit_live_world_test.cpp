@@ -55694,7 +55694,7 @@ TEST_CASE( "actual dispatched faction party receives attack alert and retains na
                                << " target_player=" << ( source.current_target() == &attacker )
                                << " danger=" << source.get_ai_danger() << " moves=" << source.get_moves();
         }
-        if( condition == "flight" && tick == 1 ) {
+        if( condition == "flight" && tick < 2 ) {
             // Existing bounded in-memory debug messages expose the action at
             // selection time. Restore the caller's debug state after one turn.
             const bool debug_before = debug_mode;
@@ -55706,7 +55706,9 @@ TEST_CASE( "actual dispatched faction party receives attack alert and retains na
                 debug_mode = true;
                 debugmode::enabled_filters.clear();
                 debugmode::enabled_filters.emplace( debugmode::DF_NPC );
-                const auto messages_before = Messages::recent_messages( 100 );
+                debugmode::enabled_filters.emplace( debugmode::DF_NPC_COMBATAI );
+                selected_action_trace << "decision_tick=" << tick << '\n';
+                const auto messages_before = Messages::recent_messages( 200 );
                 const auto trace_alarm = [&]( const char *when ) {
                     const bool response = source.faction_alarm_requires_response();
                     const bool visible = source.faction_alarm &&
@@ -55718,12 +55720,11 @@ TEST_CASE( "actual dispatched faction party receives attack alert and retains na
                 trace_alarm( "before" );
                 scene.step();
                 trace_alarm( "after" );
-                for( const auto &message : Messages::recent_messages( 100 ) ) {
+                for( const auto &message : Messages::recent_messages( 200 ) ) {
                     if( std::find( messages_before.begin(), messages_before.end(), message ) ==
                         messages_before.end() &&
-                        ( message.second.find( " chose action " ) != std::string::npos ||
-                          ( message.second.find( "NPC " ) != std::string::npos &&
-                            message.second.find( ": target = " ) != std::string::npos ) ) ) {
+                        ( message.second.find( source.get_name() ) != std::string::npos ||
+                          message.second.find( " chose action " ) != std::string::npos ) ) {
                         selected_action_trace << message.first << ' ' << message.second << '\n';
                     }
                 }
@@ -70337,8 +70338,18 @@ TEST_CASE( "complete publication refuses a foreign or impossible retained crossi
             bad.prior_owner = bad.next_owner;
         }
         const auto before = serialize_world( overmap_buffer.global_state.bandit_live_world );
-        CHECK_FALSE( g->save() );
+        std::ostringstream diagnostic;
+        bool saved = false;
+        {
+            std::ostream &log = DebugLog( D_INFO, DC_ALL );
+            auto *previous = log.rdbuf( diagnostic.rdbuf() );
+            on_out_of_scope restore_log( [&] { log.rdbuf( previous ); } );
+            saved = g->save();
+        }
+        CHECK_FALSE( saved );
         CHECK( g->last_save_result() == "failed_exception" );
+        CHECK( diagnostic.str().find( "Save exception: crossing save has incompatible actor or operation copies" ) !=
+               std::string::npos );
         CHECK( serialize_world( overmap_buffer.global_state.bandit_live_world ) == before );
         CHECK( r067_handover_actor_key( scene.actor( ids[0].get_value() ) ) == first );
         CHECK( r067_handover_actor_key( scene.actor( ids[1].get_value() ) ) == second );

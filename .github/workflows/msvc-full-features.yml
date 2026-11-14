@@ -173,7 +173,9 @@ jobs:
 
     - name: Check travelling contact ownership and hostile route controls (Windows)
       run: |
-        py -3 tests/travelling_contact_ci.py .\Cataclysm-test-vcpkg-static-Release-x64.exe
+        py -3 tests/test_travelling_contact_ci.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        py -3 tests/travelling_contact_ci.py .\Cataclysm-test-vcpkg-static-Release-x64.exe --tiles 1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Check Unicode retirement archival (Windows)

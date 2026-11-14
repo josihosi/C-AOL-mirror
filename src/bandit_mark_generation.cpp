@@ -6,10 +6,25 @@
 #include <map>
 #include <sstream>
 
+#include "map_scale_constants.h"
+
 namespace bandit_mark_generation
 {
 namespace
 {
+fire_signal_visibility::time_band fire_time( light_time_band time )
+{
+    switch( time ) {
+        case light_time_band::daylight:
+            return fire_signal_visibility::time_band::daylight;
+        case light_time_band::twilight:
+            return fire_signal_visibility::time_band::twilight;
+        case light_time_band::night:
+            return fire_signal_visibility::time_band::night;
+    }
+    return fire_signal_visibility::time_band::night;
+}
+
 int clamp_nonnegative( int value )
 {
     return std::max( 0, value );
@@ -1072,7 +1087,7 @@ local_field_signal_projection adapt_local_field_signal_reading(
         smoke.persistence = reading.smoke_intensity > 0 ? 1 : 0;
         smoke.height_bias = reading.fire_intensity >= 2 ? 1 : 0;
         smoke.spread_bias = 0;
-        smoke.weather = reading.smoke_weather;
+        smoke.weather = reading.fire_weather ? smoke_weather_band::clear : reading.smoke_weather;
         smoke.notes.push_back( "live source hook: fd_fire=" +
                                std::to_string( reading.fire_intensity ) +
                                ", fd_smoke=" + std::to_string( reading.smoke_intensity ) );
@@ -1081,6 +1096,31 @@ local_field_signal_projection adapt_local_field_signal_reading(
         smoke.notes.push_back( "local field adapter: fd_fire/fd_smoke -> smoke packet" );
         result.has_smoke_packet = true;
         result.smoke = adapt_smoke_packet( smoke );
+        if( reading.fire_weather ) {
+            auto &projection = result.smoke;
+            projection.projected_range_ms = fire_signal_visibility::effective_range_ms(
+                                                projection.projected_range_omt, fire_signal_visibility::channel::smoke,
+                                                fire_time( reading.light_time ), *reading.fire_weather );
+            constexpr int omt_ms = SEEX * 2;
+            // This OMT value is only a candidate-search envelope; consumers
+            // must also apply the exact map-square limit.
+            const bool enabled = fire_signal_visibility::channel_enabled(
+                                     fire_signal_visibility::channel::smoke,
+                                     fire_time( reading.light_time ), *reading.fire_weather );
+            projection.projected_range_omt = enabled ?
+                                             ( std::max( 1, projection.projected_range_ms ) + omt_ms - 1 ) / omt_ms : 0;
+            projection.viable = projection.viable && enabled &&
+                                reading.observed_range_omt * omt_ms <= projection.projected_range_ms;
+            for( std::string &note : projection.signal.notes ) {
+                if( note.find( "smoke packet:" ) == 0 || note == projection.weather_effect.summary ) {
+                    note = "unattenuated baseline: " + note;
+                }
+            }
+            projection.weather_effect.summary = "fire visibility weather=" + reading.fire_weather->band +
+                                                " range_ms=" + std::to_string( projection.projected_range_ms );
+            projection.review_summary = projection.weather_effect.summary;
+            projection.signal.notes.push_back( projection.weather_effect.summary );
+        }
     }
 
     const int strongest_light_intensity = std::max( reading.fire_intensity, reading.light_intensity );
@@ -1106,8 +1146,10 @@ local_field_signal_projection adapt_local_field_signal_reading(
     light.side_leakage = reading.side_leakage > 0 ?
                          std::clamp( reading.side_leakage, 0, 2 ) :
                          ( exposed_to_sky ? 1 : 0 );
-    light.time = reading.light_time;
-    light.weather = reading.light_weather;
+    const bool fire_light = reading.fire_weather && reading.fire_intensity > 0 &&
+                            reading.light_intensity <= 0;
+    light.time = fire_light ? light_time_band::night : reading.light_time;
+    light.weather = fire_light ? light_weather_band::clear : reading.light_weather;
     light.exposure = exposed_to_sky ? light_exposure_band::exposed :
                      ( light.side_leakage > 0 ? light_exposure_band::screened :
                        light_exposure_band::contained );
@@ -1131,6 +1173,32 @@ local_field_signal_projection adapt_local_field_signal_reading(
     light.notes.push_back( "local field adapter: fire/lamp/household/searchlight/time/weather -> light packet" );
     result.has_light_packet = true;
     result.light = adapt_light_packet( light );
+    if( fire_light ) {
+        auto &projection = result.light;
+        projection.baseline_range_omt = projection.projected_range_omt;
+        projection.fire_weather = reading.fire_weather;
+        projection.projected_range_ms = fire_signal_visibility::effective_range_ms(
+                                            projection.projected_range_omt, fire_signal_visibility::channel::firelight,
+                                            fire_time( reading.light_time ), *reading.fire_weather );
+        constexpr int omt_ms = SEEX * 2;
+        const bool enabled = fire_signal_visibility::channel_enabled(
+                                 fire_signal_visibility::channel::firelight,
+                                 fire_time( reading.light_time ), *reading.fire_weather );
+        projection.projected_range_omt = enabled ?
+                                         ( std::max( 1, projection.projected_range_ms ) + omt_ms - 1 ) / omt_ms : 0;
+        projection.viable = projection.viable && enabled &&
+                            reading.observed_range_omt * omt_ms <= projection.projected_range_ms;
+        projection.packet.time = reading.light_time;
+        for( std::string &note : projection.signal.notes ) {
+            if( note.find( "light packet:" ) == 0 || note == projection.concealment.summary ) {
+                note = "unattenuated baseline: " + note;
+            }
+        }
+        projection.concealment.summary = "fire visibility weather=" + reading.fire_weather->band +
+                                         " range_ms=" + std::to_string( projection.projected_range_ms );
+        projection.review_summary = projection.concealment.summary;
+        projection.signal.notes.push_back( projection.concealment.summary );
+    }
     return result;
 }
 
@@ -1142,6 +1210,14 @@ int horde_signal_power_from_light_projection( const light_projection &projection
     const light_packet &packet = projection.packet;
     if( packet.time == light_time_band::daylight ) {
         return 0;
+    }
+    if( projection.projected_range_ms >= 0 ) {
+        // Weather-capped fire may still be visible nearby. Exact physical
+        // range and escape are checked by each recipient.
+        if( packet.exposure == light_exposure_band::contained ) {
+            return 0;
+        }
+        return std::clamp( projection.projected_range_omt * 2, 1, 60 );
     }
     if( packet.exposure != light_exposure_band::exposed &&
         packet.source != light_source_band::searchlight ) {

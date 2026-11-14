@@ -1875,13 +1875,18 @@ void overmapbuffer::signal_hordes( const tripoint_abs_sm &center, const int sig_
 
 int overmapbuffer::attract_hordes_to_light( const tripoint_abs_ms &source, const int intensity,
         const int observer_radius_sm, const int brightness_range_omt, const bool source_exposed,
-        const std::string &sample_id, const time_point &observed, int *candidate_count )
+        const std::string &sample_id, const time_point &observed, int *candidate_count,
+        const int brightness_range_ms )
 {
     int attracted = 0;
     int candidates = 0;
     const tripoint_abs_omt source_omt = project_to<coords::omt>( source );
-    const auto visible = [this, &source_omt, brightness_range_omt, source_exposed](
+    const auto visible = [this, &source, &source_omt, brightness_range_omt, brightness_range_ms, source_exposed](
     const tripoint_abs_ms & observer ) {
+        if( brightness_range_ms >= 0 &&
+            rl_dist( source.xy(), observer.xy() ) > brightness_range_ms ) {
+            return false;
+        }
         const tripoint_abs_omt observer_omt = project_to<coords::omt>( observer );
         physical_light::route route;
         route.distance_omt = rl_dist( source_omt, observer_omt );
@@ -1889,6 +1894,8 @@ int overmapbuffer::attract_hordes_to_light( const tripoint_abs_ms &source, const
         route.source_exposed = source_exposed;
         route.vertical_sightline = route.vertical_offset == 0 || source_exposed;
         route.brightness_range_omt = brightness_range_omt;
+        route.brightness_range_ms = brightness_range_ms;
+        route.distance_ms = rl_dist( source.xy(), observer.xy() );
         for( const tripoint_abs_omt &omt : line_to( source_omt, observer_omt ) ) {
             const oter_id &terrain = ter_existing( omt );
             if( !terrain.is_valid() ) {

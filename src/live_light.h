@@ -18,6 +18,9 @@ struct live_bandit_signal_observation {
     tripoint_abs_omt source_omt;
     std::optional<tripoint_abs_ms> source_ms;
     int range_cap_omt = 0;
+    // -1 denotes a legacy whole-OMT limit. Otherwise this is the actual
+    // fractional fire/smoke limit; range_cap_omt is a search envelope only.
+    int range_cap_ms = -1;
     int horde_signal_power = 0;
     std::string weather_summary;
     // A smoke source may be seen across levels only after local geometry
@@ -45,6 +48,11 @@ struct loaded_z_source_index;
 }
 namespace live_light
 {
+// Legacy samples have only a whole-OMT envelope; current fire samples carry
+// their exact map-square limit as well.
+bool within_range( const live_bandit_signal_observation &sample, const tripoint_abs_ms &observer );
+// Conservative candidate search: whether any square in the OMT is in range.
+bool within_range_of_omt( const live_bandit_signal_observation &sample, const tripoint_abs_omt &omt );
 // Current physical potential of this exact fire, without emitting a signal.
 // A missing observation is not evidence that a prior episode ended.
 std::optional<bool> tended_fire_conspicuous( const tripoint_abs_ms &source );

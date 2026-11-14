@@ -6,6 +6,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -22,6 +23,7 @@
 #include "field_type.h"
 #include "game.h"
 #include "item.h"
+#include "json.h"
 #include "map.h"
 #include "mapdata.h"
 #include "map_helpers.h"
@@ -41,6 +43,7 @@
 #include "veh_type.h"
 #include "weather_type.h"
 #include "worldfactory.h"
+#include "zombie_rider_overmap_ai.h"
 
 namespace
 {
@@ -1111,7 +1114,9 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
         clear_creatures();
     } );
     setup_dark_native_lightmap();
-    calendar::turn = calendar::turn_zero + 100_turns;
+    // The selected distant smoke channel is active in daylight.
+    calendar::turn = calendar::turn_zero + 12_hours + 100_turns;
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
     reset_live_light_sample_cache();
     overmap_buffer.global_state.bandit_live_world.clear();
 
@@ -1196,10 +1201,21 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     overmap_buffer.global_state.bandit_live_world.sites.push_back(
         make_site( "test:smoke_out_of_range", out_of_range_anchor ) );
 
-    const std::filesystem::path event_path = std::filesystem::absolute(
-                "build_logs/first-smoke-001/adapter-events.jsonl" );
-    std::filesystem::create_directories( event_path.parent_path() );
-    std::filesystem::remove( event_path );
+    std::filesystem::path event_dir;
+    for( int i = 0; i < 1000; ++i ) {
+        const auto candidate = std::filesystem::temp_directory_path() /
+                               ( "caol-signal-camp-test-" + std::to_string( i ) );
+        if( std::filesystem::create_directory( candidate ) ) {
+            event_dir = candidate;
+            break;
+        }
+    }
+    REQUIRE_FALSE( event_dir.empty() );
+    const std::filesystem::path event_path = event_dir / "adapter-events.jsonl";
+    on_out_of_scope cleanup_events( [&]() {
+        std::filesystem::remove( event_path );
+        std::filesystem::remove( event_dir );
+    } );
     scoped_transition_environment transition_environment;
     transition_environment.set( event_path.string(), "smoke-adapter-test" );
     const auto read_transition_stream = [&event_path]() {
@@ -1222,8 +1238,9 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
         return sample.mark.kind == "light" || sample.mark.kind == "searchlight";
     } ) );
     CHECK( smoke->source_ms == smoke_abs );
-    CHECK( smoke->observed_turn == 100 );
-    CHECK( smoke->sample_id == smoke->mark.mark_id + "#100" );
+    const int observed_turn = to_turns<int>( calendar::turn - calendar::turn_zero );
+    CHECK( smoke->observed_turn == observed_turn );
+    CHECK( smoke->sample_id == smoke->mark.mark_id + "#" + std::to_string( observed_turn ) );
 
     const auto find_site = []( const std::string & id ) -> const bandit_live_world::site_record * {
         return overmap_buffer.global_state.bandit_live_world.find_site( id );
@@ -1296,6 +1313,313 @@ TEST_CASE( "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_fa
     CHECK( abstract_site->intelligence_map.leads.front().revision == first_abstract_lead.revision );
     CHECK( abstract_site->intelligence_map.leads.front().source_sample_id ==
            first_abstract_lead.source_sample_id );
+
+    // The same physical smoke remains loaded after nightfall, but the new
+    // turn must not refresh the staffed camp's earlier daylight knowledge.
+    calendar::turn = calendar::turn_zero + 24_hours;
+    REQUIRE( is_night( calendar::turn ) );
+    run_live_light_delivery_for_test();
+    const auto &night_samples = live_light::samples_for_turn( calendar::turn );
+    CHECK_FALSE( std::any_of( night_samples.begin(), night_samples.end(),
+    [&]( const live_bandit_signal_observation & sample ) {
+        return sample.mark.kind == "smoke" && sample.source_ms == smoke_abs;
+    } ) );
+    observed_site = find_site( "test:smoke_dispatchable" );
+    REQUIRE( observed_site != nullptr );
+    REQUIRE( observed_site->intelligence_map.leads.size() == 1 );
+    CHECK( observed_site->intelligence_map.leads.front().source_sample_id ==
+           first_lead.source_sample_id );
+    CHECK( observed_site->intelligence_map.leads.front().last_seen_minutes ==
+           first_lead.last_seen_minutes );
+
+    // A saved light observation used the square-based live_light identity
+    // before the fire/lamp projections were separated. Reload that actual
+    // camp state with both emitters present and replay the same physical turn.
+    here.add_field( smoke_pos, field_type_id( "fd_fire" ), 3 );
+    here.add_item( smoke_pos, powered_flashlight() );
+    on_out_of_scope cleanup_light( [&]() {
+        here.remove_field( smoke_pos, field_type_id( "fd_fire" ) );
+        here.i_clear( smoke_pos );
+    } );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    observed_site = find_site( "test:smoke_dispatchable" );
+    REQUIRE( observed_site != nullptr );
+    const auto saved_light = std::find_if( observed_site->intelligence_map.leads.begin(),
+    observed_site->intelligence_map.leads.end(), []( const auto & lead ) {
+        return lead.kind == bandit_live_world::camp_lead_kind::light_signal;
+    } );
+    REQUIRE( saved_light != observed_site->intelligence_map.leads.end() );
+    const auto original_light = *saved_light;
+    CHECK( original_light.source_sample_id.find( "live_light@" ) == 0 );
+    std::ostringstream saved_world;
+    JsonOut world_json( saved_world, true );
+    // Other diagnostic sites deliberately have incomplete synthetic rosters;
+    // serialize only the real, fully authorized camp under this check.
+    bandit_live_world::world_state camp_world;
+    camp_world.sites.push_back( *observed_site );
+    camp_world.serialize( world_json );
+    bandit_live_world::world_state reloaded_world;
+    reloaded_world.deserialize( json_loader::from_string( saved_world.str() ).get_object() );
+    overmap_buffer.global_state.bandit_live_world = std::move( reloaded_world );
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    observed_site = find_site( "test:smoke_dispatchable" );
+    REQUIRE( observed_site != nullptr );
+    const auto replayed_light = std::find_if( observed_site->intelligence_map.leads.begin(),
+    observed_site->intelligence_map.leads.end(), []( const auto & lead ) {
+        return lead.kind == bandit_live_world::camp_lead_kind::light_signal;
+    } );
+    REQUIRE( replayed_light != observed_site->intelligence_map.leads.end() );
+    CHECK( replayed_light->source_sample_id == original_light.source_sample_id );
+    CHECK( replayed_light->first_seen_minutes == original_light.first_seen_minutes );
+    CHECK( replayed_light->last_seen_minutes == original_light.last_seen_minutes );
+    CHECK( replayed_light->revision == original_light.revision );
+}
+
+TEST_CASE( "production fire signals follow clock and weather without stale samples",
+           "[physical_light][fire_signal_visibility]" )
+{
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    const bandit_live_world::world_state previous_world = overmap_buffer.global_state.bandit_live_world;
+    on_out_of_scope restore_world( [&]() {
+        overmap_buffer.global_state.bandit_live_world = previous_world;
+        reset_live_light_sample_cache();
+    } );
+    setup_dark_native_lightmap();
+    overmap_buffer.global_state.bandit_live_world.clear();
+    map &here = get_map();
+    const tripoint_bub_ms source = get_avatar().pos_bub();
+    const tripoint_abs_ms source_abs = here.get_abs( source );
+    here.add_field( source, field_type_id( "fd_fire" ), 2 );
+    here.add_field( source, field_type_id( "fd_smoke" ), 1 );
+    on_out_of_scope cleanup( [&]() {
+        here.remove_field( source, field_type_id( "fd_fire" ) );
+        here.remove_field( source, field_type_id( "fd_smoke" ) );
+    } );
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    const auto sample = [&]( const std::string & kind ) -> const live_bandit_signal_observation * {
+        const auto &samples = live_light::samples_for_turn( calendar::turn );
+        const auto found = std::find_if( samples.begin(), samples.end(), [&]( const auto & entry )
+        {
+            return entry.source_ms == source_abs && entry.mark.kind == kind;
+        } );
+        if( found == samples.end() )
+        {
+            return nullptr;
+        }
+        return & *found;
+    };
+    calendar::turn = calendar::turn_zero + 12_hours;
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    REQUIRE( sample( "smoke" ) != nullptr );
+    CHECK( sample( "light" ) == nullptr );
+    // A real lamp at the same position remains visible in daytime and does
+    // not inherit the fire channel gate or its source identity.
+    here.add_item( source, powered_flashlight() );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    REQUIRE( sample( "light" ) != nullptr );
+    CHECK( sample( "light" )->mark.mark_id.find( "live_light@" ) == 0 );
+    here.i_clear( source );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( sample( "light" ) == nullptr );
+    REQUIRE( sample( "smoke" ) != nullptr );
+    const std::string first_sample = sample( "smoke" )->sample_id;
+    run_live_light_delivery_for_test();
+    REQUIRE( sample( "smoke" ) != nullptr );
+    CHECK( sample( "smoke" )->sample_id == first_sample );
+
+    calendar::turn = calendar::turn_zero + 24_hours;
+    run_live_light_delivery_for_test();
+    CHECK( sample( "smoke" ) == nullptr );
+    REQUIRE( sample( "light" ) != nullptr );
+    const int clear_light_range = sample( "light" )->range_cap_ms;
+    {
+        scoped_weather_override fog( weather_type_id( "fog" ) );
+        calendar::turn += 1_turns;
+        run_live_light_delivery_for_test();
+        REQUIRE( sample( "light" ) != nullptr );
+        CHECK( sample( "light" )->range_cap_ms > 0 );
+        CHECK( sample( "light" )->range_cap_ms < clear_light_range );
+        CHECK( sample( "light" )->range_cap_ms <= 2 * SEEX * 2 );
+    }
+    here.remove_field( source, field_type_id( "fd_fire" ) );
+    here.remove_field( source, field_type_id( "fd_smoke" ) );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( sample( "light" ) == nullptr );
+    CHECK( sample( "smoke" ) == nullptr );
+}
+
+TEST_CASE( "fog permits nearby but not distant zombie fire investigation",
+           "[physical_light][fire_signal_visibility][hordes]" )
+{
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    setup_dark_native_lightmap();
+    calendar::turn = night_time( calendar::turn ) + 2_hours;
+    REQUIRE( is_night( calendar::turn ) );
+    scoped_weather_override fog( weather_type_id( "fog" ) );
+    fog.with_windspeed( 0 );
+    map &here = get_map();
+    const tripoint_bub_ms source = get_avatar().pos_bub();
+    const tripoint_abs_ms source_abs = here.get_abs( source );
+    const tripoint_abs_ms near = source_abs + point_rel_ms( 4, 0 );
+    const tripoint_abs_ms far = source_abs + point_rel_ms( 48, 0 );
+    overmap &om = overmap_buffer.get( coords::project_to<coords::om>( source_abs ).xy() );
+    restore_on_out_of_scope<horde_map> restore_hordes( om.hordes );
+    om.hordes.clear();
+    for( const auto &pos : {
+             source_abs, near, far
+         } ) {
+        overmap_buffer.ter_set( coords::project_to<coords::omt>( pos ), oter_id( "field" ) );
+    }
+    REQUIRE( om.hordes.spawn_entity( near, mtype_id( "mon_zombie" ) ) );
+    REQUIRE( om.hordes.spawn_entity( far, mtype_id( "mon_zombie" ) ) );
+    here.add_field( source, field_type_id( "fd_fire" ), 3 );
+    on_out_of_scope cleanup( [&]() {
+        here.remove_field( source, field_type_id( "fd_fire" ) );
+        reset_live_light_sample_cache();
+    } );
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    const auto &samples = live_light::samples_for_turn( calendar::turn );
+    const auto fire = std::find_if( samples.begin(), samples.end(), [&]( const auto & sample ) {
+        return sample.source_ms == source_abs && sample.mark.mark_id.find( "live_light@" ) == 0 &&
+               sample.range_cap_ms >= 0;
+    } );
+    REQUIRE( fire != samples.end() );
+    CHECK( fire->range_cap_ms >= 4 );
+    CHECK( fire->range_cap_ms < 48 );
+    const auto *near_zombie = overmap_buffer.entity_at( near );
+    const auto *far_zombie = overmap_buffer.entity_at( far );
+    REQUIRE( near_zombie );
+    REQUIRE( far_zombie );
+    CHECK( near_zombie->light_sample_id == fire->sample_id );
+    CHECK( far_zombie->light_sample_id.empty() );
+    const auto expiry = near_zombie->light_expires;
+    run_live_light_delivery_for_test();
+    CHECK( overmap_buffer.entity_at( near )->light_expires == expiry );
+}
+
+TEST_CASE( "legacy firelight sample survives save reload and co-located lamp",
+           "[physical_light][fire_signal_visibility][identity]" )
+{
+    restore_on_out_of_scope restore_turn( calendar::turn );
+    setup_dark_native_lightmap();
+    calendar::turn = night_time( calendar::turn ) + 2_hours;
+    REQUIRE( is_night( calendar::turn ) );
+    scoped_weather_override clear_weather( WEATHER_CLEAR );
+    map &here = get_map();
+    const tripoint_bub_ms source = get_avatar().pos_bub();
+    const tripoint_abs_ms source_abs = here.get_abs( source );
+    const tripoint_abs_ms near = source_abs + point_rel_ms( 4, 0 );
+    overmap &om = overmap_buffer.get( coords::project_to<coords::om>( source_abs ).xy() );
+    restore_on_out_of_scope<horde_map> restore_hordes( om.hordes );
+    om.hordes.clear();
+    overmap_buffer.ter_set( coords::project_to<coords::omt>( source_abs ), oter_id( "field" ) );
+    REQUIRE( om.hordes.spawn_entity( near, mtype_id( "mon_zombie" ) ) );
+    const int turn = to_turns<int>( calendar::turn - calendar::turn_zero );
+    const std::string legacy_id = "live_light@" + std::to_string( source_abs.x() ) + "," +
+                                  std::to_string( source_abs.y() ) + "," + std::to_string( source_abs.z() ) +
+                                  "#" + std::to_string( turn );
+    REQUIRE( overmap_buffer.attract_hordes_to_light( source_abs, 1, 1, 30, true,
+            legacy_id, calendar::turn ) == 1 );
+    const auto *before = overmap_buffer.entity_at( near );
+    REQUIRE( before );
+    const auto observed = before->light_observed;
+    const auto expiry = before->light_expires;
+
+    std::ostringstream serialized;
+    om.serialize( serialized );
+    auto reloaded = std::make_unique<overmap>( om.pos() );
+    std::istringstream input( serialized.str() );
+    reloaded->unserialize( input );
+    om.hordes = reloaded->hordes;
+    const auto *restored = overmap_buffer.entity_at( near );
+    REQUIRE( restored );
+    CHECK( restored->light_sample_id == legacy_id );
+    CHECK( restored->light_observed == observed );
+    CHECK( restored->light_expires == expiry );
+
+    overmap_global_state saved_global;
+    auto &saved_rider = saved_global.zombie_rider_light_memory[
+                            coords::project_to<coords::omt>( source_abs )];
+    saved_rider.interest_score = 3;
+    saved_rider.turns_remaining = 80;
+    saved_rider.max_riders_drawn = 1;
+    saved_rider.observed_at_turn = turn;
+    saved_rider.expires_at_turn = turn + 80;
+    saved_rider.sample_id = legacy_id;
+    std::ostringstream global_json;
+    JsonOut output( global_json, true );
+    saved_global.serialize( output );
+    overmap_global_state loaded_global;
+    loaded_global.deserialize( json_loader::from_string( global_json.str() ).get_object() );
+    auto &loaded_rider = loaded_global.zombie_rider_light_memory.at(
+                             coords::project_to<coords::omt>( source_abs ) );
+    CHECK( loaded_rider.sample_id == legacy_id );
+    CHECK( loaded_rider.observed_at_turn == turn );
+    CHECK( loaded_rider.expires_at_turn == turn + 80 );
+
+    here.add_field( source, field_type_id( "fd_fire" ), 3 );
+    here.add_item( source, powered_flashlight() );
+    on_out_of_scope cleanup( [&]() {
+        here.remove_field( source, field_type_id( "fd_fire" ) );
+        here.i_clear( source );
+        reset_live_light_sample_cache();
+    } );
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    const auto &samples = live_light::samples_for_turn( calendar::turn );
+    int fire_count = 0;
+    int lamp_count = 0;
+    std::string actual_sample_id;
+    for( const auto &sample : samples ) {
+        if( sample.source_ms != source_abs || !sample.has_light_projection ) {
+            continue;
+        }
+        CHECK( sample.sample_id == legacy_id );
+        actual_sample_id = sample.sample_id;
+        sample.range_cap_ms >= 0 ? ++fire_count : ++lamp_count;
+    }
+    CHECK( fire_count == 1 );
+    CHECK( lamp_count == 1 );
+    zombie_rider_overmap_ai::rider_light_interest interest;
+    interest.should_investigate = true;
+    interest.interest_score = 3;
+    interest.memory_turns = 100;
+    interest.max_riders_drawn = 1;
+    CHECK_FALSE( zombie_rider_overmap_ai::refresh_light_memory( loaded_rider, interest,
+            actual_sample_id, turn ) );
+    CHECK( loaded_rider.expires_at_turn == turn + 80 );
+    restored = overmap_buffer.entity_at( near );
+    REQUIRE( restored );
+    CHECK( restored->light_sample_id == legacy_id );
+    CHECK( restored->light_observed == observed );
+    CHECK( restored->light_expires == expiry );
+
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    restored = overmap_buffer.entity_at( near );
+    REQUIRE( restored );
+    CHECK( restored->light_sample_id == legacy_id.substr( 0, legacy_id.rfind( '#' ) + 1 ) +
+           std::to_string( turn + 1 ) );
+    CHECK( restored->light_observed == calendar::turn );
+    CHECK( restored->light_expires > expiry );
+    const auto &next_samples = live_light::samples_for_turn( calendar::turn );
+    const auto next_light = std::find_if( next_samples.begin(),
+    next_samples.end(), [&]( const auto & sample ) {
+        return sample.source_ms == source_abs && sample.has_light_projection;
+    } );
+    REQUIRE( next_light != next_samples.end() );
+    CHECK( zombie_rider_overmap_ai::refresh_light_memory( loaded_rider, interest,
+            next_light->sample_id, turn + 1 ) );
+    CHECK_FALSE( zombie_rider_overmap_ai::refresh_light_memory( loaded_rider, interest,
+            next_light->sample_id, turn + 1 ) );
+    CHECK( loaded_rider.observed_at_turn == turn + 1 );
 }
 
 TEST_CASE( "production loaded strong fire emits the calibrated smoke envelope",
@@ -1309,7 +1633,7 @@ TEST_CASE( "production loaded strong fire emits the calibrated smoke envelope",
     } );
     setup_dark_native_lightmap();
     overmap_buffer.global_state.bandit_live_world.clear();
-    calendar::turn = calendar::turn_zero + 101_turns;
+    calendar::turn = calendar::turn_zero + 12_hours + 101_turns;
     reset_live_light_sample_cache();
     map &here = get_map();
     const tripoint_bub_ms source = get_avatar().pos_bub();

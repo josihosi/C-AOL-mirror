@@ -621,7 +621,7 @@ TEST_CASE( "ecology_view_reads_migo_leases_without_mutating_them",
     tower.operation->sweep.begin( tower.operation->source.source_omt, 7 );
     tower.operation->members.emplace_back();
     tower.operation->members.back().member_id = member.token.member_id;
-    auto serialize = []( const auto &world ) {
+    auto serialize = []( const auto & world ) {
         std::ostringstream out;
         JsonOut json( out, true );
         world.serialize( json );
@@ -636,7 +636,7 @@ TEST_CASE( "ecology_view_reads_migo_leases_without_mutating_them",
     request.enabled = true;
     auto view = ecology_debug::query_bandit_ecology( humans, request );
     REQUIRE( view.entities.size() == 2 );
-    auto dispatched = std::find_if( view.entities.begin(), view.entities.end(), []( const auto &row ) {
+    auto dispatched = std::find_if( view.entities.begin(), view.entities.end(), []( const auto & row ) {
         return row.kind == ecology_debug::entity_kind::migo_dispatch;
     } );
     REQUIRE( dispatched != view.entities.end() );
@@ -666,7 +666,7 @@ TEST_CASE( "ecology_view_reads_migo_leases_without_mutating_them",
                             migo_population::representation::local ) );
     view = ecology_debug::query_bandit_ecology( humans, request );
     REQUIRE( view.selected );
-    dispatched = std::find_if( view.entities.begin(), view.entities.end(), [&id]( const auto &row ) {
+    dispatched = std::find_if( view.entities.begin(), view.entities.end(), [&id]( const auto & row ) {
         return row.id == id;
     } );
     REQUIRE( dispatched != view.entities.end() );

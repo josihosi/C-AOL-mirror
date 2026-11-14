@@ -83,6 +83,10 @@ struct route {
     bool source_exposed = false;
     bool vertical_sightline = false;
     int brightness_range_omt = 0;
+    // Optional exact budget for a weather-attenuated fire signal. Legacy
+    // routes continue to use their existing whole-OMT calculation.
+    int brightness_range_ms = -1;
+    int distance_ms = -1;
     std::vector<int> terrain_see_costs;
 };
 
@@ -93,6 +97,9 @@ struct detection {
     // of this physical query.
     bool recognizes_identity = false;
 };
+
+// Terrain see costs are in OMT sight units. A negative cost is opaque.
+bool within_exact_budget( int range_ms, int distance_ms, const std::vector<int> &terrain_see_costs );
 
 // Small, persistence-free gate for a loaded source pass.  Game state owns
 // observations; this only prevents UI/render/debug and scheduler re-entry

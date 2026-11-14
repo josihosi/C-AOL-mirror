@@ -6,6 +6,7 @@
 #include <climits>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -211,6 +212,8 @@ weather_type_id get_weather_at_point( const tripoint_abs_omt &pos );
 std::tuple<char, nc_color, size_t> get_note_display_info( std::string_view note );
 bool is_generated_omt( const point_abs_omt &omp );
 std::pair<std::string, nc_color> ecology_marker_display( ecology_debug::entity_kind kind );
+std::map<std::string, std::string> ecology_semantic_facts(
+    const overmap_draw_data_t &data, const tripoint_abs_omt &cursor );
 ecology_debug::query_filters ecology_query_filters( ecology_filter_mode filter,
         ecology_faction_filter_mode faction_filter = ecology_faction_filter_mode::all,
         bool loaded_only = false );

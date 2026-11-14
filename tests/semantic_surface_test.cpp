@@ -7852,4 +7852,131 @@ for( const auto &entry : previous )
 }
 
 
+TEST_CASE( "native ecology no-op actions publish handled successor state",
+           "[semantic_surface][ecology_debug][ecology_noop_receipt]" )
+{
+    const bool selected = GENERATE( false, true );
+    CAPTURE( selected );
+    clear_avatar();
+    clear_map();
+    avatar &u = get_avatar();
+    const trait_id clairvoyance( "DEBUG_CLAIRVOYANCE" );
+    u.set_mutation( clairvoyance );
+    on_out_of_scope remove_trait( [&]() {
+        u.unset_mutation( clairvoyance );
+    } );
+    const auto turn_before = calendar::turn;
+    const auto old_humans = overmap_buffer.global_state.bandit_live_world;
+    const auto old_populations = overmap_buffer.global_state.migo_populations;
+    const auto old_towers = overmap_buffer.global_state.migo_towers;
+    on_out_of_scope restore_migo( [&]() {
+        overmap_buffer.global_state.bandit_live_world = old_humans;
+        overmap_buffer.global_state.migo_populations = old_populations;
+        overmap_buffer.global_state.migo_towers = old_towers;
+    } );
+    overmap_buffer.global_state.bandit_live_world = {};
+    overmap_buffer.global_state.migo_populations = {};
+    overmap_buffer.global_state.migo_towers = {};
+    if( selected ) {
+        migo_population::site_record tower;
+        tower.id = "semantic-noop-tower";
+        tower.tower = true;
+        tower.anchor = u.pos_abs_omt();
+        tower.members.emplace_back();
+        tower.members.back().token.site_id = tower.id;
+        tower.members.back().token.member_id = "resident";
+        tower.members.back().owner = migo_population::representation::slot;
+        overmap_buffer.global_state.migo_populations.sites.push_back( tower );
+    }
+    restore_on_out_of_scope restore_data( g->overmap_data );
+    overmap_ui::overmap_draw_data_t previous_controls;
+    overmap_ui::restore_ecology_observer_controls( previous_controls );
+    overmap_ui::overmap_draw_data_t default_controls;
+    overmap_ui::remember_ecology_observer_controls( default_controls );
+    on_out_of_scope restore_controls( [&]() {
+        overmap_ui::remember_ecology_observer_controls( previous_controls );
+    } );
+    const bool owns_terminal = !catacurses::stdscr;
+    if( owns_terminal ) {
+        catacurses::init_interface();
+        catacurses::resizeterm();
+    }
+    on_out_of_scope close_terminal( [&]() {
+        ui::omap::force_quit();
+        if( owns_terminal ) {
+            catacurses::endwin();
+        }
+    } );
+    scoped_imgui_context imgui;
+    restore_on_out_of_scope restore_test_mode( test_mode );
+    test_mode = false;
+    const char *request_path = std::getenv( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    const std::optional<std::string> old_request_path = request_path ?
+            std::optional<std::string>( request_path ) : std::nullopt;
+    unset_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH" );
+    on_out_of_scope restore_transport( [&]() {
+        assign_test_environment( "OPENCLAW_HARNESS_SEMANTIC_REQUEST_PATH", old_request_path );
+    } );
+    ui_adaptor fixture_root;
+    fixture_root.on_redraw( []( ui_adaptor & ) {} );
+    ui_manager::redraw();
+    semantic_surface_manager manager( "native-ecology-noop" );
+    semantic_surface_manager_session session( manager );
+    semantic_surface_scope world( manager, "world", "World" );
+    std::vector<semantic_action_receipt> receipts;
+    manager.set_receipt_observer( [&]( const auto & receipt ) {
+        receipts.push_back( receipt );
+    } );
+    int stage = 0;
+    std::string initial_frame;
+    std::string initial_selected;
+    manager.set_descriptor_observer( [&]( const semantic_surface_descriptor & owner ) {
+        if( owner.kind != "overmap" || !owner.payload.count( "ecology_count" ) ) {
+            return;
+        }
+        if( stage == 0 ) {
+            if( selected && !owner.payload.count( "ecology_selected_id" ) ) {
+                return;
+            }
+            CHECK( owner.payload.at( "ecology_enabled" ) == "true" );
+            CHECK( owner.payload.at( "ecology_count" ) == ( selected ? "1" : "0" ) );
+            CHECK( owner.payload.at( "completed_ecology_actions" ) == "0" );
+            CHECK( owner.payload.at( "ecology_following" ) == "false" );
+            initial_frame = owner.frame_id;
+            initial_selected = selected ? owner.payload.at( "ecology_selected_id" ) : "";
+            const std::string action = selected ? "overmap.ecology_select" : "overmap.ecology_follow";
+            stage = 1;
+            REQUIRE( manager.submit_request( { owner.run_id, owner.surface_id, owner.frame_id,
+                                               "ecology-noop", action, std::nullopt, {} } ) );
+        } else if( stage == 1 && owner.payload.at( "completed_ecology_actions" ) == "1" ) {
+            CHECK( owner.frame_id != initial_frame );
+            CHECK( owner.payload.at( "ecology_following" ) == "false" );
+            if( selected ) {
+                CHECK( owner.payload.at( "ecology_selected_id" ) == initial_selected );
+            } else {
+                CHECK( owner.payload.count( "ecology_selected_id" ) == 0 );
+            }
+            CHECK( calendar::turn == turn_before );
+            stage = 2;
+            REQUIRE( manager.submit_request( { owner.run_id, owner.surface_id, owner.frame_id,
+                                               "ecology-close", "overmap.close", std::nullopt, {} } ) );
+        }
+    } );
+    on_out_of_scope clear_observers( [&]() {
+        manager.set_descriptor_observer( {} );
+        manager.set_receipt_observer( {} );
+    } );
+    ui::omap::display();
+    CHECK( stage == 2 );
+    const auto action_receipt = std::find_if( receipts.begin(),
+    receipts.end(), []( const auto & receipt ) {
+        return receipt.request_id == "ecology-noop";
+    } );
+    REQUIRE( action_receipt != receipts.end() );
+    CHECK( action_receipt->accepted );
+    CHECK_FALSE( action_receipt->resulting_frame_id.empty() );
+    CHECK( action_receipt->resulting_frame_id != initial_frame );
+    CHECK( calendar::turn == turn_before );
+}
+
 #endif

@@ -14,6 +14,7 @@
 #endif
 
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <chrono>
 #include <climits>
@@ -57,6 +58,7 @@
 #include "bandit_live_world.h"
 #include "bandit_live_world_probe.h"
 #include "bandit_mark_generation.h"
+#include "fire_signal_visibility.h"
 #include "physical_light.h"
 #include "raid_sweep.h"
 #include "basecamp.h"
@@ -13848,6 +13850,12 @@ std::vector<live_bandit_signal_observation> observe_loaded_z_light_sources()
     }
 
     for( const physical_light::emitter &emitter : source_index.stationary_emitters ) {
+        // Fire is already projected from its field source. Other luminous
+        // fields, furniture, terrain, lamps and vehicles remain independent.
+        if( emitter.kind == physical_light::source_kind::field &&
+            emitter.provenance == "field:fd_fire" ) {
+            continue;
+        }
         const tripoint_bub_ms p = here.get_bub( emitter.position );
         if( !here.inbounds( p ) ) {
             continue;
@@ -13867,117 +13875,173 @@ std::vector<live_bandit_signal_observation> observe_loaded_z_light_sources()
     const bandit_mark_generation::light_time_band light_time = live_bandit_light_time_band();
     const bandit_mark_generation::light_weather_band light_weather = live_bandit_light_weather_band();
     const weather_manager &weather = get_weather_const();
+    const auto fire_weather = fire_signal_visibility::classify_weather(
+                                  weather.weather_id.str(), weather.weather_id->precip,
+                                  weather.weather_id->rains, weather.weather_id->sight_penalty,
+                                  weather.windspeed );
     const int observed_turn = to_turns<int>( calendar::turn - calendar::turn_zero );
     const int observed_minutes = live_bandit_current_minutes();
     for( const std::pair<const tripoint_abs_ms, live_bandit_local_source_reading> &entry : readings ) {
         const tripoint_abs_ms &source_pos = entry.first;
         const tripoint_abs_omt source_omt = coords::project_to<coords::omt>( source_pos );
         const live_bandit_local_source_reading &reading = entry.second;
-        bandit_mark_generation::local_field_signal_reading adapter_reading;
-        adapter_reading.smoke_id = live_bandit_source_mark_id( "smoke", source_pos );
-        adapter_reading.light_id = live_bandit_source_mark_id( "light", source_pos );
-        adapter_reading.envelope_id = "local_field@" + live_bandit_omt_token( source_omt );
-        adapter_reading.region_id = live_bandit_omt_token( source_omt );
-        adapter_reading.observed_range_omt = 0;
-        adapter_reading.fire_intensity = reading.fire_intensity;
-        adapter_reading.smoke_intensity = reading.smoke_intensity;
-        adapter_reading.light_intensity = reading.light_intensity;
-        adapter_reading.light_source = reading.light_source;
-        adapter_reading.outside = reading.outside;
-        adapter_reading.side_leakage = reading.side_leakage;
-        adapter_reading.elevated_roof_exposed = reading.elevated_roof_exposed;
-        adapter_reading.smoke_weather = weather_band;
-        adapter_reading.light_time = light_time;
-        adapter_reading.light_weather = light_weather;
-
-        const bandit_mark_generation::local_field_signal_projection field_projection =
-            bandit_mark_generation::adapt_local_field_signal_reading( adapter_reading );
-        const bandit_mark_generation::smoke_projection &projection = field_projection.smoke;
-        if( field_projection.has_smoke_packet && !projection.viable ) {
-            DebugLog( D_INFO, DC_ALL ) << "bandit_live_world signal rejected: packet="
-                                       << projection.packet.id
-                                       << " kind=smoke reason=below_threshold weather="
-                                       << bandit_mark_generation::to_string( weather_band )
-                                       << " observed_range_omt=" << projection.packet.observed_range_omt
-                                       << " projected_range_omt=" << projection.projected_range_omt
-                                       << " visibility_score=" << projection.visibility_score << '\n';
-        } else if( field_projection.has_smoke_packet ) {
-            live_bandit_signal_observation observation;
-            observation.signal = projection.signal;
-            observation.source_omt = source_omt;
-            observation.source_ms = source_pos;
-            observation.range_cap_omt = projection.projected_range_omt;
-            observation.weather_summary = projection.weather_effect.summary;
-            const auto support = physical_light::evaluate_smoke_support( here,
-                                 here.get_bub( source_pos ) );
-            // An unavailable geometry result cannot borrow the legacy exposed
-            // flag to become observable. The flag still describes the emitter.
-            observation.smoke_source_exposed_to_sky = reading.outside && support.position.has_value();
-            observation.smoke_observable_ms = support.position;
-            observation.smoke_support_reason = support.reason;
-            observation.mark.mark_id = projection.packet.id;
-            observation.mark.kind = "smoke";
-            observation.mark.source_omt = source_omt;
-            observation.mark.observed_range_omt = projection.packet.observed_range_omt;
-            observation.mark.range_cap_omt = projection.projected_range_omt;
-            observation.mark.strength = projection.signal.strength;
-            observation.mark.confidence = projection.signal.confidence;
-            observation.mark.bounty_add = projection.signal.bounty_add;
-            observation.mark.threat_add = projection.signal.threat_add;
-            observation.mark.notes = projection.signal.notes;
-            observation.observed_turn = observed_turn;
-            observation.observed_minutes = observed_minutes;
-            observation.sample_id = observation.mark.mark_id + "#" +
-                                    std::to_string( observed_turn );
-            observations.push_back( observation );
-        }
-
-        if( !field_projection.has_light_packet ) {
-            continue;
-        }
-
-        const bandit_mark_generation::light_projection &light_projection = field_projection.light;
-        if( !light_projection.viable ) {
-            if( signal_diagnostics ) {
-                DebugLog( D_INFO, DC_ALL ) << "bandit_live_world signal rejected: packet="
-                                           << light_projection.packet.id
-                                           << " kind=light reason=below_threshold time="
-                                           << bandit_mark_generation::to_string( light_time )
-                                           << " weather=" << bandit_mark_generation::to_string( light_weather )
-                                           << " exposure="
-                                           << bandit_mark_generation::to_string( light_projection.packet.exposure )
-                                           << " observed_range_omt=" << light_projection.packet.observed_range_omt
-                                           << " projected_range_omt=" << light_projection.projected_range_omt
-                                           << " visibility_score=" << light_projection.visibility_score << '\n';
+        const std::size_t first_source_observation = observations.size();
+        // A lamp on the fire square remains an independent emitter. It must
+        // neither lend intensity to the fire nor inherit fire's time gate.
+        for( const bool fire_channel : {
+                 true, false
+             } ) {
+            if( fire_channel ? ( reading.fire_intensity <= 0 && reading.smoke_intensity <= 0 ) :
+                reading.light_intensity <= 0 ) {
+                continue;
             }
-            continue;
-        }
+            bandit_mark_generation::local_field_signal_reading adapter_reading;
+            adapter_reading.smoke_id = live_bandit_source_mark_id( "smoke", source_pos );
+            // The historic light identity denotes this physical square, not
+            // a proven emitter type. Fire and a co-located lamp are sampled
+            // independently but retain that one canonical source/sample ID;
+            // legacy knowledge cannot truthfully be assigned to either one.
+            adapter_reading.light_id = live_bandit_source_mark_id( "light", source_pos );
+            adapter_reading.envelope_id = "local_field@" + live_bandit_omt_token( source_omt );
+            adapter_reading.region_id = live_bandit_omt_token( source_omt );
+            adapter_reading.observed_range_omt = 0;
+            adapter_reading.fire_intensity = fire_channel ? reading.fire_intensity : 0;
+            adapter_reading.smoke_intensity = fire_channel ? reading.smoke_intensity : 0;
+            adapter_reading.light_intensity = fire_channel ? 0 : reading.light_intensity;
+            adapter_reading.light_source = fire_channel ?
+                                           bandit_mark_generation::light_source_band::ordinary : reading.light_source;
+            adapter_reading.outside = reading.outside;
+            adapter_reading.side_leakage = reading.side_leakage;
+            adapter_reading.elevated_roof_exposed = reading.elevated_roof_exposed;
+            adapter_reading.smoke_weather = weather_band;
+            adapter_reading.light_time = light_time;
+            adapter_reading.light_weather = light_weather;
+            if( fire_channel ) {
+                adapter_reading.fire_weather = fire_weather;
+            }
 
-        live_bandit_signal_observation light_observation;
-        light_observation.signal = light_projection.signal;
-        light_observation.source_omt = source_omt;
-        light_observation.source_ms = source_pos;
-        light_observation.range_cap_omt = light_projection.projected_range_omt;
-        light_observation.weather_summary = light_projection.concealment.summary;
-        light_observation.mark.mark_id = light_projection.packet.id;
-        light_observation.mark.kind = light_projection.signal.kind;
-        light_observation.mark.source_omt = source_omt;
-        light_observation.mark.observed_range_omt = light_projection.packet.observed_range_omt;
-        light_observation.mark.range_cap_omt = light_projection.projected_range_omt;
-        light_observation.mark.strength = light_projection.signal.strength;
-        light_observation.mark.confidence = light_projection.signal.confidence;
-        light_observation.mark.bounty_add = light_projection.signal.bounty_add;
-        light_observation.mark.threat_add = light_projection.signal.threat_add;
-        light_observation.mark.notes = light_projection.signal.notes;
-        light_observation.horde_signal_power =
-            bandit_mark_generation::horde_signal_power_from_light_projection( light_projection );
-        light_observation.has_light_projection = true;
-        light_observation.light_projection = light_projection;
-        light_observation.observed_turn = observed_turn;
-        light_observation.observed_minutes = observed_minutes;
-        light_observation.sample_id = light_observation.mark.mark_id + "#" +
-                                      std::to_string( observed_turn );
-        observations.push_back( light_observation );
+            const bandit_mark_generation::local_field_signal_projection field_projection =
+                bandit_mark_generation::adapt_local_field_signal_reading( adapter_reading );
+            const bandit_mark_generation::smoke_projection &projection = field_projection.smoke;
+            if( field_projection.has_smoke_packet && !projection.viable ) {
+                if( signal_diagnostics ) {
+                    DebugLog( D_INFO, DC_ALL ) << "bandit_live_world signal rejected: packet="
+                                               << projection.packet.id
+                                               << " kind=smoke reason=below_threshold weather="
+                                               << bandit_mark_generation::to_string( weather_band )
+                                               << " selected_weather=" << fire_weather.band
+                                               << " time=" << bandit_mark_generation::to_string( light_time )
+                                               << " range_ms=" << projection.projected_range_ms
+                                               << " observed_range_omt=" << projection.packet.observed_range_omt
+                                               << " projected_range_omt=" << projection.projected_range_omt
+                                               << " visibility_score=" << projection.visibility_score << '\n';
+                }
+            } else if( field_projection.has_smoke_packet ) {
+                live_bandit_signal_observation observation;
+                observation.signal = projection.signal;
+                observation.source_omt = source_omt;
+                observation.source_ms = source_pos;
+                observation.range_cap_omt = projection.projected_range_omt;
+                observation.range_cap_ms = projection.projected_range_ms;
+                observation.weather_summary = projection.weather_effect.summary;
+                const auto support = physical_light::evaluate_smoke_support( here,
+                    here.get_bub( source_pos ) );
+                // An unavailable geometry result cannot borrow the legacy exposed
+                // flag to become observable. The flag still describes the emitter.
+                observation.smoke_source_exposed_to_sky = reading.outside && support.position.has_value();
+                observation.smoke_observable_ms = support.position;
+                observation.smoke_support_reason = support.reason;
+                observation.mark.mark_id = projection.packet.id;
+                observation.mark.kind = "smoke";
+                observation.mark.source_omt = source_omt;
+                observation.mark.observed_range_omt = projection.packet.observed_range_omt;
+                observation.mark.range_cap_omt = projection.projected_range_omt;
+                observation.mark.strength = projection.signal.strength;
+                observation.mark.confidence = projection.signal.confidence;
+                observation.mark.bounty_add = projection.signal.bounty_add;
+                observation.mark.threat_add = projection.signal.threat_add;
+                observation.mark.notes = projection.signal.notes;
+                observation.observed_turn = observed_turn;
+                observation.observed_minutes = observed_minutes;
+                observation.sample_id = observation.mark.mark_id + "#" +
+                                        std::to_string( observed_turn );
+                observations.push_back( observation );
+            }
+
+            if( !field_projection.has_light_packet ) {
+                continue;
+            }
+
+            const bandit_mark_generation::light_projection &light_projection = field_projection.light;
+            if( !light_projection.viable ) {
+                if( signal_diagnostics ) {
+                    DebugLog( D_INFO, DC_ALL ) << "bandit_live_world signal rejected: packet="
+                                               << light_projection.packet.id
+                                               << " kind=light reason=below_threshold time="
+                                               << bandit_mark_generation::to_string( light_time )
+                                               << " weather=" << bandit_mark_generation::to_string( light_weather )
+                                               << " selected_weather=" << ( fire_channel ? fire_weather.band : "legacy" )
+                                               << " range_ms=" << light_projection.projected_range_ms
+                                               << " exposure="
+                                               << bandit_mark_generation::to_string( light_projection.packet.exposure )
+                                               << " observed_range_omt=" << light_projection.packet.observed_range_omt
+                                               << " projected_range_omt=" << light_projection.projected_range_omt
+                                               << " visibility_score=" << light_projection.visibility_score << '\n';
+                }
+                continue;
+            }
+
+            live_bandit_signal_observation light_observation;
+            light_observation.signal = light_projection.signal;
+            light_observation.source_omt = source_omt;
+            light_observation.source_ms = source_pos;
+            light_observation.range_cap_omt = light_projection.projected_range_omt;
+            light_observation.range_cap_ms = light_projection.projected_range_ms;
+            light_observation.weather_summary = light_projection.concealment.summary;
+            light_observation.mark.mark_id = light_projection.packet.id;
+            light_observation.mark.kind = light_projection.signal.kind;
+            light_observation.mark.source_omt = source_omt;
+            light_observation.mark.observed_range_omt = light_projection.packet.observed_range_omt;
+            light_observation.mark.range_cap_omt = light_projection.projected_range_omt;
+            light_observation.mark.strength = light_projection.signal.strength;
+            light_observation.mark.confidence = light_projection.signal.confidence;
+            light_observation.mark.bounty_add = light_projection.signal.bounty_add;
+            light_observation.mark.threat_add = light_projection.signal.threat_add;
+            light_observation.mark.notes = light_projection.signal.notes;
+            light_observation.horde_signal_power =
+                bandit_mark_generation::horde_signal_power_from_light_projection( light_projection );
+            light_observation.has_light_projection = true;
+            light_observation.light_projection = light_projection;
+            light_observation.observed_turn = observed_turn;
+            light_observation.observed_minutes = observed_minutes;
+            light_observation.sample_id = light_observation.mark.mark_id + "#" +
+                                          std::to_string( observed_turn );
+            observations.push_back( light_observation );
+        }
+        // The previous sampler emitted one strongest light packet per square.
+        // If fire and a lamp now produce two physical projections with the
+        // same legacy sample ID, deliver the stronger one first so a receiver's
+        // once-only check cannot suppress a stronger co-located source.
+        auto first_light = std::find_if( observations.begin() + first_source_observation,
+        observations.end(), []( const auto & sample ) {
+            return sample.has_light_projection;
+        } );
+        if( first_light != observations.end() ) {
+            auto second_light = std::find_if( std::next( first_light ), observations.end(),
+            []( const auto & sample ) {
+                return sample.has_light_projection;
+            } );
+            if( second_light != observations.end() ) {
+                const auto strength = []( const live_bandit_signal_observation & sample ) {
+                    const int range_ms = sample.range_cap_ms >= 0 ? sample.range_cap_ms :
+                                         sample.range_cap_omt * 2 * SEEX;
+                    return std::make_pair( sample.horde_signal_power, range_ms );
+                };
+                if( strength( *second_light ) > strength( *first_light ) ) {
+                    std::iter_swap( first_light, second_light );
+                }
+            }
+        }
     }
 
     int smoke_packets = 0;
@@ -14123,7 +14187,8 @@ int observe_live_hostile_signal_sources(
         }
         const auto signal = std::find_if( ordered_signals.begin(), ordered_signals.end(),
         [&site]( const live_bandit_signal_observation * candidate ) {
-            return rl_dist( site.anchor, candidate->source_omt ) <= candidate->range_cap_omt;
+            return rl_dist( site.anchor, candidate->source_omt ) <= candidate->range_cap_omt &&
+                   live_light::within_range_of_omt( *candidate, site.anchor );
         } );
         if( signal == ordered_signals.end() ) {
             std::string reason = "no_in_range_production_signal";
@@ -14338,7 +14403,7 @@ int attract_live_hordes_from_light_observations(
         const int attracted = overmap_buffer.attract_hordes_to_light( source_ms,
                               signal.horde_signal_power, signal.horde_signal_power,
                               signal.range_cap_omt, source_exposed, signal.sample_id,
-                              calendar::turn, &candidates );
+                              calendar::turn, &candidates, signal.range_cap_ms );
         signaled_sources += attracted > 0 ? 1 : 0;
         ++packets;
         candidate_visits += candidates;
@@ -14387,6 +14452,7 @@ int signal_live_writhing_stalkers_from_light_observations(
             if( critter.type->id != mon_writhing_stalker || critter.is_dead() || critter.friendly != 0 ||
                 !overmap_buffer.predator_activity_for( critter,
                         predator_activation::representation::local, critter.pos_abs() ) ||
+                !live_light::within_range( signal, critter.pos_abs() ) ||
                 !critter.sees( here, source_bub ) ) {
                 continue;
             }
@@ -14659,6 +14725,10 @@ int signal_live_zombie_riders_from_light_observations(
             if( used_signal[peer_index] || !peer.has_light_projection || peer.horde_signal_power <= 0 ) {
                 continue;
             }
+            // Keep fire and unrelated lamps as separate physical sources.
+            if( ( signal.range_cap_ms >= 0 ) != ( peer.range_cap_ms >= 0 ) ) {
+                continue;
+            }
             const int distance = std::max( std::abs( peer.source_omt.x() - signal.source_omt.x() ),
                                            std::abs( peer.source_omt.y() - signal.source_omt.y() ) );
             if( peer.source_omt.z() != signal.source_omt.z() || distance > 1 ) {
@@ -14693,8 +14763,23 @@ int signal_live_zombie_riders_from_light_observations(
             aggregate_projection.visibility_score = std::clamp(
                     aggregate_projection.visibility_score + nearby_light_bonus, 0, 60 );
             const int cluster_cap = aggregate_projection.concealment.elevated_exposure_extended ? 40 : 30;
-            aggregate_projection.projected_range_omt = std::clamp(
+            if( aggregate_projection.projected_range_ms < 0 ) {
+                aggregate_projection.projected_range_omt = std::clamp(
                         aggregate_projection.projected_range_omt + nearby_light_bonus, 0, cluster_cap );
+            } else if( aggregate_projection.fire_weather ) {
+                const int cluster_baseline = std::clamp( aggregate_projection.baseline_range_omt +
+                    nearby_light_bonus, 0, cluster_cap );
+                const auto time = aggregate_projection.packet.time ==
+                                  bandit_mark_generation::light_time_band::daylight ?
+                                  fire_signal_visibility::time_band::daylight :
+                                  aggregate_projection.packet.time == bandit_mark_generation::light_time_band::twilight ?
+                                  fire_signal_visibility::time_band::twilight : fire_signal_visibility::time_band::night;
+                aggregate_projection.projected_range_ms = fire_signal_visibility::effective_range_ms(
+                        cluster_baseline, fire_signal_visibility::channel::firelight, time,
+                        *aggregate_projection.fire_weather );
+                aggregate_projection.projected_range_omt =
+                    ( std::max( 1, aggregate_projection.projected_range_ms ) + 2 * SEEX - 1 ) / ( 2 * SEEX );
+            }
             aggregate_projection.review_summary += "; nearby camp-light cluster sources=" +
                                                    std::to_string( aggregate_sources );
             aggregate_projection.signal.notes.push_back( "nearby camp-light cluster sources=" +
@@ -14704,9 +14789,26 @@ int signal_live_zombie_riders_from_light_observations(
 
         const int rider_horde_signal_power =
             bandit_mark_generation::horde_signal_power_from_light_projection( aggregate_projection );
+        std::vector<zombie_rider_overmap_ai::rider_overmap_agent> eligible_riders = riders;
+        if( signal.range_cap_ms >= 0 ) {
+            if( !signal.source_ms ) {
+                continue;
+            }
+            map &here = get_map();
+            const tripoint_bub_ms source = here.get_bub( *signal.source_ms );
+            live_bandit_signal_observation cluster_signal = signal;
+            cluster_signal.range_cap_ms = aggregate_projection.projected_range_ms;
+            eligible_riders.erase( std::remove_if( eligible_riders.begin(), eligible_riders.end(),
+            [&]( const auto & rider ) {
+                const auto found = live_riders_by_id.find( rider.rider_id );
+                return found == live_riders_by_id.end() || !here.inbounds( source ) ||
+                       !live_light::within_range( cluster_signal, found->second->pos_abs() ) ||
+                       !found->second->sees( here, source );
+            } ), eligible_riders.end() );
+        }
         const zombie_rider_overmap_ai::rider_light_interest interest =
             zombie_rider_overmap_ai::evaluate_light_attraction( aggregate_projection, world_age_days,
-                    static_cast<int>( riders.size() ) );
+                static_cast<int>( eligible_riders.size() ) );
         zombie_rider_overmap_ai::rider_light_memory &memory =
             overmap_buffer.global_state.zombie_rider_light_memory[signal.source_omt];
         const bool fresh_detection = zombie_rider_overmap_ai::refresh_light_memory(
@@ -14718,7 +14820,7 @@ int signal_live_zombie_riders_from_light_observations(
             continue;
         }
         const zombie_rider_overmap_ai::rider_convergence_result convergence =
-            zombie_rider_overmap_ai::evaluate_rider_convergence( memory, signal.source_omt, riders );
+            zombie_rider_overmap_ai::evaluate_rider_convergence( memory, signal.source_omt, eligible_riders );
         const tripoint_abs_ms light_source = signal.source_ms.value_or(
                 coords::project_to<coords::ms>( signal.source_omt ) );
         const live_zombie_rider_pressure_summary pressure = command_live_zombie_riders_to_light(
@@ -14806,8 +14908,13 @@ bool live_bandit_overmap_los_from( const tripoint_abs_omt &origin,
 }
 
 bool live_bandit_overmap_smoke_los_from( const tripoint_abs_omt &origin,
-        const live_bandit_signal_observation &smoke )
+        const live_bandit_signal_observation &smoke,
+        std::optional<tripoint_abs_ms> observer = std::nullopt )
 {
+    if( !live_light::within_range( smoke, observer.value_or(
+                                       project_to<coords::ms>( origin ) + point( SEEX, SEEY ) ) ) ) {
+        return false;
+    }
     // Legacy abstract packets without a map-square emitter retain their
     // existing exposed-source contract. Every current loaded packet supplies
     // explicit support, including a truthful unavailable result.
@@ -14817,14 +14924,24 @@ bool live_bandit_overmap_smoke_los_from( const tripoint_abs_omt &origin,
     const tripoint_abs_omt visible_omt = smoke.smoke_observable_ms ?
                                          project_to<coords::omt>( *smoke.smoke_observable_ms ) : smoke.source_omt;
     if( visible_omt.z() == origin.z() ) {
-        return live_bandit_overmap_los_from( origin, visible_omt, smoke.range_cap_omt );
+        if( smoke.range_cap_ms < 0 ) {
+            return live_bandit_overmap_los_from( origin, visible_omt, smoke.range_cap_omt );
+        }
+        const point_rel_omt offset = visible_omt.xy() - origin.xy();
+        if( smoke.range_cap_omt < 0 || offset.x() < -smoke.range_cap_omt ||
+            offset.x() > smoke.range_cap_omt || offset.y() < -smoke.range_cap_omt ||
+            offset.y() > smoke.range_cap_omt ) {
+            return false;
+        }
     }
     // An open-air plume can be viewed across levels in either direction.
     // The generic terrain/actor LOS remains same-level; this smoke ray still
     // pays every intervening terrain cost.
-    if( ( !smoke.smoke_observable_ms && !smoke.smoke_source_exposed_to_sky ) ||
+    if( ( visible_omt.z() != origin.z() && !smoke.smoke_observable_ms &&
+          !smoke.smoke_source_exposed_to_sky ) ||
         smoke.range_cap_omt <= 0 ||
-        rl_dist( origin.xy(), smoke.source_omt.xy() ) > smoke.range_cap_omt ) {
+        ( visible_omt.z() != origin.z() &&
+          rl_dist( origin.xy(), smoke.source_omt.xy() ) > smoke.range_cap_omt ) ) {
         return false;
     }
     std::vector<int> terrain_see_costs;
@@ -14833,13 +14950,17 @@ bool live_bandit_overmap_smoke_los_from( const tripoint_abs_omt &origin,
             static_cast<int>( overmap_buffer.ter( omt )->get_see_cost() ) );
     }
     return bandit_live_world::structural_observer_route_is_visible(
-               smoke.range_cap_omt, terrain_see_costs );
+               smoke.range_cap_omt, terrain_see_costs ) &&
+           physical_light::within_exact_budget( smoke.range_cap_ms, 0, terrain_see_costs );
 }
 
 bool live_bandit_overmap_light_los_from( const tripoint_abs_omt &origin,
-        const live_bandit_signal_observation &signal )
+        const live_bandit_signal_observation &signal,
+        std::optional<tripoint_abs_ms> observer = std::nullopt )
 {
-    if( !signal.has_light_projection ) {
+    if( !signal.has_light_projection ||
+        !live_light::within_range( signal, observer.value_or(
+                                       project_to<coords::ms>( origin ) + point( SEEX, SEEY ) ) ) ) {
         return false;
     }
     const bandit_mark_generation::light_packet &packet = signal.light_projection.packet;
@@ -14864,6 +14985,12 @@ bool live_bandit_overmap_light_los_from( const tripoint_abs_omt &origin,
     // across levels.  A sealed upper floor cannot manufacture this flag.
     route.vertical_sightline = route.vertical_offset == 0 || route.source_exposed;
     route.brightness_range_omt = brightness_range;
+    route.brightness_range_ms = signal.range_cap_ms;
+    if( signal.source_ms ) {
+        const tripoint_abs_ms observer_pos = observer.value_or(
+                project_to<coords::ms>( origin ) + point( SEEX, SEEY ) );
+        route.distance_ms = rl_dist( signal.source_ms->xy(), observer_pos.xy() );
+    }
     route.terrain_see_costs = std::move( terrain_see_costs );
     const physical_light::detection detection = physical_light::detect( route );
     DebugLog( D_INFO, DC_ALL ) << "bandit_live_world light_los"
@@ -16123,6 +16250,13 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_structural_si
                                     signal.mark.kind == "searchlight";
         const bool smoke_signal = signal.mark.kind == "smoke";
         const bool light_signal = signal.mark.kind == "light" || signal.mark.kind == "searchlight";
+        const tripoint_abs_ms scout_position = observer && observer->pos_abs_omt() == request.current_omt ?
+                                               observer->pos_abs() :
+                                               project_to<coords::ms>( request.current_omt ) + point( SEEX, SEEY );
+        if( !site_watch && !live_light::within_range( signal, scout_position ) ) {
+            refuse_candidate( "outside_exact_range" );
+            continue;
+        }
         const tripoint_abs_omt source_at_scout_level( signal.source_omt.x(),
                 signal.source_omt.y(), request.current_omt.z() );
         if( site_watch ) {
@@ -16162,12 +16296,15 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_structural_si
         } else {
             line_of_sight = light_signal ?
                             ( signal.source_omt == request.current_omt ||
-                              live_bandit_overmap_light_los_from( request.current_omt, signal ) ) :
-                            live_bandit_overmap_smoke_los_from( request.current_omt, signal );
+                              live_bandit_overmap_light_los_from( request.current_omt, signal, scout_position ) ) :
+                            live_bandit_overmap_smoke_los_from( request.current_omt, signal, scout_position );
         }
         if( site_watch && line_of_sight ) {
             size_t visible_watchers = 0;
             for( const auto &member : watchers ) {
+                if( !live_light::within_range( signal, member->pos_abs() ) ) {
+                    continue;
+                }
                 const auto read = optical_geometry.read_signal( *member, member->pos_abs(),
                                   smoke_signal ? signal.smoke_observable_ms.value_or( *signal.source_ms ) : *signal.source_ms,
                                   outing.target_footprint );
@@ -16419,13 +16556,15 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_staffed_camp_
             continue;
         }
         const auto found = std::find_if( signals.begin(), signals.end(),
-        [&request, &signal_distance, select_smoke]( const live_bandit_signal_observation & signal ) {
+                                         [&request, &signal_distance, observer,
+        select_smoke]( const live_bandit_signal_observation & signal ) {
             const bool smoke = signal.mark.kind == "smoke";
             const bool light = signal.mark.kind == "light" || signal.mark.kind == "searchlight";
             const bool line_of_sight = light ?
-                                       live_bandit_overmap_light_los_from( request.camp_omt, signal ) :
-                                       live_bandit_overmap_smoke_los_from( request.camp_omt, signal );
-            return ( select_smoke ? smoke : light ) && signal.range_cap_omt >= 1 &&
+                                       live_bandit_overmap_light_los_from( request.camp_omt, signal, observer->pos_abs() ) :
+                                       live_bandit_overmap_smoke_los_from( request.camp_omt, signal, observer->pos_abs() );
+            return ( select_smoke ? smoke : light ) &&
+                   live_light::within_range( signal, observer->pos_abs() ) && signal.range_cap_omt >= 1 &&
                    signal.range_cap_omt <= 40 &&
                    signal_distance( signal ) <= signal.range_cap_omt &&
                    line_of_sight;
@@ -16491,9 +16630,9 @@ std::vector<bandit_live_world::structural_signal_read> live_bandit_staffed_camp_
                     read.observer_sight_points = sight_points;
                     read.line_of_sight = light ?
                                          live_bandit_overmap_light_los_from( request.camp_omt,
-                                                 *out_of_range ) :
+                                             *out_of_range, observer->pos_abs() ) :
                                          live_bandit_overmap_smoke_los_from( request.camp_omt,
-                                                 *out_of_range );
+                                             *out_of_range, observer->pos_abs() );
                     read.rejected = true;
                     read.rejection_reason = "out_of_range";
                     read.summary = out_of_range->weather_summary;
@@ -17470,16 +17609,21 @@ std::optional<bool> live_light::tended_fire_conspicuous( const tripoint_abs_ms &
     reading.smoke_weather = live_bandit_smoke_weather_band();
     reading.light_time = live_bandit_light_time_band();
     reading.light_weather = live_bandit_light_weather_band();
+    const weather_manager &weather = get_weather_const();
+    reading.fire_weather = fire_signal_visibility::classify_weather(
+                               weather.weather_id.str(), weather.weather_id->precip,
+                               weather.weather_id->rains, weather.weather_id->sight_penalty,
+                               weather.windspeed );
     const auto projection = bandit_mark_generation::adapt_local_field_signal_reading( reading );
     // Match the production sampler's selected-source projection, including
     // fire-derived smoke potential. An upper smoke field has a separate ID
     // and cannot be attributed to this fire by position alone.
     const auto support = physical_light::evaluate_smoke_support( here, p );
     const bool smoke_candidate = projection.has_smoke_packet && projection.smoke.viable &&
-                                 projection.smoke.projected_range_omt > 3;
+                                 projection.smoke.projected_range_ms > 3 * SEEX * 2;
     const bool smoke = smoke_candidate && support.position.has_value();
     const bool light = projection.has_light_packet && projection.light.viable &&
-                       projection.light.projected_range_omt > 3 &&
+                       projection.light.projected_range_ms > 3 * SEEX * 2 &&
                        projection.light.packet.exposure != bandit_mark_generation::light_exposure_band::contained;
     if( smoke || light ) {
         return true;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run connected travelling controls and repaired fixture regressions."""
+"""Run selected connected travelling, signal and ecology controls."""
 
 import argparse
 from pathlib import Path
@@ -37,17 +37,61 @@ SELECTIONS = (
     "bandit_structural_outing_consumes_bounty_on_arrival_after_interest_survives",
     "R8 saved abstract return leaves its intermediate waypoint on the next motor cadence",
     "active structural scouts separate coarse hostile optics from real danger",
+    "fire_signal_stock_weather_calibration",
+    "fire_signal_range_keeps_fraction_and_combines_weather",
+    "fractional fire range pays exact terrain budget",
+    "production_smoke_signal_records_staffed_camp_leads_once_and_keeps_failures",
+    "production fire signals follow clock and weather without stale samples",
+    "fog permits nearby but not distant zombie fire investigation",
+    "production rider light clusters respect walls and source escape",
+    "legacy firelight sample survives save reload and co-located lamp",
+    "rider fire clusters apply baseline bonus before weather caps",
+    "ecology_view_reads_migo_leases_without_mutating_them",
+    "ecology overmap facts follow gated canonical migo projection",
+    "native ecology no-op actions publish handled successor state",
+    "semantic World exposes only registered native vehicle controls",
 )
 PASS = re.compile(r"^All tests passed \(([1-9][0-9]*) assertions? in 1 test case\)$", re.MULTILINE)
+CURSES_ONLY_NOOP = "native ecology no-op actions publish handled successor state"
+TILES_MARKER = "drain_planner_epoch_pack_unpack_roundtrips"
 
 
-def run_controls(binary: Path) -> int:
+def renderer_matches(binary: Path, tiles: bool) -> bool:
+    """Check the actual binary's mutually exclusive compiled test markers."""
+    markers = f"{CURSES_ONLY_NOOP},{TILES_MARKER}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="caol-renderer-ci-") as user_dir:
+            result = subprocess.run(
+                [str(binary), markers, "--list-test-names-only", "--user-dir", user_dir],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                errors="replace", check=False, timeout=30,
+            )
+    except subprocess.TimeoutExpired:
+        print("Renderer capability query timed out", file=sys.stderr)
+        return False
+    expected = TILES_MARKER if tiles else CURSES_ONLY_NOOP
+    observed = {line.strip() for line in result.stdout.splitlines()} & {CURSES_ONLY_NOOP, TILES_MARKER}
+    # Catch's list-names exit status is the number of matching test cases.
+    if result.returncode != 1 or observed != {expected}:
+        print(f"Renderer capability mismatch: expected {expected!r}, observed {sorted(observed)!r}, "
+              f"list exit {result.returncode}", file=sys.stderr)
+        return False
+    return True
+
+
+def run_controls(binary: Path, tiles: bool) -> int:
     binary = binary.resolve()
     if not binary.is_file():
         print(f"Test executable not found: {binary}", file=sys.stderr)
         return 1
+    if not renderer_matches(binary, tiles):
+        return 1
+    if tiles:
+        print(f"Tiles build: {CURSES_ONLY_NOOP} is compiled only for curses", flush=True)
     failed = False
     for selection in SELECTIONS:
+        if tiles and selection == CURSES_ONLY_NOOP:
+            continue
         with tempfile.TemporaryDirectory(prefix="caol-travelling-ci-") as user_dir:
             try:
                 result = subprocess.run(
@@ -70,4 +114,7 @@ def run_controls(binary: Path) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path, help="Path to the CI-built Catch executable")
-    sys.exit(run_controls(parser.parse_args().binary))
+    parser.add_argument("--tiles", required=True, type=int, choices=(0, 1),
+                        help="Actual build renderer: 0 for curses, 1 for Tiles")
+    args = parser.parse_args()
+    sys.exit(run_controls(args.binary, bool(args.tiles)))

@@ -124,6 +124,22 @@ TEST_CASE( "semantic World advertises native Examine registered in DEFAULTMODE",
     CHECK( examine->second == "examine" );
 }
 
+TEST_CASE( "semantic World exposes only registered native vehicle controls",
+           "[semantic_surface][harness][vehicle]" )
+{
+    input_context unregistered( "vehicle-controls-unregistered" );
+    const auto missing = openclaw_harness_world_actions( unregistered );
+    CHECK( std::none_of( missing.begin(), missing.end(), []( const auto & action ) {
+        return action.first == "world.control_vehicle";
+    } ) );
+    const input_context context = get_default_mode_input_context();
+    REQUIRE( context.is_registered_action( "control_vehicle" ) );
+    const auto actions = openclaw_harness_world_actions( context );
+    CHECK( std::count_if( actions.begin(), actions.end(), []( const auto & action ) {
+        return action.first == "world.control_vehicle" && action.second == "control_vehicle";
+    } ) == 1 );
+}
+
 TEST_CASE( "brazier semantic Examine uses the native fire menu and state",
            "[semantic_surface][harness][brazier]" )
 {

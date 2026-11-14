@@ -1,8 +1,10 @@
 #pragma once
 
 #include "bandit_dry_run.h"
+#include "fire_signal_visibility.h"
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -125,6 +127,8 @@ struct smoke_projection {
     smoke_weather_effect weather_effect;
     int visibility_score = 0;
     int projected_range_omt = 0;
+    // Negative indicates a legacy projection without a map-square limit.
+    int projected_range_ms = -1;
     bool viable = false;
     std::string review_summary;
 };
@@ -172,6 +176,11 @@ struct light_projection {
     light_concealment_packet concealment;
     int visibility_score = 0;
     int projected_range_omt = 0;
+    int projected_range_ms = -1;
+    // The fire's clear-night range is retained so the existing rider cluster
+    // bonus can be applied before, rather than after, weather attenuation.
+    int baseline_range_omt = 0;
+    std::optional<fire_signal_visibility::weather_profile> fire_weather;
     bool viable = false;
     std::string review_summary;
 };
@@ -192,6 +201,8 @@ struct local_field_signal_reading {
     smoke_weather_band smoke_weather = smoke_weather_band::clear;
     light_time_band light_time = light_time_band::night;
     light_weather_band light_weather = light_weather_band::clear;
+    // Present only for live fire/smoke, not unrelated lamps/searchlights.
+    std::optional<fire_signal_visibility::weather_profile> fire_weather;
 };
 
 struct local_field_signal_projection {

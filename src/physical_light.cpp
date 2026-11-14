@@ -479,12 +479,34 @@ smoke_support evaluate_smoke_support( map &here, const tripoint_bub_ms &source )
     return { std::nullopt, "roof_geometry_unavailable" };
 }
 
+bool within_exact_budget( int range_ms, int distance_ms, const std::vector<int> &terrain_see_costs )
+{
+    if( range_ms < 0 ) {
+        return true;
+    }
+    if( distance_ms < 0 || distance_ms > range_ms ) {
+        return false;
+    }
+    long long remaining = range_ms - distance_ms;
+    for( const int cost : terrain_see_costs ) {
+        if( cost < 0 ) {
+            return false;
+        }
+        remaining -= static_cast<long long>( cost ) * ( 2 * SEEX );
+        if( remaining < 0 ) {
+            return false;
+        }
+    }
+    return true;
+}
+
 detection detect( const route &path )
 {
     detection result;
     if( !path.source_exposed || path.brightness_range_omt <= 0 || path.distance_omt < 0 ||
         path.distance_omt > path.brightness_range_omt ||
-        ( path.vertical_offset != 0 && !path.vertical_sightline ) ) {
+        ( path.vertical_offset != 0 && !path.vertical_sightline ) ||
+        !within_exact_budget( path.brightness_range_ms, path.distance_ms, path.terrain_see_costs ) ) {
         return result;
     }
     int remaining = path.brightness_range_omt - path.distance_omt;

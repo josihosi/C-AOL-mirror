@@ -36,6 +36,7 @@
 #include "mtype.h"
 #include "overmap.h"
 #include "overmapbuffer.h"
+#include "options_helpers.h"
 #include "path_info.h"
 #include "pathfinding.h"
 #include "player_helpers.h"
@@ -44,6 +45,7 @@
 #include "type_id.h"
 #include "vehicle.h"
 #include "worldfactory.h"
+#include "weather_type.h"
 #include "zombie_rider_overmap_ai.h"
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -1766,6 +1768,128 @@ TEST_CASE( "live_unbanded_rider_receives_one_light_investigation",
     CHECK( signal_live_zombie_riders_from_light_observations_for_test( { signal } ) == 0 );
     CHECK( zombie_rider_overmap_ai::get_camp_pressure_intent( rider )->observed_world ==
            signal.observed_turn );
+}
+
+TEST_CASE( "rider fire clusters apply baseline bonus before weather caps",
+           "[zombie_rider][native][light][fire_signal_visibility]" )
+{
+    restore_on_out_of_scope restore_time( calendar::turn );
+    restore_on_out_of_scope restore_bands( overmap_buffer.global_state.zombie_rider_bands );
+    restore_on_out_of_scope restore_activity( overmap_buffer.global_state.predator_activity );
+    restore_on_out_of_scope restore_memory( overmap_buffer.global_state.zombie_rider_light_memory );
+    restore_on_out_of_scope restore_memory_turn(
+        overmap_buffer.global_state.zombie_rider_light_memory_last_turn );
+    clear_map_without_vision();
+    on_out_of_scope cleanup( [] {
+        reset_live_light_sample_cache();
+        clear_map_without_vision();
+    } );
+    set_time( calendar::turn_zero + 80000000_turns );
+    REQUIRE( is_night( calendar::turn ) );
+    map &here = get_map();
+    const tripoint_bub_ms source( 60, 60, 0 );
+    const tripoint_bub_ms peer = source + tripoint( 24, 0, 0 );
+    prepare_zombie_rider_local_arena( here, source );
+    REQUIRE( here.inbounds( peer ) );
+    // The shared arena uses INDOORS floor; expose both actual fire squares
+    // and their immediate surroundings to sky for this optical test.
+    for( const tripoint_bub_ms fire : {
+             source, peer
+         } ) {
+        for( const tripoint_bub_ms &p : here.points_in_radius( fire, 3 ) ) {
+            here.ter_set( p, ter_str_id( "t_grass" ) );
+        }
+    }
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    REQUIRE( here.is_outside( source ) );
+    REQUIRE( here.is_outside( peer ) );
+    get_avatar().setpos( here, source, false );
+    overmap_buffer.global_state.zombie_rider_bands.clear();
+    auto &memories = overmap_buffer.global_state.zombie_rider_light_memory;
+    memories.clear();
+    monster &rider = spawn_new_local_rider_fixture( source + point::east * 4 );
+    REQUIRE( overmap_buffer.predator_activity_for( rider, predator_activation::representation::local,
+            rider.pos_abs() ) );
+    const tripoint_abs_ms source_abs = here.get_abs( source );
+    const tripoint_abs_omt source_omt = coords::project_to<coords::omt>( source_abs );
+    here.add_field( source, field_type_id( "fd_fire" ), 3 );
+    scoped_weather_override clear( WEATHER_CLEAR );
+    clear.with_windspeed( 0 );
+    reset_live_light_sample_cache();
+    run_live_light_delivery_for_test();
+    const auto source_sample = [&]() -> const live_bandit_signal_observation * {
+        const auto &samples = live_light::samples_for_turn( calendar::turn );
+        const auto found = std::find_if( samples.begin(), samples.end(), [&]( const auto & sample )
+        {
+            return sample.source_ms == source_abs && sample.has_light_projection && sample.range_cap_ms >= 0;
+        } );
+        if( found == samples.end() )
+        {
+            return nullptr;
+        }
+        return & *found;
+    };
+    CAPTURE( source_abs, get_avatar().pos_abs(), here.is_outside( source ),
+             here.get_field_intensity( source, field_type_id( "fd_fire" ) ),
+             live_light::samples_for_turn( calendar::turn ).size() );
+    REQUIRE( source_sample() );
+    const int baseline = source_sample()->light_projection.baseline_range_omt;
+    REQUIRE( baseline > 0 );
+    REQUIRE( memories.count( source_omt ) );
+    REQUIRE( memories.at( source_omt ).active() );
+    const int isolated_duration = memories.at( source_omt ).expires_at_turn -
+                                  memories.at( source_omt ).observed_at_turn;
+
+    here.add_field( peer, field_type_id( "fd_fire" ), 3 );
+    get_avatar().setpos( here, peer, false );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    REQUIRE( memories.count( source_omt ) );
+    REQUIRE( memories.at( source_omt ).active() );
+    const int group_duration = memories.at( source_omt ).expires_at_turn -
+                               memories.at( source_omt ).observed_at_turn;
+    const int expected_group_power = std::min( 60, 2 * std::min( 30, baseline + 2 ) );
+    CHECK( group_duration == std::clamp( 60 + expected_group_power * 4, 90, 300 ) );
+    CHECK( group_duration > isolated_duration );
+
+    // Fog is applied after the same baseline bonus. Choose a real rider just
+    // beyond the isolated fire's range but within the grouped range.
+    scoped_weather_override fog( weather_type_id( "fog" ) );
+    fog.with_windspeed( 0 );
+    here.remove_field( peer, field_type_id( "fd_fire" ) );
+    get_avatar().setpos( here, source, false );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    REQUIRE( source_sample() );
+    const int isolated_fog_ms = source_sample()->range_cap_ms;
+    const int grouped_fog_ms = fire_signal_visibility::effective_range_ms(
+                                   std::min( 30, baseline + 2 ),
+                                   fire_signal_visibility::channel::firelight,
+                                   fire_signal_visibility::time_band::night,
+                                   *source_sample()->light_projection.fire_weather );
+    REQUIRE( grouped_fog_ms > isolated_fog_ms );
+    REQUIRE( grouped_fog_ms <= 2 * SEEX * 2 );
+    const tripoint_bub_ms boundary = source + point::east * ( isolated_fog_ms + 1 );
+    REQUIRE( here.inbounds( boundary ) );
+    rider.setpos( here, boundary );
+    memories.clear();
+    zombie_rider_overmap_ai::clear_camp_pressure_intent( rider );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    CHECK( ( !memories.count( source_omt ) || !memories.at( source_omt ).active() ) );
+
+    here.add_field( peer, field_type_id( "fd_fire" ), 3 );
+    get_avatar().setpos( here, peer, false );
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0 );
+    REQUIRE( rider.sees( here, source ) );
+    calendar::turn += 1_turns;
+    run_live_light_delivery_for_test();
+    REQUIRE( memories.count( source_omt ) );
+    CHECK( memories.at( source_omt ).active() );
+    CHECK( memories.at( source_omt ).observed_at_turn ==
+           to_turns<int>( calendar::turn - calendar::turn_zero ) );
 }
 
 TEST_CASE( "zombie_rider_overmap_light_attraction_is_late_game_and_bounded",

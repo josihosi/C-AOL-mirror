@@ -1,11 +1,38 @@
 #include "live_light.h"
 
 #include "physical_light.h"
+#include "map_scale_constants.h"
+#include <algorithm>
 #include <map>
 #include <set>
 
 namespace live_light
 {
+bool within_range( const live_bandit_signal_observation &sample, const tripoint_abs_ms &observer )
+{
+    if( sample.range_cap_ms < 0 ) {
+        return true;
+    }
+    return sample.source_ms &&
+           rl_dist( sample.source_ms->xy(), observer.xy() ) <= sample.range_cap_ms;
+}
+
+bool within_range_of_omt( const live_bandit_signal_observation &sample, const tripoint_abs_omt &omt )
+{
+    if( sample.range_cap_ms < 0 ) {
+        return true;
+    }
+    if( !sample.source_ms ) {
+        return false;
+    }
+    const tripoint_abs_ms origin = coords::project_to<coords::ms>( omt );
+    const int dx = std::max( { 0, origin.x() - sample.source_ms->x(),
+                               sample.source_ms->x() - origin.x() - 2 * SEEX + 1 } );
+    const int dy = std::max( { 0, origin.y() - sample.source_ms->y(),
+                               sample.source_ms->y() - origin.y() - 2 * SEEY + 1 } );
+    return std::max( dx, dy ) <= sample.range_cap_ms;
+}
+
 namespace
 {
 std::vector<live_bandit_signal_observation> sample_cache;

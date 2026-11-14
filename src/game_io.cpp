@@ -1170,6 +1170,7 @@ bool game::save()
         return false;
     } catch( const std::exception &err ) {
         last_save_result_ = "failed_exception";
+        DebugLog( D_INFO, DC_ALL ) << "Save exception: " << err.what();
         popup( _( "Failed to save game data: %s" ), err.what() );
         return false;
     }

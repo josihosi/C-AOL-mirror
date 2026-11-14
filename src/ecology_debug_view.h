@@ -17,8 +17,14 @@ namespace bandit_live_world
 struct world_state;
 } // namespace bandit_live_world
 
-namespace migo_population { struct world_state; }
-namespace migo_tower { struct world_state; }
+namespace migo_population
+{
+struct world_state;
+}
+namespace migo_tower
+{
+struct world_state;
+}
 
 namespace ecology_debug
 {
