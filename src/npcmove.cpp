@@ -1044,7 +1044,8 @@ bool has_hostile_home_return_order( const npc &who )
 
 // An alert remains credible while a scout disengages. Validate only the loaded
 // homeward route and its next physical step; this grants no future safety credit.
-bool prepare_scout_alarm_homeward_step( npc &who )
+bool prepare_scout_alarm_homeward_step( npc &who,
+                                        const std::optional<tripoint_abs_ms> &homeward_departure )
 {
     const auto &world = overmap_buffer.global_state.bandit_live_world;
     const auto relationship = bandit_live_world::read_active_covert_scout_homeward_member(
@@ -1081,11 +1082,11 @@ bool prepare_scout_alarm_homeward_step( npc &who )
         ( source->current_target() && source->get_ai_danger() > 0 ) ) {
         return false;
     }
-    return who.prepare_omt_destination_path( [&]( const std::vector<tripoint_bub_ms> &route ) {
+    const auto valid_homeward_path = [&]( const std::vector<tripoint_bub_ms> &route ) {
         const tripoint_abs_ms next = here.get_abs( route.front() );
-        if( trig_dist( next.raw(), who.faction_alarm->incident.raw() ) <=
-            trig_dist( who.pos_abs().raw(), who.faction_alarm->incident.raw() ) ||
-            !who.can_move_to_ignoring_danger( route.front(), false ) ) {
+        // Retained knowledge does not make a safe sideways or inward detour
+        // an immediate threat. Current creatures and hazards are checked below.
+        if( !who.can_move_to_ignoring_danger( route.front(), false ) ) {
             return false;
         }
         for( const npc *observer : {
@@ -1134,7 +1135,24 @@ bool prepare_scout_alarm_homeward_step( npc &who )
                                 relationship->forbidden_route_omts.end(), omt ) ==
                      relationship->forbidden_route_omts.end() );
         } );
-    } );
+    };
+    if( homeward_departure ) {
+        if( !here.inbounds( *homeward_departure ) || who.pos_abs() == *homeward_departure ) {
+            return false;
+        }
+        auto route = here.route( who.pos_bub(),
+                                 pathfinding_target::point( here.get_bub( *homeward_departure ) ),
+                                 who.get_pathfinding_settings( false ), who.get_path_avoid() );
+        while( !route.empty() && route.front() == who.pos_bub() ) {
+            route.erase( route.begin() );
+        }
+        if( route.empty() || !valid_homeward_path( route ) ) {
+            return false;
+        }
+        who.path = std::move( route );
+        return true;
+    }
+    return who.prepare_omt_destination_path( valid_homeward_path );
 }
 
 bool live_bandit_hot_defended_doorstep_pickup_blocked( const npc &who )
@@ -3258,7 +3276,7 @@ bool npc::apply_llm_intent_item_targets()
     return false;
 }
 
-void npc::move()
+void npc::move( const std::optional<tripoint_abs_ms> &homeward_departure )
 {
     reconcile_active_operation_sleep();
     const map &here = get_map();
@@ -3707,7 +3725,9 @@ void npc::move()
         // and visible combat above retain priority, including party separation.
         action = address_needs( NPC_DANGER_VERY_LOW + 1.0f );
         if( action == npc_undecided ) {
-            if( prepare_scout_alarm_homeward_step( *this ) ) {
+            if( homeward_departure && pos_abs() == *homeward_departure ) {
+                action = npc_pause;
+            } else if( prepare_scout_alarm_homeward_step( *this, homeward_departure ) ) {
                 // Consume only a preflighted native home step. The alert remains
                 // active; the next cache/action cycle reassesses combat and retreat.
                 action = npc_goto_destination;

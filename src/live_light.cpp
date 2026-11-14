@@ -17,7 +17,8 @@ bool within_range( const live_bandit_signal_observation &sample, const tripoint_
            rl_dist( sample.source_ms->xy(), observer.xy() ) <= sample.range_cap_ms;
 }
 
-bool within_range_of_omt( const live_bandit_signal_observation &sample, const tripoint_abs_omt &omt )
+bool within_range_of_omt( const live_bandit_signal_observation &sample,
+                          const tripoint_abs_omt &omt )
 {
     if( sample.range_cap_ms < 0 ) {
         return true;

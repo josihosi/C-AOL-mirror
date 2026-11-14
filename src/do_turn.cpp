@@ -19234,7 +19234,6 @@ live_bandit_homeward_reunion_route live_bandit_homeward_reunion_path(
                 ( !live_bandit_member_routing_home( *actor, site ) &&
                   !live_bandit_member_routing_burn_egress( *actor, site.active_outing ) ) ||
                 actor->get_attitude() == NPCATT_FLEE || actor->get_attitude() == NPCATT_FLEE_TEMP ||
-                actor->faction_alarm_requires_response() ||
                 ( actor->current_target() != nullptr && actor->get_ai_danger() > 0 ) ) {
                 return {};
             }
@@ -19250,7 +19249,10 @@ live_bandit_homeward_reunion_route live_bandit_homeward_reunion_path(
              follower, leader
          } ) {
         npc &anchor = mover == leader ? *follower : *leader;
+        // An alarmed anchor keeps its own native survival decision. A partner
+        // without an outstanding response can still close the cohesion gap.
         if( !live_bandit_member_can_take_homeward_step( *mover ) ||
+            ( cohesion_refused && mover->faction_alarm_requires_response() ) ||
             !here.inbounds( mover->pos_abs() ) || !here.inbounds( anchor.pos_abs() ) ) {
             continue;
         }
@@ -21530,7 +21532,9 @@ void monmove()
                 homeward_trace.action( "npc_move", "native_survival branch selected" );
                 {
                     raid_perf_scope npc_move_scope( raid_perf_stage::npc_normal_move );
-                    guy.move();
+                    guy.move( homeward_boundary != pair_homeward_boundary_steps.end() ?
+                              std::optional<tripoint_abs_ms>( homeward_boundary->second.departure ) :
+                              std::nullopt );
                 }
             } else if( assembly_order != pair_assembly_orders.end() ) {
                 homeward_trace.action( "assembly_order", "assembly order precedes homeward motor" );

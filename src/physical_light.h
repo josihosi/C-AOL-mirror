@@ -99,7 +99,8 @@ struct detection {
 };
 
 // Terrain see costs are in OMT sight units. A negative cost is opaque.
-bool within_exact_budget( int range_ms, int distance_ms, const std::vector<int> &terrain_see_costs );
+bool within_exact_budget( int range_ms, int distance_ms,
+                          const std::vector<int> &terrain_see_costs );
 
 // Small, persistence-free gate for a loaded source pass.  Game state owns
 // observations; this only prevents UI/render/debug and scheduler re-entry

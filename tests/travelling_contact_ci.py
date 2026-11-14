@@ -31,6 +31,8 @@ SELECTIONS = (
     "alarm fixture isolates persisted route threats and restores their custody",
     "actual dispatched faction party receives attack alert and retains native flight",
     "authenticated scouts disengage homeward without dismissing a current alert",
+    "homeward pair reaches its boundary through ordinary paid movement",
+    "homeward boundary crossing awaits a physically incapacitated survivor",
     "assessment return transfers preserve the deadline clock and real physical progress",
     "bandit_road_opportunity_is_physically_scouted_without_fabricating_bounty",
     "bandit_structural_outing_arrival_is_once_only_after_reload",

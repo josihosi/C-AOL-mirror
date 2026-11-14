@@ -62683,7 +62683,7 @@ TEST_CASE( "authenticated scouts disengage homeward without dismissing a current
     const std::string mode = GENERATE( "move", "scheduler", "blocked", "combat", "unavailable_source",
                                        "wrong_home", "foreign_owner", "forced_sleep", "flight",
                                        "dog_ahead", "incident_hazard", "hidden_incident", "received", "adjacent_threat",
-                                       "stale_local_path",
+                                       "stale_local_path", "safe_detour",
                                        "later_hazard", "immediate_trap", "ordinary_navigation" );
     CAPTURE( cannibal, mode );
     override_option llm( "LLM_INTENT_ENABLE", "false" );
@@ -62783,6 +62783,7 @@ TEST_CASE( "authenticated scouts disengage homeward without dismissing a current
     }
     std::optional<tripoint_bub_ms> stale_next;
     std::optional<tripoint_bub_ms> later_hazard;
+    std::optional<tripoint_bub_ms> safe_detour_next;
     const auto waypoint_target = [&]( const npc & member ) {
         auto waypoint = member.omt_path.rbegin();
         while( waypoint != member.omt_path.rend() && *waypoint == member.pos_abs_omt() ) {
@@ -62801,7 +62802,33 @@ TEST_CASE( "authenticated scouts disengage homeward without dismissing a current
         REQUIRE( member.path.size() > 5 );
         REQUIRE( waypoint_target( member ).contains( member.path.back() ) );
     };
-    if( mode == "stale_local_path" ) {
+    if( mode == "safe_detour" ) {
+        // A retained hidden warning does not make this real, passable detour
+        // dangerous. The only unoccupied exit is closer to the old incident.
+        safe_detour_next = first.pos_bub() + point::west;
+        for( const auto &point : here.points_in_radius( first.pos_bub(), 1 ) ) {
+            if( point != first.pos_bub() && point != second.pos_bub() && point != *safe_detour_next ) {
+                here.ter_set( point, ter_id( "t_wall" ) );
+                here.furn_set( point, furn_id( "f_null" ) );
+            }
+        }
+        here.ter_set( *safe_detour_next, ter_id( "t_floor" ) );
+        here.furn_set( *safe_detour_next, furn_id( "f_null" ) );
+        here.ter_set( *safe_detour_next + point::west, ter_id( "t_floor" ) );
+        here.furn_set( *safe_detour_next + point::west, furn_id( "f_null" ) );
+        here.invalidate_map_cache( 0 );
+        here.build_map_cache( 0 );
+        REQUIRE_FALSE( first.sees( here, here.get_bub( incident ) ) );
+        REQUIRE( first.faction_alarm_requires_response() );
+        REQUIRE( trig_dist( here.get_abs( *safe_detour_next ).raw(), incident.raw() ) <=
+                 trig_dist( first.pos_abs().raw(), incident.raw() ) );
+        auto actual_route = here.route( first, waypoint_target( first ) );
+        while( !actual_route.empty() && actual_route.front() == first.pos_bub() ) {
+            actual_route.erase( actual_route.begin() );
+        }
+        REQUIRE_FALSE( actual_route.empty() );
+        REQUIRE( actual_route.front() == *safe_detour_next );
+    } else if( mode == "stale_local_path" ) {
         // A real passable cached path to the east increases incident distance,
         // but is not a route to the authenticated current home waypoint.
         second.path = here.route( second,
@@ -62994,6 +63021,13 @@ TEST_CASE( "authenticated scouts disengage homeward without dismissing a current
             CHECK_FALSE( first.sees_dangerous_field( first.pos_bub() ) );
             CHECK( first.faction_alarm->until == until );
         }
+    } else if( mode == "safe_detour" ) {
+        REQUIRE( safe_detour_next );
+        CHECK( first.pos_bub() == *safe_detour_next );
+        CHECK( first.has_active_faction_alarm() );
+        CHECK( first.faction_alarm->until == until );
+        CHECK_FALSE( first.sees_dangerous_field( first.pos_bub() ) );
+        CHECK( scene.site().active_outing.member_return_receipts.empty() );
     } else if( mode == "wrong_home" ) {
         // A generic sound investigation is still allowed. The scout alarm
         // helper cannot replace a foreign destination with an owned home step.
@@ -63042,7 +63076,7 @@ TEST_CASE( "authenticated scouts disengage homeward without dismissing a current
             }
         }
     }
-    if( progress && mode != "ordinary_navigation" ) {
+    if( ( progress && mode != "ordinary_navigation" ) || mode == "safe_detour" ) {
         CHECK( homeward_action );
     } else if( mode == "combat" || mode == "adjacent_threat" || mode == "flight" ||
                mode == "forced_sleep" ||
@@ -70914,6 +70948,118 @@ std::pair<int, int> r067_boundary_corpse_custody( const tripoint_abs_ms &positio
     return counts;
 }
 } // namespace
+
+TEST_CASE( "homeward pair reaches its boundary through ordinary paid movement",
+           "[bandit_live_world][homeward_ordinary_approach]" )
+{
+    using namespace bandit_live_world;
+    override_option llm( "LLM_INTENT_ENABLE", "false" );
+    override_option generated_monsters( "SPAWN_DENSITY", "0" );
+    const bool cannibal = GENERATE( false, true );
+    const bool asynchronous = GENERATE( false, true );
+    const bool obstructed = GENERATE( false, true );
+    CAPTURE( cannibal, asynchronous, obstructed );
+    r055_scene scene;
+    r067_finite_loaded_scene( scene, cannibal );
+    const auto ids = scene.site().active_outing.member_ids;
+    REQUIRE( ids.size() == 2 );
+    auto first = overmap_buffer.find_npc( ids.front() );
+    auto second = overmap_buffer.find_npc( ids.back() );
+    REQUIRE( first );
+    REQUIRE( second );
+    const auto origin = first->pos_abs_sm() - point( 4, 8 );
+    get_map().load( tripoint_abs_sm( origin.xy(), 1 ), false );
+    get_avatar().setpos( get_map(), tripoint_bub_ms( 48, 48, 1 ), false );
+    for( const auto &tile : get_map().points_in_radius( get_avatar().pos_bub(), 1 ) ) {
+        get_map().ter_set( tile, ter_id( tile == get_avatar().pos_bub() ? "t_floor" : "t_wall" ) );
+    }
+    g->reload_npcs();
+    // Isolate this setup from unrelated monsters; do not suppress later
+    // survival decisions or remove threats during the action sequence.
+    clear_creatures();
+    REQUIRE( first->is_active() );
+    REQUIRE( second->is_active() );
+    REQUIRE( scene.site().active_outing.owner == simulation_owner::local );
+    if( obstructed ) {
+        // Add one real obstacle to a selected ordinary path. The map and
+        // planner must find an actual alternative; no actor is relocated.
+        const auto prior_steps = live_bandit_homeward_boundary_steps_for_test();
+        REQUIRE( prior_steps.size() == 2 );
+        const auto target = get_map().get_bub( prior_steps.at( ids.front() ).first );
+        const auto prior_path = get_map().route( first->pos_bub(),
+                                pathfinding_target::radius( target, 0 ),
+                                first->get_pathfinding_settings( false ), first->get_path_avoid() );
+        REQUIRE( prior_path.size() > 4 );
+        const auto obstacle = prior_path[3];
+        REQUIRE( get_creature_tracker().creature_at( obstacle ) == nullptr );
+        get_map().ter_set( obstacle, ter_id( "t_wall" ) );
+        get_map().invalidate_map_cache( obstacle.z() );
+        get_map().build_map_cache( obstacle.z(), true );
+        const auto alternate = get_map().route( first->pos_bub(),
+                                                pathfinding_target::radius( target, 0 ),
+                                                first->get_pathfinding_settings( false ), first->get_path_avoid() );
+        REQUIRE_FALSE( alternate.empty() );
+        REQUIRE( std::find( alternate.begin(), alternate.end(), obstacle ) == alternate.end() );
+    }
+    const auto initial_steps = live_bandit_homeward_boundary_steps_for_test();
+    INFO( live_bandit_homeward_boundary_discriminator_for_test() );
+    REQUIRE( initial_steps.size() == 2 );
+    REQUIRE( ( first->pos_abs() != initial_steps.at( ids.front() ).first ||
+               second->pos_abs() != initial_steps.at( ids.back() ).first ) );
+    if( asynchronous ) {
+        // One actor starts with ordinary move debt; neither body is frozen,
+        // relocated or advanced by the test after the Local handoff.
+        first->mod_moves( -75 );
+    }
+    int elapsed = 0;
+    while( elapsed < 300 && scene.site().active_outing.owner == simulation_owner::local ) {
+        const auto current_steps = live_bandit_homeward_boundary_steps_for_test();
+        CAPTURE( elapsed, first->pos_abs(), second->pos_abs(), current_steps.size() );
+        INFO( live_bandit_homeward_boundary_discriminator_for_test() );
+        REQUIRE_FALSE( first->is_dead() );
+        REQUIRE_FALSE( second->is_dead() );
+        scene.step();
+        ++elapsed;
+    }
+    CAPTURE( elapsed, first->pos_abs(), second->pos_abs() );
+    INFO( live_bandit_homeward_boundary_discriminator_for_test() );
+    CHECK( scene.site().active_outing.owner == simulation_owner::abstract );
+    CHECK( scene.site().active_outing.casualty_ids.empty() );
+    CHECK( scene.site().active_outing.member_return_receipts.empty() );
+    REQUIRE( current_external_simulation_cursor( scene.site() ) );
+    const auto crossing_omt = first->pos_abs_omt();
+    REQUIRE( second->pos_abs_omt() == crossing_omt );
+    refresh_live_bandit_activation();
+    REQUIRE( scene.site().active_outing.activation.active );
+    for( int elapsed_minutes = 0; elapsed_minutes < 60 &&
+         first->pos_abs_omt() == crossing_omt &&
+         scene.site().active_outing.owner == simulation_owner::abstract; elapsed_minutes += 5 ) {
+        calendar::turn += 5_minutes;
+        process_overmap_npc_move_for_test();
+    }
+    CAPTURE( crossing_omt, first->pos_abs_omt(), second->pos_abs_omt() );
+    CHECK( first->pos_abs_omt() != crossing_omt );
+    CHECK( second->pos_abs_omt() == first->pos_abs_omt() );
+    CHECK( scene.site().active_outing.casualty_ids.empty() );
+    if( cannibal && !asynchronous && obstructed ) {
+        // Save the actual completed departure and later paid overmap step,
+        // then reload the same identities rather than manufacturing a handoff.
+        const auto first_position = first->pos_abs();
+        const auto second_position = second->pos_abs();
+        const auto world_name = world_generator->active_world->world_name;
+        REQUIRE( g->save() );
+        r067_handover_reload( world_name );
+        first = overmap_buffer.find_npc( ids.front() );
+        second = overmap_buffer.find_npc( ids.back() );
+        REQUIRE( first );
+        REQUIRE( second );
+        CHECK( first->pos_abs() == first_position );
+        CHECK( second->pos_abs() == second_position );
+        CHECK( scene.site().active_outing.member_ids == ids );
+        CHECK( scene.site().active_outing.casualty_ids.empty() );
+        CHECK( current_external_simulation_cursor( scene.site() ) );
+    }
+}
 
 TEST_CASE( "selected native boundary settles pending body time before physical transfer",
            "[bandit_live_world][handover_stability_067][handover_loaded_boundary_067]" )

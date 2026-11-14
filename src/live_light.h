@@ -52,7 +52,8 @@ namespace live_light
 // their exact map-square limit as well.
 bool within_range( const live_bandit_signal_observation &sample, const tripoint_abs_ms &observer );
 // Conservative candidate search: whether any square in the OMT is in range.
-bool within_range_of_omt( const live_bandit_signal_observation &sample, const tripoint_abs_omt &omt );
+bool within_range_of_omt( const live_bandit_signal_observation &sample,
+                          const tripoint_abs_omt &omt );
 // Current physical potential of this exact fire, without emitting a signal.
 // A missing observation is not evidence that a prior episode ended.
 std::optional<bool> tended_fire_conspicuous( const tripoint_abs_ms &source );

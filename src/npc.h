@@ -1375,7 +1375,8 @@ class npc : public Character
         void shift( const point_rel_sm &s );
 
         // Movement; the following are defined in npcmove.cpp
-        void move(); // Picks an action & a target and calls execute_action
+        void move( const std::optional<tripoint_abs_ms> &homeward_departure =
+                       std::nullopt ); // Picks an action & a target and calls execute_action
         void execute_action( npc_action action ); // Performs action
         void trace_hostile_decision_for_harness( const std::string &action,
                 const std::string &reason );
