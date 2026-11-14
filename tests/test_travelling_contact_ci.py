@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Check renderer binding and strict per-case execution in the CI route."""
 
+import os
+import shutil
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -26,7 +29,8 @@ class TravellingContactCITest(unittest.TestCase):
             binary.touch()
             marker = subprocess.CompletedProcess([], 1, marker_output + "\n")
             results = [marker] + [subprocess.CompletedProcess([], code, text) for code, text in outcomes]
-            with patch.object(route.subprocess, "run", side_effect=results) as runner:
+            with patch.object(route, "curses_test_environment", return_value={"TERM": "xterm"}), \
+                    patch.object(route.subprocess, "run", side_effect=results) as runner:
                 result = route.run_controls(binary, tiles)
             return result, runner.call_args_list
 
@@ -37,6 +41,87 @@ class TravellingContactCITest(unittest.TestCase):
             result, calls = self.run_with(False, route.CURSES_ONLY_NOOP, [passed] * 3)
         self.assertEqual(result, 0)
         self.assertEqual([call.args[0][1] for call in calls[1:]], list(selections))
+
+    def test_linux_curses_case_receives_validated_terminal_only_for_that_case(self):
+        selections = ("first", route.CURSES_ONLY_NOOP, "last")
+        passed = (0, "All tests passed (1 assertion in 1 test case)\n")
+        with patch.object(route.sys, "platform", "linux"), patch.object(route, "SELECTIONS", selections):
+            result, calls = self.run_with(False, route.CURSES_ONLY_NOOP, [passed] * 3)
+        self.assertEqual(result, 0)
+        self.assertIsNone(calls[1].kwargs["env"])
+        self.assertEqual(calls[2].kwargs["env"], {"TERM": "xterm"})
+        self.assertIsNone(calls[3].kwargs["env"])
+
+    def test_terminal_fallback_preserves_valid_term_and_other_environment(self):
+        cases = (("", [0], "xterm"), ("unknown", [0], "xterm"),
+                 ("bad-terminal", [1, 0], "xterm"), ("screen", [0], "screen"))
+        for terminal, exit_codes, expected in cases:
+            with self.subTest(terminal=terminal), \
+                    patch.dict(os.environ, {"TERM": terminal, "OTHER_SETTING": "kept"}, clear=True), \
+                    patch.object(route.shutil, "which", return_value="/usr/bin/infocmp"), \
+                    patch.object(route.subprocess, "run", side_effect=[
+                        subprocess.CompletedProcess([], code) for code in exit_codes
+                    ]):
+                env = route.curses_test_environment()
+                self.assertEqual(env, {"TERM": expected, "OTHER_SETTING": "kept"})
+
+    def test_unavailable_terminfo_fails_closed_and_other_cases_continue(self):
+        selections = (route.CURSES_ONLY_NOOP, "later")
+        passed = (0, "All tests passed (1 assertion in 1 test case)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "cata_test"
+            binary.touch()
+            responses = [subprocess.CompletedProcess([], 1, route.CURSES_ONLY_NOOP + "\n"),
+                         subprocess.CompletedProcess([], *passed)]
+            with patch.object(route.sys, "platform", "linux"), \
+                    patch.object(route, "SELECTIONS", selections), \
+                    patch.object(route, "curses_test_environment", return_value=None), \
+                    patch.object(route.subprocess, "run", side_effect=responses) as runner:
+                self.assertEqual(route.run_controls(binary, False), 1)
+            self.assertEqual([call.args[0][1] for call in runner.call_args_list],
+                             [f"{route.CURSES_ONLY_NOOP},{route.TILES_MARKER}", "later"])
+
+    def test_missing_infocmp_or_xterm_entry_fails_closed(self):
+        with patch.object(route.shutil, "which", return_value=None):
+            self.assertIsNone(route.curses_test_environment())
+        with patch.dict(os.environ, {"TERM": "unknown"}, clear=True), \
+                patch.object(route.shutil, "which", return_value="/usr/bin/infocmp"), \
+                patch.object(route.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)):
+            self.assertIsNone(route.curses_test_environment())
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("infocmp"),
+                         "requires a local curses/terminfo installation")
+    def test_headless_invalid_terminal_runs_real_curses_setup_with_fallback(self):
+        if subprocess.run(["infocmp", "xterm"], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, check=False).returncode != 0:
+            self.skipTest("xterm terminfo is unavailable")
+        invalid_term = "caol-invalid-terminal-829a"
+        if subprocess.run(["infocmp", invalid_term], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, check=False).returncode == 0:
+            self.skipTest("test terminal unexpectedly exists")
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "cata_test"
+            binary.write_text(
+                f"#!{sys.executable}\n"
+                "import curses, sys\n"
+                f"marker = {route.CURSES_ONLY_NOOP!r}\n"
+                "if '--list-test-names-only' in sys.argv:\n"
+                "    print(marker)\n"
+                "    raise SystemExit(1)\n"
+                "curses.setupterm()\n"
+                "print('All tests passed (1 assertion in 1 test case)')\n"
+            )
+            binary.chmod(0o755)
+            env = os.environ.copy()
+            env["TERM"] = invalid_term
+            original = subprocess.run([str(binary), route.CURSES_ONLY_NOOP], env=env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      text=True, check=False)
+            self.assertNotEqual(original.returncode, 0, original.stdout)
+            with patch.dict(os.environ, {"TERM": invalid_term}), \
+                    patch.object(route.sys, "platform", "linux"), \
+                    patch.object(route, "SELECTIONS", (route.CURSES_ONLY_NOOP,)):
+                self.assertEqual(route.run_controls(binary, False), 0)
 
     def test_tiles_skips_only_the_guarded_case(self):
         selections = ("first", route.CURSES_ONLY_NOOP, "last")

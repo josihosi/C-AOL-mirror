@@ -2,11 +2,14 @@
 """Run selected connected travelling, signal and ecology controls."""
 
 import argparse
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Optional
 
 
 SELECTIONS = (
@@ -81,6 +84,31 @@ def renderer_matches(binary: Path, tiles: bool) -> bool:
     return True
 
 
+def curses_test_environment() -> Optional[dict[str, str]]:
+    """Keep a usable TERM or select the installed xterm entry for headless Linux."""
+    env = os.environ.copy()
+    infocmp = shutil.which("infocmp")
+    if not infocmp:
+        print("Linux curses tests require infocmp and xterm terminfo", file=sys.stderr)
+        return None
+
+    def available(terminal: str) -> bool:
+        try:
+            result = subprocess.run([infocmp, terminal], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, check=False, timeout=5, env=env)
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    terminal = env.get("TERM", "")
+    if not terminal or terminal == "unknown" or not available(terminal):
+        if not available("xterm"):
+            print("Linux curses tests require infocmp and xterm terminfo", file=sys.stderr)
+            return None
+        env["TERM"] = "xterm"
+    return env
+
+
 def run_controls(binary: Path, tiles: bool) -> int:
     binary = binary.resolve()
     if not binary.is_file():
@@ -94,12 +122,20 @@ def run_controls(binary: Path, tiles: bool) -> int:
     for selection in SELECTIONS:
         if tiles and selection == CURSES_ONLY_NOOP:
             continue
+        case_env = None
+        if not tiles and sys.platform.startswith("linux") and selection == CURSES_ONLY_NOOP:
+            case_env = curses_test_environment()
+            if case_env is None:
+                print(f"Travelling control terminal setup failed: {selection}", file=sys.stderr)
+                failed = True
+                continue
         with tempfile.TemporaryDirectory(prefix="caol-travelling-ci-") as user_dir:
             try:
                 result = subprocess.run(
                     [str(binary), selection, "--rng-seed", "33491075", "--use-colour", "no",
                      "--user-dir", user_dir], stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, errors="replace", check=False, timeout=600,
+                    env=case_env,
                 )
             except subprocess.TimeoutExpired:
                 print(f"Travelling control timed out: {selection}", file=sys.stderr, flush=True)
