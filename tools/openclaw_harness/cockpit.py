@@ -11,6 +11,7 @@ from cockpit_archive import ArchiveMap, ArchiveSequence
 
 import json
 import secrets
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
@@ -128,6 +129,8 @@ class CockpitRunChannel:
         self._read_evidence = read_evidence
         self._read_process_state = read_process_state
         self._process_exit_observation: Optional[Dict[str, Any]] = None
+        # A process exit belongs to this controller's authority generation.
+        self._process_exit_controller_nonce = secrets.token_hex(16)
         self._binding_id = str(binding_id)
         self._read_binding_id = read_binding_id
         self._mutate_binding_for_control = mutate_binding_for_control
@@ -1059,7 +1062,7 @@ class CockpitRunChannel:
         self._run_id = run_id
         suffix = (f":reobserved:{secrets.token_hex(8)}" if reobserved else
                   ":confirmed" if cached is not None else "")
-        observation_id = f"{run_id}:process-exit:{pid}{suffix}"
+        observation_id = f"{run_id}:process-exit:{pid}:controller:{self._process_exit_controller_nonce}{suffix}"
         previous = self._last_public_state or {}
         facts = {**process, "gameplay_credit": False,
                  "save_outcome": "not_established_by_process_exit"}
@@ -4310,15 +4313,46 @@ class CockpitService:
                 for action in ("game.act", "game.wait", "game.move_relative")}
 
     def call(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        channel = self.run_channel
+        deferred = getattr(channel, "_deferred_reporting_failure", None) if channel else None
+        if deferred is not None:
+            try:
+                channel._fail_operation(deferred["reason"], deferred["detail"])
+            except sqlite3.OperationalError as exc:
+                if str(exc) != "database is locked":
+                    raise
+                return {"ok": False, "error": "reporting_revocation_pending",
+                        "journal_state": "unconfirmed", "unused_authority": "revocation_pending",
+                        "next_action": "Wait for archive access; then observe the exited process again."}
+            channel._deferred_reporting_failure = None
+            refusal = channel._reporting_exit_refusal()
+            if refusal is not None:
+                return refusal
+            if not isinstance(request, Mapping) or request.get("action") not in {"game.observe", "game.look"}:
+                return {"ok": False, "error": "fresh_observation_required",
+                        "unused_authority": "revoked", "next_action": "game.observe"}
         try:
             return self._call(request)
         except Exception as exc:
             # A failed adapter or observation is a request failure, never an
             # implicit instruction to close the game or replay native input.
-            if self.run_channel is not None:
-                return self.run_channel._fail_operation(str(exc), {
-                    "exception_type": type(exc).__name__,
-                })
+            if channel is not None:
+                try:
+                    return channel._fail_operation(str(exc), {"exception_type": type(exc).__name__})
+                except sqlite3.OperationalError as revoke_error:
+                    action = request.get("action") if isinstance(request, Mapping) else None
+                    if (not isinstance(exc, sqlite3.OperationalError) or str(exc) != "database is locked" or
+                            str(revoke_error) != "database is locked" or
+                            action not in {"run.witness", "run.finish"} or
+                            channel._reporting_exit_refusal() is not None):
+                        raise
+                    # Revocation cannot be persisted while the archive is locked.
+                    # Deny every subsequent request until it has succeeded.
+                    channel._deferred_reporting_failure = {"reason": str(exc),
+                        "detail": {"exception_type": type(exc).__name__}}
+                    return {"ok": False, "error": "reporting_revocation_pending",
+                            "journal_state": "unconfirmed", "unused_authority": "revocation_pending",
+                            "next_action": "Wait for archive access; then observe the exited process again."}
             return {"ok": False, "error": str(exc)}
 
     def _call(self, request: Mapping[str, Any]) -> Dict[str, Any]:

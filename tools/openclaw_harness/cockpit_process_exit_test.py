@@ -1,5 +1,9 @@
 """Bound process death must replace cached native input authority."""
 import sys
+import json
+import os
+import subprocess
+import startup_harness
 import tempfile
 import sqlite3
 from contextlib import closing
@@ -9,7 +13,8 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cockpit import CockpitRunChannel, CockpitService
-from cockpit_archive import Archive
+from cockpit_archive import Archive, ArchiveSequence
+from cockpit_file_bridge import _request_identity
 
 
 CHARTER = {"claim": "Inspect native interface usability", "material_proof": "Observed native facts",
@@ -323,6 +328,153 @@ class ProcessExitTest(unittest.TestCase):
         process.update(alive=False, run_id="other-run")
         with self.assertRaisesRegex(ValueError, "process_exit_run_identity_mismatch"):
             channel.observe()
+
+
+class JournalLockPublicationTest(unittest.TestCase):
+ def test_locked_exit_fail_closed_then_fresh_observation_single_finish(self):
+  with tempfile.TemporaryDirectory() as t, closing(Archive(Path(t)/'evidence.sqlite',run_id='run-a',binding_id='bound-a')) as a:
+   a.connection.execute('PRAGMA busy_timeout=20')
+   process={'run_id':'run-a','pid':123,'alive':True,'exit_code':None,'identity_status':'matched','evidence_ref':'game-process-exit.json'}
+   dispatch=Mock(); finalize=Mock(return_value={'cleanup':{'status':'already_exited','native_exit_credit':False}})
+   c=CockpitRunChannel(world,dispatch,archive=a,binding_id='bound-a',read_process_state=lambda:process,finalize_session=finalize,witness_charter=CHARTER,witness_identity={'scenario_id':'test','source_identity':'src','executable_identity':'exe'})
+   service=CockpitService(run_channel=c)
+   old_world=service.call({'action':'game.observe'})['result']['observation_id']
+   self.assertFalse(c._observations[old_world]['used'])
+   process.update(alive=False,exit_code=0)
+   old=service.call({'action':'game.observe'})['result']['observation_id']
+   self.assertTrue(c._observations[old_world]['used'])
+   finish={'action':'run.finish','observation_id':old,'stop_reason':'done','unused_authority':'released','outcome':{'summary':'exit observed','verdict':'inconclusive'}}
+   with closing(sqlite3.connect(Path(t)/'evidence.sqlite',timeout=.02)) as lock:
+    lock.execute('BEGIN IMMEDIATE')
+    failure=service.call({'action':'run.witness','observation_id':old,'stop_reason':'done','unused_authority':'released'})
+    self.assertEqual(failure['error'],'reporting_revocation_pending')
+    self.assertEqual(failure['unused_authority'],'revocation_pending')
+    self.assertEqual(failure['journal_state'],'unconfirmed')
+    for action in (finish,{'action':'game.observe'},{'action':'game.act','observation_id':old_world,'action_id':'world.move.north'}):
+     self.assertEqual(service.call(action)['error'],'reporting_revocation_pending')
+    replacement_service=CockpitService(run_channel=c)
+    self.assertEqual(replacement_service.call(finish)['error'],'reporting_revocation_pending')
+    self.assertIsNone(c._sealed_journal);dispatch.assert_not_called();finalize.assert_not_called()
+    lock.rollback()
+   self.assertEqual(service.call({'action':'game.act','observation_id':old_world,'action_id':'world.move.north'})['error'],'fresh_observation_required')
+   self.assertTrue(c._observations[old_world]['used']);dispatch.assert_not_called()
+   self.assertEqual(service.call(finish)['error'],'unknown_or_stale_observation')
+   fresh=service.call({'action':'game.observe'})['result']
+   self.assertNotEqual(old,fresh['observation_id']);self.assertEqual(fresh['surface']['facts']['exit_code'],0)
+   self.assertEqual(fresh['surface']['facts']['save_outcome'],'not_established_by_process_exit')
+   finish['observation_id']=fresh['observation_id'];result=service.call(finish)
+   self.assertTrue(result['ok'],result);self.assertEqual(result['result']['cleanup']['status'],'already_exited')
+   self.assertFalse(result['result']['declared_reentry_ready']);finalize.assert_called_once();dispatch.assert_not_called()
+   self.assertFalse(service.call(finish)['ok']);finalize.assert_called_once()
+
+
+class RestartExitPublicationTest(unittest.TestCase):
+ def test_real_archive_restart_old_request_rejected_fresh_finish_once(self):
+  with tempfile.TemporaryDirectory() as t:
+   path=Path(t)/'evidence.sqlite'
+   process={'run_id':'run-a','pid':123,'alive':False,'exit_code':0,'identity_status':'matched','evidence_ref':'game-process-exit.json'}
+   dispatch=Mock();finalize=Mock(return_value={'cleanup':{'status':'already_exited','native_exit_credit':False}})
+   def channel(archive):
+    return CockpitRunChannel(world,dispatch,archive=archive,binding_id='bound-a',read_process_state=lambda:process,finalize_session=finalize,witness_charter=CHARTER,witness_identity={'scenario_id':'test','source_identity':'src','executable_identity':'exe'})
+   with closing(Archive(path,run_id='run-a',binding_id='bound-a')) as archive:
+    archive.connection.execute('PRAGMA busy_timeout=20');first=channel(archive);first_service=CockpitService(run_channel=first)
+    first._transcript.append({'kind':'probe','marker':'predecessor-transcript-sentinel'})
+    stream_id=first._transcript.stream
+    old=first_service.call({'action':'game.observe'})['result']['observation_id']
+    with closing(sqlite3.connect(path,timeout=.02)) as lock:
+     lock.execute('BEGIN IMMEDIATE')
+     request={'action':'run.witness','observation_id':old,'stop_reason':'pending-reason-sentinel','unused_authority':'released'}
+     self.assertEqual(first_service.call(request)['error'],'reporting_revocation_pending')
+     self.assertIsNone(first._sealed_journal)
+     with self.assertRaisesRegex(sqlite3.OperationalError,'database is locked'):
+      channel(archive)
+     lock.rollback()
+   with closing(Archive(path,run_id='run-a',binding_id='bound-a')) as archive:
+    new=channel(archive);service=CockpitService(run_channel=new)
+    fresh=service.call({'action':'game.observe'})['result']
+    new_id=fresh['observation_id']
+    self.assertNotEqual(new_id,old)
+    self.assertEqual(service.call({'action':'game.observe'})['result']['observation_id'],new_id)
+    self.assertEqual(fresh['surface']['facts']['exit_code'],0)
+    self.assertEqual(fresh['surface']['facts']['save_outcome'],'not_established_by_process_exit')
+    self.assertNotEqual(new._transcript.stream,stream_id)
+    prior=list(ArchiveSequence(archive,stream_id))
+    self.assertTrue(any(x.get('marker')=='predecessor-transcript-sentinel' for x in prior))
+    self.assertFalse(any(x.get('marker')=='predecessor-transcript-sentinel' for x in new._transcript))
+    durable_values=[row[0] for row in archive.connection.execute('SELECT value FROM records')]
+    durable_values += [row[0] for row in archive.connection.execute('SELECT value FROM objects')]
+    durable_values += [row[0] for row in archive.connection.execute('SELECT value FROM metadata')]
+    self.assertFalse(any('pending-reason-sentinel' in value for value in durable_values))
+    request={'action':'run.finish','observation_id':old,'stop_reason':'done','unused_authority':'released','outcome':{'summary':'exit observed','verdict':'inconclusive'}}
+    self.assertEqual(_request_identity(json.dumps(request).encode())['observation_id'],old)
+    self.assertEqual(service.call(request)['error'],'unknown_or_stale_observation')
+    finalize.assert_not_called();dispatch.assert_not_called()
+    sealed=service.call({'action':'run.witness','observation_id':new_id,'stop_reason':'done','unused_authority':'released'})
+    self.assertTrue(sealed['ok'],sealed)
+    journal=list(sealed['result']['evidence_journal']['entries'])
+    self.assertFalse(any('predecessor-transcript-sentinel' in json.dumps(entry) for entry in journal))
+    request['observation_id']=new_id
+    result=service.call(request)
+    self.assertTrue(result['ok'],result)
+    self.assertFalse(result['result']['declared_reentry_ready'])
+    self.assertEqual(result['result']['cleanup']['status'],'already_exited')
+    finalize.assert_called_once();dispatch.assert_not_called()
+    self.assertFalse(service.call(request)['ok']);finalize.assert_called_once()
+
+
+class ActualExitCleanupPublicationTest(unittest.TestCase):
+    def test_lock_retry_finalizes_actual_exited_owned_child_once(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                directory = Path(root)
+                generation = startup_harness.process_generation_snapshot(child.pid)
+                self.assertTrue(generation.get("alive"))
+                (directory / "process.json").write_text(json.dumps({"pid": child.pid, "process_generation": generation}))
+                child.terminate()
+                child.wait(timeout=5)
+                self.assertIsNotNone(child.returncode)
+                owned = startup_harness.current_owned_process_generation(directory)
+                self.assertEqual(owned["status"], "exited")
+                process = {"run_id": "run-a", "pid": child.pid, "alive": False,
+                           "exit_code": child.returncode, "identity_status": "matched",
+                           "process_generation": generation}
+                def finalize(report):
+                    with patch.dict(os.environ, {"OPENCLAW_COCKPIT_BRIDGE_SESSION_DIR": str(directory)}):
+                        return startup_harness.finalize_cockpit_live_session(directory, child.pid, report)
+                final = Mock(wraps=finalize)
+                with closing(Archive(directory / "evidence.sqlite", run_id="run-a", binding_id="bound-a")) as archive:
+                    archive.connection.execute("PRAGMA busy_timeout=20")
+                    dispatch = Mock()
+                    channel = CockpitRunChannel(world, dispatch, archive=archive, binding_id="bound-a",
+                        read_process_state=lambda: process, finalize_session=final, witness_charter=CHARTER,
+                        witness_identity={"scenario_id": "test", "source_identity": "src", "executable_identity": "exe"})
+                    service = CockpitService(run_channel=channel)
+                    old = service.call({"action": "game.observe"})["result"]["observation_id"]
+                    with closing(sqlite3.connect(directory / "evidence.sqlite", timeout=.02)) as lock:
+                        lock.execute("BEGIN IMMEDIATE")
+                        failed = service.call({"action": "run.witness", "observation_id": old,
+                                               "stop_reason": "done", "unused_authority": "released"})
+                        self.assertEqual(failed["error"], "reporting_revocation_pending")
+                        final.assert_not_called()
+                        lock.rollback()
+                    fresh = service.call({"action": "game.observe"})["result"]["observation_id"]
+                    self.assertNotEqual(old, fresh)
+                    request = {"action": "run.finish", "observation_id": old, "stop_reason": "done",
+                               "unused_authority": "released", "outcome": {"summary": "exit observed", "verdict": "inconclusive"}}
+                    self.assertEqual(service.call(request)["error"], "unknown_or_stale_observation")
+                    request["observation_id"] = fresh
+                    finished = service.call(request)
+                    self.assertTrue(finished["ok"], finished)
+                    self.assertEqual(finished["result"]["cleanup"]["status"], "already_exited")
+                    self.assertFalse(finished["result"]["cleanup"]["native_exit_credit"])
+                    self.assertFalse(service.call(request)["ok"])
+                    final.assert_called_once()
+                    dispatch.assert_not_called()
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
 
 
 if __name__ == "__main__":
